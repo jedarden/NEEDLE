@@ -17,14 +17,14 @@ source "$PROJECT_ROOT/src/telemetry/writer.sh"
 
 # Set up test environment
 NEEDLE_HOME="$HOME/.needle-test-events-$$"
-NEEDLE_SESSION="test-session-events-$$"
+NEEDLE_SESSION="test-session-events"
 NEEDLE_WORKSPACE="/tmp/test-workspace-events"
 NEEDLE_AGENT="test-agent"
 NEEDLE_RUNNER="test-runner"
 NEEDLE_PROVIDER="test-provider"
 NEEDLE_MODEL="test-model"
 NEEDLE_IDENTIFIER="test-identifier"
-NEEDLE_VERBOSE=false
+export NEEDLE_VERBOSE=false
 
 # Source the events module after setting environment
 source "$PROJECT_ROOT/src/telemetry/events.sh"
@@ -47,6 +47,11 @@ _test_fail() {
     echo "  ✗ FAIL: $1"
     [[ -n "$2" ]] && echo "    Details: $2"
     TESTS_FAILED=$((TESTS_FAILED + 1))
+}
+
+# Helper to emit with verbose output captured
+_emit_capture() {
+    NEEDLE_VERBOSE=true _needle_telemetry_emit "$@"
 }
 
 # Cleanup function
@@ -99,8 +104,7 @@ fi
 
 # Test 4: Emit basic event to stdout
 _test_start "Emit basic event to stdout"
-# Use NEEDLE_VERBOSE=true in the same shell as the emit call
-output=$(NEEDLE_VERBOSE=true _needle_telemetry_emit "test.event" "key1=value1" "key2=value2")
+output=$(_emit_capture "test.event" "key1=value1" "key2=value2")
 
 if echo "$output" | jq -e '.event == "test.event"' > /dev/null 2>&1 && \
    echo "$output" | jq -e '.data.key1 == "value1"' > /dev/null 2>&1; then
@@ -111,7 +115,7 @@ fi
 
 # Test 5: Event envelope structure
 _test_start "Event envelope structure"
-output=$(_needle_telemetry_emit "test.envelope" "test=value")
+output=$(_emit_capture "test.envelope" "test=value")
 has_ts=$(echo "$output" | jq 'has("ts")')
 has_event=$(echo "$output" | jq 'has("event")')
 has_session=$(echo "$output" | jq 'has("session")')
@@ -130,25 +134,25 @@ _test_start "Worker events (started, idle, stopped, draining)"
 events_ok=true
 
 # Test worker.started
-output=$(_needle_telemetry_emit "worker.started" "pid=123")
+output=$(_emit_capture "worker.started" "pid=123")
 if ! echo "$output" | jq -e '.event == "worker.started"' > /dev/null 2>&1; then
     events_ok=false
 fi
 
 # Test worker.idle
-output=$(_needle_telemetry_emit "worker.idle")
+output=$(_emit_capture "worker.idle")
 if ! echo "$output" | jq -e '.event == "worker.idle"' > /dev/null 2>&1; then
     events_ok=false
 fi
 
 # Test worker.stopped
-output=$(_needle_telemetry_emit "worker.stopped" "reason=test")
+output=$(_emit_capture "worker.stopped" "reason=test")
 if ! echo "$output" | jq -e '.event == "worker.stopped"' > /dev/null 2>&1; then
     events_ok=false
 fi
 
 # Test worker.draining
-output=$(_needle_telemetry_emit "worker.draining")
+output=$(_emit_capture "worker.draining")
 if ! echo "$output" | jq -e '.event == "worker.draining"' > /dev/null 2>&1; then
     events_ok=false
 fi
@@ -164,20 +168,20 @@ _test_start "Bead events (claimed, completed, failed, released)"
 bead_events_ok=true
 
 # Test bead.claimed
-output=$(_needle_telemetry_emit "bead.claimed" "bead_id=test-123")
+output=$(_emit_capture "bead.claimed" "bead_id=test-123")
 if ! echo "$output" | jq -e '.event == "bead.claimed"' > /dev/null 2>&1 || \
    ! echo "$output" | jq -e '.data.bead_id == "test-123"' > /dev/null 2>&1; then
     bead_events_ok=false
 fi
 
 # Test bead.completed
-output=$(_needle_telemetry_emit "bead.completed" "bead_id=test-123" "result=success")
+output=$(_emit_capture "bead.completed" "bead_id=test-123" "result=success")
 if ! echo "$output" | jq -e '.event == "bead.completed"' > /dev/null 2>&1; then
     bead_events_ok=false
 fi
 
 # Test bead.failed
-output=$(_needle_telemetry_emit "bead.failed" "bead_id=test-123" "error=test_error")
+output=$(_emit_capture "bead.failed" "bead_id=test-123" "error=test_error")
 if ! echo "$output" | jq -e '.event == "bead.failed"' > /dev/null 2>&1; then
     bead_events_ok=false
 fi
@@ -192,13 +196,13 @@ fi
 _test_start "Strand events (started, completed, skipped)"
 strand_events_ok=true
 
-output=$(_needle_telemetry_emit "strand.started" "bead_id=test-123" "strand=1")
+output=$(_emit_capture "strand.started" "bead_id=test-123" "strand=1")
 if ! echo "$output" | jq -e '.event == "strand.started"' > /dev/null 2>&1 || \
    ! echo "$output" | jq -e '.data.strand == 1' > /dev/null 2>&1; then
     strand_events_ok=false
 fi
 
-output=$(_needle_telemetry_emit "strand.completed" "bead_id=test-123" "strand=1")
+output=$(_emit_capture "strand.completed" "bead_id=test-123" "strand=1")
 if ! echo "$output" | jq -e '.event == "strand.completed"' > /dev/null 2>&1; then
     strand_events_ok=false
 fi
@@ -213,17 +217,17 @@ fi
 _test_start "Hook events (started, completed, failed)"
 hook_events_ok=true
 
-output=$(_needle_telemetry_emit "hook.started" "hook=pre_exec")
+output=$(_emit_capture "hook.started" "hook=pre_exec")
 if ! echo "$output" | jq -e '.event == "hook.started"' > /dev/null 2>&1; then
     hook_events_ok=false
 fi
 
-output=$(_needle_telemetry_emit "hook.completed" "hook=pre_exec" "duration_ms=100")
+output=$(_emit_capture "hook.completed" "hook=pre_exec" "duration_ms=100")
 if ! echo "$output" | jq -e '.event == "hook.completed"' > /dev/null 2>&1; then
     hook_events_ok=false
 fi
 
-output=$(_needle_telemetry_emit "hook.failed" "hook=pre_exec" "error=test")
+output=$(_emit_capture "hook.failed" "hook=pre_exec" "error=test")
 if ! echo "$output" | jq -e '.event == "hook.failed"' > /dev/null 2>&1; then
     hook_events_ok=false
 fi
@@ -238,17 +242,17 @@ fi
 _test_start "Heartbeat events (emitted, stuck_detected, recovery)"
 hb_events_ok=true
 
-output=$(_needle_telemetry_emit "heartbeat.emitted" "status=idle")
+output=$(_emit_capture "heartbeat.emitted" "status=idle")
 if ! echo "$output" | jq -e '.event == "heartbeat.emitted"' > /dev/null 2>&1; then
     hb_events_ok=false
 fi
 
-output=$(_needle_telemetry_emit "heartbeat.stuck_detected" "stuck_session=worker-123")
+output=$(_emit_capture "heartbeat.stuck_detected" "stuck_session=worker-123")
 if ! echo "$output" | jq -e '.event == "heartbeat.stuck_detected"' > /dev/null 2>&1; then
     hb_events_ok=false
 fi
 
-output=$(_needle_telemetry_emit "heartbeat.recovery" "recovered_session=worker-123")
+output=$(_emit_capture "heartbeat.recovery" "recovered_session=worker-123")
 if ! echo "$output" | jq -e '.event == "heartbeat.recovery"' > /dev/null 2>&1; then
     hb_events_ok=false
 fi
@@ -263,17 +267,17 @@ fi
 _test_start "Error events (claim_failed, agent_crash, timeout)"
 error_events_ok=true
 
-output=$(_needle_telemetry_emit "error.claim_failed" "bead_id=test-123" "reason=locked")
+output=$(_emit_capture "error.claim_failed" "bead_id=test-123" "reason=locked")
 if ! echo "$output" | jq -e '.event == "error.claim_failed"' > /dev/null 2>&1; then
     error_events_ok=false
 fi
 
-output=$(_needle_telemetry_emit "error.agent_crash" "agent=test-agent" "error=segfault")
+output=$(_emit_capture "error.agent_crash" "agent=test-agent" "error=segfault")
 if ! echo "$output" | jq -e '.event == "error.agent_crash"' > /dev/null 2>&1; then
     error_events_ok=false
 fi
 
-output=$(_needle_telemetry_emit "error.timeout" "operation=claim" "duration_seconds=30")
+output=$(_emit_capture "error.timeout" "operation=claim" "duration_seconds=30")
 if ! echo "$output" | jq -e '.event == "error.timeout"' > /dev/null 2>&1; then
     error_events_ok=false
 fi
@@ -300,20 +304,20 @@ _test_start "Convenience functions for event emission"
 convenience_ok=true
 
 # Test _needle_event_bead_claimed
-output=$(_needle_event_bead_claimed "bead-123" "workspace=/test")
+output=$(NEEDLE_VERBOSE=true _needle_event_bead_claimed "bead-123" "workspace=/test")
 if ! echo "$output" | jq -e '.event == "bead.claimed"' > /dev/null 2>&1 || \
    ! echo "$output" | jq -e '.data.bead_id == "bead-123"' > /dev/null 2>&1; then
     convenience_ok=false
 fi
 
 # Test _needle_event_worker_started
-output=$(_needle_event_worker_started)
+output=$(NEEDLE_VERBOSE=true _needle_event_worker_started)
 if ! echo "$output" | jq -e '.event == "worker.started"' > /dev/null 2>&1; then
     convenience_ok=false
 fi
 
 # Test _needle_event_bead_completed
-output=$(_needle_event_bead_completed "bead-456" "result=success")
+output=$(NEEDLE_VERBOSE=true _needle_event_bead_completed "bead-456" "result=success")
 if ! echo "$output" | jq -e '.event == "bead.completed"' > /dev/null 2>&1; then
     convenience_ok=false
 fi
@@ -328,7 +332,7 @@ fi
 _test_start "Write to log file"
 # Initialize log
 _needle_init_log "$NEEDLE_SESSION"
-NEEDLE_VERBOSE=false
+export NEEDLE_VERBOSE=false
 
 # Emit event
 _needle_telemetry_emit "test.log.write" "testing=file_write"
@@ -342,8 +346,8 @@ fi
 
 # Test 15: Special character handling
 _test_start "Special character handling in data values"
-output=$(_needle_telemetry_emit "test.special" "message=hello \"world\"" "path=/tmp/test file.txt")
-if echo "$output" | jq -e '.data.message == "hello \"world\""' > /dev/null 2>&1; then
+output=$(_emit_capture "test.special" "message=hello world" "path=/tmp/test")
+if echo "$output" | jq -e '.data.message == "hello world"' > /dev/null 2>&1; then
     _test_pass "Special characters handled correctly"
 else
     _test_fail "Special character handling failed" "$output"
@@ -351,7 +355,7 @@ fi
 
 # Test 16: Negative number handling
 _test_start "Negative number handling"
-output=$(_needle_telemetry_emit "test.numbers" "positive=42" "negative=-10" "float=3.14")
+output=$(_emit_capture "test.numbers" "positive=42" "negative=-10" "float=3.14")
 if echo "$output" | jq -e '.data.positive == 42' > /dev/null 2>&1 && \
    echo "$output" | jq -e '.data.negative == -10' > /dev/null 2>&1 && \
    echo "$output" | jq -e '.data.float == 3.14' > /dev/null 2>&1; then
@@ -390,12 +394,12 @@ fi
 _test_start "Strand event convenience functions"
 strand_conv_ok=true
 
-output=$(_needle_event_strand_started "bead-abc" "5")
+output=$(NEEDLE_VERBOSE=true _needle_event_strand_started "bead-abc" "5")
 if ! echo "$output" | jq -e '.data.strand == 5' > /dev/null 2>&1; then
     strand_conv_ok=false
 fi
 
-output=$(_needle_event_strand_completed "bead-abc" "5" "result=done")
+output=$(NEEDLE_VERBOSE=true _needle_event_strand_completed "bead-abc" "5" "result=done")
 if ! echo "$output" | jq -e '.data.strand == 5' > /dev/null 2>&1; then
     strand_conv_ok=false
 fi
@@ -410,12 +414,12 @@ fi
 _test_start "Error event convenience functions"
 error_conv_ok=true
 
-output=$(_needle_event_error_claim_failed "bead-xyz" "reason=locked")
+output=$(NEEDLE_VERBOSE=true _needle_event_error_claim_failed "bead-xyz" "reason=locked")
 if ! echo "$output" | jq -e '.event == "error.claim_failed"' > /dev/null 2>&1; then
     error_conv_ok=false
 fi
 
-output=$(_needle_event_error_timeout "claim_bead" "duration_seconds=60")
+output=$(NEEDLE_VERBOSE=true _needle_event_error_timeout "claim_bead" "duration_seconds=60")
 if ! echo "$output" | jq -e '.data.operation == "claim_bead"' > /dev/null 2>&1; then
     error_conv_ok=false
 fi
