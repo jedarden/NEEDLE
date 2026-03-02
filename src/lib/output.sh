@@ -47,21 +47,21 @@ _needle_print_color() {
 }
 
 _needle_info() {
-    if [[ "$NEEDLE_QUIET" == "true" ]]; then
+    if [[ "${NEEDLE_QUIET:-}" == "true" ]]; then
         return
     fi
     _needle_print_color "$NEEDLE_COLOR_BLUE" "ℹ $*"
 }
 
 _needle_success() {
-    if [[ "$NEEDLE_QUIET" == "true" ]]; then
+    if [[ "${NEEDLE_QUIET:-}" == "true" ]]; then
         return
     fi
     _needle_print_color "$NEEDLE_COLOR_GREEN" "✓ $*"
 }
 
 _needle_warn() {
-    if [[ "$NEEDLE_QUIET" == "true" ]]; then
+    if [[ "${NEEDLE_QUIET:-}" == "true" ]]; then
         return
     fi
     _needle_print_color "$NEEDLE_COLOR_YELLOW" "⚠ $*" >&2
@@ -72,14 +72,14 @@ _needle_error() {
 }
 
 _needle_debug() {
-    if [[ "$NEEDLE_VERBOSE" != "true" ]]; then
+    if [[ "${NEEDLE_VERBOSE:-false}" != "true" ]]; then
         return
     fi
     _needle_print_color "$NEEDLE_COLOR_DIM" "[DEBUG] $*"
 }
 
 _needle_verbose() {
-    if [[ "$NEEDLE_VERBOSE" != "true" ]]; then
+    if [[ "${NEEDLE_VERBOSE:-false}" != "true" ]]; then
         return
     fi
     _needle_print_color "$NEEDLE_COLOR_CYAN" "  $*"

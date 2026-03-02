@@ -149,9 +149,9 @@ _needle_telemetry_emit() {
     fi
 
     # Write to log file if writer is available and initialized
-    if [[ -n "$NEEDLE_LOG_INITIALIZED" ]] && [[ "$NEEDLE_LOG_INITIALIZED" == "true" ]]; then
+    if [[ -n "${NEEDLE_LOG_INITIALIZED:-}" ]] && [[ "$NEEDLE_LOG_INITIALIZED" == "true" ]]; then
         _needle_write_event "$json"
-    elif [[ -n "$NEEDLE_LOG_FILE" ]]; then
+    elif [[ -n "${NEEDLE_LOG_FILE:-}" ]]; then
         # Log file is set but not initialized - try to append directly
         echo "$json" >> "$NEEDLE_LOG_FILE"
     fi
