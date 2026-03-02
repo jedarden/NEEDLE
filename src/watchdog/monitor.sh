@@ -44,10 +44,10 @@ _needle_watchdog_init() {
     fi
 
     # Load configuration values
-    NEEDLE_WATCHDOG_INTERVAL=$(_needle_config_get 'watchdog.interval' '30')
-    NEEDLE_WATCHDOG_HEARTBEAT_TIMEOUT=$(_needle_config_get 'watchdog.heartbeat_timeout' '120')
-    NEEDLE_WATCHDOG_BEAD_TIMEOUT=$(_needle_config_get 'watchdog.bead_timeout' '600')
-    NEEDLE_WATCHDOG_RECOVERY_ACTION=$(_needle_config_get 'watchdog.recovery_action' 'restart')
+    NEEDLE_WATCHDOG_INTERVAL=$(get_config 'watchdog.interval' '30')
+    NEEDLE_WATCHDOG_HEARTBEAT_TIMEOUT=$(get_config 'watchdog.heartbeat_timeout' '120')
+    NEEDLE_WATCHDOG_BEAD_TIMEOUT=$(get_config 'watchdog.bead_timeout' '600')
+    NEEDLE_WATCHDOG_RECOVERY_ACTION=$(get_config 'watchdog.recovery_action' 'restart')
 
     return 0
 }

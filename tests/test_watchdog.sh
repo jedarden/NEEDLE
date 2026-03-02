@@ -2,7 +2,8 @@
 # Tests for NEEDLE Watchdog Monitor
 # Run with: bash tests/test_watchdog.sh
 
-set -e
+# Don't exit on first error - we want to run all tests
+# set -e
 
 # Test setup
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,8 +36,11 @@ _test_setup() {
     export NEEDLE_HOME="$TEST_DIR/.needle"
     export NEEDLE_STATE_DIR="state"
     export NEEDLE_LOG_DIR="logs"
+    export NEEDLE_CONFIG_FILE="$NEEDLE_HOME/config.yaml"
     mkdir -p "$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
     mkdir -p "$NEEDLE_HOME/$NEEDLE_LOG_DIR"
+    # Clear config cache for each test
+    NEEDLE_CONFIG_CACHE=""
 }
 
 _test_teardown() {
@@ -103,6 +107,17 @@ _assert_file_exists() {
     fi
 }
 
+_assert_dir_exists() {
+    local dir="$1"
+    local message="${2:-Directory should exist}"
+    if [[ -d "$dir" ]]; then
+        return 0
+    else
+        _test_fail "$message (dir: $dir)"
+        return 1
+    fi
+}
+
 _assert_file_not_exists() {
     local file="$1"
     local message="${2:-File should not exist}"
@@ -125,9 +140,9 @@ test_watchdog_init() {
     # Run init
     _needle_watchdog_init
 
-    # Check directories were created
-    _assert_file_exists "$NEEDLE_WATCHDOG_PID_FILE" && \
-    _assert_file_exists "$NEEDLE_WATCHDOG_HEARTBEATS_DIR" "Heartbeats dir should exist"
+    # Check directories were created (init creates paths, not PID file)
+    # PID file is created when watchdog starts
+    _assert_dir_exists "$NEEDLE_WATCHDOG_HEARTBEATS_DIR" "Heartbeats dir should exist"
 
     local result=$?
     if [[ $result -eq 0 ]]; then
@@ -271,9 +286,8 @@ test_config_values() {
     _test_start "Configuration values"
     _test_setup
 
-    # Set up config
-    mkdir -p "$NEEDLE_HOME"
-    cat > "$NEEDLE_HOME/config.yaml" << 'EOF'
+    # Set up config with custom values
+    cat > "$NEEDLE_CONFIG_FILE" << 'EOF'
 watchdog:
   interval: 60
   heartbeat_timeout: 240
