@@ -3,20 +3,32 @@
 # Initialize NEEDLE configuration and directory structure
 
 _needle_init_help() {
-    _needle_print "Usage: needle init [OPTIONS]
+    _needle_print "Initialize NEEDLE with interactive onboarding
 
-Initialize NEEDLE configuration and directory structure.
+This command guides you through first-time setup:
+  1. Installing dependencies (tmux, jq, yq, br)
+  2. Detecting available coding CLI agents
+  3. Configuring your first workspace
+  4. Creating default configuration
 
-Options:
-    -f, --force      Overwrite existing configuration
-    -e, --editor     Set default editor
-    -t, --timezone   Set timezone (default: UTC)
-    -h, --help       Show this help message
+USAGE:
+    needle init [OPTIONS]
 
-Examples:
-    needle init                    Initialize with defaults
-    needle init --editor vim       Set editor to vim
-    needle init --force            Reinitialize, overwriting config
+OPTIONS:
+    -f, --force              Overwrite existing configuration
+    -e, --editor <EDITOR>    Set default editor
+    -t, --timezone <TZ>      Set timezone (default: UTC)
+    -h, --help               Show this help message
+
+EXAMPLES:
+    # Interactive setup
+    needle init
+
+    # Re-run setup, overwriting existing config
+    needle init --force
+
+    # Set editor and timezone
+    needle init --editor vim --timezone America/New_York
 "
 }
 

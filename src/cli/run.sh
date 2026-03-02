@@ -3,24 +3,33 @@
 # Execute a needle workflow or script
 
 _needle_run_help() {
-    _needle_print "Usage: needle run <NAME> [OPTIONS]
+    _needle_print "Start a worker to process beads from the queue
 
-Execute a needle workflow or script.
+Starts a NEEDLE worker that processes beads (tasks) from the queue.
+The worker will claim beads, execute them with the configured agent,
+and mark them as complete.
 
-Arguments:
-    NAME             Name of the workflow or script to run
+USAGE:
+    needle run [OPTIONS]
 
-Options:
-    -p, --parallel   Run in parallel mode
-    -w, --workers    Number of parallel workers (default: 4)
-    -d, --dry-run    Show what would be done without executing
-    -v, --verbose    Show detailed output
-    -h, --help       Show this help message
+OPTIONS:
+    -w, --workspace <PATH>   Workspace directory containing .beads/
+    -a, --agent <NAME>       Agent to use (e.g., claude-anthropic-sonnet)
+    -p, --parallel           Run in parallel mode
+    -n, --workers <NUM>      Number of parallel workers (default: 4)
+    -d, --dry-run            Show what would be done without executing
+    -v, --verbose            Show detailed output
+    -h, --help               Show this help message
 
-Examples:
-    needle run my-workflow           Run a workflow
-    needle run my-workflow -p        Run with parallel execution
-    needle run my-workflow --dry-run Preview execution
+EXAMPLES:
+    # Start a worker with explicit options
+    needle run --workspace=/path/to/project --agent=claude-anthropic-sonnet
+
+    # Run with parallel execution
+    needle run -w /path/to/project -a claude-anthropic-sonnet -p
+
+    # Preview what would be done
+    needle run --dry-run
 "
 }
 

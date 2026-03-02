@@ -3,17 +3,24 @@
 # Show current status and health of NEEDLE
 
 _needle_status_help() {
-    _needle_print "Usage: needle status [OPTIONS]
+    _needle_print "Show current status and health of NEEDLE
 
-Show current status and health of NEEDLE.
+Displays information about the NEEDLE installation including
+version, configuration status, and directory structure.
 
-Options:
+USAGE:
+    needle status [OPTIONS]
+
+OPTIONS:
     -j, --json       Output in JSON format
     -h, --help       Show this help message
 
-Examples:
-    needle status           Show status
-    needle status --json    Output as JSON
+EXAMPLES:
+    # Show status
+    needle status
+
+    # Output as JSON for scripting
+    needle status --json
 "
 }
 

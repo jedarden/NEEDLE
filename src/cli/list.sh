@@ -3,22 +3,35 @@
 # List available workflows, scripts, or resources
 
 _needle_list_help() {
-    _needle_print "Usage: needle list [TYPE] [OPTIONS]
+    _needle_print "List running workers and available resources
 
-List available workflows, scripts, or resources.
+Shows information about active NEEDLE workers and available
+workflows, scripts, or other resources.
 
-Arguments:
-    TYPE             What to list: workflows, scripts, all (default: all)
+USAGE:
+    needle list [TYPE] [OPTIONS]
 
-Options:
-    -f, --format     Output format: table, json, simple (default: table)
-    -q, --quiet      Only show names
-    -h, --help       Show this help message
+ARGUMENTS:
+    TYPE             What to list: workers, workflows, scripts, all
+                     (default: workers)
 
-Examples:
-    needle list                  List all resources
-    needle list workflows        List only workflows
-    needle list --format json    Output as JSON
+OPTIONS:
+    -f, --format <FMT>   Output format: table, json, simple (default: table)
+    -q, --quiet          Only show names (one per line)
+    -h, --help           Show this help message
+
+EXAMPLES:
+    # List running workers
+    needle list
+
+    # List all resources
+    needle list all
+
+    # Output as JSON for scripting
+    needle list --format json
+
+    # Get just the names
+    needle list --quiet
 "
 }
 

@@ -27,14 +27,23 @@ _needle_help() {
         config)
             _needle_config_help
             ;;
+        logs)
+            _needle_logs_help
+            ;;
         version)
             _needle_version_help
             ;;
         upgrade)
             _needle_upgrade_help
             ;;
+        agents)
+            _needle_agents_help
+            ;;
         help)
-            _needle_print "Usage: needle help [COMMAND]"
+            _needle_print "Display help for NEEDLE commands"
+            _needle_print ""
+            _needle_print "USAGE:"
+            _needle_print "    needle help [COMMAND]"
             _needle_print ""
             _needle_print "Display help for a specific command."
             ;;
@@ -47,41 +56,58 @@ _needle_help() {
 
 _needle_help_main() {
     cat << 'EOF'
-NEEDLE - Workflow Automation Tool
+NEEDLE - Navigates Every Enqueued Deliverable, Logs Effort
 
-Usage:
-    needle <command> [options] [arguments]
+A universal wrapper for headless coding CLI agents that processes
+beads (tasks) from a queue with automatic session management.
 
-Commands:
-    init        Initialize NEEDLE configuration
-    run         Execute a workflow or script
-    list        List available workflows and scripts
-    status      Show NEEDLE status and health
-    config      View and modify configuration
-    version     Display version information
-    upgrade     Upgrade NEEDLE to latest version
+USAGE:
+    needle <COMMAND> [OPTIONS]
+    needle [OPTIONS]
+
+COMMANDS:
+    init        Interactive first-time setup and onboarding
+    run         Start a worker to process beads
+    list        List running workers
+    status      Show worker health and statistics
+    logs        View or tail worker logs
+
+    agents      Detect and manage coding CLI agents
+    upgrade     Check for and install updates
+    version     Show version information
+
+    config      View or edit configuration
     help        Show help information
 
-Global Options:
-    -h, --help      Show this help message
-    -v, --verbose   Enable verbose output
-    -q, --quiet     Suppress non-essential output
-    --no-color      Disable colored output
-    --version       Show version number
+OPTIONS:
+    -h, --help       Print help information
+    -V, --version    Print version information
+    -v, --verbose    Enable verbose output
+    -q, --quiet      Suppress non-error output
+    --no-color       Disable colored output
 
-Getting Started:
-    needle init              Initialize NEEDLE
-    needle run <workflow>    Execute a workflow
-    needle list              List available workflows
+QUICK START:
+    # First time setup (runs automatically if unconfigured)
+    needle init
+
+    # Start a worker
+    needle run --workspace=/path/to/project --agent=claude-anthropic-sonnet
+
+    # List running workers
+    needle list
+
+    # Show status
+    needle status
+
+CONFIGURATION:
+    Global config:    ~/.needle/config.yaml
+    Workspace config: .needle.yaml (in workspace root)
+    Logs:             ~/.needle/logs/
+
+DOCUMENTATION:
+    Full docs:  https://github.com/coder/needle#readme
+    Issues:     https://github.com/coder/needle/issues
 
 Use "needle help <command>" for more information about a command.
-
-Examples:
-    needle init --editor vim
-    needle run my-workflow --parallel --workers 8
-    needle list workflows --format json
-    needle config get editor
-
-For more information, visit: https://github.com/example/needle
 EOF
 }

@@ -15,29 +15,46 @@ NEEDLE_MAX_BACKUPS="${NEEDLE_MAX_BACKUPS:-5}"
 # -----------------------------------------------------------------------------
 
 _needle_upgrade_help() {
-    _needle_print "Usage: needle upgrade [OPTIONS]
+    _needle_print "Upgrade NEEDLE to the latest or specified version
 
-Upgrade NEEDLE to the latest or specified version.
+Downloads and installs the latest version of NEEDLE from GitHub
+releases. Creates backups automatically and supports rollback.
 
-Options:
-    -c, --check          Check for available updates without installing
-    -f, --force          Force upgrade even if already at latest version
-    -y, --yes            Skip confirmation prompt
-    -l, --local <FILE>   Install from local file (air-gapped environments)
-    -v, --version <VER>  Upgrade to specific version instead of latest
-    --list               List available versions
-    --rollback           Rollback to previous version
-    --rollback-to <VER>  Rollback to specific version
-    -h, --help           Show this help message
+USAGE:
+    needle upgrade [OPTIONS]
 
-Examples:
-    needle upgrade                Upgrade to latest version
-    needle upgrade --check        Check for updates only
-    needle upgrade --force        Reinstall current version
-    needle upgrade -v 0.2.0       Install specific version
-    needle upgrade --local ./needle-v0.3.0  Install from local file
-    needle upgrade --rollback     Restore previous version
-    needle upgrade --list         Show available versions
+OPTIONS:
+    -c, --check              Check for available updates without installing
+    -f, --force              Force upgrade even if already at latest version
+    -y, --yes                Skip confirmation prompt
+    -l, --local <FILE>       Install from local file (air-gapped environments)
+    -v, --version <VER>      Upgrade to specific version instead of latest
+    --list                   List available versions
+    --rollback               Rollback to previous version
+    --rollback-to <VER>      Rollback to specific version
+    -h, --help               Show this help message
+
+EXAMPLES:
+    # Upgrade to latest version
+    needle upgrade
+
+    # Check for updates only
+    needle upgrade --check
+
+    # Reinstall current version
+    needle upgrade --force
+
+    # Install specific version
+    needle upgrade -v 0.2.0
+
+    # Install from local file
+    needle upgrade --local ./needle-v0.3.0
+
+    # Restore previous version
+    needle upgrade --rollback
+
+    # Show available versions
+    needle upgrade --list
 "
 }
 

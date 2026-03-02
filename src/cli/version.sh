@@ -3,19 +3,28 @@
 # Display version information
 
 _needle_version_help() {
-    _needle_print "Usage: needle version [OPTIONS]
+    _needle_print "Show NEEDLE version information
 
-Display NEEDLE version information.
+Displays the installed NEEDLE version with optional detail
+and output format options.
 
-Options:
+USAGE:
+    needle version [OPTIONS]
+
+OPTIONS:
     -j, --json       Output in JSON format
     -s, --short      Output short version string only
     -h, --help       Show this help message
 
-Examples:
-    needle version          Show full version info
-    needle version --short  Show just version number
-    needle version --json   Output as JSON
+EXAMPLES:
+    # Show full version info
+    needle version
+
+    # Show just version number
+    needle version --short
+
+    # Output as JSON for scripting
+    needle version --json
 "
 }
 

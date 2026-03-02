@@ -34,14 +34,19 @@ source "$NEEDLE_ROOT_DIR/src/lib/json.sh"
 source "$NEEDLE_ROOT_DIR/src/lib/config.sh"
 source "$NEEDLE_ROOT_DIR/src/lib/utils.sh"
 
+# Source onboarding modules
+source "$NEEDLE_ROOT_DIR/src/onboarding/agents.sh"
+
 # Source CLI subcommands
 source "$NEEDLE_ROOT_DIR/src/cli/init.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/run.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/list.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/status.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/config.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/logs.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/version.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/upgrade.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/agents.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/help.sh"
 
 # -----------------------------------------------------------------------------
@@ -59,7 +64,7 @@ NEEDLE_USE_COLOR="${NEEDLE_USE_COLOR:-true}"
 _needle_maybe_init() {
     # Commands that don't require initialization
     case "${1:-}" in
-        init|version|help|--help|-h|--version|-V|-x|upgrade)
+        init|version|help|--help|-h|--version|-V|-x|upgrade|agents)
             return 0
             ;;
     esac
@@ -86,7 +91,7 @@ _needle_parse_global_options() {
     # Check if a subcommand is present (first non-option arg that's a known subcommand)
     for arg in "$@"; do
         case "$arg" in
-            init|run|list|ls|status|config|version|upgrade|help|completion)
+            init|run|list|ls|status|config|logs|version|upgrade|help|completion|agents)
                 has_subcommand=true
                 break
                 ;;
@@ -201,11 +206,17 @@ _needle_route_command() {
         config)
             _needle_config "$@"
             ;;
+        logs)
+            _needle_logs "$@"
+            ;;
         version|-V)
             _needle_version "$@"
             ;;
         upgrade)
             _needle_upgrade "$@"
+            ;;
+        agents)
+            _needle_agents "$@"
             ;;
         help|--help|-h)
             _needle_help "$@"
@@ -237,7 +248,7 @@ _needle_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="init run list status config version upgrade help"
+    local commands="init run list status config logs version upgrade agents help"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -256,11 +267,14 @@ _needle() {
     local commands=(
         'init:Initialize NEEDLE configuration'
         'run:Execute a workflow or script'
-        'list:List available workflows and scripts'
-        'status:Show NEEDLE status'
+        'list:List running workers'
+        'status:Show worker health and statistics'
         'config:View and modify configuration'
+        'logs:View or tail worker logs'
         'version:Display version information'
         'upgrade:Upgrade NEEDLE to latest version'
+        'agents:Detect and manage coding CLI agents'
+        'agents:List available agent configurations'
         'help:Show help information'
     )
 

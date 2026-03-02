@@ -49,7 +49,9 @@ NEEDLE_SUBCOMMANDS=(
     "list"
     "status"
     "config"
+    "logs"
     "version"
     "upgrade"
+    "agents"
     "help"
 )

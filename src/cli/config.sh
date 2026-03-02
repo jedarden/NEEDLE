@@ -3,25 +3,36 @@
 # View and modify configuration
 
 _needle_config_help() {
-    _needle_print "Usage: needle config <COMMAND> [OPTIONS]
+    _needle_print "View and modify NEEDLE configuration
 
-View and modify NEEDLE configuration.
+Allows viewing and editing the NEEDLE configuration file.
+Configuration is stored in YAML format at ~/.needle/config.yaml.
 
-Commands:
+USAGE:
+    needle config <COMMAND> [OPTIONS]
+
+COMMANDS:
     get <KEY>        Get a configuration value
     set <KEY> <VAL>  Set a configuration value
     list             List all configuration values
-    edit             Open configuration in editor
+    edit             Open configuration in \$EDITOR
     path             Show configuration file path
 
-Options:
+OPTIONS:
     -h, --help       Show this help message
 
-Examples:
-    needle config list              Show all config values
-    needle config get editor        Get editor setting
-    needle config set editor vim    Set editor to vim
-    needle config edit              Open config in \$EDITOR
+EXAMPLES:
+    # Show all config values
+    needle config list
+
+    # Get a specific value
+    needle config get editor
+
+    # Set a value
+    needle config set editor vim
+
+    # Open config in editor
+    needle config edit
 "
 }
 
