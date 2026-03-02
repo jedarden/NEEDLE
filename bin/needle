@@ -1,0 +1,271 @@
+#!/usr/bin/env bash
+#
+# NEEDLE - Workflow Automation Tool
+# Main entry point for the NEEDLE CLI
+#
+# This script routes commands to subcommand implementations
+# and provides global option handling.
+#
+# Usage: needle <command> [options] [arguments]
+#
+
+set -euo pipefail
+
+# -----------------------------------------------------------------------------
+# Script Setup
+# -----------------------------------------------------------------------------
+
+# Get script directory (resolves symlinks)
+NEEDLE_SCRIPT="${BASH_SOURCE[0]}"
+while [[ -L "$NEEDLE_SCRIPT" ]]; do
+    NEEDLE_SCRIPT=$(readlink "$NEEDLE_SCRIPT")
+done
+NEEDLE_SCRIPT_DIR=$(cd "$(dirname "$NEEDLE_SCRIPT")" && pwd)
+NEEDLE_ROOT_DIR=$(cd "$NEEDLE_SCRIPT_DIR/.." && pwd)
+
+# -----------------------------------------------------------------------------
+# Source Libraries
+# -----------------------------------------------------------------------------
+
+source "$NEEDLE_ROOT_DIR/src/lib/constants.sh"
+source "$NEEDLE_ROOT_DIR/src/lib/output.sh"
+source "$NEEDLE_ROOT_DIR/src/lib/config.sh"
+source "$NEEDLE_ROOT_DIR/src/lib/utils.sh"
+
+# Source CLI subcommands
+source "$NEEDLE_ROOT_DIR/src/cli/init.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/run.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/list.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/status.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/config.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/version.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/help.sh"
+
+# -----------------------------------------------------------------------------
+# Global State
+# -----------------------------------------------------------------------------
+
+NEEDLE_VERBOSE="${NEEDLE_VERBOSE:-false}"
+NEEDLE_QUIET="${NEEDLE_QUIET:-false}"
+NEEDLE_USE_COLOR="${NEEDLE_USE_COLOR:-true}"
+
+# -----------------------------------------------------------------------------
+# Auto-Initialization Check
+# -----------------------------------------------------------------------------
+
+_needle_maybe_init() {
+    # Commands that don't require initialization
+    case "${1:-}" in
+        init|version|help|--help|-h|--version|-V|-x)
+            return 0
+            ;;
+    esac
+
+    # Check if initialized
+    if ! _needle_is_initialized; then
+        _needle_warn "NEEDLE is not initialized"
+        _needle_info "Redirecting to 'needle init'..."
+        _needle_print ""
+        _needle_init
+        exit $?
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Global Option Parsing
+# -----------------------------------------------------------------------------
+
+_needle_parse_global_options() {
+    local args=()
+    local skip_next=false
+
+    while [[ $# -gt 0 ]]; do
+        if [[ "$skip_next" == "true" ]]; then
+            skip_next=false
+            shift
+            continue
+        fi
+
+        case "$1" in
+            -v|--verbose)
+                NEEDLE_VERBOSE=true
+                shift
+                ;;
+            -q|--quiet)
+                NEEDLE_QUIET=true
+                shift
+                ;;
+            --no-color)
+                NEEDLE_USE_COLOR=false
+                shift
+                ;;
+            --color)
+                NEEDLE_USE_COLOR=true
+                shift
+                ;;
+            -h|--help)
+                _needle_help
+                exit $NEEDLE_EXIT_SUCCESS
+                ;;
+            -V|--version)
+                echo "needle version $NEEDLE_VERSION"
+                exit $NEEDLE_EXIT_SUCCESS
+                ;;
+            -x)
+                # Debug mode - enable bash xtrace
+                set -x
+                shift
+                ;;
+            --)
+                shift
+                args+=("$@")
+                break
+                ;;
+            -*)
+                # Check if it's a combined short option (e.g., -vq)
+                if [[ ${#1} -gt 2 ]] && [[ "$1" =~ ^-[a-zA-Z]+$ ]]; then
+                    _needle_error "Unknown option: $1"
+                    _needle_help
+                    exit $NEEDLE_EXIT_USAGE
+                fi
+                # Unknown global option - pass through to subcommand
+                args+=("$1")
+                shift
+                ;;
+            *)
+                # Non-option argument - pass through
+                args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    # Return remaining arguments
+    NEEDLE_REMAINING_ARGS=("${args[@]}")
+}
+
+# -----------------------------------------------------------------------------
+# Subcommand Routing
+# -----------------------------------------------------------------------------
+
+_needle_route_command() {
+    local command="${1:-help}"
+    shift || true
+
+    case "$command" in
+        init)
+            _needle_init "$@"
+            ;;
+        run)
+            _needle_run "$@"
+            ;;
+        list|ls)
+            _needle_list "$@"
+            ;;
+        status)
+            _needle_status "$@"
+            ;;
+        config)
+            _needle_config "$@"
+            ;;
+        version|-V)
+            _needle_version "$@"
+            ;;
+        help|--help|-h)
+            _needle_help "$@"
+            ;;
+        completion)
+            _needle_completion "$@"
+            ;;
+        *)
+            _needle_error "Unknown command: $command"
+            _needle_print ""
+            _needle_help
+            exit $NEEDLE_EXIT_USAGE
+            ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
+# Shell Completion (Stub)
+# -----------------------------------------------------------------------------
+
+_needle_completion() {
+    local shell="${1:-bash}"
+
+    case "$shell" in
+        bash)
+            cat << 'COMPLETION'
+# NEEDLE bash completion
+_needle_completion() {
+    local cur prev words cword
+    _init_completion || return
+
+    local commands="init run list status config version help"
+
+    if [[ $cword -eq 1 ]]; then
+        COMPREPLY=($(compgen -W "$commands" -- "$cur"))
+    fi
+}
+
+complete -F _needle_completion needle
+COMPLETION
+            ;;
+        zsh)
+            cat << 'COMPLETION'
+# NEEDLE zsh completion
+#compdef needle
+
+_needle() {
+    local commands=(
+        'init:Initialize NEEDLE configuration'
+        'run:Execute a workflow or script'
+        'list:List available workflows and scripts'
+        'status:Show NEEDLE status'
+        'config:View and modify configuration'
+        'version:Display version information'
+        'help:Show help information'
+    )
+
+    _arguments -C \
+        '1: :->command' \
+        '*:: :->args'
+
+    case $state in
+        command)
+            _describe 'command' commands
+            ;;
+    esac
+}
+
+_needle
+COMPLETION
+            ;;
+        *)
+            _needle_error "Unsupported shell: $shell"
+            _needle_info "Supported shells: bash, zsh"
+            exit $NEEDLE_EXIT_USAGE
+            ;;
+    esac
+}
+
+# -----------------------------------------------------------------------------
+# Main Entry Point
+# -----------------------------------------------------------------------------
+
+main() {
+    # Initialize output system
+    _needle_output_init
+
+    # Parse global options
+    _needle_parse_global_options "$@"
+
+    # Check for initialization (unless running init/version/help)
+    _needle_maybe_init "${NEEDLE_REMAINING_ARGS[@]:-}"
+
+    # Route to subcommand
+    _needle_route_command "${NEEDLE_REMAINING_ARGS[@]:-}"
+}
+
+# Run main with all arguments
+main "$@"
