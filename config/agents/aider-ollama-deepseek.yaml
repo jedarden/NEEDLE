@@ -33,7 +33,6 @@ output:
   retry_codes: [1]
   fail_codes: [2, 137]
 
-# Rate limits (local model, high concurrency possible)
+# Rate limits (local GPU limitation)
 limits:
-  requests_per_minute: 120
-  max_concurrent: 10
+  max_concurrent: 1

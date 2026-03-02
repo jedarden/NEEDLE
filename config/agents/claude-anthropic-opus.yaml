@@ -15,7 +15,7 @@ model: opus            # Model identifier
 # Variables: ${WORKSPACE}, ${PROMPT}, ${BEAD_ID}, ${BEAD_TITLE}
 invoke: |
   cd ${WORKSPACE} && \
-  ANTHROPIC_MODEL=claude-opus-4-6-20250929 \
+  ANTHROPIC_MODEL=claude-opus-4-5-20251001 \
   claude --print \
          --dangerously-skip-permissions \
          --output-format json \
@@ -37,5 +37,5 @@ output:
 
 # Rate limits (Opus is more expensive, lower concurrency)
 limits:
-  requests_per_minute: 30
-  max_concurrent: 3
+  requests_per_minute: 20
+  max_concurrent: 2

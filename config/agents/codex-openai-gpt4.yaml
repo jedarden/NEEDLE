@@ -36,4 +36,4 @@ output:
 # Rate limits
 limits:
   requests_per_minute: 60
-  max_concurrent: 5
+  max_concurrent: 3
