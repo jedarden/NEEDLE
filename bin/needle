@@ -54,6 +54,7 @@ source "$NEEDLE_ROOT_DIR/src/cli/config.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/logs.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/version.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/upgrade.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/rollback.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/agents.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/heartbeat.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/help.sh"
@@ -73,7 +74,7 @@ NEEDLE_USE_COLOR="${NEEDLE_USE_COLOR:-true}"
 _needle_maybe_init() {
     # Commands that don't require initialization
     case "${1:-}" in
-        init|version|help|--help|-h|--version|-V|-x|upgrade|agents)
+        init|version|help|--help|-h|--version|-V|-x|upgrade|rollback|agents)
             return 0
             ;;
     esac
@@ -100,7 +101,7 @@ _needle_parse_global_options() {
     # Check if a subcommand is present (first non-option arg that's a known subcommand)
     for arg in "$@"; do
         case "$arg" in
-            init|run|list|ls|status|config|logs|version|upgrade|help|completion|agents|heartbeat)
+            init|run|list|ls|status|config|logs|version|upgrade|rollback|help|completion|agents|heartbeat)
                 has_subcommand=true
                 break
                 ;;
@@ -224,6 +225,9 @@ _needle_route_command() {
         upgrade)
             _needle_upgrade "$@"
             ;;
+        rollback)
+            _needle_rollback "$@"
+            ;;
         agents)
             _needle_agents "$@"
             ;;
@@ -260,7 +264,7 @@ _needle_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="init run list status config logs version upgrade agents heartbeat help"
+    local commands="init run list status config logs version upgrade rollback agents heartbeat help"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -285,6 +289,7 @@ _needle() {
         'logs:View or tail worker logs'
         'version:Display version information'
         'upgrade:Upgrade NEEDLE to latest version'
+        'rollback:Rollback to a previous version'
         'agents:Detect and manage coding CLI agents'
         'heartbeat:Manage worker heartbeat and recovery'
         'help:Show help information'

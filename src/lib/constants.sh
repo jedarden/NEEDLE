@@ -52,6 +52,7 @@ NEEDLE_SUBCOMMANDS=(
     "logs"
     "version"
     "upgrade"
+    "rollback"
     "agents"
     "heartbeat"
     "help"

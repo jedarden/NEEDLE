@@ -36,6 +36,9 @@ _needle_help() {
         upgrade)
             _needle_upgrade_help
             ;;
+        rollback)
+            _needle_rollback_help
+            ;;
         agents)
             _needle_agents_help
             ;;
@@ -78,6 +81,7 @@ COMMANDS:
     agents      Detect and manage coding CLI agents
     heartbeat   Manage worker heartbeat and recovery
     upgrade     Check for and install updates
+    rollback    Rollback to a previous version
     version     Show version information
 
     config      View or edit configuration
