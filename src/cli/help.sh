@@ -30,6 +30,9 @@ _needle_help() {
         version)
             _needle_version_help
             ;;
+        upgrade)
+            _needle_upgrade_help
+            ;;
         help)
             _needle_print "Usage: needle help [COMMAND]"
             _needle_print ""
@@ -56,6 +59,7 @@ Commands:
     status      Show NEEDLE status and health
     config      View and modify configuration
     version     Display version information
+    upgrade     Upgrade NEEDLE to latest version
     help        Show help information
 
 Global Options:

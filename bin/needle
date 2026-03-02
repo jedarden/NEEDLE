@@ -41,6 +41,7 @@ source "$NEEDLE_ROOT_DIR/src/cli/list.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/status.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/config.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/version.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/upgrade.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/help.sh"
 
 # -----------------------------------------------------------------------------
@@ -58,7 +59,7 @@ NEEDLE_USE_COLOR="${NEEDLE_USE_COLOR:-true}"
 _needle_maybe_init() {
     # Commands that don't require initialization
     case "${1:-}" in
-        init|version|help|--help|-h|--version|-V|-x)
+        init|version|help|--help|-h|--version|-V|-x|upgrade)
             return 0
             ;;
     esac
@@ -80,6 +81,24 @@ _needle_maybe_init() {
 _needle_parse_global_options() {
     local args=()
     local skip_next=false
+    local has_subcommand=false
+
+    # Check if a subcommand is present (first non-option arg that's a known subcommand)
+    for arg in "$@"; do
+        case "$arg" in
+            init|run|list|ls|status|config|version|upgrade|help|completion)
+                has_subcommand=true
+                break
+                ;;
+            -*)
+                # Skip options
+                ;;
+            *)
+                # Unknown non-option argument, could be a subcommand error
+                break
+                ;;
+        esac
+    done
 
     while [[ $# -gt 0 ]]; do
         if [[ "$skip_next" == "true" ]]; then
@@ -106,12 +125,24 @@ _needle_parse_global_options() {
                 shift
                 ;;
             -h|--help)
-                _needle_help
-                exit $NEEDLE_EXIT_SUCCESS
+                # If there's a subcommand, pass --help to it
+                if $has_subcommand; then
+                    args+=("$1")
+                    shift
+                else
+                    _needle_help
+                    exit $NEEDLE_EXIT_SUCCESS
+                fi
                 ;;
             -V|--version)
-                echo "needle version $NEEDLE_VERSION"
-                exit $NEEDLE_EXIT_SUCCESS
+                # If there's a subcommand, pass --version to it
+                if $has_subcommand; then
+                    args+=("$1")
+                    shift
+                else
+                    echo "needle version $NEEDLE_VERSION"
+                    exit $NEEDLE_EXIT_SUCCESS
+                fi
                 ;;
             -x)
                 # Debug mode - enable bash xtrace
@@ -173,6 +204,9 @@ _needle_route_command() {
         version|-V)
             _needle_version "$@"
             ;;
+        upgrade)
+            _needle_upgrade "$@"
+            ;;
         help|--help|-h)
             _needle_help "$@"
             ;;
@@ -203,7 +237,7 @@ _needle_completion() {
     local cur prev words cword
     _init_completion || return
 
-    local commands="init run list status config version help"
+    local commands="init run list status config version upgrade help"
 
     if [[ $cword -eq 1 ]]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
@@ -226,6 +260,7 @@ _needle() {
         'status:Show NEEDLE status'
         'config:View and modify configuration'
         'version:Display version information'
+        'upgrade:Upgrade NEEDLE to latest version'
         'help:Show help information'
     )
 
