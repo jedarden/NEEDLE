@@ -34,6 +34,13 @@ source "$NEEDLE_ROOT_DIR/src/lib/json.sh"
 source "$NEEDLE_ROOT_DIR/src/lib/config.sh"
 source "$NEEDLE_ROOT_DIR/src/lib/utils.sh"
 
+# Source runner modules
+source "$NEEDLE_ROOT_DIR/src/runner/state.sh"
+source "$NEEDLE_ROOT_DIR/src/runner/limits.sh"
+
+# Source agent loader
+source "$NEEDLE_ROOT_DIR/src/agent/loader.sh"
+
 # Source onboarding modules
 source "$NEEDLE_ROOT_DIR/src/onboarding/welcome.sh"
 source "$NEEDLE_ROOT_DIR/src/onboarding/agents.sh"
