@@ -54,6 +54,14 @@ _NEEDLE_CONFIG_DEFAULTS='{
     "max_children": 5,
     "min_children": 2,
     "timeout": 60
+  },
+  "knot": {
+    "rate_limit_interval": 3600
+  },
+  "weave": {
+    "frequency": 3600,
+    "max_beads_per_run": 5,
+    "max_doc_files": 50
   }
 }'
 
@@ -135,6 +143,23 @@ mitosis:
 
   # timeout: Timeout in seconds for mitosis analysis
   timeout: 60
+
+# Knot strand configuration (human alerts when stuck)
+knot:
+  # rate_limit_interval: Minimum seconds between stuck alerts per workspace (default: 1 hour)
+  rate_limit_interval: 3600
+
+# Weave strand configuration (documentation gap detection)
+# This strand is opt-in only (disabled by default in strands.weave)
+weave:
+  # frequency: Minimum seconds between weave runs per workspace (default: 1 hour)
+  frequency: 3600
+
+  # max_beads_per_run: Maximum beads to create per weave analysis (default: 5)
+  max_beads_per_run: 5
+
+  # max_doc_files: Maximum documentation files to analyze per run (default: 50)
+  max_doc_files: 50
 '
 
 # Check if yq is available
@@ -507,6 +532,11 @@ mitosis:
 
   # timeout: Timeout in seconds for mitosis analysis
   timeout: 60
+
+# Knot strand configuration (human alerts when stuck)
+knot:
+  # rate_limit_interval: Minimum seconds between stuck alerts per workspace (default: 1 hour)
+  rate_limit_interval: 3600
 EOF
 
     if [[ $? -eq 0 ]]; then
