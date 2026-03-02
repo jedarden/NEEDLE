@@ -17,7 +17,8 @@ NEEDLE_EXIT_RUNTIME=4
 
 # Default paths
 NEEDLE_HOME="${NEEDLE_HOME:-$HOME/.needle}"
-NEEDLE_CONFIG_FILE="config.yaml"
+NEEDLE_CONFIG_NAME="config.yaml"
+NEEDLE_CONFIG_FILE="${NEEDLE_CONFIG_FILE:-$NEEDLE_HOME/$NEEDLE_CONFIG_NAME}"
 NEEDLE_STATE_DIR="state"
 NEEDLE_CACHE_DIR="cache"
 NEEDLE_LOG_DIR="logs"
@@ -49,5 +50,6 @@ NEEDLE_SUBCOMMANDS=(
     "status"
     "config"
     "version"
+    "upgrade"
     "help"
 )
