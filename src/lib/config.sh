@@ -46,6 +46,14 @@ _NEEDLE_CONFIG_DEFAULTS='{
   "hooks": {
     "timeout": "30s",
     "fail_action": "warn"
+  },
+  "mitosis": {
+    "enabled": true,
+    "skip_types": "bug,hotfix,incident",
+    "skip_labels": "no-mitosis,atomic,single-task",
+    "max_children": 5,
+    "min_children": 2,
+    "timeout": 60
   }
 }'
 
@@ -106,6 +114,27 @@ hooks:
   # post_complete: ~/.needle/hooks/post-complete.sh
   # on_failure: ~/.needle/hooks/on-failure.sh
   # on_quarantine: ~/.needle/hooks/on-quarantine.sh
+
+# Mitosis configuration for automatic bead decomposition
+# Mitosis splits complex beads into smaller, parallelizable subtasks
+mitosis:
+  # enabled: Enable/disable mitosis globally
+  enabled: true
+
+  # skip_types: Bead types that should not be split (comma-separated)
+  skip_types: bug,hotfix,incident
+
+  # skip_labels: Labels that prevent mitosis (comma-separated)
+  skip_labels: no-mitosis,atomic,single-task
+
+  # max_children: Maximum number of children per mitosis
+  max_children: 5
+
+  # min_children: Minimum children required to perform mitosis
+  min_children: 2
+
+  # timeout: Timeout in seconds for mitosis analysis
+  timeout: 60
 '
 
 # Check if yq is available
@@ -457,6 +486,27 @@ hooks:
   # post_complete: ~/.needle/hooks/post-complete.sh
   # on_failure: ~/.needle/hooks/on-failure.sh
   # on_quarantine: ~/.needle/hooks/on-quarantine.sh
+
+# Mitosis configuration for automatic bead decomposition
+# Mitosis splits complex beads into smaller, parallelizable subtasks
+mitosis:
+  # enabled: Enable/disable mitosis globally
+  enabled: true
+
+  # skip_types: Bead types that should not be split (comma-separated)
+  skip_types: bug,hotfix,incident
+
+  # skip_labels: Labels that prevent mitosis (comma-separated)
+  skip_labels: no-mitosis,atomic,single-task
+
+  # max_children: Maximum number of children per mitosis
+  max_children: 5
+
+  # min_children: Minimum children required to perform mitosis
+  min_children: 2
+
+  # timeout: Timeout in seconds for mitosis analysis
+  timeout: 60
 EOF
 
     if [[ $? -eq 0 ]]; then

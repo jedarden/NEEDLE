@@ -379,6 +379,59 @@ _needle_event_mend_completed() {
 }
 
 # ============================================================================
+# Mitosis Events (Bead Decomposition)
+# ============================================================================
+
+# Emit bead.mitosis.check event
+# Usage: _needle_event_bead_mitosis_check <bead_id> [key=value ...]
+_needle_event_bead_mitosis_check() {
+    local bead_id="$1"
+    shift
+    _needle_telemetry_emit "bead.mitosis.check" "bead_id=$bead_id" "$@"
+}
+
+# Emit bead.mitosis.started event
+# Usage: _needle_event_bead_mitosis_started <parent_id> [children_count=...] [key=value ...]
+_needle_event_bead_mitosis_started() {
+    local parent_id="$1"
+    shift
+    _needle_telemetry_emit "bead.mitosis.started" "parent_id=$parent_id" "$@"
+}
+
+# Emit bead.mitosis.child_created event
+# Usage: _needle_event_bead_mitosis_child_created <parent_id> <child_id> [title=...] [key=value ...]
+_needle_event_bead_mitosis_child_created() {
+    local parent_id="$1"
+    local child_id="$2"
+    shift 2
+    _needle_telemetry_emit "bead.mitosis.child_created" "parent_id=$parent_id" "child_id=$child_id" "$@"
+}
+
+# Emit bead.mitosis.complete event
+# Usage: _needle_event_bead_mitosis_complete <parent_id> [children_count=...] [children=...] [key=value ...]
+_needle_event_bead_mitosis_complete() {
+    local parent_id="$1"
+    shift
+    _needle_telemetry_emit "bead.mitosis.complete" "parent_id=$parent_id" "$@"
+}
+
+# Emit bead.mitosis.failed event
+# Usage: _needle_event_bead_mitosis_failed <parent_id> [reason=...] [key=value ...]
+_needle_event_bead_mitosis_failed() {
+    local parent_id="$1"
+    shift
+    _needle_telemetry_emit "bead.mitosis.failed" "parent_id=$parent_id" "$@"
+}
+
+# Emit bead.mitosis.skipped event
+# Usage: _needle_event_bead_mitosis_skipped <bead_id> [reason=...] [key=value ...]
+_needle_event_bead_mitosis_skipped() {
+    local bead_id="$1"
+    shift
+    _needle_telemetry_emit "bead.mitosis.skipped" "bead_id=$bead_id" "$@"
+}
+
+# ============================================================================
 # Error Events
 # ============================================================================
 
@@ -437,6 +490,12 @@ mend.orphan_released
 mend.heartbeat_cleaned
 mend.logs_pruned
 mend.completed
+bead.mitosis.check
+bead.mitosis.started
+bead.mitosis.child_created
+bead.mitosis.complete
+bead.mitosis.failed
+bead.mitosis.skipped
 error.claim_failed
 error.agent_crash
 error.timeout
