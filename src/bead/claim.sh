@@ -1,0 +1,551 @@
+#!/usr/bin/env bash
+# NEEDLE Bead Claiming Module
+# Atomic bead claiming with retry logic for multi-worker environments
+#
+# This module provides:
+# - Atomic claiming via `br update --claim`
+# - Weighted selection respecting priorities (P0=10x, P1=5x, P2=2x, P3=1x)
+# - Retry logic when claim fails due to race conditions
+# - Bead release functionality
+
+# Source dependencies (if not already loaded)
+if [[ -z "${_NEEDLE_OUTPUT_LOADED:-}" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/../lib/output.sh"
+fi
+
+if [[ -z "${_NEEDLE_CONSTANTS_LOADED:-}" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/../lib/constants.sh"
+fi
+
+if [[ -z "${_NEEDLE_JSON_LOADED:-}" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/../lib/json.sh"
+fi
+
+# Source telemetry for events
+if [[ -z "${_NEEDLE_TELEMETRY_EVENTS_LOADED:-}" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/../telemetry/events.sh"
+fi
+
+# ============================================================================
+# Claim-specific Priority Weights
+# ============================================================================
+# These weights are specific to the claim module
+# P0 (critical) = 10x, P1 (high) = 5x, P2 (normal) = 2x, P3+ (low) = 1x
+NEEDLE_CLAIM_PRIORITY_WEIGHTS=(
+    10  # P0 - critical (10x more likely)
+    5   # P1 - high (5x more likely)
+    2   # P2 - normal (2x more likely)
+    1   # P3 - low
+    1   # P4+ - backlog (same as P3)
+)
+
+# Default retry configuration
+NEEDLE_CLAIM_MAX_RETRIES="${NEEDLE_CLAIM_MAX_RETRIES:-5}"
+
+# ============================================================================
+# Weighted Selection Functions
+# ============================================================================
+
+# Get weight for a given priority level
+# Usage: _needle_claim_get_weight <priority>
+# Returns: weight multiplier (1-10)
+_needle_claim_get_weight() {
+    local priority="${1:-2}"  # Default to P2 (normal)
+
+    # Validate priority is a number
+    if ! [[ "$priority" =~ ^[0-9]+$ ]]; then
+        priority=2
+    fi
+
+    # Cap at max defined priority (P4+ all get weight 1)
+    if [[ $priority -ge ${#NEEDLE_CLAIM_PRIORITY_WEIGHTS[@]} ]]; then
+        priority=$(( ${#NEEDLE_CLAIM_PRIORITY_WEIGHTS[@]} - 1 ))
+    fi
+
+    echo "${NEEDLE_CLAIM_PRIORITY_WEIGHTS[$priority]}"
+}
+
+# Select a bead from the ready queue using weighted random selection
+# Usage: _needle_select_bead [--workspace <workspace>] [--json]
+# Returns: bead ID (or full JSON object if --json specified)
+# Exit codes:
+#   0 - Success, bead selected
+#   1 - No beads available or error
+#
+# Weight distribution:
+#   P0 (critical): 10x weight - ~10x more likely to be selected
+#   P1 (high):     5x weight  - ~5x more likely to be selected
+#   P2 (normal):   2x weight  - ~2x more likely to be selected
+#   P3+ (low):     1x weight  - base probability
+#
+# Example:
+#   bead_id=$(_needle_select_bead --workspace /home/coder/NEEDLE)
+#   bead_json=$(_needle_select_bead --workspace /home/coder/NEEDLE --json)
+_needle_select_bead() {
+    local workspace=""
+    local output_json=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --workspace)
+                workspace="$2"
+                shift 2
+                ;;
+            --json)
+                output_json=true
+                shift
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    # Build br ready command with optional workspace filter
+    local br_cmd="br ready --unassigned --json"
+    if [[ -n "$workspace" ]]; then
+        br_cmd="br ready --workspace=\"$workspace\" --unassigned --json"
+    fi
+
+    # Get claimable beads from br CLI
+    local candidates
+    candidates=$(eval "$br_cmd" 2>/dev/null)
+
+    # Handle empty or invalid response
+    if [[ -z "$candidates" ]] || [[ "$candidates" == "[]" ]] || [[ "$candidates" == "null" ]]; then
+        _needle_debug "No claimable beads available"
+        return 1
+    fi
+
+    # Validate JSON structure
+    if ! echo "$candidates" | jq -e '.[0]' &>/dev/null 2>&1; then
+        _needle_warn "Invalid response from br ready: expected JSON array"
+        return 1
+    fi
+
+    # Count candidates
+    local candidate_count
+    candidate_count=$(echo "$candidates" | jq 'length')
+
+    if [[ $candidate_count -eq 0 ]]; then
+        _needle_debug "Empty bead queue"
+        return 1
+    fi
+
+    _needle_debug "Found $candidate_count claimable bead(s)"
+
+    # Build weighted arrays for selection
+    # Using cumulative weight approach for efficiency
+    local beads=()
+    local weights=()
+    local total_weight=0
+
+    while IFS= read -r bead; do
+        local id priority weight
+
+        id=$(echo "$bead" | jq -r '.id // empty')
+        [[ -z "$id" ]] && continue
+
+        priority=$(echo "$bead" | jq -r '.priority // 2')
+        weight=$(_needle_claim_get_weight "$priority")
+
+        beads+=("$id")
+        weights+=("$weight")
+        total_weight=$((total_weight + weight))
+
+        _needle_verbose "Bead $id: priority=$priority, weight=$weight"
+
+    done < <(echo "$candidates" | jq -c '.[]')
+
+    # Check if we have any weighted entries
+    if [[ ${#beads[@]} -eq 0 ]]; then
+        _needle_warn "No valid beads after weighting"
+        return 1
+    fi
+
+    # Weighted random selection using cumulative distribution
+    # RANDOM is 0-32767, we scale to total_weight
+    local rand=$((RANDOM % total_weight))
+    local cumulative=0
+    local selected_idx=0
+
+    for i in "${!beads[@]}"; do
+        cumulative=$((cumulative + weights[$i]))
+        if ((rand < cumulative)); then
+            selected_idx=$i
+            break
+        fi
+    done
+
+    local selected_bead_id="${beads[$selected_idx]}"
+    _needle_debug "Selected bead: $selected_bead_id (from $total_weight weighted entries)"
+
+    # Get full bead JSON if --json was specified
+    if [[ "$output_json" == "true" ]]; then
+        local selected_bead_json
+        selected_bead_json=$(echo "$candidates" | jq -c --arg id "$selected_bead_id" '.[] | select(.id == $id)')
+        if [[ -n "$selected_bead_json" ]]; then
+            echo "$selected_bead_json"
+            return 0
+        else
+            # Fallback to just the ID if JSON extraction fails
+            _needle_warn "Could not extract full JSON for bead $selected_bead_id"
+            echo "$selected_bead_id"
+            return 0
+        fi
+    fi
+
+    echo "$selected_bead_id"
+    return 0
+}
+
+# ============================================================================
+# Atomic Claim Functions
+# ============================================================================
+
+# Atomically claim a bead with retry logic
+# Usage: _needle_claim_bead [--workspace <workspace>] --actor <actor> [--max-retries <n>]
+# Returns: bead ID on success
+# Exit codes:
+#   0 - Success, bead claimed
+#   1 - No beads available or all retries exhausted
+#
+# The retry logic handles race conditions where multiple workers attempt
+# to claim the same bead simultaneously. SQLite's transaction isolation
+# in `br` ensures only one worker succeeds - others get exit code 4.
+#
+# Example:
+#   bead_id=$(_needle_claim_bead --workspace /home/coder/NEEDLE --actor worker-alpha)
+_needle_claim_bead() {
+    local workspace=""
+    local actor=""
+    local max_retries="${NEEDLE_CLAIM_MAX_RETRIES:-5}"
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --workspace)
+                workspace="$2"
+                shift 2
+                ;;
+            --actor)
+                actor="$2"
+                shift 2
+                ;;
+            --max-retries)
+                max_retries="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    # Validate required parameters
+    if [[ -z "$actor" ]]; then
+        _needle_error "claim_bead requires --actor parameter"
+        return 1
+    fi
+
+    # Attempt to claim with retries
+    local attempt=1
+    while [[ $attempt -le $max_retries ]]; do
+        # Select a bead using weighted random selection
+        local bead_id
+        bead_id=$(_needle_select_bead --workspace "$workspace")
+
+        if [[ -z "$bead_id" ]]; then
+            # No beads available - this is normal, not an error
+            _needle_debug "No beads available to claim"
+            return 1
+        fi
+
+        _needle_debug "Attempting to claim bead $bead_id (attempt $attempt/$max_retries)"
+
+        # Attempt atomic claim via br update --claim
+        # br returns exit 0 on success, exit 4 on race condition (already claimed)
+        if br update "$bead_id" --claim --actor "$actor" 2>/dev/null; then
+            # Success! Emit telemetry and return
+            _needle_event_bead_claimed "$bead_id" \
+                "actor=$actor" \
+                "attempt=$attempt" \
+                "workspace=$workspace"
+
+            _needle_success "Claimed bead: $bead_id"
+            echo "$bead_id"
+            return 0
+        fi
+
+        # Claim failed (race condition - another worker got it first)
+        # Emit retry event and try again with a different bead
+        _needle_telemetry_emit "bead.claim_retry" \
+            "bead_id=$bead_id" \
+            "attempt=$attempt" \
+            "max_retries=$max_retries" \
+            "actor=$actor"
+
+        _needle_verbose "Claim race condition for bead $bead_id, retrying..."
+
+        attempt=$((attempt + 1))
+    done
+
+    # All retries exhausted
+    _needle_warn "Failed to claim bead after $max_retries attempts"
+    _needle_telemetry_emit "bead.claim_exhausted" \
+        "max_retries=$max_retries" \
+        "actor=$actor" \
+        "workspace=$workspace"
+
+    return 1
+}
+
+# ============================================================================
+# Bead Release Functions
+# ============================================================================
+
+# Release a claimed bead back to the queue
+# Usage: _needle_release_bead <bead_id> [--reason <reason>] [--actor <actor>]
+# Exit codes:
+#   0 - Success, bead released
+#   1 - Failed to release bead
+#
+# Example:
+#   _needle_release_bead nd-123 --reason "blocked by dependency" --actor worker-alpha
+_needle_release_bead() {
+    local bead_id=""
+    local reason="released"
+    local actor=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --reason)
+                reason="$2"
+                shift 2
+                ;;
+            --actor)
+                actor="$2"
+                shift 2
+                ;;
+            -*)
+                # Skip unknown flags
+                shift
+                ;;
+            *)
+                # First positional argument is bead_id
+                if [[ -z "$bead_id" ]]; then
+                    bead_id="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    # Validate required parameters
+    if [[ -z "$bead_id" ]]; then
+        _needle_error "release_bead requires bead_id parameter"
+        return 1
+    fi
+
+    _needle_debug "Releasing bead $bead_id: $reason"
+
+    # Release via br update --release
+    local br_cmd="br update \"$bead_id\" --release --reason \"$reason\""
+    if [[ -n "$actor" ]]; then
+        br_cmd="br update \"$bead_id\" --release --reason \"$reason\" --actor \"$actor\""
+    fi
+
+    if eval "$br_cmd" 2>/dev/null; then
+        # Emit telemetry
+        _needle_event_bead_released "$bead_id" \
+            "reason=$reason" \
+            "actor=$actor"
+
+        _needle_info "Released bead: $bead_id ($reason)"
+        return 0
+    else
+        _needle_warn "Failed to release bead $bead_id"
+        return 1
+    fi
+}
+
+# ============================================================================
+# Claim Status Functions
+# ============================================================================
+
+# Check if a bead is currently claimed
+# Usage: _needle_bead_is_claimed <bead_id>
+# Returns: 0 if claimed, 1 if not claimed
+_needle_bead_is_claimed() {
+    local bead_id="$1"
+
+    if [[ -z "$bead_id" ]]; then
+        return 1
+    fi
+
+    # Query bead status via br
+    local bead_json
+    bead_json=$(br show "$bead_id" --json 2>/dev/null)
+
+    if [[ -z "$bead_json" ]]; then
+        return 1
+    fi
+
+    # Check if bead has an assignee
+    local assignee
+    assignee=$(echo "$bead_json" | jq -r '.assignee // empty')
+
+    if [[ -n "$assignee" ]]; then
+        return 0  # Claimed
+    else
+        return 1  # Not claimed
+    fi
+}
+
+# Get the current assignee of a bead
+# Usage: _needle_bead_assignee <bead_id>
+# Returns: assignee name or empty string if unassigned
+_needle_bead_assignee() {
+    local bead_id="$1"
+
+    if [[ -z "$bead_id" ]]; then
+        return 1
+    fi
+
+    local bead_json
+    bead_json=$(br show "$bead_id" --json 2>/dev/null)
+
+    if [[ -z "$bead_json" ]]; then
+        return 1
+    fi
+
+    echo "$bead_json" | jq -r '.assignee // empty'
+}
+
+# ============================================================================
+# Statistics Functions
+# ============================================================================
+
+# Get statistics about the claimable bead pool
+# Usage: _needle_claim_stats [--workspace <workspace>]
+# Returns: JSON object with claim statistics
+_needle_claim_stats() {
+    local workspace=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --workspace)
+                workspace="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    # Build br ready command
+    local br_cmd="br ready --unassigned --json"
+    if [[ -n "$workspace" ]]; then
+        br_cmd="br ready --workspace=\"$workspace\" --unassigned --json"
+    fi
+
+    local candidates
+    candidates=$(eval "$br_cmd" 2>/dev/null)
+
+    if [[ -z "$candidates" ]] || [[ "$candidates" == "[]" ]] || [[ "$candidates" == "null" ]]; then
+        echo '{"total_beads":0,"weighted_pool_size":0,"by_priority":{}}'
+        return 0
+    fi
+
+    local total_beads weighted_pool_size
+    total_beads=$(echo "$candidates" | jq 'length')
+    weighted_pool_size=0
+
+    # Count by priority and calculate weighted pool size
+    declare -A priority_counts
+    local priority bead_weight
+
+    while IFS= read -r bead; do
+        priority=$(echo "$bead" | jq -r '.priority // 2')
+        bead_weight=$(_needle_claim_get_weight "$priority")
+        weighted_pool_size=$((weighted_pool_size + bead_weight))
+        priority_counts[$priority]=$((${priority_counts[$priority]:-0} + 1))
+    done < <(echo "$candidates" | jq -c '.[]')
+
+    # Build statistics JSON
+    local by_priority_json="{"
+    local first=true
+    for p in $(echo "${!priority_counts[@]}" | tr ' ' '\n' | sort -n); do
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            by_priority_json+=","
+        fi
+        local w=$(_needle_claim_get_weight "$p")
+        by_priority_json+="\"P$p\":{\"count\":${priority_counts[$p]},\"weight\":$w}"
+    done
+    by_priority_json+="}"
+
+    echo "{\"total_beads\":$total_beads,\"weighted_pool_size\":$weighted_pool_size,\"by_priority\":$by_priority_json}"
+}
+
+# ============================================================================
+# Direct Execution Support (for testing)
+# ============================================================================
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    case "${1:-}" in
+        select)
+            shift
+            _needle_select_bead "$@"
+            ;;
+        claim)
+            shift
+            _needle_claim_bead "$@"
+            ;;
+        release)
+            shift
+            _needle_release_bead "$@"
+            ;;
+        stats)
+            shift
+            _needle_claim_stats "$@" | jq .
+            ;;
+        is-claimed)
+            shift
+            if _needle_bead_is_claimed "$1"; then
+                echo "claimed"
+            else
+                echo "unclaimed"
+            fi
+            ;;
+        assignee)
+            shift
+            _needle_bead_assignee "$1"
+            ;;
+        -h|--help)
+            echo "Usage: $0 <command> [options]"
+            echo ""
+            echo "Commands:"
+            echo "  select [--workspace <ws>] [--json]   Select a bead using weighted selection"
+            echo "  claim --actor <name> [options]       Atomically claim a bead with retry"
+            echo "  release <bead_id> [--reason <r>]     Release a claimed bead"
+            echo "  stats [--workspace <ws>]             Show claim pool statistics"
+            echo "  is-claimed <bead_id>                 Check if bead is claimed"
+            echo "  assignee <bead_id>                   Get bead assignee"
+            echo ""
+            echo "Weight Configuration:"
+            echo "  P0 (critical): 10x weight"
+            echo "  P1 (high):     5x weight"
+            echo "  P2 (normal):   2x weight"
+            echo "  P3+ (low):     1x weight"
+            echo ""
+            echo "Environment Variables:"
+            echo "  NEEDLE_CLAIM_MAX_RETRIES  Max claim attempts (default: 5)"
+            ;;
+        *)
+            echo "Unknown command: $1" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
+    esac
+fi
