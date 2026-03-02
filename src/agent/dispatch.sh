@@ -1,0 +1,552 @@
+#!/usr/bin/env bash
+# NEEDLE Agent Dispatcher Module
+# Renders invoke templates and executes agents
+#
+# This module implements the core execution engine that:
+# 1. Loads agent configuration
+# 2. Renders invoke templates with variables
+# 3. Executes via bash with appropriate input method
+# 4. Captures output and exit code
+# 5. Measures execution duration
+# 6. Handles timeouts and signals
+
+# Source dependencies (if not already loaded)
+if [[ -z "${_NEEDLE_OUTPUT_LOADED:-}" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/../lib/output.sh"
+fi
+
+# Module state
+_NEEDLE_DISPATCH_PID=""
+_NEEDLE_DISPATCH_OUTPUT_FILE=""
+_NEEDLE_DISPATCH_START_TIME=0
+
+# -----------------------------------------------------------------------------
+# Template Rendering
+# -----------------------------------------------------------------------------
+
+# Render invoke template with variable substitution
+# Variables: ${WORKSPACE}, ${PROMPT}, ${BEAD_ID}, ${BEAD_TITLE}
+#
+# Usage: _needle_render_invoke <template> <workspace> <prompt> <bead_id> <bead_title>
+# Returns: Rendered template string
+_needle_render_invoke() {
+    local template="$1"
+    local workspace="$2"
+    local prompt="$3"
+    local bead_id="$4"
+    local bead_title="$5"
+
+    # Start with the template
+    local rendered="$template"
+
+    # Replace variables in order (most specific first)
+    # Note: We use pattern replacement which handles multi-line strings correctly
+
+    # Escape special characters in replacement values for bash safety
+    # For heredoc templates, the PROMPT is inserted literally inside the heredoc
+
+    # Replace ${WORKSPACE}
+    rendered="${rendered//\$\{WORKSPACE\}/$workspace}"
+
+    # Replace ${BEAD_ID}
+    rendered="${rendered//\$\{BEAD_ID\}/$bead_id}"
+
+    # Replace ${BEAD_TITLE}
+    rendered="${rendered//\$\{BEAD_TITLE\}/$bead_title}"
+
+    # Replace ${PROMPT} - this is the tricky one
+    # In heredoc templates, ${PROMPT} appears inside the heredoc block
+    # which is treated as literal text when delimiter is quoted
+    rendered="${rendered//\$\{PROMPT\}/$prompt}"
+
+    echo "$rendered"
+}
+
+# Render template for args input method (prompts need escaping)
+# Usage: _needle_render_invoke_args <template> <workspace> <prompt> <bead_id> <bead_title>
+_needle_render_invoke_args() {
+    local template="$1"
+    local workspace="$2"
+    local prompt="$3"
+    local bead_id="$4"
+    local bead_title="$5"
+
+    # For args method, escape the prompt for double-quote embedding
+    local escaped_prompt
+    escaped_prompt=$(_needle_escape_prompt_for_args "$prompt")
+
+    # Start with template
+    local rendered="$template"
+
+    # Replace variables
+    rendered="${rendered//\$\{WORKSPACE\}/$workspace}"
+    rendered="${rendered//\$\{BEAD_ID\}/$bead_id}"
+    rendered="${rendered//\$\{BEAD_TITLE\}/$bead_title}"
+    rendered="${rendered//\$\{PROMPT\}/$escaped_prompt}"
+
+    echo "$rendered"
+}
+
+# Escape prompt for args-style invocation (double-quoted string)
+# Usage: _needle_escape_prompt_for_args <prompt>
+_needle_escape_prompt_for_args() {
+    local prompt="$1"
+
+    # Escape characters that are special in double-quoted bash strings
+    # Order matters: backslash must be first
+    local escaped="$prompt"
+    escaped="${escaped//\\/\\\\}"      # Backslash -> \\
+    escaped="${escaped//\"/\\\"}"      # Double quote -> \"
+    escaped="${escaped//\$/\\\$}"      # Dollar sign -> \$
+    escaped="${escaped//\`/\\\`}"      # Backtick -> \`
+
+    echo "$escaped"
+}
+
+# -----------------------------------------------------------------------------
+# Input Method Dispatchers
+# -----------------------------------------------------------------------------
+
+# Dispatch using heredoc input method (default for Claude)
+# The template already contains the heredoc structure
+#
+# Usage: _needle_dispatch_heredoc <rendered_template> <output_file>
+# Returns: Exit code of the command
+_needle_dispatch_heredoc() {
+    local rendered="$1"
+    local output_file="$2"
+    local timeout="${3:-0}"
+
+    _needle_debug "Dispatching with heredoc method"
+
+    if [[ "$timeout" -gt 0 ]]; then
+        timeout "$timeout" bash -c "$rendered" > "$output_file" 2>&1
+        local exit_code=$?
+        # timeout returns 124 when timed out
+        if [[ $exit_code -eq 124 ]]; then
+            _needle_warn "Command timed out after ${timeout}s"
+        fi
+        return $exit_code
+    else
+        bash -c "$rendered" > "$output_file" 2>&1
+        return $?
+    fi
+}
+
+# Dispatch using stdin input method
+# Pipe the prompt to the command
+#
+# Usage: _needle_dispatch_stdin <invoke_cmd> <prompt> <output_file> [timeout]
+# Returns: Exit code of the command
+_needle_dispatch_stdin() {
+    local invoke_cmd="$1"
+    local prompt="$2"
+    local output_file="$3"
+    local timeout="${4:-0}"
+
+    _needle_debug "Dispatching with stdin method"
+
+    if [[ "$timeout" -gt 0 ]]; then
+        echo "$prompt" | timeout "$timeout" bash -c "$invoke_cmd" > "$output_file" 2>&1
+        local exit_code=$?
+        if [[ $exit_code -eq 124 ]]; then
+            _needle_warn "Command timed out after ${timeout}s"
+        fi
+        return $exit_code
+    else
+        echo "$prompt" | bash -c "$invoke_cmd" > "$output_file" 2>&1
+        return $?
+    fi
+}
+
+# Dispatch using file input method
+# Write prompt to file, then execute command that reads from file
+#
+# Usage: _needle_dispatch_file <invoke_cmd> <prompt> <file_path> <output_file> [timeout]
+# Returns: Exit code of the command
+_needle_dispatch_file() {
+    local invoke_cmd="$1"
+    local prompt="$2"
+    local file_path="$3"
+    local output_file="$4"
+    local timeout="${5:-0}"
+
+    _needle_debug "Dispatching with file method to: $file_path"
+
+    # Write prompt to the input file
+    if ! echo "$prompt" > "$file_path" 2>/dev/null; then
+        _needle_error "Failed to write prompt file: $file_path"
+        return 1
+    fi
+
+    # Replace ${PROMPT_FILE} placeholder in command if present
+    local resolved_cmd="${invoke_cmd//\$\{PROMPT_FILE\}/$file_path}"
+
+    local exit_code
+    if [[ "$timeout" -gt 0 ]]; then
+        timeout "$timeout" bash -c "$resolved_cmd" > "$output_file" 2>&1
+        exit_code=$?
+        if [[ $exit_code -eq 124 ]]; then
+            _needle_warn "Command timed out after ${timeout}s"
+        fi
+    else
+        bash -c "$resolved_cmd" > "$output_file" 2>&1
+        exit_code=$?
+    fi
+
+    # Clean up the prompt file
+    rm -f "$file_path" 2>/dev/null
+
+    return $exit_code
+}
+
+# Dispatch using args input method
+# Pass prompt as command-line argument
+#
+# Usage: _needle_dispatch_args <rendered_template> <output_file> [timeout]
+# Returns: Exit code of the command
+_needle_dispatch_args() {
+    local rendered="$1"
+    local output_file="$2"
+    local timeout="${3:-0}"
+
+    _needle_debug "Dispatching with args method"
+
+    if [[ "$timeout" -gt 0 ]]; then
+        timeout "$timeout" bash -c "$rendered" > "$output_file" 2>&1
+        local exit_code=$?
+        if [[ $exit_code -eq 124 ]]; then
+            _needle_warn "Command timed out after ${timeout}s"
+        fi
+        return $exit_code
+    else
+        bash -c "$rendered" > "$output_file" 2>&1
+        return $?
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Main Dispatcher
+# -----------------------------------------------------------------------------
+
+# Dispatch agent to work on a bead
+# This is the main entry point for agent execution
+#
+# Usage: _needle_dispatch_agent <agent_name> <workspace> <prompt> <bead_id> <bead_title> [timeout]
+# Returns: Pipe-delimited string: exit_code|duration_ms|output_file
+#
+# Example:
+#   result=$(_needle_dispatch_agent "claude-anthropic-sonnet" "/home/user/project" "Fix the bug" "nd-100" "Fix bug")
+#   exit_code=$(echo "$result" | cut -d'|' -f1)
+#   duration=$(echo "$result" | cut -d'|' -f2)
+#   output_file=$(echo "$result" | cut -d'|' -f3)
+_needle_dispatch_agent() {
+    local agent_name="$1"
+    local workspace="$2"
+    local prompt="$3"
+    local bead_id="$4"
+    local bead_title="$5"
+    local timeout="${6:-0}"
+
+    # Validate required parameters
+    if [[ -z "$agent_name" ]]; then
+        _needle_error "Agent name is required"
+        return 1
+    fi
+
+    if [[ -z "$workspace" ]]; then
+        _needle_error "Workspace is required"
+        return 1
+    fi
+
+    if [[ -z "$prompt" ]]; then
+        _needle_error "Prompt is required"
+        return 1
+    fi
+
+    # Load agent configuration (uses NEEDLE_AGENT associative array)
+    if ! _needle_load_agent "$agent_name"; then
+        _needle_error "Failed to load agent: $agent_name"
+        return 1
+    fi
+
+    _needle_debug "Dispatching agent: ${NEEDLE_AGENT[name]} (${NEEDLE_AGENT[input_method]} method)"
+    _needle_verbose "Bead: $bead_id - $bead_title"
+    _needle_verbose "Workspace: $workspace"
+
+    # Create output capture file
+    local output_file
+    output_file=$(mktemp "${TMPDIR:-/tmp}/needle-dispatch-${bead_id}-XXXXXXXX.log")
+    _NEEDLE_DISPATCH_OUTPUT_FILE="$output_file"
+
+    # Record start time (milliseconds)
+    local start_time
+    start_time=$(_needle_get_time_ms)
+    _NEEDLE_DISPATCH_START_TIME="$start_time"
+
+    # Render template and execute based on input method
+    local exit_code
+    local input_method="${NEEDLE_AGENT[input_method]:-heredoc}"
+
+    case "$input_method" in
+        heredoc)
+            # Render template (prompt is embedded in heredoc literally)
+            local rendered
+            rendered=$(_needle_render_invoke \
+                "${NEEDLE_AGENT[invoke]}" \
+                "$workspace" \
+                "$prompt" \
+                "$bead_id" \
+                "$bead_title"
+            )
+
+            _needle_dispatch_heredoc "$rendered" "$output_file" "$timeout"
+            exit_code=$?
+            ;;
+
+        stdin)
+            # For stdin, invoke template is just the command
+            # We pipe the prompt to it
+            _needle_dispatch_stdin \
+                "${NEEDLE_AGENT[invoke]}" \
+                "$prompt" \
+                "$output_file" \
+                "$timeout"
+            exit_code=$?
+            ;;
+
+        file)
+            # For file method, determine the file path
+            local file_path="${NEEDLE_AGENT[input_file_path]:-${TMPDIR:-/tmp}/needle-prompt-${bead_id}.txt}"
+
+            _needle_dispatch_file \
+                "${NEEDLE_AGENT[invoke]}" \
+                "$prompt" \
+                "$file_path" \
+                "$output_file" \
+                "$timeout"
+            exit_code=$?
+            ;;
+
+        args)
+            # For args method, render with proper escaping
+            local rendered
+            rendered=$(_needle_render_invoke_args \
+                "${NEEDLE_AGENT[invoke]}" \
+                "$workspace" \
+                "$prompt" \
+                "$bead_id" \
+                "$bead_title"
+            )
+
+            _needle_dispatch_args "$rendered" "$output_file" "$timeout"
+            exit_code=$?
+            ;;
+
+        *)
+            _needle_error "Unknown input method: $input_method"
+            rm -f "$output_file"
+            return 1
+            ;;
+    esac
+
+    # Record end time and calculate duration
+    local end_time
+    end_time=$(_needle_get_time_ms)
+    local duration=$((end_time - start_time))
+
+    _needle_debug "Agent completed: exit_code=$exit_code, duration=${duration}ms"
+
+    # Return results as pipe-delimited string
+    echo "${exit_code}|${duration}|${output_file}"
+}
+
+# -----------------------------------------------------------------------------
+# Utility Functions
+# -----------------------------------------------------------------------------
+
+# Get current time in milliseconds
+# Usage: _needle_get_time_ms
+_needle_get_time_ms() {
+    if [[ -f /proc/uptime ]]; then
+        # Linux: use /proc/uptime for sub-second precision
+        local uptime
+        read -r uptime _ < /proc/uptime
+        # Convert to integer milliseconds
+        echo "${uptime/./}"
+    else
+        # Fallback: use date (may not have milliseconds on all systems)
+        date +%s%3N 2>/dev/null || echo "$(date +%s)000"
+    fi
+}
+
+# Clean up dispatch resources (call on exit or interrupt)
+# Usage: _needle_dispatch_cleanup
+_needle_dispatch_cleanup() {
+    # Kill any running process
+    if [[ -n "$_NEEDLE_DISPATCH_PID" ]] && kill -0 "$_NEEDLE_DISPATCH_PID" 2>/dev/null; then
+        _needle_debug "Killing dispatch process: $_NEEDLE_DISPATCH_PID"
+        kill -TERM "$_NEEDLE_DISPATCH_PID" 2>/dev/null
+        wait "$_NEEDLE_DISPATCH_PID" 2>/dev/null
+    fi
+
+    # Clean up output file if it exists
+    if [[ -n "$_NEEDLE_DISPATCH_OUTPUT_FILE" ]] && [[ -f "$_NEEDLE_DISPATCH_OUTPUT_FILE" ]]; then
+        rm -f "$_NEEDLE_DISPATCH_OUTPUT_FILE" 2>/dev/null
+    fi
+}
+
+# Parse dispatch result string
+# Usage: _needle_parse_dispatch_result <result_string> <var_prefix>
+# Sets: <var_prefix>_exit_code, <var_prefix>_duration, <var_prefix>_output_file
+_needle_parse_dispatch_result() {
+    local result="$1"
+    local prefix="$2"
+
+    if [[ -z "$result" ]]; then
+        return 1
+    fi
+
+    IFS='|' read -r ${prefix}_exit_code ${prefix}_duration ${prefix}_output_file <<< "$result"
+}
+
+# Check if exit code indicates success
+# Uses agent's success_codes configuration
+# Usage: _needle_is_success_exit_code <exit_code>
+_needle_is_success_exit_code() {
+    local exit_code="$1"
+    local success_codes="${NEEDLE_AGENT[success_codes]:-0}"
+
+    # Check if exit code is in success codes
+    for code in $success_codes; do
+        if [[ "$code" == "$exit_code" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Check if exit code indicates retryable error
+# Uses agent's retry_codes configuration
+# Usage: _needle_is_retry_exit_code <exit_code>
+_needle_is_retry_exit_code() {
+    local exit_code="$1"
+    local retry_codes="${NEEDLE_AGENT[retry_codes]:-1}"
+
+    for code in $retry_codes; do
+        if [[ "$code" == "$exit_code" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Check if exit code indicates hard failure
+# Uses agent's fail_codes configuration
+# Usage: _needle_is_fail_exit_code <exit_code>
+_needle_is_fail_exit_code() {
+    local exit_code="$1"
+    local fail_codes="${NEEDLE_AGENT[fail_codes]:-2 137}"
+
+    for code in $fail_codes; do
+        if [[ "$code" == "$exit_code" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Classify exit code as success/retry/fail
+# Usage: _needle_classify_exit_code <exit_code>
+# Returns: "success", "retry", or "fail"
+_needle_classify_exit_code() {
+    local exit_code="$1"
+
+    if _needle_is_success_exit_code "$exit_code"; then
+        echo "success"
+    elif _needle_is_retry_exit_code "$exit_code"; then
+        echo "retry"
+    else
+        echo "fail"
+    fi
+}
+
+# -----------------------------------------------------------------------------
+# Signal Handling
+# -----------------------------------------------------------------------------
+
+# Set up signal handlers for clean termination
+# Usage: _needle_setup_signal_handlers
+_needle_setup_signal_handlers() {
+    trap '_needle_handle_signal SIGTERM' TERM
+    trap '_needle_handle_signal SIGINT' INT
+    trap '_needle_handle_signal SIGHUP' HUP
+}
+
+# Handle termination signals
+# Usage: _needle_handle_signal <signal_name>
+_needle_handle_signal() {
+    local signal="$1"
+    _needle_warn "Received $signal, cleaning up..."
+
+    _needle_dispatch_cleanup
+
+    exit 130  # 128 + signal number (2 for SIGINT)
+}
+
+# -----------------------------------------------------------------------------
+# Direct Execution Support (for testing)
+# -----------------------------------------------------------------------------
+
+# Allow running this module directly for testing
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    # Source dependencies for direct execution
+    source "$(dirname "${BASH_SOURCE[0]}")/../lib/output.sh"
+    source "$(dirname "${BASH_SOURCE[0]}")/loader.sh"
+    source "$(dirname "${BASH_SOURCE[0]}")/escape.sh"
+
+    case "${1:-}" in
+        render)
+            if [[ $# -lt 5 ]]; then
+                echo "Usage: $0 render <template> <workspace> <prompt> <bead_id> <bead_title>"
+                exit 1
+            fi
+            _needle_render_invoke "$2" "$3" "$4" "$5" "$6"
+            ;;
+        dispatch)
+            if [[ $# -lt 5 ]]; then
+                echo "Usage: $0 dispatch <agent_name> <workspace> <prompt> <bead_id> <bead_title> [timeout]"
+                exit 1
+            fi
+            _needle_dispatch_agent "$2" "$3" "$4" "$5" "$6" "${7:-0}"
+            ;;
+        escape)
+            if [[ -z "${2:-}" ]]; then
+                echo "Usage: $0 escape <prompt>"
+                exit 1
+            fi
+            _needle_escape_prompt_for_args "$2"
+            ;;
+        -h|--help)
+            echo "Usage: $0 <command> [args]"
+            echo ""
+            echo "Commands:"
+            echo "  render <template> <workspace> <prompt> <bead_id> <bead_title>"
+            echo "      Render invoke template with variables"
+            echo ""
+            echo "  dispatch <agent_name> <workspace> <prompt> <bead_id> <bead_title> [timeout]"
+            echo "      Dispatch agent and return exit_code|duration_ms|output_file"
+            echo ""
+            echo "  escape <prompt>"
+            echo "      Escape prompt for args-style invocation"
+            ;;
+        *)
+            echo "Unknown command: ${1:-}"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
+fi
