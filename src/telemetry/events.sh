@@ -458,6 +458,18 @@ _needle_event_error_timeout() {
 }
 
 # ============================================================================
+# Effort Events (Cost Tracking)
+# ============================================================================
+
+# Emit effort.recorded event
+# Usage: _needle_event_effort_recorded <bead_id> [cost=...] [agent=...] [key=value ...]
+_needle_event_effort_recorded() {
+    local bead_id="$1"
+    shift
+    _needle_telemetry_emit "effort.recorded" "bead_id=$bead_id" "$@"
+}
+
+# ============================================================================
 # Event Category Listing
 # ============================================================================
 
@@ -499,6 +511,7 @@ bead.mitosis.skipped
 error.claim_failed
 error.agent_crash
 error.timeout
+effort.recorded
 EOF
 }
 

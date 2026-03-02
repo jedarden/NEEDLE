@@ -46,3 +46,13 @@ output:
 limits:
   requests_per_minute: 60
   max_concurrent: 5
+
+# Cost configuration
+# type: pay_per_token | unlimited | use_or_lose
+# input_per_1k: cost per 1K input tokens (for pay_per_token)
+# output_per_1k: cost per 1K output tokens (for pay_per_token)
+cost:
+  type: pay_per_token
+  # Claude Sonnet 4.5 pricing (as of 2025)
+  input_per_1k: 0.003      # $3/1M input tokens
+  output_per_1k: 0.015     # $15/1M output tokens

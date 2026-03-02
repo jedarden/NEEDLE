@@ -38,3 +38,7 @@ output:
 limits:
   requests_per_minute: 120
   max_concurrent: 10
+
+# Cost configuration (local inference = free/unlimited)
+cost:
+  type: unlimited
