@@ -62,6 +62,12 @@ _NEEDLE_CONFIG_DEFAULTS='{
     "frequency": 3600,
     "max_beads_per_run": 5,
     "max_doc_files": 50
+  },
+  "watchdog": {
+    "interval": 30,
+    "heartbeat_timeout": 120,
+    "bead_timeout": 600,
+    "recovery_action": "restart"
   }
 }'
 
@@ -160,6 +166,23 @@ weave:
 
   # max_doc_files: Maximum documentation files to analyze per run (default: 50)
   max_doc_files: 50
+
+# Watchdog configuration for automatic worker recovery
+# The watchdog monitors heartbeats and recovers stuck workers
+watchdog:
+  # interval: Seconds between heartbeat checks (default: 30)
+  interval: 30
+
+  # heartbeat_timeout: Seconds without heartbeat before recovery (default: 120)
+  heartbeat_timeout: 120
+
+  # bead_timeout: Maximum seconds a bead can run before recovery (default: 600 = 10 minutes)
+  bead_timeout: 600
+
+  # recovery_action: What to do when a worker is stuck (restart | stop)
+  # restart: Attempt to respawn the worker after recovery
+  # stop: Just kill the worker without respawning
+  recovery_action: restart
 '
 
 # Check if yq is available

@@ -379,6 +379,30 @@ _needle_event_mend_completed() {
 }
 
 # ============================================================================
+# Weave Events (Documentation Gap Detection)
+# ============================================================================
+
+# Emit weave.bead_created event
+# Usage: _needle_event_weave_bead_created <bead_id> [source=...] [key=value ...]
+_needle_event_weave_bead_created() {
+    local bead_id="$1"
+    shift
+    _needle_telemetry_emit "weave.bead_created" "bead_id=$bead_id" "$@"
+}
+
+# Emit weave.analysis_started event
+# Usage: _needle_event_weave_analysis_started [workspace=...] [doc_count=...] [key=value ...]
+_needle_event_weave_analysis_started() {
+    _needle_telemetry_emit "weave.analysis_started" "$@"
+}
+
+# Emit weave.analysis_completed event
+# Usage: _needle_event_weave_analysis_completed [gaps_found=...] [beads_created=...] [key=value ...]
+_needle_event_weave_analysis_completed() {
+    _needle_telemetry_emit "weave.analysis_completed" "$@"
+}
+
+# ============================================================================
 # Mitosis Events (Bead Decomposition)
 # ============================================================================
 
@@ -502,6 +526,9 @@ mend.orphan_released
 mend.heartbeat_cleaned
 mend.logs_pruned
 mend.completed
+weave.bead_created
+weave.analysis_started
+weave.analysis_completed
 bead.mitosis.check
 bead.mitosis.started
 bead.mitosis.child_created
