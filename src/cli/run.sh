@@ -5,6 +5,13 @@
 # This module implements CLI parsing and validation for the 'needle run' command.
 # It parses command-line arguments, validates them, applies config defaults,
 # and exports validated options for the worker execution phase.
+#
+# Multi-worker spawning (nd-2pw):
+# - Handles --count=N option to spawn multiple workers
+# - Uses NATO alphabet identifiers via naming.sh module
+# - Creates tmux sessions via tmux.sh module
+# - Reports all session names at end
+# - Respects concurrency limits from limits.sh module
 
 # -----------------------------------------------------------------------------
 # Run Command Help
@@ -531,11 +538,7 @@ _needle_run() {
         fi
     fi
 
-    # TODO: Implement actual workflow execution (Phase 2: nd-qzu-2)
-    _needle_warn "Workflow execution not yet implemented"
-    _needle_info "This is a stub for the 'run' subcommand - CLI parsing is complete"
-
-    # Show what would be done in dry-run mode
+    # Handle dry-run mode
     if [[ "$dry_run" == "true" ]]; then
         _needle_print ""
         _needle_section "Dry Run Summary"
@@ -559,7 +562,306 @@ _needle_run() {
         _needle_print ""
         _needle_section "Validated Options (JSON)"
         _needle_export_validated_json
+        exit $NEEDLE_EXIT_SUCCESS
+    fi
+
+    # Spawn workers
+    local spawned_sessions=()
+    local failed_count=0
+
+    if [[ "$count" -eq 1 ]]; then
+        # Single worker - use existing session creation
+        local session
+        session=$(_needle_spawn_single_worker "$workspace" "$agent" "$provider" "$budget" "$no_hooks")
+        if [[ $? -eq 0 ]] && [[ -n "$session" ]]; then
+            spawned_sessions+=("$session")
+        else
+            ((failed_count++))
+        fi
+    else
+        # Multiple workers - spawn in parallel
+        _needle_info "Spawning $count workers..."
+        spawned_sessions=$(_needle_spawn_multiple_workers "$workspace" "$agent" "$provider" "$count" "$budget" "$no_hooks")
+        failed_count=$((count - ${#spawned_sessions[@]}))
+    fi
+
+    # Report results
+    _needle_print ""
+    if [[ ${#spawned_sessions[@]} -gt 0 ]]; then
+        _needle_success "Started ${#spawned_sessions[@]} worker(s)"
+        _needle_print ""
+        _needle_section "Worker Sessions"
+
+        for session in "${spawned_sessions[@]}"; do
+            _needle_table_row "Session" "$session"
+            _needle_info "  Attach with: needle attach $session"
+        done
+
+        # Emit multi-worker start event
+        if [[ ${#spawned_sessions[@]} -gt 1 ]]; then
+            _needle_emit_event "workers.multi_spawned" \
+                "Started multiple workers in parallel" \
+                "count=${#spawned_sessions[@]}" \
+                "agent=$agent" \
+                "workspace=$workspace"
+        fi
+    else
+        _needle_error "Failed to start any workers"
+        exit $NEEDLE_EXIT_RUNTIME
+    fi
+
+    if [[ $failed_count -gt 0 ]]; then
+        _needle_warn "$failed_count worker(s) failed to start"
     fi
 
     exit $NEEDLE_EXIT_SUCCESS
+}
+
+# -----------------------------------------------------------------------------
+# Worker Spawning Functions
+# -----------------------------------------------------------------------------
+
+# Spawn a single worker in a tmux session
+# Arguments:
+#   $1 - Workspace path
+#   $2 - Agent name
+#   $3 - Provider name
+#   $4 - Budget (optional)
+#   $5 - No hooks flag (true/false)
+# Returns: Session name on success, empty on failure
+# Usage: session=$(_needle_spawn_single_worker "/workspace" "claude-anthropic-sonnet" "anthropic" "10.00" "false")
+_needle_spawn_single_worker() {
+    local workspace="$1"
+    local agent="$2"
+    local provider="$3"
+    local budget="$4"
+    local no_hooks="$5"
+
+    # Parse agent name to get runner, provider, model components
+    local runner model
+    IFS='-' read -r runner _ model <<< "$agent"
+
+    # Get next available identifier
+    local identifier
+    identifier=$(get_next_identifier "$agent")
+
+    # Generate session name
+    local session
+    session=$(_needle_generate_session_name "" "$runner" "$provider" "$model" "$identifier")
+
+    # Build command to run worker
+    local cmd_args=(
+        "needle" "_run_worker"
+        "--workspace" "$workspace"
+        "--agent" "$agent"
+        "--identifier" "$identifier"
+    )
+
+    [[ -n "$budget" ]] && cmd_args+=("--budget" "$budget")
+    [[ "$no_hooks" == "true" ]] && cmd_args+=("--no-hooks")
+
+    # Create tmux session
+    if _needle_create_session "$session" "${cmd_args[*]}"; then
+        echo "$session"
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Spawn multiple workers in parallel
+# Arguments:
+#   $1 - Workspace path
+#   $2 - Agent name
+#   $3 - Provider name
+#   $4 - Number of workers to spawn
+#   $5 - Budget (optional)
+#   $6 - No hooks flag (true/false)
+# Returns: Array of session names (newline-separated)
+# Usage: sessions=$(_needle_spawn_multiple_workers "/workspace" "claude-anthropic-sonnet" "anthropic" 5 "10.00" "false")
+_needle_spawn_multiple_workers() {
+    local workspace="$1"
+    local agent="$2"
+    local provider="$3"
+    local count="$4"
+    local budget="$5"
+    local no_hooks="$6"
+
+    # Parse agent name to get runner, provider, model components
+    local runner model
+    IFS='-' read -r runner _ model <<< "$agent"
+
+    # Get list of existing identifiers for this agent
+    local existing_identifiers
+    existing_identifiers=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | \
+        grep "^needle-$agent-" | sed 's/.*-//' | tr '\n' ' ' || echo "")
+
+    # Allocate unique identifiers for all workers
+    local identifiers=()
+    local used="$existing_identifiers"
+
+    for ((i = 0; i < count; i++)); do
+        local next_id
+        next_id=$(get_next_identifier_from_list "$used")
+        identifiers+=("$next_id")
+        used="$used $next_id"
+    done
+
+    # Spawn workers in parallel (non-blocking)
+    local spawned_sessions=()
+    local pids=()
+
+    for identifier in "${identifiers[@]}"; do
+        # Generate session name
+        local session
+        session=$(_needle_generate_session_name "" "$runner" "$provider" "$model" "$identifier")
+
+        # Build command to run worker
+        local cmd_args=(
+            "needle" "_run_worker"
+            "--workspace" "$workspace"
+            "--agent" "$agent"
+            "--identifier" "$identifier"
+        )
+
+        [[ -n "$budget" ]] && cmd_args+=("--budget" "$budget")
+        [[ "$no_hooks" == "true" ]] && cmd_args+=("--no-hooks")
+
+        # Create tmux session (non-blocking)
+        if _needle_create_session "$session" "${cmd_args[*]}"; then
+            spawned_sessions+=("$session")
+            _needle_debug "Spawned worker: $session"
+        else
+            _needle_warn "Failed to spawn worker: $session"
+        fi
+    done
+
+    # Return all spawned session names
+    printf '%s\n' "${spawned_sessions[@]}"
+}
+
+# -----------------------------------------------------------------------------
+# Module Integration Wrappers
+# -----------------------------------------------------------------------------
+
+# These wrapper functions ensure compatibility with naming.sh and tmux.sh modules.
+# If the modules are loaded, use their functions; otherwise provide fallbacks.
+
+# Get next available identifier for an agent
+# Falls back to NATO alphabet from constants.sh if naming.sh not loaded
+# Arguments:
+#   $1 - Agent name (runner-provider-model)
+# Returns: Next available NATO identifier
+get_next_identifier() {
+    if declare -f _needle_naming_get_next_identifier &>/dev/null; then
+        _needle_naming_get_next_identifier "$1"
+    else
+        # Fallback: use naming.sh get_next_identifier if available
+        if declare -f get_next_identifier &>/dev/null; then
+            # Use the naming.sh function directly
+            return 0
+        fi
+
+        # Inline implementation using NATO alphabet
+        local agent="$1"
+        local prefix="needle-$agent-"
+        local existing
+        existing=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^$prefix" | sed 's/.*-//' || true)
+
+        for name in "${NEEDLE_NATO_ALPHABET[@]}"; do
+            if ! echo "$existing" | grep -qx "$name"; then
+                echo "$name"
+                return 0
+            fi
+        done
+
+        # All 26 NATO names used - add numeric suffix
+        local count
+        count=$(echo "$existing" | grep -c . 2>/dev/null || echo "0")
+        echo "alpha-$((count + 1))"
+    fi
+}
+
+# Get next available identifier from a list of already-used identifiers
+# Arguments:
+#   $1 - Space-separated list of used identifiers
+# Returns: Next unused NATO identifier
+get_next_identifier_from_list() {
+    local used="$1"
+
+    for name in "${NEEDLE_NATO_ALPHABET[@]}"; do
+        if ! echo "$used" | grep -qw "$name"; then
+            echo "$name"
+            return 0
+        fi
+    done
+
+    # All 26 NATO names used - add numeric suffix
+    local count
+    count=$(echo "$used" | wc -w | tr -d ' ')
+    echo "alpha-$((count + 1))"
+}
+
+# Generate a session name from components
+# Falls back to inline implementation if tmux.sh not loaded
+# Arguments:
+#   $1 - Pattern (optional, uses default)
+#   $2 - Runner name
+#   $3 - Provider name
+#   $4 - Model name
+#   $5 - Identifier
+# Returns: Formatted session name
+_needle_generate_session_name() {
+    local pattern="${1:-}"
+    local runner="${2:-unknown}"
+    local provider="${3:-unknown}"
+    local model="${4:-unknown}"
+    local identifier="${5:-alpha}"
+
+    if [[ -z "$pattern" ]]; then
+        pattern='needle-{runner}-{provider}-{model}-{identifier}'
+    fi
+
+    local name="$pattern"
+    name="${name//\{runner\}/$runner}"
+    name="${name//\{provider\}/$provider}"
+    name="${name//\{model\}/$model}"
+    name="${name//\{identifier\}/$identifier}"
+
+    # Sanitize for tmux
+    name=$(echo "$name" | tr -cd '[:alnum:]._-')
+
+    echo "$name"
+}
+
+# Create a tmux session
+# Falls back to inline implementation if tmux.sh not loaded
+# Arguments:
+#   $1 - Session name
+#   $2... - Command to run
+# Returns: 0 on success, 1 on failure
+_needle_create_session() {
+    local session="$1"
+    shift
+    local cmd="$*"
+
+    if [[ -z "$session" ]] || [[ -z "$cmd" ]]; then
+        return 1
+    fi
+
+    # Check if tmux is available
+    if ! command -v tmux &>/dev/null; then
+        _needle_warn "tmux not available, cannot create session"
+        return 1
+    fi
+
+    # Check if session already exists
+    if tmux has-session -t "$session" 2>/dev/null; then
+        _needle_warn "Session already exists: $session"
+        return 1
+    fi
+
+    # Create detached session
+    tmux new-session -d -s "$session" "$cmd"
+    return $?
 }

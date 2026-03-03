@@ -64,6 +64,11 @@ _NEEDLE_CONFIG_DEFAULTS='{
     "max_beads_per_run": 5,
     "max_doc_files": 50
   },
+  "unravel": {
+    "min_wait_hours": 24,
+    "max_alternatives": 3,
+    "timeout": 120
+  },
   "watchdog": {
     "interval": 30,
     "heartbeat_timeout": 120,
@@ -170,6 +175,18 @@ weave:
 
   # max_doc_files: Maximum documentation files to analyze per run (default: 50)
   max_doc_files: 50
+
+# Unravel strand configuration (alternative approaches for blocked HUMAN beads)
+# This strand is opt-in only (disabled by default in strands.unravel)
+unravel:
+  # min_wait_hours: Hours a HUMAN bead must wait before alternatives are proposed (default: 24)
+  min_wait_hours: 24
+
+  # max_alternatives: Maximum alternative beads to create per HUMAN bead (default: 3)
+  max_alternatives: 3
+
+  # timeout: Timeout in seconds for unravel analysis (default: 120)
+  timeout: 120
 
 # Watchdog configuration for automatic worker recovery
 # The watchdog monitors heartbeats and recovers stuck workers
@@ -567,6 +584,18 @@ mitosis:
 knot:
   # rate_limit_interval: Minimum seconds between stuck alerts per workspace (default: 1 hour)
   rate_limit_interval: 3600
+
+# Unravel strand configuration (alternative approaches for blocked HUMAN beads)
+# This strand is opt-in only (disabled by default in strands.unravel)
+unravel:
+  # min_wait_hours: Hours a HUMAN bead must wait before alternatives are proposed (default: 24)
+  min_wait_hours: 24
+
+  # max_alternatives: Maximum alternative beads to create per HUMAN bead (default: 3)
+  max_alternatives: 3
+
+  # timeout: Timeout in seconds for unravel analysis (default: 120)
+  timeout: 120
 EOF
 
     if [[ $? -eq 0 ]]; then

@@ -33,12 +33,17 @@ _needle_strand_mend() {
         work_done=true
     fi
 
-    # 2. Prune old heartbeat files from dead workers
+    # 2. Release stale claims (claims held longer than threshold)
+    if _needle_mend_stale_claims "$workspace"; then
+        work_done=true
+    fi
+
+    # 3. Prune old heartbeat files from dead workers
     if _needle_mend_old_heartbeats; then
         work_done=true
     fi
 
-    # 3. Log rotation/cleanup (if configured)
+    # 4. Log rotation/cleanup (if configured)
     if _needle_mend_logs; then
         work_done=true
     fi
@@ -167,6 +172,180 @@ _needle_mend_orphaned_claims() {
         return 0
     fi
 
+    return 1
+}
+
+# ============================================================================
+# Stale Claims Detection
+# ============================================================================
+
+# Detect and release stale claims (beads held longer than threshold)
+# A stale claim is a bead that has been in_progress for too long,
+# regardless of whether the worker is still alive.
+#
+# This is different from orphaned claims:
+# - Orphaned: Worker is dead (no heartbeat)
+# - Stale: Claim has been held too long (time-based)
+#
+# Usage: _needle_mend_stale_claims <workspace>
+# Returns: 0 if any claims were released, 1 if none
+_needle_mend_stale_claims() {
+    local workspace="$1"
+    local released=0
+
+    # Get stale claim threshold (default: 1 hour = 3600 seconds)
+    local stale_threshold
+    stale_threshold=$(get_config "mend.stale_claim_threshold" "3600")
+
+    _needle_debug "mend: checking for stale claims (threshold: ${stale_threshold}s)"
+
+    # Get all in-progress beads from the workspace
+    local in_progress
+    in_progress=$(br list --workspace="$workspace" --status in_progress --json 2>/dev/null)
+
+    # Handle empty or null results
+    if [[ -z "$in_progress" ]] || [[ "$in_progress" == "[]" ]] || [[ "$in_progress" == "null" ]]; then
+        _needle_debug "mend: no in-progress beads to check for staleness"
+        return 1
+    fi
+
+    # Check if br command succeeded and returned valid JSON
+    if ! echo "$in_progress" | jq -e '.[]' &>/dev/null; then
+        _needle_debug "mend: no valid in-progress beads data for stale check"
+        return 1
+    fi
+
+    local now
+    now=$(date +%s)
+
+    # Iterate through in-progress beads
+    while IFS= read -r bead; do
+        local bead_id assignee claim_timestamp updated_at claim_epoch age
+
+        # Extract bead ID and timestamps
+        bead_id=$(echo "$bead" | jq -r '.id // empty')
+        assignee=$(echo "$bead" | jq -r '.assignee // .claimed_by // empty')
+        claim_timestamp=$(echo "$bead" | jq -r '.claim_timestamp // empty')
+        updated_at=$(echo "$bead" | jq -r '.updated_at // empty')
+
+        # Skip beads without an ID
+        if [[ -z "$bead_id" ]]; then
+            continue
+        fi
+
+        # Determine the claim time - prefer claim_timestamp, fall back to updated_at
+        local claim_time=""
+        if [[ -n "$claim_timestamp" ]] && [[ "$claim_timestamp" != "null" ]]; then
+            claim_time="$claim_timestamp"
+        elif [[ -n "$updated_at" ]] && [[ "$updated_at" != "null" ]]; then
+            claim_time="$updated_at"
+        else
+            # No timestamp available, skip this bead
+            _needle_debug "mend: skipping $bead_id - no timestamp available"
+            continue
+        fi
+
+        # Convert ISO8601 timestamp to epoch seconds
+        # Handle various ISO8601 formats: 2026-03-03T10:09:09.969909498Z or 2026-03-03T10:09:09Z
+        claim_epoch=$(_needle_parse_iso8601 "$claim_time")
+
+        if [[ -z "$claim_epoch" ]] || [[ "$claim_epoch" == "0" ]]; then
+            _needle_debug "mend: could not parse timestamp for $bead_id: $claim_time"
+            continue
+        fi
+
+        # Calculate age of claim
+        age=$((now - claim_epoch))
+
+        _needle_verbose "mend: $bead_id age=${age}s (threshold=${stale_threshold}s)"
+
+        # Check if claim is stale
+        if ((age > stale_threshold)); then
+            _needle_warn "Found stale claim: $bead_id (age: ${age}s, threshold: ${stale_threshold}s, assignee: ${assignee:-unknown})"
+
+            # Release the stale claim using SQL fallback (works around br CLI CHECK constraint bug)
+            if _needle_release_bead "$bead_id" --reason "stale_claim_auto_release" --actor "mend_strand"; then
+                _needle_info "Released stale claim: $bead_id (held for ${age}s)"
+
+                # Emit event for monitoring
+                _needle_emit_event "mend.stale_released" \
+                    "Released stale bead claim" \
+                    "bead_id=$bead_id" \
+                    "assignee=${assignee:-unknown}" \
+                    "workspace=$workspace" \
+                    "age_seconds=$age" \
+                    "threshold_seconds=$stale_threshold"
+
+                ((released++))
+            else
+                _needle_warn "Failed to release stale claim: $bead_id"
+            fi
+        fi
+    done < <(echo "$in_progress" | jq -c '.[]' 2>/dev/null)
+
+    if ((released > 0)); then
+        _needle_info "Released $released stale claim(s)"
+        return 0
+    fi
+
+    return 1
+}
+
+# Parse ISO8601 timestamp to epoch seconds
+# Handles formats: 2026-03-03T10:09:09Z, 2026-03-03T10:09:09.123456Z, 2026-03-03T10:09:09+00:00
+#
+# Usage: _needle_parse_iso8601 <timestamp>
+# Returns: epoch seconds, or 0 on failure
+_needle_parse_iso8601() {
+    local timestamp="$1"
+
+    if [[ -z "$timestamp" ]] || [[ "$timestamp" == "null" ]]; then
+        echo 0
+        return 1
+    fi
+
+    local epoch=0
+
+    # Try GNU date first (Linux)
+    if epoch=$(date -d "$timestamp" +%s 2>/dev/null) && [[ -n "$epoch" ]] && [[ "$epoch" =~ ^[0-9]+$ ]]; then
+        echo "$epoch"
+        return 0
+    fi
+
+    # Try BSD date (macOS) - strip milliseconds first
+    local stripped_ts="${timestamp%%.*}"
+    if epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${stripped_ts}" +%s 2>/dev/null) && [[ -n "$epoch" ]] && [[ "$epoch" =~ ^[0-9]+$ ]]; then
+        echo "$epoch"
+        return 0
+    fi
+
+    # Fallback: Parse ISO8601 manually (YYYY-MM-DDTHH:MM:SS)
+    if [[ "$timestamp" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2}) ]]; then
+        local year="${BASH_REMATCH[1]}"
+        local month="${BASH_REMATCH[2]}"
+        local day="${BASH_REMATCH[3]}"
+        local hour="${BASH_REMATCH[4]}"
+        local minute="${BASH_REMATCH[5]}"
+        local second="${BASH_REMATCH[6]}"
+
+        # Use Python for reliable conversion if available
+        if command -v python3 &>/dev/null; then
+            epoch=$(python3 -c "
+import datetime
+try:
+    dt = datetime.datetime(${year}, ${month}, ${day}, ${hour}, ${minute}, ${second})
+    print(int(dt.timestamp()))
+except:
+    print(0)
+" 2>/dev/null)
+            if [[ -n "$epoch" ]] && [[ "$epoch" =~ ^[0-9]+$ ]] && [[ "$epoch" != "0" ]]; then
+                echo "$epoch"
+                return 0
+            fi
+        fi
+    fi
+
+    echo 0
     return 1
 }
 

@@ -424,6 +424,39 @@ _needle_event_mend_completed() {
 }
 
 # ============================================================================
+# Unravel Events (Alternative Approaches for Blocked Beads)
+# ============================================================================
+
+# Emit unravel.alternatives_created event
+# Usage: _needle_event_unravel_alternatives_created <parent_id> [alternatives_count=...] [key=value ...]
+_needle_event_unravel_alternatives_created() {
+    local parent_id="$1"
+    shift
+    _needle_telemetry_emit "unravel.alternatives_created" "parent_id=$parent_id" "$@"
+}
+
+# Emit unravel.alternative_created event (individual alternative)
+# Usage: _needle_event_unravel_alternative_created <parent_id> <alternative_id> [title=...] [key=value ...]
+_needle_event_unravel_alternative_created() {
+    local parent_id="$1"
+    local alternative_id="$2"
+    shift 2
+    _needle_telemetry_emit "unravel.alternative_created" "parent_id=$parent_id" "alternative_id=$alternative_id" "$@"
+}
+
+# Emit unravel.analysis_started event
+# Usage: _needle_event_unravel_analysis_started [workspace=...] [human_bead_id=...] [key=value ...]
+_needle_event_unravel_analysis_started() {
+    _needle_telemetry_emit "unravel.analysis_started" "$@"
+}
+
+# Emit unravel.analysis_completed event
+# Usage: _needle_event_unravel_analysis_completed [alternatives_found=...] [key=value ...]
+_needle_event_unravel_analysis_completed() {
+    _needle_telemetry_emit "unravel.analysis_completed" "$@"
+}
+
+# ============================================================================
 # Weave Events (Documentation Gap Detection)
 # ============================================================================
 
@@ -593,6 +626,10 @@ mend.orphan_released
 mend.heartbeat_cleaned
 mend.logs_pruned
 mend.completed
+unravel.alternatives_created
+unravel.alternative_created
+unravel.analysis_started
+unravel.analysis_completed
 weave.bead_created
 weave.analysis_started
 weave.analysis_completed
