@@ -135,11 +135,10 @@ _needle_get_claimable_beads() {
         candidates=$(br list --status open --json 2>/dev/null)
     fi
 
-    # Filter client-side: unassigned, unblocked, not deferred, no open dependencies
+    # Filter client-side: unassigned, unblocked, not deferred, no OPEN dependencies
     # These are the same criteria br ready uses internally
-    # NOTE: We filter by dependency_count == 0 because br list doesn't include
-    # dependency status (open/closed). If a bead has dependencies, we can't tell
-    # if they're met without additional queries. The br claim command will validate.
+    # NOTE: We used to filter by dependency_count == 0, but that excluded beads
+    # whose dependencies were all CLOSED. Now we check if dependencies are actually open.
     # NOTE: Also filter out HUMAN type beads - those are alerts, not work items
     local filtered
     filtered=$(echo "$candidates" | jq -c '
@@ -147,17 +146,44 @@ _needle_get_claimable_beads() {
             .assignee == null and
             .blocked_by == null and
             (.deferred_until == null or .deferred_until == "") and
-            (.dependency_count == null or .dependency_count == 0) and
             (.issue_type == null or .issue_type != "human")
         )]
     ' 2>/dev/null)
 
+    # Now filter out beads with OPEN dependencies
+    # For each bead with dependency_count > 0, check if all deps are closed
+    local final_filtered="[]"
+    while IFS= read -r bead; do
+        local bead_id dep_count
+        bead_id=$(echo "$bead" | jq -r '.id')
+        dep_count=$(echo "$bead" | jq -r '.dependency_count // 0')
+
+        if [[ "$dep_count" -eq 0 ]]; then
+            # No dependencies, include it
+            final_filtered=$(echo "$final_filtered" | jq -c --argjson bead "$bead" '. + [$bead]')
+        else
+            # Check if all dependencies are closed
+            local deps_status
+            deps_status=$(br dep list "$bead_id" --json 2>/dev/null)
+            local open_deps
+            open_deps=$(echo "$deps_status" | jq '[.[] | select(.status != "closed")] | length' 2>/dev/null || echo "1")
+
+            if [[ "$open_deps" -eq 0 ]]; then
+                # All dependencies are closed, include it
+                final_filtered=$(echo "$final_filtered" | jq -c --argjson bead "$bead" '. + [$bead]')
+                _needle_debug "DIAG: Bead $bead_id has $dep_count deps, all closed - including"
+            else
+                _needle_debug "DIAG: Bead $bead_id has $open_deps open deps - excluding"
+            fi
+        fi
+    done < <(echo "$filtered" | jq -c '.[]')
+
     # DIAGNOSTIC: Log the result count
     local count
-    count=$(echo "$filtered" | jq 'length' 2>/dev/null || echo "0")
-    _needle_debug "DIAG: Fallback found $count claimable beads"
+    count=$(echo "$final_filtered" | jq 'length' 2>/dev/null || echo "0")
+    _needle_debug "DIAG: Fallback found $count claimable beads (after checking closed deps)"
 
-    echo "$filtered"
+    echo "$final_filtered"
 }
 
 # Select a bead from the ready queue using weighted random selection
