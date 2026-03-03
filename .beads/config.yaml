@@ -1,4 +1,14 @@
 # Beads Project Configuration
-# issue_prefix: bd
-# default_priority: 2
-# default_type: task
+issue_prefix: nd
+default_priority: 2
+default_type: task
+
+# Enable all strands for worker discovery
+strands:
+  pluck: true
+  explore: true
+  mend: true
+  weave: true
+  unravel: true
+  pulse: true
+  knot: true

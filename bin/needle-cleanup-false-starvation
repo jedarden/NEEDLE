@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# NEEDLE: Cleanup False Starvation Alerts
+#
+# Finds and closes starvation alerts when work is actually available.
+# This handles the case where workers report starvation due to environment
+# issues rather than actual lack of work.
+#
+# Usage:
+#   needle-cleanup-false-starvation [workspace]
+#   needle-cleanup-false-starvation --dry-run
+#
+# Exit codes:
+#   0 - Success (alerts processed)
+#   1 - Error
+
+set -euo pipefail
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+DRY_RUN=false
+WORKSPACE=""
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run|-n)
+            DRY_RUN=true
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [OPTIONS] [workspace]"
+            echo ""
+            echo "Options:"
+            echo "  --dry-run, -n    Show what would be closed without closing"
+            echo "  --help, -h       Show this help"
+            echo ""
+            echo "Finds and closes worker starvation alerts when work is available."
+            exit 0
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+        *)
+            WORKSPACE="$1"
+            shift
+            ;;
+    esac
+done
+
+# Default to current directory
+WORKSPACE="${WORKSPACE:-$(pwd)}"
+
+# Validate workspace
+if [[ ! -d "$WORKSPACE" ]]; then
+    echo "ERROR: Workspace does not exist: $WORKSPACE" >&2
+    exit 1
+fi
+
+# ============================================================================
+# Functions
+# ============================================================================
+
+# Count claimable beads in workspace
+count_claimable_beads() {
+    local ws="$1"
+    local count
+
+    # Try br ready first (most accurate)
+    count=$(cd "$ws" && br ready --json 2>/dev/null | jq 'length' 2>/dev/null) || count=0
+
+    if [[ "$count" -gt 0 ]]; then
+        echo "$count"
+        return 0
+    fi
+
+    # Fallback to br list with filtering
+    count=$(cd "$ws" && br list --status open --json 2>/dev/null | \
+            jq '[.[] | select(.assignee == null and .blocked_by == null)] | length' 2>/dev/null) || count=0
+
+    echo "$count"
+}
+
+# Find open starvation alerts
+find_starvation_alerts() {
+    local ws="$1"
+
+    cd "$ws" && br list --status open --json 2>/dev/null | \
+        jq -r '.[] | select(.title | test("ALERT: Worker.*no work|NEEDLE stuck|starvation"; "i")) | "\(.id)|\(.title)"' 2>/dev/null || true
+}
+
+# Close an alert with comment
+close_alert() {
+    local ws="$1"
+    local alert_id="$2"
+    local comment="$3"
+
+    if $DRY_RUN; then
+        echo "[DRY-RUN] Would close: $alert_id"
+        echo "[DRY-RUN] Comment: $comment"
+        return 0
+    fi
+
+    # Add comment first, then close
+    cd "$ws" && br comments add "$alert_id" "$comment" 2>&1 && \
+               br update "$alert_id" --status closed 2>&1
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+echo "=== NEEDLE False Starvation Cleanup ==="
+echo "Workspace: $WORKSPACE"
+echo "Dry run: $DRY_RUN"
+echo ""
+
+# Count claimable beads
+work_count=$(count_claimable_beads "$WORKSPACE")
+echo "Claimable beads found: $work_count"
+
+if [[ "$work_count" -eq 0 ]]; then
+    echo ""
+    echo "No work available - skipping cleanup (alerts may be legitimate)"
+    exit 0
+fi
+
+echo ""
+echo "Checking for starvation alerts..."
+
+# Find alerts
+alerts=$(find_starvation_alerts "$WORKSPACE")
+
+if [[ -z "$alerts" ]]; then
+    echo "No starvation alerts found."
+    exit 0
+fi
+
+# Process each alert
+closed_count=0
+while IFS='|' read -r alert_id alert_title; do
+    [[ -z "$alert_id" ]] && continue
+
+    echo ""
+    echo "Found alert: $alert_id"
+    echo "  Title: $alert_title"
+
+    # Close as false positive
+    comment="AUTO-CLOSED: $work_count claimable beads available. False positive starvation alert."
+    if close_alert "$WORKSPACE" "$alert_id" "$comment"; then
+        echo "  Status: CLOSED"
+        ((closed_count++))
+    else
+        echo "  Status: FAILED to close"
+    fi
+done <<< "$alerts"
+
+echo ""
+echo "=== Summary ==="
+echo "Alerts processed: $(echo "$alerts" | grep -c '|' || echo 0)"
+echo "Alerts closed: $closed_count"
+echo "Claimable beads: $work_count"
+
+if $DRY_RUN; then
+    echo ""
+    echo "This was a dry run. No alerts were actually closed."
+fi

@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+# NEEDLE Ready Fallback Tool
+# Lists claimable beads using br list + client-side filtering
+# Workaround for br ready schema error: "Invalid column type Text at index: 14, name: created_by"
+#
+# CRITICAL FIX (nd-3jf): Check dependency STATUS instead of just count
+# - Old behavior: excluded beads with dependency_count > 0
+# - New behavior: includes beads if ALL dependencies are CLOSED
+# - This prevents false positive worker starvation when deps are resolved
+#
+# Usage:
+#   needle-ready [--limit N] [--json] [--priority P]
+#
+# Exit codes:
+#   0 - Success (beads found or empty list)
+#   1 - Error
+
+set -e
+
+LIMIT="${NEEDLE_READY_LIMIT:-20}"
+OUTPUT_JSON=false
+PRIORITY_FILTER=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --limit|-l)
+            LIMIT="$2"
+            shift 2
+            ;;
+        --json|-j)
+            OUTPUT_JSON=true
+            shift
+            ;;
+        --priority|-p)
+            PRIORITY_FILTER="$2"
+            shift 2
+            ;;
+        --help|-h)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "List claimable beads (fallback for 'br ready' schema error)"
+            echo ""
+            echo "Options:"
+            echo "  -l, --limit N     Max beads to return (default: 20)"
+            echo "  -j, --json        Output as JSON"
+            echo "  -p, --priority P  Filter by priority (0-4)"
+            echo "  -h, --help        Show this help"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# ============================================================================
+# Helper function: Check if all dependencies of a bead are closed
+# Returns: 0 if all deps closed (or no deps), 1 if any dep is open
+# ============================================================================
+_check_all_deps_closed() {
+    local bead_id="$1"
+
+    # Get dependency list for this bead
+    local deps_json
+    deps_json=$(br dep list "$bead_id" --json 2>/dev/null || echo "[]")
+
+    # Count open dependencies (status != "closed")
+    local open_deps
+    open_deps=$(echo "$deps_json" | jq '[.[] | select(.status != "closed")] | length' 2>/dev/null || echo "1")
+
+    if [[ "$open_deps" -eq 0 ]]; then
+        return 0  # All deps closed (or no deps)
+    else
+        return 1  # Has open dependencies
+    fi
+}
+
+# ============================================================================
+# Step 1: Get all open beads and apply basic filters
+# ============================================================================
+# Build jq filter for initial claimable bead candidates:
+# - status = "open"
+# - No assignee (claimed_by is null or empty)
+# - Not blocked (blocked_by is null or empty) - this is different from dependencies
+# - Not deferred (deferred_until is null or empty)
+# - Not a HUMAN bead (issue_type != "human") - alerts are not work items
+# NOTE: We do NOT filter by depends_on here - we check dependency status below
+
+JQ_FILTER='[.[] | select(.status == "open") | select(.claimed_by == null or .claimed_by == "") | select(.blocked_by == null or .blocked_by == "") | select(.deferred_until == null or .deferred_until == "") | select(.issue_type == null or .issue_type != "human")'
+
+# Add priority filter if specified
+if [[ -n "$PRIORITY_FILTER" ]]; then
+    JQ_FILTER="$JQ_FILTER | select(.priority == $PRIORITY_FILTER)"
+fi
+
+# Close the array
+JQ_FILTER="$JQ_FILTER]"
+
+# Get candidate beads
+CANDIDATES=$(br list --status open --json 2>/dev/null | jq "$JQ_FILTER")
+
+# ============================================================================
+# Step 2: Filter out beads with OPEN dependencies
+# This is the fix from nd-3jf: check dependency STATUS, not just count
+# ============================================================================
+FINAL_RESULT="[]"
+
+while IFS= read -r bead; do
+    [[ -z "$bead" || "$bead" == "null" ]] && continue
+
+    bead_id=$(echo "$bead" | jq -r '.id')
+    dep_count=$(echo "$bead" | jq -r '.dependency_count // 0')
+
+    if [[ "$dep_count" -eq 0 ]]; then
+        # No dependencies, include it
+        FINAL_RESULT=$(echo "$FINAL_RESULT" | jq -c --argjson bead "$bead" '. + [$bead]')
+    else
+        # Check if all dependencies are closed
+        if _check_all_deps_closed "$bead_id"; then
+            # All dependencies are closed, include it
+            FINAL_RESULT=$(echo "$FINAL_RESULT" | jq -c --argjson bead "$bead" '. + [$bead]')
+        fi
+        # If there are open dependencies, skip this bead
+    fi
+done < <(echo "$CANDIDATES" | jq -c '.[]')
+
+# Sort by priority and limit
+RESULT=$(echo "$FINAL_RESULT" | jq "sort_by(.priority) | .[0:$LIMIT]")
+
+# ============================================================================
+# Step 3: Output result
+# ============================================================================
+if $OUTPUT_JSON; then
+    echo "$RESULT"
+else
+    # Text output
+    echo "$RESULT" | jq -r '.[] | "\(.id) [P\(.priority)] \(.title)"' 2>/dev/null || echo "No claimable beads found"
+fi

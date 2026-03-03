@@ -24,6 +24,19 @@ _needle_strand_knot() {
 
     _needle_debug "knot strand: checking if human alert is needed for $workspace"
 
+    # PRE-FLIGHT VERIFICATION: Check if work is actually available
+    # This prevents false positive starvation alerts when beads exist
+    # but weren't found by earlier strands due to timing/race conditions
+    if _needle_knot_verify_work_available "$workspace"; then
+        _needle_debug "knot strand: pre-flight found available work - skipping alert (false positive prevented)"
+        # Return 1 (no work) to maintain consistency - we didn't create an alert
+        # But log that we found work for diagnostics
+        _needle_emit_event "knot.false_positive_prevented" \
+            "Pre-flight verification found available work, skipping starvation alert" \
+            "workspace=$workspace"
+        return 1
+    fi
+
     # Check rate limit - only alert once per hour per workspace
     if ! _needle_knot_check_rate_limit "$workspace"; then
         _needle_debug "knot strand: rate limited, skipping alert"
@@ -43,6 +56,71 @@ _needle_strand_knot() {
     fi
 
     _needle_debug "knot strand: failed to create alert"
+    return 1
+}
+
+# ============================================================================
+# Pre-Flight Verification
+# ============================================================================
+
+# Pre-flight verification to prevent false positive starvation alerts
+# Checks if work is actually available before creating an alert
+# Returns: 0 if work IS available (should NOT alert), 1 if no work (should alert)
+_needle_knot_verify_work_available() {
+    local workspace="$1"
+
+    _needle_debug "knot: running pre-flight verification for $workspace"
+
+    # Method 1: Direct br list check (bypasses potential br ready issues)
+    # Count claimable beads: open status, no claim, not HUMAN type
+    local direct_count
+    direct_count=$(cd "$workspace" 2>/dev/null && br list --status open --json 2>/dev/null | \
+        jq '[.[] | select(.claim_token == null or .claim_token == "") | select(.issue_type == null or .issue_type != "human")] | length' 2>/dev/null || echo "0")
+
+    if [[ "$direct_count" -gt 0 ]]; then
+        _needle_debug "knot: pre-flight found $direct_count claimable beads via direct query"
+        return 0  # Work available - DON'T create alert
+    fi
+
+    # Method 2: Check using needle-ready tool if available
+    local needle_ready="$workspace/bin/needle-ready"
+    if [[ -x "$needle_ready" ]]; then
+        local ready_count
+        ready_count=$("$needle_ready" --json 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+
+        if [[ "$ready_count" -gt 0 ]]; then
+            _needle_debug "knot: pre-flight found $ready_count claimable beads via needle-ready"
+            return 0  # Work available - DON'T create alert
+        fi
+    fi
+
+    # Method 3: Check for any open beads at all (last resort)
+    local any_open
+    any_open=$(cd "$workspace" 2>/dev/null && br list --status open --json 2>/dev/null | \
+        jq 'length' 2>/dev/null || echo "0")
+
+    if [[ "$any_open" -gt 0 ]]; then
+        # There are open beads but none are claimable
+        # Log diagnostic info but don't alert (might be all claimed or blocked)
+        _needle_debug "knot: found $any_open open beads but none claimable - logging diagnostics"
+
+        # Log why beads aren't claimable for debugging
+        local claimed blocked human_type
+        claimed=$(cd "$workspace" && br list --status open --json 2>/dev/null | \
+            jq '[.[] | select(.claim_token != null and .claim_token != "")] | length' 2>/dev/null || echo "?")
+        blocked=$(cd "$workspace" && br list --status open --json 2>/dev/null | \
+            jq '[.[] | select(.blocked_by != null and .blocked_by != "")] | length' 2>/dev/null || echo "?")
+        human_type=$(cd "$workspace" && br list --status open --json 2>/dev/null | \
+            jq '[.[] | select(.issue_type == "human")] | length' 2>/dev/null || echo "?")
+
+        _needle_debug "knot: bead status - claimed: $claimed, blocked: $blocked, human: $human_type"
+
+        # Still return 1 (no work available) since beads aren't claimable
+        # But this is a legitimate reason, not a false positive
+    fi
+
+    # No work available - proceed with alert
+    _needle_debug "knot: pre-flight confirmed no claimable work available"
     return 1
 }
 

@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# NEEDLE Database Rebuild Tool
+# Rebuilds the beads database from JSONL export
+# Fixes schema mismatches like "Invalid column type Text at index: 14, name: created_by"
+#
+# Usage:
+#   needle-db-rebuild [--dry-run] [--backup]
+#
+# Exit codes:
+#   0 - Success
+#   1 - Error
+
+set -e
+
+DRY_RUN=false
+BACKUP=true
+DB_PATH=".beads/beads.db"
+JSONL_PATH=".beads/issues.jsonl"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run|-n)
+            DRY_RUN=true
+            shift
+            ;;
+        --no-backup)
+            BACKUP=false
+            shift
+            ;;
+        --help|-h)
+            echo "Usage: $0 [OPTIONS]"
+            echo ""
+            echo "Rebuild beads database from JSONL export to fix schema issues"
+            echo ""
+            echo "Options:"
+            echo "  -n, --dry-run     Show what would be done without making changes"
+            echo "  --no-backup       Skip creating backup of existing database"
+            echo "  -h, --help        Show this help"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Verify we're in a beads workspace
+if [[ ! -f "$JSONL_PATH" ]]; then
+    echo "Error: No JSONL export found at $JSONL_PATH"
+    echo "Run 'br export' first to create a backup"
+    exit 1
+fi
+
+if [[ ! -f "$DB_PATH" ]]; then
+    echo "Error: No database found at $DB_PATH"
+    exit 1
+fi
+
+# Count records
+TOTAL_RECORDS=$(wc -l < "$JSONL_PATH")
+echo "Found $TOTAL_RECORDS records in $JSONL_PATH"
+
+if $DRY_RUN; then
+    echo ""
+    echo "[DRY RUN] Would perform:"
+    echo "  1. Backup $DB_PATH to ${DB_PATH}.bak"
+    echo "  2. Remove $DB_PATH"
+    echo "  3. Run 'br import' to recreate database"
+    echo "  4. Verify $TOTAL_RECORDS records restored"
+    exit 0
+fi
+
+# Create backup
+if $BACKUP; then
+    BACKUP_PATH="${DB_PATH}.$(date +%Y%m%d_%H%M%S).bak"
+    echo "Creating backup at $BACKUP_PATH"
+    cp "$DB_PATH" "$BACKUP_PATH"
+fi
+
+# Remove old database
+echo "Removing old database..."
+rm -f "$DB_PATH"
+
+# Rebuild from JSONL using br sync
+echo "Rebuilding database from JSONL..."
+br sync --import-only 2>&1
+
+# Verify
+NEW_COUNT=$(br list --json 2>/dev/null | jq 'length')
+echo ""
+echo "Rebuild complete!"
+echo "  Original records: $TOTAL_RECORDS"
+echo "  Restored records: $NEW_COUNT"
+
+# Test br ready
+echo ""
+echo "Testing 'br ready'..."
+if br ready --json 2>&1 | grep -q '"id"'; then
+    echo "✓ br ready is working!"
+else
+    echo "✗ br ready still has issues - fallback may still be needed"
+fi

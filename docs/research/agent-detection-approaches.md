@@ -1,9 +1,14 @@
 # Agent Detection Module: Research and Comparison
 
-**Bead:** nd-5cp (Alternative: Research and document options)
-**Original Bead:** nd-1ge (Implement agent detection module)
-**Date:** 2026-03-02
-**Status:** Research Document
+**Related Beads:**
+- nd-1ge (Original: Implement agent detection module) - **CLOSED/SUPERSEDED**
+- nd-3d3 (Alternative: Research and document options) - **THIS DOCUMENT**
+- nd-5cp (Alternative: Research and document options)
+
+**Date:** 2026-03-02 (Updated 2026-03-03)
+**Status:** Research Document - Implementation Complete
+
+> **Note:** The original bead nd-1ge has been closed as superseded. The implementation in `src/onboarding/agents.sh` is complete and functional. This document serves as architectural reference for future enhancements.
 
 ---
 

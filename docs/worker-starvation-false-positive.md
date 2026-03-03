@@ -1,59 +1,113 @@
 # Worker Starvation False Positive Analysis
 
 **Date:** 2026-03-03
-**Issue:** HUMAN beads nd-3bo, nd-2h0 (Worker starvation alerts)
-**Status:** RESOLVED - False Positive (confirmed twice)
+**Status:** RESOLVED - Was Actually TRUE POSITIVE (bugs fixed)
 
-## Root Cause
+## Background
 
-The `br ready` command fails with a schema error:
-```
-Database error: Invalid column type Text at index: 14, name: created_by
-```
+Multiple HUMAN beads (nd-3bo, nd-2h0, nd-1zx, nd-165) were created as worker starvation alerts. Initial analysis suggested these were false positives because the fallback mechanism appeared to work.
 
-This is a known bug in beads_rust v0.1.13.
+## Actual Root Causes
 
-## Fallback IS Working
+Upon deeper investigation, the worker starvation was a **TRUE POSITIVE** caused by multiple bugs:
 
-The fallback mechanism in `src/bead/select.sh` function `_needle_get_claimable_beads`:
-1. Detects the DATABASE_ERROR from `br ready`
-2. Falls back to `br list` with client-side filtering
-3. **Successfully finds claimable beads**
+### Bug 1: Debug Output Pollution (src/lib/output.sh)
 
-### Verification
+`_needle_debug` and `_needle_verbose` were outputting to stdout instead of stderr.
+
+**Impact:** When functions were called in subshells to capture output, the debug messages corrupted the JSON, causing parsing failures.
+
+**Fix:** Added `>&2` redirection to send debug/verbose output to stderr.
+
 ```bash
-$ source src/bead/select.sh && _needle_get_claimable_beads | jq 'length'
-36
+# Before
+_needle_debug() {
+    _needle_print_color "$NEEDLE_COLOR_DIM" "[DEBUG] $*"
+}
 
-$ _needle_select_weighted
-nd-2pw  # Successfully selected a P0 task bead
+# After
+_needle_debug() {
+    _needle_print_color "$NEEDLE_COLOR_DIM" "[DEBUG] $*" >&2
+}
 ```
 
-## Workaround Tools
+### Bug 2: Workspace Not Honored in Fallback (src/bead/select.sh)
 
-- `bin/needle-ready` - Lists claimable beads using fallback
-- `bin/needle-db-rebuild` - Rebuilds database from JSONL
+The `br list` command operates on the current directory, but the fallback wasn't changing directories when `--workspace` was provided.
 
-## Resolution
+**Impact:** When workers passed a workspace parameter, the fallback ran in the wrong directory and found no beads (or wrong beads).
 
-The worker starvation alert was a **false positive**. The fallback mechanism is working correctly. Workers should be able to claim beads.
+**Fix:** Added `cd "$workspace" &&` before `br list` when workspace is provided.
 
-## Recommendations
+```bash
+if [[ -n "$workspace" && -d "$workspace" ]]; then
+    candidates=$(cd "$workspace" && br list --status open --json 2>/dev/null)
+else
+    candidates=$(br list --status open --json 2>/dev/null)
+fi
+```
 
-1. **Immediate**: Ensure workers load the fallback code correctly
-2. **Short-term**: Upgrade beads_rust to fix schema bug
-3. **Long-term**: Add integration tests for fallback path
+### Bug 3: Dependency Filter Missing (src/bead/select.sh)
 
-## Root Cause of False Positive Alerts
+The fallback filter didn't check `dependency_count`, so beads with unmet dependencies were being selected.
 
-The worker starvation detection logic does not account for the fallback mechanism's success. When `br ready` fails, the fallback in `_needle_get_claimable_beads` successfully finds beads, but the worker's detection logic may be checking a different path or not properly detecting the fallback's success.
+**Impact:** Claim attempts on beads with open dependencies always failed with "cannot claim blocked issue".
 
-### Investigation Needed
-- Check `src/runner/loop.sh` for starvation detection logic
-- Verify workers call `_needle_get_claimable_beads` correctly
-- Ensure diagnostic logging is enabled to trace the issue
+**Fix:** Added `dependency_count == 0` to the filter criteria.
+
+```bash
+filtered=$(echo "$candidates" | jq -c '
+    [.[] | select(
+        .assignee == null and
+        .blocked_by == null and
+        (.deferred_until == null or .deferred_until == "") and
+        (.dependency_count == null or .dependency_count == 0) and  # NEW
+        (.issue_type == null or .issue_type != "human")
+    )]
+')
+```
+
+### Bug 4: Claim Not Workspace-Aware (src/bead/claim.sh)
+
+The `br update --claim` command runs in the current directory, not the specified workspace.
+
+**Impact:** Claims failed with NOT_INITIALIZED error when run from outside the workspace.
+
+**Fix:** Run claim in workspace directory when `--workspace` is provided.
+
+```bash
+if [[ -n "$workspace" && -d "$workspace" ]]; then
+    claim_result=$(cd "$workspace" && br update "$bead_id" --claim --actor "$actor" 2>&1)
+else
+    claim_result=$(br update "$bead_id" --claim --actor "$actor" 2>&1)
+fi
+```
+
+## Verification
+
+Successfully claimed bead `nd-14v` from `/tmp` directory with `--workspace /home/coder/NEEDLE` parameter after fixes.
+
+## Files Modified
+
+- `src/lib/output.sh` (lines 74-86): Debug/verbose output to stderr
+- `src/bead/select.sh` (lines 125-147): Workspace and dependency filtering
+- `src/bead/claim.sh` (lines 262-276): Workspace-aware claim
+
+## Commit
+
+```
+fix(worker): Fix multiple bugs causing worker starvation
+commit 08c7173
+```
+
+## Lessons Learned
+
+1. **Always redirect debug output to stderr** in functions whose stdout is captured
+2. **Test with workspace parameters** explicitly, not just from within the workspace
+3. **Validate all filter criteria** match what the primary command (br ready) does
+4. **Run external CLI commands in the correct directory** when they operate on current directory
 
 ## Related Skills
 
-- `br-cli-workspace-isolation-troubleshooting`
 - `worker-starvation-false-positive`
+- `br-cli-workspace-isolation-troubleshooting`

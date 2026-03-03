@@ -1,0 +1,41 @@
+#!/bin/bash
+# NEEDLE: Cleanup Closed Dependencies
+#
+# This script removes closed dependencies from beads, making
+# dependency_count accurate for workers that filter by count.
+#
+# Usage: ./bin/needle-cleanup-closed-deps [--dry-run]
+
+cd /home/coder/NEEDLE
+
+DRY_RUN=false
+if [[ "${1:-}" == "--dry-run" ]]; then
+    DRY_RUN=true
+    echo "=== DRY RUN MODE - No changes will be made ==="
+fi
+
+# Get all beads with dependencies
+beads_with_deps=$(br list --status open --json 2>/dev/null | jq -r '.[] | select(.dependency_count > 0) | .id')
+
+removed_count=0
+for bead_id in $beads_with_deps; do
+    # Get dependencies that are closed
+    closed_deps=$(br dep list "$bead_id" --json 2>/dev/null | jq -r '.[] | select(.status == "closed") | .depends_on_id')
+    
+    for dep_id in $closed_deps; do
+        if [[ -n "$dep_id" ]]; then
+            echo "Removing closed dependency: $bead_id -> $dep_id"
+            if ! $DRY_RUN; then
+                br dep remove "$bead_id" "$dep_id" 2>/dev/null || echo "  (already removed or error)"
+            fi
+            ((removed_count++))
+        fi
+    done
+done
+
+echo ""
+echo "=== Summary ==="
+echo "Closed dependencies to remove: $removed_count"
+if $DRY_RUN; then
+    echo "Run without --dry-run to apply changes"
+fi
