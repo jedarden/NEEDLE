@@ -1,144 +1,214 @@
 #!/usr/bin/env bash
 # NEEDLE CLI Agents Subcommand
-# Manage and detect coding CLI agents
+# List and manage agent adapters from YAML configurations
 
 _needle_agents_help() {
-    _needle_print "Usage: needle agents [OPTIONS] [COMMAND]
+    _needle_print "Usage: needle agents [OPTIONS]
 
-Manage and detect coding CLI agents.
+List and manage agent adapters.
 
-Commands:
-    scan         Scan for installed agents (default)
-    list         List all installed agents
-    info         Show detailed info for an agent
-    default      Show the default agent
-
-Options:
-    -j, --json   Output in JSON format
-    -h, --help   Show this help message
+OPTIONS:
+    -s, --scan     Re-scan PATH for available agents
+    -j, --json     Output as JSON
+    -a, --all      Include unavailable agents
+    -h, --help     Print help
 
 Examples:
-    needle agents              Scan for all agents
-    needle agents scan         Scan for all agents
-    needle agents list         List installed agents
-    needle agents info claude  Show info for Claude
-    needle agents --json       Output scan as JSON
+    needle agents              List available agents
+    needle agents --all        List all agents (including missing)
+    needle agents --scan       Re-scan and list agents
+    needle agents --json       Output as JSON
 "
 }
 
+# Output agents as JSON array
+_needle_agents_json() {
+    local -a agents=("$@")
+    local json="["
+    local first=true
+
+    for agent_info in "${agents[@]}"; do
+        IFS='|' read -r name runner status source file <<< "$agent_info"
+
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            json+=","
+        fi
+
+        json+="{"
+        json+="\"name\":\"$(_needle_json_escape "$name")\","
+        json+="\"runner\":\"$(_needle_json_escape "$runner")\","
+        json+="\"status\":\"$(_needle_json_escape "$status")\","
+        json+="\"source\":\"$(_needle_json_escape "$source")\""
+        json+="}"
+    done
+
+    json+="]"
+    echo "$json"
+}
+
 _needle_agents() {
+    local scan=false
     local json_output=false
-    local command="scan"
+    local show_all=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -s|--scan)
+                scan=true
+                shift
+                ;;
             -j|--json)
                 json_output=true
                 shift
                 ;;
+            -a|--all)
+                show_all=true
+                shift
+                ;;
             -h|--help)
                 _needle_agents_help
-                exit $NEEDLE_EXIT_SUCCESS
-                ;;
-            scan|list|info|default)
-                command="$1"
-                shift
+                return 0
                 ;;
             -*)
                 _needle_error "Unknown option: $1"
                 _needle_agents_help
-                exit $NEEDLE_EXIT_USAGE
+                return 1
                 ;;
             *)
-                # Positional argument (for info command)
-                shift
+                _needle_error "Unexpected argument: $1"
+                _needle_agents_help
+                return 1
                 ;;
         esac
     done
 
-    case "$command" in
-        scan)
-            if [[ "$json_output" == "true" ]]; then
-                _needle_scan_agents --json
-            else
-                _needle_scan_agents
-            fi
-            ;;
-        list)
-            if [[ "$json_output" == "true" ]]; then
-                _needle_scan_agents_json
-            else
-                _needle_list_agents
-            fi
-            ;;
-        info)
-            local agent="${1:-}"
-            if [[ -z "$agent" ]]; then
-                # Show info for default agent
-                agent=$(_needle_get_default_agent 2>/dev/null)
-                if [[ -z "$agent" ]]; then
-                    _needle_error "No agent specified and no default agent found"
-                    _needle_info "Usage: needle agents info <agent_name>"
-                    exit $NEEDLE_EXIT_USAGE
-                fi
-            fi
-            _needle_agent_info "$agent"
-            ;;
-        default)
-            local default_agent
-            default_agent=$(_needle_get_default_agent 2>/dev/null)
-            if [[ -z "$default_agent" ]]; then
-                _needle_warn "No ready agent found"
-                _needle_info "Install and configure an agent first"
-                exit $NEEDLE_EXIT_ERROR
-            fi
+    # Initialize agent loader if needed
+    [[ -z "$NEEDLE_BUILTIN_AGENTS_DIR" ]] && _needle_agent_loader_init
 
-            if [[ "$json_output" == "true" ]]; then
-                echo "{\"default_agent\":\"$default_agent\"}"
-            else
-                _needle_print "$default_agent"
-            fi
-            ;;
-    esac
-}
-
-# List installed agents (simple format)
-_needle_list_agents() {
-    local installed
-    installed=$(_needle_get_installed_agents)
-
-    if [[ -z "$installed" ]]; then
-        _needle_warn "No agents installed"
-        _needle_info "Run 'needle agents scan' for installation instructions"
-        return 0
+    if $scan; then
+        _needle_info "Scanning for agents..."
     fi
 
-    _needle_section "Installed Agents"
+    # Collect agents from builtin and user directories
+    local -a agents=()
+    local -A seen=()
 
-    for agent in $installed; do
-        local name="${NEEDLE_AGENT_NAMES[$agent]:-$agent}"
-        local version
-        version=$(_needle_agent_version "$agent" 2>/dev/null)
-        local auth
-        auth=$(_needle_agent_auth_status "$agent" 2>/dev/null)
+    # Built-in agents directory
+    if [[ -n "$NEEDLE_BUILTIN_AGENTS_DIR" && -d "$NEEDLE_BUILTIN_AGENTS_DIR" ]]; then
+        for file in "$NEEDLE_BUILTIN_AGENTS_DIR"/*.yaml "$NEEDLE_BUILTIN_AGENTS_DIR"/*.yml; do
+            [[ -f "$file" ]] || continue
+            local basename
+            basename=$(basename "$file")
+            basename="${basename%.yaml}"
+            basename="${basename%.yml}"
 
-        local auth_indicator
-        case "$auth" in
-            authenticated)
-                auth_indicator="${NEEDLE_COLOR_GREEN}✓${NEEDLE_COLOR_RESET}"
-                ;;
-            auth-required)
-                auth_indicator="${NEEDLE_COLOR_YELLOW}!${NEEDLE_COLOR_RESET}"
-                ;;
-            *)
-                auth_indicator="${NEEDLE_COLOR_DIM}?${NEEDLE_COLOR_RESET}"
-                ;;
-        esac
+            # Skip if already seen (user config takes precedence)
+            if [[ -z "${seen[$basename]:-}" ]]; then
+                seen[$basename]=1
+                agents+=("$basename|builtin|$file")
+            fi
+        done 2>/dev/null
+    fi
 
-        printf "  %s %-12s %s %s\n" "$auth_indicator" "$name" "${NEEDLE_COLOR_DIM}$version${NEEDLE_COLOR_RESET}" ""
-    done
+    # User agents directory
+    local user_agents_dir="${NEEDLE_HOME}/agents"
+    if [[ -d "$user_agents_dir" ]]; then
+        for file in "$user_agents_dir"/*.yaml "$user_agents_dir"/*.yml; do
+            [[ -f "$file" ]] || continue
+            local basename
+            basename=$(basename "$file")
+            basename="${basename%.yaml}"
+            basename="${basename%.yml}"
 
-    _needle_print ""
-    _needle_info "Legend: ✓ authenticated  ! auth required  ? unknown"
+            # User config takes precedence - replace if exists
+            if [[ -n "${seen[$basename]:-}" ]]; then
+                # Remove existing entry and add user version
+                local -a new_agents=()
+                for agent_info in "${agents[@]}"; do
+                    IFS='|' read -r name source _ <<< "$agent_info"
+                    if [[ "$name" != "$basename" ]]; then
+                        new_agents+=("$agent_info")
+                    fi
+                done
+                agents=("${new_agents[@]}")
+            fi
+            agents+=("$basename|user|$file")
+            seen[$basename]=1
+        done 2>/dev/null
+    fi
+
+    # Sort agents by name
+    IFS=$'\n' agents=($(sort -t'|' -k1 <<<"${agents[*]}")); unset IFS
+
+    if $json_output; then
+        # Build JSON with status info
+        local -a json_agents=()
+        for agent_info in "${agents[@]}"; do
+            IFS='|' read -r name source file <<< "$agent_info"
+
+            local runner
+            runner=$(_needle_parse_yaml "$file" '.runner' 2>/dev/null)
+            [[ -z "$runner" ]] && runner="unknown"
+
+            local status
+            if command -v "$runner" &>/dev/null; then
+                status="available"
+            else
+                status="missing"
+                ! $show_all && continue
+            fi
+
+            json_agents+=("$name|$runner|$status|$source|$file")
+        done
+
+        _needle_agents_json "${json_agents[@]}"
+    else
+        # Human-readable table output
+        printf "%-35s %-10s %-12s %s\n" "NAME" "RUNNER" "STATUS" "SOURCE"
+        printf "%-35s %-10s %-12s %s\n" "----" "------" "------" "------"
+
+        local found=0
+        for agent_info in "${agents[@]}"; do
+            IFS='|' read -r name source file <<< "$agent_info"
+
+            local runner
+            runner=$(_needle_parse_yaml "$file" '.runner' 2>/dev/null)
+            [[ -z "$runner" ]] && runner="unknown"
+
+            local status
+            if command -v "$runner" &>/dev/null; then
+                status="available"
+                ((found++)) || true
+            else
+                status="missing"
+                ! $show_all && continue
+            fi
+
+            # Colorize status
+            local status_display
+            if [[ "$status" == "available" ]]; then
+                status_display="${NEEDLE_COLOR_GREEN}available${NEEDLE_COLOR_RESET}"
+            else
+                status_display="${NEEDLE_COLOR_RED}missing${NEEDLE_COLOR_RESET}"
+            fi
+
+            printf "%-35s %-10s %-12s %s\n" "$name" "$runner" "$status_display" "$source"
+        done
+
+        # Summary
+        if [[ $found -eq 0 ]]; then
+            _needle_print ""
+            if $show_all; then
+                _needle_warn "No agents available"
+            else
+                _needle_warn "No available agents found"
+                _needle_info "Use --all to see all configured agents"
+            fi
+        fi
+    fi
+
+    return 0
 }
