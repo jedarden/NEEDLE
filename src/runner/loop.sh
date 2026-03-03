@@ -81,6 +81,21 @@ source "$NEEDLE_SRC/watchdog/heartbeat.sh"
 # Source state registry for worker registration
 source "$NEEDLE_SRC/runner/state.sh"
 
+# Source bead modules for prompt building and claiming
+source "$NEEDLE_SRC/bead/claim.sh"
+source "$NEEDLE_SRC/bead/prompt.sh"
+
+# Source agent modules for dispatching
+source "$NEEDLE_SRC/agent/loader.sh"
+source "$NEEDLE_SRC/agent/dispatch.sh"
+
+# Source hook runner for pre/post execution hooks
+source "$NEEDLE_SRC/hooks/runner.sh"
+
+# Source telemetry modules for token extraction and effort tracking
+source "$NEEDLE_SRC/telemetry/tokens.sh"
+source "$NEEDLE_SRC/telemetry/effort.sh"
+
 _NEEDLE_LOOP_LOADED=true
 _NEEDLE_LOOP_INIT=false
 _NEEDLE_LOOP_SHUTDOWN=false
@@ -695,56 +710,6 @@ _needle_loop_get_config() {
 source "$NEEDLE_SRC/strands/engine.sh"
 
 # ============================================================================
-# Bead Processing Stubs
-# ============================================================================
-
-# Build prompt for agent (stub)
-# Returns: prompt string
-_needle_build_prompt() {
-    local bead_id="$1"
-    local workspace="$2"
-
-    _needle_debug "Building prompt for bead $bead_id in $workspace"
-    # TODO: Implement actual prompt building
-    echo "Process bead $bead_id in workspace $workspace"
-}
-
-# Dispatch agent (stub)
-# Returns: exit_code|duration_ms|output_file
-_needle_dispatch_agent() {
-    local agent="$1"
-    local workspace="$2"
-    local prompt="$3"
-    local bead_id="$4"
-    local bead_title="$5"
-
-    _needle_debug "Dispatching agent $agent for bead $bead_id"
-    # TODO: Implement actual agent dispatch
-    # Return: exit_code|duration_ms|output_file
-    echo "0|100|/tmp/needle-output-${bead_id}.log"
-}
-
-# Run hook (stub)
-# Returns: 0 on success
-_needle_run_hook() {
-    local hook_name="$1"
-    local bead_id="$2"
-
-    _needle_debug "Running hook $hook_name for bead $bead_id"
-    # TODO: Implement actual hook runner call
-    return 0
-}
-
-# Release bead (stub - implemented later in file)
-# This is a placeholder - full implementation is in Bead Release Function section
-_needle_release_bead() {
-    local bead_id="$1"
-    local reason="$2"
-    _needle_debug "Releasing bead $bead_id: $reason"
-    # Full implementation in Bead Release Function section below
-}
-
-# ============================================================================
 # Main Worker Loop
 # ============================================================================
 
@@ -1032,6 +997,56 @@ _needle_process_bead() {
         "duration_ms=$dispatch_duration" \
         "session=$NEEDLE_SESSION" \
         "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    # ========================================================================
+    # Effort Recording (Token Extraction + Cost Calculation)
+    # ========================================================================
+
+    # Extract tokens from output file
+    local input_tokens=0
+    local output_tokens=0
+    local cost="0.00"
+
+    if [[ -n "$dispatch_output" ]] && [[ -f "$dispatch_output" ]]; then
+        local token_result
+        token_result=$(_needle_extract_tokens "$agent" "$dispatch_output")
+
+        if [[ -n "$token_result" ]]; then
+            input_tokens=$(echo "$token_result" | cut -d'|' -f1)
+            output_tokens=$(echo "$token_result" | cut -d'|' -f2)
+
+            # Ensure we have valid numbers
+            [[ ! "$input_tokens" =~ ^[0-9]+$ ]] && input_tokens=0
+            [[ ! "$output_tokens" =~ ^[0-9]+$ ]] && output_tokens=0
+
+            _needle_debug "Extracted tokens: input=$input_tokens, output=$output_tokens"
+        fi
+
+        # Calculate cost
+        cost=$(calculate_cost "$agent" "$input_tokens" "$output_tokens")
+        _needle_debug "Calculated cost: \$$cost"
+    fi
+
+    # Record effort for this bead
+    if [[ "$input_tokens" -gt 0 ]] || [[ "$output_tokens" -gt 0 ]]; then
+        record_effort "$bead_id" "$cost" "$agent" "$input_tokens" "$output_tokens"
+        _needle_debug "Recorded effort: bead=$bead_id, cost=\$$cost, agent=$agent"
+    fi
+
+    # Emit effort recorded telemetry
+    _needle_telemetry_emit "bead.effort_recorded" \
+        "bead_id=$bead_id" \
+        "agent=$agent" \
+        "input_tokens=$input_tokens" \
+        "output_tokens=$output_tokens" \
+        "cost=$cost" \
+        "session=$NEEDLE_SESSION" \
+        "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    # Export effort data for post-execute hook
+    export NEEDLE_INPUT_TOKENS="$input_tokens"
+    export NEEDLE_OUTPUT_TOKENS="$output_tokens"
+    export NEEDLE_COST="$cost"
 
     # Run post-execute hook
     # Set environment variables for the hook
