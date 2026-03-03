@@ -73,26 +73,37 @@ _needle_get_claimable_beads() {
     done
 
     # Try br ready first (preferred - server-side filtering)
+    # Note: br ready outputs to stderr, so we need to capture stderr
+    # Also, it may output log lines before JSON, so we extract just the JSON
+    local raw_output
     if [[ -n "$workspace" ]]; then
-        candidates=$(br ready --workspace="$workspace" --unassigned --json 2>/dev/null)
+        raw_output=$(br ready --workspace="$workspace" --unassigned --json 2>&1)
     else
-        candidates=$(br ready --unassigned --json 2>/dev/null)
+        raw_output=$(br ready --unassigned --json 2>&1)
     fi
 
+    # Extract JSON portion (from first { or [ to the end)
+    candidates=$(echo "$raw_output" | sed -n '/^[{[]/,$p')
+
     # Check if br ready returned valid JSON array
-    if echo "$candidates" | jq -e 'if type == "array" then true else false end' &>/dev/null; then
+    if [[ -n "$candidates" ]] && echo "$candidates" | jq -e 'type == "array"' &>/dev/null; then
         echo "$candidates"
         return 0
+    fi
+
+    # Check for error response (beads_rust v0.1.13 schema bug)
+    if [[ -n "$candidates" ]] && echo "$candidates" | jq -e '.error.code == "DATABASE_ERROR"' &>/dev/null; then
+        _needle_debug "br ready returned DATABASE_ERROR, using fallback"
+    elif [[ -z "$candidates" ]]; then
+        _needle_debug "br ready returned no JSON, using fallback"
     fi
 
     # br ready failed - use fallback with br list + client-side filtering
     _needle_debug "br ready failed, using br list fallback"
 
-    if [[ -n "$workspace" ]]; then
-        candidates=$(br list --workspace="$workspace" --status open --json 2>/dev/null)
-    else
-        candidates=$(br list --status open --json 2>/dev/null)
-    fi
+    # Note: br list doesn't support --workspace flag, it operates on current directory
+    # Workspace filtering is handled by running in the correct directory
+    candidates=$(br list --status open --json 2>/dev/null)
 
     # Filter client-side: unassigned, unblocked, not deferred
     # These are the same criteria br ready uses internally
