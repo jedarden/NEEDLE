@@ -7,6 +7,28 @@
 # - Uses weighted random selection to prevent starvation
 # - P0=8x, P1=4x, P2=2x, P3=1x weight multipliers
 
+# ============================================================================
+# PATH Setup (CRITICAL: Must be done before any br calls)
+# ============================================================================
+# Ensure ~/.local/bin is in PATH for br CLI access
+# This fixes worker starvation caused by br not being found
+if [[ -d "$HOME/.local/bin" ]]; then
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*) ;;
+        *) export PATH="$HOME/.local/bin:$PATH" ;;
+    esac
+fi
+
+# Verify br is available
+if ! command -v br &>/dev/null; then
+    echo "ERROR: br CLI not found in PATH" >&2
+    echo "  PATH=$PATH" >&2
+    echo "  Expected: $HOME/.local/bin/br" >&2
+    echo "" >&2
+    echo "Install br from: https://github.com/Dicklesworthstone/beads_rust" >&2
+    exit 1
+fi
+
 # Source dependencies (if not already loaded)
 if [[ -z "${_NEEDLE_OUTPUT_LOADED:-}" ]]; then
     source "$(dirname "${BASH_SOURCE[0]}")/../lib/output.sh"
@@ -105,13 +127,18 @@ _needle_get_claimable_beads() {
     # Workspace filtering is handled by running in the correct directory
     candidates=$(br list --status open --json 2>/dev/null)
 
-    # Filter client-side: unassigned, unblocked, not deferred
+    # Filter client-side: unassigned, unblocked, not deferred, no unmet dependencies
     # These are the same criteria br ready uses internally
+    # NOTE: Also filter out beads with dependencies (dependency_count > 0) since
+    # br ready would not return them anyway (they're not truly "ready")
+    # NOTE: Also filter out HUMAN type beads - those are alerts, not work items
     echo "$candidates" | jq -c '
         [.[] | select(
             .assignee == null and
             .blocked_by == null and
-            (.deferred_until == null or .deferred_until == "")
+            (.deferred_until == null or .deferred_until == "") and
+            (.dependency_count == null or .dependency_count == 0) and
+            (.issue_type == null or .issue_type != "human")
         )]
     ' 2>/dev/null
 }
