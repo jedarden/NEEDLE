@@ -63,6 +63,24 @@ if [[ -z "${NEEDLE_SRC:-}" ]]; then
     NEEDLE_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 
+# ============================================================================
+# Source Dependencies
+# ============================================================================
+# Source lib modules first (provides output, json, utils, config)
+source "$NEEDLE_SRC/lib/output.sh"
+source "$NEEDLE_SRC/lib/json.sh"
+source "$NEEDLE_SRC/lib/utils.sh"
+source "$NEEDLE_SRC/lib/config.sh"
+
+# Source telemetry/events module for event emission
+source "$NEEDLE_SRC/telemetry/events.sh"
+
+# Source heartbeat module for worker liveness tracking
+source "$NEEDLE_SRC/watchdog/heartbeat.sh"
+
+# Source state registry for worker registration
+source "$NEEDLE_SRC/runner/state.sh"
+
 _NEEDLE_LOOP_LOADED=true
 _NEEDLE_LOOP_INIT=false
 _NEEDLE_LOOP_SHUTDOWN=false
@@ -492,126 +510,6 @@ _needle_loop_get_config() {
 }
 
 # ============================================================================
-# Event Emission Stubs
-# ============================================================================
-
-# Emit worker started event (stub)
-_needle_event_worker_started() {
-    _needle_debug "Worker started: $*"
-}
-
-# Emit worker idle event (stub)
-_needle_event_worker_idle() {
-    _needle_debug "Worker idle: $*"
-}
-
-# Emit worker stopped event (stub)
-_needle_event_worker_stopped() {
-    _needle_debug "Worker stopped: $*"
-}
-
-# Emit worker draining event (stub)
-_needle_event_worker_draining() {
-    _needle_debug "Worker draining"
-}
-
-# Emit bead claimed event (stub)
-_needle_event_bead_claimed() {
-    _needle_debug "Bead claimed: $*"
-}
-
-# Emit bead prompt built event (stub)
-_needle_event_bead_prompt_built() {
-    _needle_debug "Bead prompt built: $*"
-}
-
-# Emit bead agent started event (stub)
-_needle_event_bead_agent_started() {
-    _needle_debug "Bead agent started: $*"
-}
-
-# Emit bead agent completed event (stub)
-_needle_event_bead_agent_completed() {
-    _needle_debug "Bead agent completed: $*"
-}
-
-# Emit bead completed event (stub)
-_needle_event_bead_completed() {
-    _needle_debug "Bead completed: $*"
-}
-
-# Emit bead failed event (stub)
-_needle_event_bead_failed() {
-    _needle_debug "Bead failed: $*"
-}
-
-# Emit bead released event (stub)
-_needle_event_bead_released() {
-    _needle_debug "Bead released: $*"
-}
-
-# Emit error events (stubs)
-_needle_event_error_claim_failed() {
-    _needle_warn "Error: claim failed: $*"
-}
-
-_needle_event_error_complete_failed() {
-    _needle_warn "Error: complete failed: $*"
-}
-
-_needle_event_error_release_failed() {
-    _needle_warn "Error: release failed: $*"
-}
-
-# ============================================================================
-# Telemetry Emission Stubs
-# ============================================================================
-
-# Emit telemetry event (stub)
-_needle_telemetry_emit() {
-    _needle_debug "Telemetry: $*"
-}
-
-# Initialize telemetry (stub)
-_needle_telemetry_init() {
-    _needle_debug "Telemetry initialized"
-}
-
-# ============================================================================
-# Heartbeat Stubs
-# ============================================================================
-
-# Heartbeat keepalive (stub)
-_needle_heartbeat_keepalive() {
-    _needle_debug "Heartbeat keepalive"
-}
-
-# Heartbeat start bead (stub)
-_needle_heartbeat_start_bead() {
-    _needle_debug "Heartbeat start bead: $*"
-}
-
-# Heartbeat end bead (stub)
-_needle_heartbeat_end_bead() {
-    _needle_debug "Heartbeat end bead"
-}
-
-# Heartbeat draining (stub)
-_needle_heartbeat_draining() {
-    _needle_debug "Heartbeat draining"
-}
-
-# Heartbeat cleanup (stub)
-_needle_heartbeat_cleanup() {
-    _needle_debug "Heartbeat cleanup"
-}
-
-# Heartbeat init (stub)
-_needle_heartbeat_init() {
-    _needle_debug "Heartbeat initialized"
-}
-
-# ============================================================================
 # Strand Engine Integration
 # ============================================================================
 
@@ -660,24 +558,13 @@ _needle_run_hook() {
     return 0
 }
 
-# Release bead (stub)
+# Release bead (stub - implemented later in file)
+# This is a placeholder - full implementation is in Bead Release Function section
 _needle_release_bead() {
     local bead_id="$1"
     local reason="$2"
-
     _needle_debug "Releasing bead $bead_id: $reason"
-    # TODO: Implement actual release
-}
-
-# Unregister worker (stub)
-_needle_unregister_worker() {
-    local session="$1"
-    _needle_debug "Unregistering worker: $session"
-}
-
-# Register worker (stub)
-_needle_register_worker() {
-    _needle_debug "Registering worker: $*"
+    # Full implementation in Bead Release Function section below
 }
 
 # ============================================================================
