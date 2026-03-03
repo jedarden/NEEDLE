@@ -45,6 +45,66 @@ _needle_get_priority_weight() {
     echo "${NEEDLE_PRIORITY_WEIGHTS[$priority]}"
 }
 
+# Get claimable beads with fallback for br ready bug
+# Usage: _needle_get_claimable_beads [--workspace <path>]
+# Returns: JSON array of claimable beads (unassigned, unblocked, not deferred)
+# Exit codes:
+#   0 - Success (may return empty array)
+#   1 - Error
+#
+# This function implements a workaround for beads_rust v0.1.13 bug where
+# br ready fails with "Invalid column type Text at index: 14, name: created_by"
+# It falls back to br list with client-side filtering when br ready fails.
+_needle_get_claimable_beads() {
+    local workspace=""
+    local candidates
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --workspace)
+                workspace="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    # Try br ready first (preferred - server-side filtering)
+    if [[ -n "$workspace" ]]; then
+        candidates=$(br ready --workspace="$workspace" --unassigned --json 2>/dev/null)
+    else
+        candidates=$(br ready --unassigned --json 2>/dev/null)
+    fi
+
+    # Check if br ready returned valid JSON array
+    if echo "$candidates" | jq -e 'if type == "array" then true else false end' &>/dev/null; then
+        echo "$candidates"
+        return 0
+    fi
+
+    # br ready failed - use fallback with br list + client-side filtering
+    _needle_debug "br ready failed, using br list fallback"
+
+    if [[ -n "$workspace" ]]; then
+        candidates=$(br list --workspace="$workspace" --status open --json 2>/dev/null)
+    else
+        candidates=$(br list --status open --json 2>/dev/null)
+    fi
+
+    # Filter client-side: unassigned, unblocked, not deferred
+    # These are the same criteria br ready uses internally
+    echo "$candidates" | jq -c '
+        [.[] | select(
+            .assignee == null and
+            .blocked_by == null and
+            (.deferred_until == null or .deferred_until == "")
+        )]
+    ' 2>/dev/null
+}
+
 # Select a bead from the ready queue using weighted random selection
 # Usage: _needle_select_weighted [--json]
 # Returns: bead ID (or full JSON object if --json specified)
@@ -70,9 +130,9 @@ _needle_select_weighted() {
         esac
     done
 
-    # Get claimable beads from br CLI
+    # Get claimable beads from br CLI (with fallback for br ready bug)
     local candidates
-    candidates=$(br ready --unassigned --json 2>/dev/null)
+    candidates=$(_needle_get_claimable_beads)
 
     # Handle empty or invalid response
     if [[ -z "$candidates" ]] || [[ "$candidates" == "[]" ]] || [[ "$candidates" == "null" ]]; then
@@ -157,7 +217,7 @@ _needle_select_weighted() {
 # Returns: JSON array of beads with computed weights
 _needle_list_weighted_beads() {
     local candidates
-    candidates=$(br ready --unassigned --json 2>/dev/null)
+    candidates=$(_needle_get_claimable_beads)
 
     if [[ -z "$candidates" ]] || [[ "$candidates" == "[]" ]] || [[ "$candidates" == "null" ]]; then
         echo "[]"

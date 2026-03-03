@@ -26,6 +26,11 @@ if [[ -z "${_NEEDLE_TELEMETRY_EVENTS_LOADED:-}" ]]; then
     source "$(dirname "${BASH_SOURCE[0]}")/../telemetry/events.sh"
 fi
 
+# Source select module for _needle_get_claimable_beads fallback
+if [[ -z "${_NEEDLE_SELECT_LOADED:-}" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/select.sh"
+fi
+
 # ============================================================================
 # Claim-specific Priority Weights
 # ============================================================================
@@ -101,15 +106,9 @@ _needle_select_bead() {
         esac
     done
 
-    # Build br ready command with optional workspace filter
-    local br_cmd="br ready --unassigned --json"
-    if [[ -n "$workspace" ]]; then
-        br_cmd="br ready --workspace=\"$workspace\" --unassigned --json"
-    fi
-
-    # Get claimable beads from br CLI
+    # Get claimable beads from br CLI (with fallback for br ready bug)
     local candidates
-    candidates=$(eval "$br_cmd" 2>/dev/null)
+    candidates=$(_needle_get_claimable_beads ${workspace:+--workspace "$workspace"})
 
     # Handle empty or invalid response
     if [[ -z "$candidates" ]] || [[ "$candidates" == "[]" ]] || [[ "$candidates" == "null" ]]; then
@@ -443,14 +442,9 @@ _needle_claim_stats() {
         esac
     done
 
-    # Build br ready command
-    local br_cmd="br ready --unassigned --json"
-    if [[ -n "$workspace" ]]; then
-        br_cmd="br ready --workspace=\"$workspace\" --unassigned --json"
-    fi
-
+    # Get claimable beads (with fallback for br ready bug)
     local candidates
-    candidates=$(eval "$br_cmd" 2>/dev/null)
+    candidates=$(_needle_get_claimable_beads ${workspace:+--workspace "$workspace"})
 
     if [[ -z "$candidates" ]] || [[ "$candidates" == "[]" ]] || [[ "$candidates" == "null" ]]; then
         echo '{"total_beads":0,"weighted_pool_size":0,"by_priority":{}}'
