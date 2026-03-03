@@ -74,6 +74,17 @@ _NEEDLE_CONFIG_DEFAULTS='{
     "heartbeat_timeout": 120,
     "bead_timeout": 600,
     "recovery_action": "restart"
+  },
+  "pulse": {
+    "frequency": "24h",
+    "max_beads_per_run": 5,
+    "seen_issues_retention_days": 30,
+    "detectors": {
+      "security": true,
+      "dependencies": true,
+      "docs": true,
+      "coverage": false
+    }
   }
 }'
 
@@ -204,6 +215,30 @@ watchdog:
   # restart: Attempt to respawn the worker after recovery
   # stop: Just kill the worker without respawning
   recovery_action: restart
+
+# Pulse strand configuration (codebase health monitoring)
+# This strand is opt-in only (disabled by default in strands.pulse)
+pulse:
+  # frequency: Minimum time between pulse scans (default: 24h)
+  # Supports: s (seconds), m (minutes), h (hours), d (days)
+  frequency: 24h
+
+  # max_beads_per_run: Maximum beads to create per scan (default: 5)
+  max_beads_per_run: 5
+
+  # seen_issues_retention_days: Days to remember seen issues for deduplication (default: 30)
+  seen_issues_retention_days: 30
+
+  # detectors: Enable/disable specific health detectors
+  detectors:
+    # security: Scan for security vulnerabilities
+    security: true
+    # dependencies: Check for outdated dependencies
+    dependencies: true
+    # docs: Check for documentation drift
+    docs: true
+    # coverage: Monitor test coverage trends
+    coverage: false
 '
 
 # Check if yq is available

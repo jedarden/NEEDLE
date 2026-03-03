@@ -481,6 +481,52 @@ _needle_event_weave_analysis_completed() {
 }
 
 # ============================================================================
+# Pulse Events (Codebase Health Monitoring)
+# ============================================================================
+
+# Emit pulse.bead_created event
+# Usage: _needle_event_pulse_bead_created <bead_id> [category=...] [severity=...] [key=value ...]
+_needle_event_pulse_bead_created() {
+    local bead_id="$1"
+    shift
+    _needle_telemetry_emit "pulse.bead_created" "bead_id=$bead_id" "$@"
+}
+
+# Emit pulse.scan_started event
+# Usage: _needle_event_pulse_scan_started [workspace=...] [key=value ...]
+_needle_event_pulse_scan_started() {
+    _needle_telemetry_emit "pulse.scan_started" "$@"
+}
+
+# Emit pulse.scan_completed event
+# Usage: _needle_event_pulse_scan_completed [issues_found=...] [beads_created=...] [key=value ...]
+_needle_event_pulse_scan_completed() {
+    _needle_telemetry_emit "pulse.scan_completed" "$@"
+}
+
+# Emit pulse.issue_detected event
+# Usage: _needle_event_pulse_issue_detected [category=...] [severity=...] [title=...] [key=value ...]
+_needle_event_pulse_issue_detected() {
+    _needle_telemetry_emit "pulse.issue_detected" "$@"
+}
+
+# Emit pulse.detector_started event
+# Usage: _needle_event_pulse_detector_started <detector_name> [key=value ...]
+_needle_event_pulse_detector_started() {
+    local detector_name="$1"
+    shift
+    _needle_telemetry_emit "pulse.detector_started" "detector=$detector_name" "$@"
+}
+
+# Emit pulse.detector_completed event
+# Usage: _needle_event_pulse_detector_completed <detector_name> [issues_found=...] [key=value ...]
+_needle_event_pulse_detector_completed() {
+    local detector_name="$1"
+    shift
+    _needle_telemetry_emit "pulse.detector_completed" "detector=$detector_name" "$@"
+}
+
+# ============================================================================
 # Mitosis Events (Bead Decomposition)
 # ============================================================================
 
@@ -633,6 +679,12 @@ unravel.analysis_completed
 weave.bead_created
 weave.analysis_started
 weave.analysis_completed
+pulse.bead_created
+pulse.scan_started
+pulse.scan_completed
+pulse.issue_detected
+pulse.detector_started
+pulse.detector_completed
 bead.mitosis.check
 bead.mitosis.started
 bead.mitosis.child_created
