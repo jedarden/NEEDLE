@@ -30,6 +30,11 @@ mkdir -p "$NEEDLE_HOME/$NEEDLE_STATE_DIR"
 mkdir -p "$NEEDLE_HOME/$NEEDLE_LOG_DIR"
 mkdir -p "$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
 
+# Create a test workspace directory for pre-flight verification tests
+# (the knot.sh code does `cd "$workspace"` which requires the directory to exist)
+TEST_WORKSPACE_DIR="/tmp/needle-test-workspace-$$"
+mkdir -p "$TEST_WORKSPACE_DIR/bin"
+
 # Create a minimal config file for testing
 cat > "$NEEDLE_HOME/config.yaml" << 'EOF'
 strands:
@@ -69,11 +74,35 @@ _test_fail() {
 }
 
 # Mock br command for testing
+# Default behavior: no claimable beads (empty arrays)
+# Tests can override by setting MOCK_BR_READY_COUNT or MOCK_BR_LIST_DATA
+#
+# IMPORTANT: This function must be exported to be available in subshells
+# (the knot.sh code runs br commands via $(cd ... && br ...) which creates subshells)
 br() {
     case "$1" in
+        ready)
+            # Return claimable beads count for false positive prevention
+            if [[ -n "$MOCK_BR_READY_COUNT" ]]; then
+                # Return array of mock beads
+                local count="$MOCK_BR_READY_COUNT"
+                local result="["
+                for ((i=0; i<count; i++)); do
+                    [[ $i -gt 0 ]] && result+=","
+                    result+="{\"id\":\"nd-mock-$i\",\"title\":\"Mock bead $i\",\"priority\":2}"
+                done
+                result+="]"
+                echo "$result"
+            else
+                echo '[]'
+            fi
+            ;;
         list)
-            # Return empty array for list commands
-            echo '[]'
+            if [[ -n "$MOCK_BR_LIST_DATA" ]]; then
+                echo "$MOCK_BR_LIST_DATA"
+            else
+                echo '[]'
+            fi
             ;;
         create)
             # Return a mock bead ID
@@ -86,9 +115,14 @@ br() {
     esac
 }
 
+# Export the mock br function and mock variables so they're available in subshells
+export -f br
+export MOCK_BR_READY_COUNT MOCK_BR_LIST_DATA
+
 # Cleanup function
 cleanup() {
     rm -rf "$NEEDLE_HOME"
+    rm -rf "$TEST_WORKSPACE_DIR"
 }
 trap cleanup EXIT
 
@@ -213,6 +247,85 @@ if [[ "$interval" == "3600" ]]; then
 else
     _test_fail "Config rate limit interval incorrect: expected 3600, got $interval"
 fi
+
+# Test 13: Pre-flight verification detects claimable beads via br ready
+_test_start "Pre-flight detects claimable beads via br ready"
+export MOCK_BR_READY_COUNT=5
+if _needle_knot_verify_work_available "$TEST_WORKSPACE_DIR"; then
+    _test_pass "Pre-flight correctly detected claimable beads"
+else
+    _test_fail "Pre-flight failed to detect claimable beads"
+fi
+unset MOCK_BR_READY_COUNT
+
+# Test 14: Pre-flight returns no work when no claimable beads
+_test_start "Pre-flight returns no work when no claimable beads"
+export MOCK_BR_READY_COUNT=""
+export MOCK_BR_LIST_DATA="[]"
+if ! _needle_knot_verify_work_available "$TEST_WORKSPACE_DIR"; then
+    _test_pass "Pre-flight correctly detected no claimable beads"
+else
+    _test_fail "Pre-flight incorrectly found claimable beads when none exist"
+fi
+unset MOCK_BR_READY_COUNT MOCK_BR_LIST_DATA
+
+# Test 15: Strand skips alert when claimable beads exist (false positive prevention)
+_test_start "Strand skips alert when claimable beads exist"
+# Clear any rate limits first
+_needle_knot_clear_rate_limit "$TEST_WORKSPACE_DIR"
+# Set up mock to return claimable beads
+export MOCK_BR_READY_COUNT=3
+if ! _needle_strand_knot "$TEST_WORKSPACE_DIR" "test-agent"; then
+    _test_pass "Strand correctly skipped alert when claimable beads exist"
+else
+    _test_fail "Strand incorrectly created alert despite claimable beads"
+fi
+unset MOCK_BR_READY_COUNT
+
+# Test 16: Pre-flight detects claimable beads via br list fallback
+_test_start "Pre-flight detects claimable beads via br list fallback"
+# Mock br ready to fail (empty), but br list to have claimable beads
+export MOCK_BR_READY_COUNT=""
+export MOCK_BR_LIST_DATA='[{"id":"nd-test-1","title":"Test bead","status":"open","priority":2,"claimed_by":"","blocked_by":"","deferred_until":"","issue_type":"task"}]'
+if _needle_knot_verify_work_available "$TEST_WORKSPACE_DIR"; then
+    _test_pass "Pre-flight correctly used br list fallback"
+else
+    _test_fail "Pre-flight failed to use br list fallback"
+fi
+unset MOCK_BR_READY_COUNT MOCK_BR_LIST_DATA
+
+# Test 17: Pre-flight excludes blocked beads from claimable count
+_test_start "Pre-flight excludes blocked beads from claimable count"
+export MOCK_BR_READY_COUNT=""
+export MOCK_BR_LIST_DATA='[{"id":"nd-blocked-1","title":"Blocked bead","status":"open","priority":2,"claimed_by":"","blocked_by":"nd-other","deferred_until":"","issue_type":"task"}]'
+if ! _needle_knot_verify_work_available "$TEST_WORKSPACE_DIR"; then
+    _test_pass "Pre-flight correctly excluded blocked bead"
+else
+    _test_fail "Pre-flight incorrectly counted blocked bead as claimable"
+fi
+unset MOCK_BR_READY_COUNT MOCK_BR_LIST_DATA
+
+# Test 18: Pre-flight excludes HUMAN beads from claimable count
+_test_start "Pre-flight excludes HUMAN beads from claimable count"
+export MOCK_BR_READY_COUNT=""
+export MOCK_BR_LIST_DATA='[{"id":"nd-human-1","title":"Human alert","status":"open","priority":0,"claimed_by":"","blocked_by":"","deferred_until":"","issue_type":"human"}]'
+if ! _needle_knot_verify_work_available "$TEST_WORKSPACE_DIR"; then
+    _test_pass "Pre-flight correctly excluded HUMAN bead"
+else
+    _test_fail "Pre-flight incorrectly counted HUMAN bead as claimable"
+fi
+unset MOCK_BR_READY_COUNT MOCK_BR_LIST_DATA
+
+# Test 19: Pre-flight excludes deferred beads from claimable count
+_test_start "Pre-flight excludes deferred beads from claimable count"
+export MOCK_BR_READY_COUNT=""
+export MOCK_BR_LIST_DATA='[{"id":"nd-deferred-1","title":"Deferred bead","status":"open","priority":2,"claimed_by":"","blocked_by":"","deferred_until":"2026-12-31","issue_type":"task"}]'
+if ! _needle_knot_verify_work_available "$TEST_WORKSPACE_DIR"; then
+    _test_pass "Pre-flight correctly excluded deferred bead"
+else
+    _test_fail "Pre-flight incorrectly counted deferred bead as claimable"
+fi
+unset MOCK_BR_READY_COUNT MOCK_BR_LIST_DATA
 
 # Summary
 echo ""
