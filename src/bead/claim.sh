@@ -263,7 +263,16 @@ _needle_claim_bead() {
 
         # Attempt atomic claim via br update --claim
         # br returns exit 0 on success, exit 4 on race condition (already claimed)
-        if br update "$bead_id" --claim --actor "$actor" 2>/dev/null; then
+        # FIX: Run in workspace directory if provided (br operates on current directory)
+        local claim_result
+        if [[ -n "$workspace" && -d "$workspace" ]]; then
+            claim_result=$(cd "$workspace" && br update "$bead_id" --claim --actor "$actor" 2>&1)
+        else
+            claim_result=$(br update "$bead_id" --claim --actor "$actor" 2>&1)
+        fi
+        local claim_exit=$?
+
+        if [[ $claim_exit -eq 0 ]]; then
             # Success! Emit telemetry and return
             _needle_event_bead_claimed "$bead_id" \
                 "actor=$actor" \

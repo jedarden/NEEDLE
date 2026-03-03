@@ -75,14 +75,14 @@ _needle_debug() {
     if [[ "${NEEDLE_VERBOSE:-false}" != "true" ]]; then
         return
     fi
-    _needle_print_color "$NEEDLE_COLOR_DIM" "[DEBUG] $*"
+    _needle_print_color "$NEEDLE_COLOR_DIM" "[DEBUG] $*" >&2
 }
 
 _needle_verbose() {
     if [[ "${NEEDLE_VERBOSE:-false}" != "true" ]]; then
         return
     fi
-    _needle_print_color "$NEEDLE_COLOR_CYAN" "  $*"
+    _needle_print_color "$NEEDLE_COLOR_CYAN" "  $*" >&2
 }
 
 _needle_header() {

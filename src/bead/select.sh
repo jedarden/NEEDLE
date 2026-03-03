@@ -127,14 +127,19 @@ _needle_get_claimable_beads() {
 
     # Note: br list doesn't support --workspace flag, it operates on current directory
     # Workspace filtering is handled by running in the correct directory
-    candidates=$(br list --status open --json 2>/dev/null)
+    # FIX: Actually change to the workspace directory if provided
+    if [[ -n "$workspace" && -d "$workspace" ]]; then
+        _needle_debug "DIAG: Running br list in workspace: $workspace"
+        candidates=$(cd "$workspace" && br list --status open --json 2>/dev/null)
+    else
+        candidates=$(br list --status open --json 2>/dev/null)
+    fi
 
-    # Filter client-side: unassigned, unblocked, not deferred
+    # Filter client-side: unassigned, unblocked, not deferred, no open dependencies
     # These are the same criteria br ready uses internally
-    # NOTE: We do NOT filter by dependency_count because br list doesn't include
-    # dependency status (open/closed), only count. Beads with met dependencies
-    # (all closed) should be claimable. The br claim command will reject beads
-    # with unmet dependencies, so we let it handle that check.
+    # NOTE: We filter by dependency_count == 0 because br list doesn't include
+    # dependency status (open/closed). If a bead has dependencies, we can't tell
+    # if they're met without additional queries. The br claim command will validate.
     # NOTE: Also filter out HUMAN type beads - those are alerts, not work items
     local filtered
     filtered=$(echo "$candidates" | jq -c '
@@ -142,6 +147,7 @@ _needle_get_claimable_beads() {
             .assignee == null and
             .blocked_by == null and
             (.deferred_until == null or .deferred_until == "") and
+            (.dependency_count == null or .dependency_count == 0) and
             (.issue_type == null or .issue_type != "human")
         )]
     ' 2>/dev/null)
