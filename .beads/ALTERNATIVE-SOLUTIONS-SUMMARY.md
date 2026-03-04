@@ -183,5 +183,29 @@ Problem resolved
 
 ---
 
+## Recent Resolutions
+
+### nd-19h (2026-03-04) - RESOLVED
+
+**Alert:** Worker claude-code-glm-5-bravo starvation
+
+**Verification:**
+- WAL file: 25.9MB (corrupted)
+- Ready beads: 20 (including 4 P0 tasks)
+- Status: FALSE ALARM
+
+**Resolution:**
+1. Hook manually triggered (nd-3vr tracks CLI integration)
+2. Database rebuilt from JSONL
+3. Bead closed with documentation
+
+**Follow-up Beads:**
+- nd-3vr: Integrate on-human-created hook into br CLI workflow
+- nd-372: Fix SQLite WAL checkpoint issue causing database bloat
+
+**Key Finding:** Hook works but requires manual execution - CLI integration pending.
+
+---
+
 **Last Updated:** 2026-03-04
 **Maintained By:** claude-code-sonnet-alpha

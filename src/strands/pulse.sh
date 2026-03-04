@@ -822,6 +822,547 @@ _pulse_detector_security() {
 }
 
 # ============================================================================
+# Dependency Freshness Detector (nd-1fr)
+# ============================================================================
+
+# Get package last publish date from npm registry
+# Usage: _pulse_get_npm_package_age <package_name>
+# Returns: Age in days, or -1 if unavailable
+_pulse_get_npm_package_age() {
+    local pkg_name="$1"
+
+    # Default to -1 (unknown) if we can't fetch
+    local age_days=-1
+
+    # Query npm registry API
+    # Endpoint: https://registry.npmjs.org/-/package/<package>/dist-tags
+    local api_url="https://registry.npmjs.org/-/package/${pkg_name}/dist-tags"
+
+    # Use curl with timeout and silent mode
+    local response
+    response=$(curl -sSf --connect-timeout 5 --max-time 10 "$api_url" 2>/dev/null) || {
+        _needle_debug "pulse: failed to fetch npm package info for $pkg_name"
+        echo -1
+        return 0
+    }
+
+    # Get the latest version
+    local latest_version
+    latest_version=$(echo "$response" | jq -r '.latest // empty' 2>/dev/null)
+
+    if [[ -z "$latest_version" ]]; then
+        echo -1
+        return 0
+    fi
+
+    # Now fetch the package metadata to get the last publish date
+    local meta_url="https://registry.npmjs.org/${pkg_name}"
+    local meta_response
+    meta_response=$(curl -sSf --connect-timeout 5 --max-time 10 "$meta_url" 2>/dev/null) || {
+        echo -1
+        return 0
+    }
+
+    # Get the time object for the latest version
+    local last_modified
+    last_modified=$(echo "$meta_response" | jq -r '.time["'"$latest_version"'"] // empty' 2>/dev/null)
+
+    if [[ -z "$last_modified" ]]; then
+        echo -1
+        return 0
+    fi
+
+    # Calculate age in days
+    # Convert ISO timestamp to epoch, then calculate days
+    local modified_epoch now_epoch
+    modified_epoch=$(date -d "$last_modified" +%s 2>/dev/null || echo 0)
+
+    if [[ "$modified_epoch" -eq 0 ]]; then
+        echo -1
+        return 0
+    fi
+
+    now_epoch=$(date +%s)
+    local age_seconds=$((now_epoch - modified_epoch))
+    age_days=$((age_seconds / 86400))
+
+    echo "$age_days"
+}
+
+# Get package last publish date from PyPI
+# Usage: _pulse_get_pip_package_age <package_name>
+# Returns: Age in days, or -1 if unavailable
+_pulse_get_pip_package_age() {
+    local pkg_name="$1"
+
+    # Default to -1 (unknown) if we can't fetch
+    local age_days=-1
+
+    # Query PyPI JSON API
+    # Endpoint: https://pypi.org/pypi/<package>/json
+    local api_url="https://pypi.org/pypi/${pkg_name}/json"
+
+    # Use curl with timeout and silent mode
+    local response
+    response=$(curl -sSf --connect-timeout 5 --max-time 10 "$api_url" 2>/dev/null) || {
+        _needle_debug "pulse: failed to fetch PyPI package info for $pkg_name"
+        echo -1
+        return 0
+    }
+
+    # Get the last release upload time
+    # PyPI returns: { "urls": [...], "info": {...}, "last_serial": ... }
+    # We want the most recent upload time from urls or info.version
+    local last_uploaded
+    last_uploaded=$(echo "$response" | jq -r '.urls[-1].upload_time // .info.release_url // empty' 2>/dev/null)
+
+    # Alternative: get the latest version's upload time
+    if [[ -z "$last_uploaded" ]]; then
+        # Try to get the upload_time_iso from the most recent release
+        last_uploaded=$(echo "$response" | jq -r '.urls | sort_by(.upload_time) | .[-1].upload_time // empty' 2>/dev/null)
+    fi
+
+    # Another approach: get from releases
+    if [[ -z "$last_uploaded" ]]; then
+        local latest_version
+        latest_version=$(echo "$response" | jq -r '.info.version // empty' 2>/dev/null)
+        if [[ -n "$latest_version" ]]; then
+            last_uploaded=$(echo "$response" | jq -r '.releases["'"$latest_version"'"][-1].upload_time // empty' 2>/dev/null)
+        fi
+    fi
+
+    if [[ -z "$last_uploaded" ]]; then
+        echo -1
+        return 0
+    fi
+
+    # Calculate age in days
+    # Handle both ISO format and Unix timestamp
+    local modified_epoch now_epoch
+    if [[ "$last_uploaded" =~ ^[0-9]+$ ]]; then
+        # Unix timestamp
+        modified_epoch="$last_uploaded"
+    else
+        # ISO format
+        modified_epoch=$(date -d "$last_uploaded" +%s 2>/dev/null || echo 0)
+    fi
+
+    if [[ "$modified_epoch" -eq 0 ]]; then
+        echo -1
+        return 0
+    fi
+
+    now_epoch=$(date +%s)
+    local age_seconds=$((now_epoch - modified_epoch))
+    age_days=$((age_seconds / 86400))
+
+    echo "$age_days"
+}
+
+# Get installed version from package.json
+# Usage: _pulse_get_npm_installed_version <workspace> <package_name>
+# Returns: Installed version or empty string
+_pulse_get_npm_installed_version() {
+    local workspace="$1"
+    local pkg_name="$2"
+
+    if [[ ! -f "$workspace/package.json" ]]; then
+        echo ""
+        return 0
+    fi
+
+    # Check both dependencies and devDependencies
+    local version
+    version=$(jq -r '.dependencies["'"$pkg_name"'"] // .devDependencies["'"$pkg_name"'"] // empty' "$workspace/package.json" 2>/dev/null)
+
+    # Clean version (remove ^ or ~ prefix)
+    version="${version#^}"
+    version="${version#\~}"
+
+    echo "$version"
+}
+
+# Get installed version from requirements.txt
+# Usage: _pulse_get_pip_installed_version <workspace> <package_name>
+# Returns: Installed version or empty string
+_pulse_get_pip_installed_version() {
+    local workspace="$1"
+    local pkg_name="$2"
+
+    # Check requirements.txt
+    if [[ -f "$workspace/requirements.txt" ]]; then
+        # Match patterns like: package==1.2.3, package>=1.2.3, package~=1.2.3
+        local version
+        version=$(grep -iE "^${pkg_name}[=<>~]+" "$workspace/requirements.txt" 2>/dev/null | head -1 | sed -E 's/.*[=<>~]+//' | cut -d' ' -f1)
+        # Clean version (remove trailing whitespace or comments)
+        version="${version%%#*}"
+        version="${version%% *}"
+        echo "$version"
+        return 0
+    fi
+
+    # Check pyproject.toml for Poetry projects
+    if [[ -f "$workspace/pyproject.toml" ]]; then
+        local version
+        version=$(grep -A2 -iE "^\[tool\.poetry\.dependencies\]" "$workspace/pyproject.toml" 2>/dev/null | \
+                  grep -iE "^${pkg_name}[[:space:]]*=" | \
+                  sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' 2>/dev/null || echo "")
+        if [[ -n "$version" ]]; then
+            echo "$version"
+            return 0
+        fi
+    fi
+
+    echo ""
+}
+
+# Get latest version from npm registry
+# Usage: _pulse_get_npm_latest_version <package_name>
+# Returns: Latest version or empty string
+_pulse_get_npm_latest_version() {
+    local pkg_name="$1"
+
+    local api_url="https://registry.npmjs.org/-/package/${pkg_name}/dist-tags"
+
+    local response
+    response=$(curl -sSf --connect-timeout 5 --max-time 10 "$api_url" 2>/dev/null) || {
+        echo ""
+        return 0
+    }
+
+    jq -r '.latest // empty' <<< "$response" 2>/dev/null || echo ""
+}
+
+# Get latest version from PyPI
+# Usage: _pulse_get_pip_latest_version <package_name>
+# Returns: Latest version or empty string
+_pulse_get_pip_latest_version() {
+    local pkg_name="$1"
+
+    local api_url="https://pypi.org/pypi/${pkg_name}/json"
+
+    local response
+    response=$(curl -sSf --connect-timeout 5 --max-time 10 "$api_url" 2>/dev/null) || {
+        echo ""
+        return 0
+    }
+
+    jq -r '.info.version // empty' <<< "$response" 2>/dev/null || echo ""
+}
+
+# Scan Node.js dependencies for staleness
+# Usage: _pulse_scan_npm_deps <workspace>
+# Returns: JSON array of stale dependency issue objects
+_pulse_scan_npm_deps() {
+    local workspace="$1"
+    local issues="[]"
+
+    # Check for package.json
+    if [[ ! -f "$workspace/package.json" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    # Get threshold from config (default: 365 days)
+    local threshold
+    threshold=$(get_config "strands.pulse.stale_threshold_days" "365")
+
+    # Get max deps to check per run
+    local max_deps
+    max_deps=$(get_config "strands.pulse.max_deps_per_run" "10")
+
+    # Get dependencies list (both dependencies and devDependencies)
+    local deps
+    deps=$(jq -r '(.dependencies // {}) + (.devDependencies // {}) | keys[]' "$workspace/package.json" 2>/dev/null)
+
+    if [[ -z "$deps" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    local deps_checked=0
+
+    while IFS= read -r pkg_name && ((deps_checked < max_deps)); do
+        [[ -z "$pkg_name" ]] && continue
+
+        # Skip private/scoped packages that might not be on npm
+        if [[ "$pkg_name" == @* ]]; then
+            continue
+        fi
+
+        # Get package age
+        local age_days
+        age_days=$(_pulse_get_npm_package_age "$pkg_name")
+
+        # Skip if we couldn't determine age
+        if [[ "$age_days" -lt 0 ]]; then
+            _needle_debug "pulse: could not determine age for npm package: $pkg_name"
+            continue
+        fi
+
+        ((deps_checked++))
+
+        # Check if stale
+        if ((age_days >= threshold)); then
+            local installed_version latest_version
+            installed_version=$(_pulse_get_npm_installed_version "$workspace" "$pkg_name")
+            latest_version=$(_pulse_get_npm_latest_version "$pkg_name")
+
+            local title="Update stale npm dependency: ${pkg_name} (${age_days} days old)"
+            local fingerprint="stale-dep:npm:${pkg_name}"
+
+            local description="npm package **${pkg_name}** has not been updated in ${age_days} days.
+
+**Current Version:** ${installed_version:-unknown}
+**Latest Version:** ${latest_version:-unknown}
+**Last Updated:** ${age_days} days ago
+**Threshold:** ${threshold} days
+
+## Context
+This dependency hasn't received updates in over a year, which may indicate:
+- The package is abandoned or unmaintained
+- Security vulnerabilities may exist without patches
+- Compatibility issues with newer runtimes/libraries
+
+## Remediation
+1. Check if a newer version is available: \`npm outdated ${pkg_name}\`
+2. Review the package's changelog for breaking changes
+3. Update the dependency: \`npm update ${pkg_name}\` or \`npm install ${pkg_name}@latest\`
+4. Test thoroughly after updating
+5. Consider alternatives if the package is abandoned"
+
+            # Determine severity based on age
+            local severity="low"
+            if ((age_days >= 730)); then
+                severity="medium"  # 2+ years
+            fi
+            if ((age_days >= 1095)); then
+                severity="high"    # 3+ years
+            fi
+
+            local issue
+            issue=$(jq -n \
+                --arg category "dependencies" \
+                --arg severity "$severity" \
+                --arg title "$title" \
+                --arg description "$description" \
+                --arg fingerprint "$fingerprint" \
+                --arg labels "npm,dependencies,stale,maintenance" \
+                '{
+                    category: $category,
+                    severity: $severity,
+                    title: $title,
+                    description: $description,
+                    fingerprint: $fingerprint,
+                    labels: $labels
+                }')
+
+            issues=$(echo "$issues" "$issue" | jq -s 'add' 2>/dev/null || echo "$issues")
+        fi
+    done <<< "$deps"
+
+    echo "$issues"
+}
+
+# Scan Python dependencies for staleness
+# Usage: _pulse_scan_pip_deps <workspace>
+# Returns: JSON array of stale dependency issue objects
+_pulse_scan_pip_deps() {
+    local workspace="$1"
+    local issues="[]"
+
+    # Check for Python project files
+    local has_python_reqs=false
+    if [[ -f "$workspace/requirements.txt" ]] || [[ -f "$workspace/pyproject.toml" ]] || \
+       [[ -f "$workspace/setup.py" ]] || [[ -f "$workspace/Pipfile" ]]; then
+        has_python_reqs=true
+    fi
+
+    if [[ "$has_python_reqs" != "true" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    # Get threshold from config (default: 365 days)
+    local threshold
+    threshold=$(get_config "strands.pulse.stale_threshold_days" "365")
+
+    # Get max deps to check per run
+    local max_deps
+    max_deps=$(get_config "strands.pulse.max_deps_per_run" "10")
+
+    # Parse requirements.txt for package names
+    local pkgs=()
+    if [[ -f "$workspace/requirements.txt" ]]; then
+        while IFS= read -r line; do
+            # Skip comments, empty lines, and pip options
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line// }" ]] && continue
+            [[ "$line" =~ ^-[a-z] ]] && continue
+            [[ "$line" =~ ^-- ]] && continue
+
+            # Extract package name (before version specifier)
+            local pkg_name
+            pkg_name=$(echo "$line" | sed -E 's/([a-zA-Z0-9_-]+).*/\1/' | head -1)
+            pkg_name="${pkg_name%%\[*}"  # Remove extras marker
+
+            if [[ -n "$pkg_name" ]]; then
+                pkgs+=("$pkg_name")
+            fi
+        done < "$workspace/requirements.txt"
+    fi
+
+    if [[ ${#pkgs[@]} -eq 0 ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    local deps_checked=0
+
+    for pkg_name in "${pkgs[@]}"; do
+        ((deps_checked >= max_deps)) && break
+
+        # Get package age
+        local age_days
+        age_days=$(_pulse_get_pip_package_age "$pkg_name")
+
+        # Skip if we couldn't determine age
+        if [[ "$age_days" -lt 0 ]]; then
+            _needle_debug "pulse: could not determine age for pip package: $pkg_name"
+            continue
+        fi
+
+        ((deps_checked++))
+
+        # Check if stale
+        if ((age_days >= threshold)); then
+            local installed_version latest_version
+            installed_version=$(_pulse_get_pip_installed_version "$workspace" "$pkg_name")
+            latest_version=$(_pulse_get_pip_latest_version "$pkg_name")
+
+            local title="Update stale pip dependency: ${pkg_name} (${age_days} days old)"
+            local fingerprint="stale-dep:pip:${pkg_name}"
+
+            local description="Python package **${pkg_name}** has not been updated in ${age_days} days.
+
+**Current Version:** ${installed_version:-unknown}
+**Latest Version:** ${latest_version:-unknown}
+**Last Updated:** ${age_days} days ago
+**Threshold:** ${threshold} days
+
+## Context
+This dependency hasn't received updates in over a year, which may indicate:
+- The package is abandoned or unmaintained
+- Security vulnerabilities may exist without patches
+- Compatibility issues with newer Python versions
+
+## Remediation
+1. Check for updates: \`pip index versions ${pkg_name}\`
+2. Review the package's changelog for breaking changes
+3. Update the dependency: \`pip install --upgrade ${pkg_name}\`
+4. Update requirements.txt with the new version
+5. Test thoroughly after updating
+6. Consider alternatives if the package is abandoned"
+
+            # Determine severity based on age
+            local severity="low"
+            if ((age_days >= 730)); then
+                severity="medium"  # 2+ years
+            fi
+            if ((age_days >= 1095)); then
+                severity="high"    # 3+ years
+            fi
+
+            local issue
+            issue=$(jq -n \
+                --arg category "dependencies" \
+                --arg severity "$severity" \
+                --arg title "$title" \
+                --arg description "$description" \
+                --arg fingerprint "$fingerprint" \
+                --arg labels "pip,python,dependencies,stale,maintenance" \
+                '{
+                    category: $category,
+                    severity: $severity,
+                    title: $title,
+                    description: $description,
+                    fingerprint: $fingerprint,
+                    labels: $labels
+                }')
+
+            issues=$(echo "$issues" "$issue" | jq -s 'add' 2>/dev/null || echo "$issues")
+        fi
+    done
+
+    echo "$issues"
+}
+
+# Main dependency freshness detector
+# Scans for stale/outdated dependencies in Node.js and Python projects
+#
+# Usage: _pulse_detector_dependencies <workspace> <agent>
+# Returns: JSON array of dependency issue objects
+_pulse_detector_dependencies() {
+    local workspace="$1"
+    local agent="$2"
+
+    # Check if dependencies detector is enabled
+    local deps_enabled
+    deps_enabled=$(get_config "strands.pulse.detectors.dependencies" "true")
+
+    if [[ "$deps_enabled" != "true" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    _needle_diag_strand "pulse" "Running dependency freshness detector" \
+        "workspace=$workspace" \
+        "agent=$agent"
+
+    # Emit detector started event
+    _needle_telemetry_emit "pulse.detector_started" \
+        "detector=dependencies" \
+        "workspace=$workspace"
+
+    local all_issues="[]"
+    local issues_found=0
+
+    # Scan npm dependencies for Node.js projects
+    local npm_issues
+    npm_issues=$(_pulse_scan_npm_deps "$workspace")
+    if [[ -n "$npm_issues" ]] && [[ "$npm_issues" != "[]" ]]; then
+        all_issues=$(echo "$all_issues" "$npm_issues" | jq -s 'add' 2>/dev/null || echo "$all_issues")
+        local npm_count
+        npm_count=$(echo "$npm_issues" | jq 'length' 2>/dev/null || echo 0)
+        ((issues_found += npm_count))
+        _needle_verbose "pulse: found $npm_count stale npm dependency(ies)"
+    fi
+
+    # Scan pip dependencies for Python projects
+    local pip_issues
+    pip_issues=$(_pulse_scan_pip_deps "$workspace")
+    if [[ -n "$pip_issues" ]] && [[ "$pip_issues" != "[]" ]]; then
+        all_issues=$(echo "$all_issues" "$pip_issues" | jq -s 'add' 2>/dev/null || echo "$all_issues")
+        local pip_count
+        pip_count=$(echo "$pip_issues" | jq 'length' 2>/dev/null || echo 0)
+        ((issues_found += pip_count))
+        _needle_verbose "pulse: found $pip_count stale pip dependency(ies)"
+    fi
+
+    # Emit detector completed event
+    _needle_telemetry_emit "pulse.detector_completed" \
+        "detector=dependencies" \
+        "workspace=$workspace" \
+        "issues_found=$issues_found"
+
+    _needle_diag_strand "pulse" "Dependency freshness detector completed" \
+        "workspace=$workspace" \
+        "issues_found=$issues_found"
+
+    echo "$all_issues"
+}
+
+# ============================================================================
 # Documentation Drift Detector (nd-gn2)
 # ============================================================================
 
@@ -1595,7 +2136,7 @@ _pulse_collect_issues() {
         fi
     fi
 
-    # Dependency freshness detector (placeholder - implemented in nd-qpj-3)
+    # Dependency freshness detector (implemented in nd-1fr)
     if declare -f _pulse_detector_dependencies &>/dev/null; then
         local dep_issues
         dep_issues=$(_pulse_detector_dependencies "$workspace" "$agent")

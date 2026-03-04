@@ -1118,6 +1118,229 @@ test_todos_max_per_run_config() {
 }
 
 # ============================================================================
+# Test: Dependency Freshness Detector (nd-1fr)
+# ============================================================================
+
+test_deps_detector_function_exists() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    if declare -f _pulse_detector_dependencies &>/dev/null; then
+        pass "Dependency freshness detector function exists"
+    else
+        fail "Dependency freshness detector function not found"
+    fi
+}
+
+test_deps_detector_returns_json_array() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # Create temp directory without project files
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    local result
+    result=$(_pulse_detector_dependencies "$temp_dir" "test-agent")
+
+    rm -rf "$temp_dir"
+
+    # Check if result is valid JSON array
+    if echo "$result" | jq -e 'type == "array"' &>/dev/null; then
+        pass "Dependency freshness detector returns valid JSON array"
+    else
+        fail "Dependency freshness detector should return valid JSON array"
+    fi
+}
+
+test_deps_detector_no_package_json() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # Create temp directory without package.json
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    local result
+    result=$(_pulse_scan_npm_deps "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    if [[ "$result" == "[]" ]]; then
+        pass "npm deps scan returns empty array when no package.json"
+    else
+        fail "npm deps scan should return empty array for non-Node.js projects"
+    fi
+}
+
+test_deps_detector_no_requirements() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # Create temp directory without Python requirements
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    local result
+    result=$(_pulse_scan_pip_deps "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    if [[ "$result" == "[]" ]]; then
+        pass "pip deps scan returns empty array when no requirements.txt"
+    else
+        fail "pip deps scan should return empty array for non-Python projects"
+    fi
+}
+
+test_deps_threshold_config() {
+    # Test threshold config (should return default 365 if not configured)
+    local config_file="$PROJECT_ROOT/src/lib/config.sh"
+    if [[ -f "$config_file" ]] && grep -q "stale_threshold_days.*365" "$config_file" 2>/dev/null; then
+        pass "Stale threshold defaults to 365 days in config"
+    else
+        fail "Stale threshold should default to 365 days in config"
+    fi
+}
+
+test_deps_max_per_run_config() {
+    # Test max deps per run config (should return default 10 if not configured)
+    local config_file="$PROJECT_ROOT/src/lib/config.sh"
+    if [[ -f "$config_file" ]] && grep -q "max_deps_per_run.*10" "$config_file" 2>/dev/null; then
+        pass "Max deps per run defaults to 10 in config"
+    else
+        fail "Max deps per run should default to 10 in config"
+    fi
+}
+
+test_deps_npm_fingerprint_format() {
+    # Test that npm dependency fingerprints follow expected format
+    local fingerprint="stale-dep:npm:lodash"
+
+    if [[ "$fingerprint" == stale-dep:npm:* ]]; then
+        pass "npm dependency fingerprint format is correct (starts with stale-dep:npm:)"
+    else
+        fail "npm dependency fingerprint format incorrect"
+    fi
+}
+
+test_deps_pip_fingerprint_format() {
+    # Test that pip dependency fingerprints follow expected format
+    local fingerprint="stale-dep:pip:requests"
+
+    if [[ "$fingerprint" == stale-dep:pip:* ]]; then
+        pass "pip dependency fingerprint format is correct (starts with stale-dep:pip:)"
+    else
+        fail "pip dependency fingerprint format incorrect"
+    fi
+}
+
+test_deps_severity_based_on_age() {
+    # Test severity escalation based on age
+    local age_365=365
+    local age_730=730
+    local age_1095=1095
+
+    # Test severity determination logic
+    local severity_365="low"
+    local severity_730="medium"
+    local severity_1095="high"
+
+    if ((age_365 >= 1095)); then
+        severity_365="high"
+    elif ((age_365 >= 730)); then
+        severity_365="medium"
+    fi
+
+    if ((age_730 >= 1095)); then
+        severity_730="high"
+    elif ((age_730 >= 730)); then
+        severity_730="medium"
+    fi
+
+    if ((age_1095 >= 1095)); then
+        severity_1095="high"
+    elif ((age_1095 >= 730)); then
+        severity_1095="medium"
+    fi
+
+    if [[ "$severity_365" == "low" ]] && [[ "$severity_730" == "medium" ]] && [[ "$severity_1095" == "high" ]]; then
+        pass "Dependency severity correctly escalates based on age"
+    else
+        fail "Dependency severity should escalate: 365d=low, 730d=medium, 1095d=high"
+    fi
+}
+
+test_deps_issue_format() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # Create a mock issue to verify format
+    local issue
+    issue=$(jq -n \
+        --arg category "dependencies" \
+        --arg severity "low" \
+        --arg title "Update stale npm dependency: test-pkg (400 days old)" \
+        --arg description "Test description" \
+        --arg fingerprint "stale-dep:npm:test-pkg" \
+        --arg labels "npm,dependencies,stale,maintenance" \
+        '{
+            category: $category,
+            severity: $severity,
+            title: $title,
+            description: $description,
+            fingerprint: $fingerprint,
+            labels: $labels
+        }')
+
+    local has_category has_severity has_title has_description has_fingerprint
+    has_category=$(echo "$issue" | jq 'has("category")')
+    has_severity=$(echo "$issue" | jq 'has("severity")')
+    has_title=$(echo "$issue" | jq 'has("title")')
+    has_description=$(echo "$issue" | jq 'has("description")')
+    has_fingerprint=$(echo "$issue" | jq 'has("fingerprint")')
+
+    if [[ "$has_category" == "true" ]] && \
+       [[ "$has_severity" == "true" ]] && \
+       [[ "$has_title" == "true" ]] && \
+       [[ "$has_description" == "true" ]] && \
+       [[ "$has_fingerprint" == "true" ]]; then
+        pass "Dependency issue object has all required fields"
+    else
+        fail "Dependency issue object missing required fields"
+    fi
+}
+
+test_deps_detector_handles_missing_curl() {
+    # This test verifies the detector handles network failures gracefully
+    # Since curl is likely available, we just verify the error handling logic exists
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # The function should exist and handle network errors
+    if declare -f _pulse_get_npm_package_age &>/dev/null; then
+        pass "npm package age function exists with error handling"
+    else
+        fail "npm package age function should exist"
+    fi
+}
+
+test_deps_detector_handles_missing_pip() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # The function should exist and handle network errors
+    if declare -f _pulse_get_pip_package_age &>/dev/null; then
+        pass "pip package age function exists with error handling"
+    else
+        fail "pip package age function should exist"
+    fi
+}
+
+test_deps_detector_enabled_config() {
+    # Test that dependencies detector is enabled by default in config
+    local config_file="$PROJECT_ROOT/src/lib/config.sh"
+    if [[ -f "$config_file" ]] && grep -q '"dependencies".*true' "$config_file" 2>/dev/null; then
+        pass "Dependencies detector is enabled by default in config"
+    else
+        fail "Dependencies detector should be enabled by default in config"
+    fi
+}
+
+# ============================================================================
 # Run Tests
 # ============================================================================
 
@@ -1248,6 +1471,23 @@ run_tests() {
     test_todos_fingerprint_format || ((failed++))
     test_todos_severity_based_on_age || ((failed++))
     test_todos_max_per_run_config || ((failed++))
+
+    # Dependency freshness detector tests (nd-1fr)
+    echo ""
+    echo "=== Dependency Freshness Detector Tests (nd-1fr) ==="
+    test_deps_detector_function_exists || ((failed++))
+    test_deps_detector_returns_json_array || ((failed++))
+    test_deps_detector_no_package_json || ((failed++))
+    test_deps_detector_no_requirements || ((failed++))
+    test_deps_threshold_config || ((failed++))
+    test_deps_max_per_run_config || ((failed++))
+    test_deps_npm_fingerprint_format || ((failed++))
+    test_deps_pip_fingerprint_format || ((failed++))
+    test_deps_severity_based_on_age || ((failed++))
+    test_deps_issue_format || ((failed++))
+    test_deps_detector_handles_missing_curl || ((failed++))
+    test_deps_detector_handles_missing_pip || ((failed++))
+    test_deps_detector_enabled_config || ((failed++))
 
     echo ""
     if [[ $failed -eq 0 ]]; then

@@ -86,6 +86,8 @@ _NEEDLE_CONFIG_DEFAULTS='{
     "coverage_threshold": 70,
     "todo_age_days": 180,
     "max_todos_per_run": 10,
+    "stale_threshold_days": 365,
+    "max_deps_per_run": 10,
     "detectors": {
       "security": true,
       "dependencies": true,
@@ -265,6 +267,12 @@ pulse:
 
   # max_todos_per_run: Maximum stale TODOs to report per scan (default: 10)
   max_todos_per_run: 10
+
+  # stale_threshold_days: Days before a dependency is considered stale (default: 365)
+  stale_threshold_days: 365
+
+  # max_deps_per_run: Maximum stale dependencies to report per scan (default: 10)
+  max_deps_per_run: 10
 
   # detectors: Enable/disable specific health detectors
   detectors:
