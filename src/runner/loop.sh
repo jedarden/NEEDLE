@@ -161,7 +161,7 @@ _needle_reset_backoff() {
 # Usage: _needle_increment_backoff
 # Returns: Number of seconds to sleep (also stored in NEEDLE_BACKOFF_SECONDS)
 _needle_increment_backoff() {
-    ((NEEDLE_FAILURE_COUNT++))
+    ((NEEDLE_FAILURE_COUNT++)) || true
     NEEDLE_LAST_FAILURE_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     _needle_debug "Failure count incremented to: $NEEDLE_FAILURE_COUNT"
@@ -255,7 +255,8 @@ _needle_init_config_tracking() {
 # Uses file mtime comparison - no inotify dependency
 # Called periodically from the main loop
 # Usage: _needle_check_config_reload
-# Returns: 0 if reload occurred, 1 if no change
+# Returns: Always 0 (compatible with set -e)
+# Side effect: Reloads config if changes detected
 _needle_check_config_reload() {
     local global_config="${NEEDLE_HOME:-$HOME/.needle}/config.yaml"
     local ws_config=""
@@ -263,9 +264,10 @@ _needle_check_config_reload() {
     local reload_sources=()
 
     # Check if we should skip this check (only check every N iterations)
-    ((NEEDLE_CONFIG_CHECK_COUNTER++))
+    # Note: Use || true to prevent set -e from triggering when counter is 0
+    ((NEEDLE_CONFIG_CHECK_COUNTER++)) || true
     if [[ $NEEDLE_CONFIG_CHECK_COUNTER -lt $NEEDLE_CONFIG_CHECK_INTERVAL ]]; then
-        return 1
+        return 0  # No change, but not an error
     fi
     NEEDLE_CONFIG_CHECK_COUNTER=0
 
@@ -326,11 +328,9 @@ _needle_check_config_reload() {
             "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
         _needle_success "Configuration reloaded successfully"
-
-        return 0
     fi
 
-    return 1
+    return 0  # Always return 0 (compatible with set -e)
 }
 
 # Validate configuration before hot-reload
@@ -845,7 +845,7 @@ _needle_worker_loop() {
             _needle_debug "Strand engine found work"
         elif [[ "$strand_result" -eq 1 ]]; then
             # No work found
-            ((consecutive_empty++))
+            ((consecutive_empty++)) || true
 
             # Track idle time
             if [[ -z "$idle_start" ]]; then

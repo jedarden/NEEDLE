@@ -201,9 +201,9 @@ _needle_telemetry_emit() {
         echo "$json" >> "$NEEDLE_LOG_FILE"
     fi
 
-    # Print to stdout if verbose mode is enabled
+    # Print to stderr if verbose mode is enabled (stdout reserved for return values)
     if [[ "${NEEDLE_VERBOSE:-}" == "true" ]]; then
-        echo "$json"
+        echo "$json" >&2
     fi
 
     return 0

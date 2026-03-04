@@ -315,7 +315,8 @@ _needle_claim_bead() {
                 "attempt=$attempt" \
                 "workspace=$workspace"
 
-            _needle_success "Claimed bead: $bead_id"
+            # NOTE: Redirect to stderr - stdout reserved for return value
+            _needle_success "Claimed bead: $bead_id" >&2
             echo "$bead_id"
             return 0
         fi

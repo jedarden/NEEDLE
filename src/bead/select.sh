@@ -361,9 +361,10 @@ _needle_get_claimable_beads() {
     # Try br ready first (preferred - server-side filtering)
     # Note: br ready outputs to stderr, so we need to capture stderr
     # Also, it may output log lines before JSON, so we extract just the JSON
+    # NOTE: br ready doesn't support --workspace flag, so we cd to the workspace
     local raw_output
-    if [[ -n "$workspace" ]]; then
-        raw_output=$(br ready --workspace="$workspace" --unassigned --json 2>&1)
+    if [[ -n "$workspace" && -d "$workspace" ]]; then
+        raw_output=$(cd "$workspace" && br ready --unassigned --json 2>&1)
     else
         raw_output=$(br ready --unassigned --json 2>&1)
     fi
@@ -408,8 +409,82 @@ _needle_get_claimable_beads() {
                 "filtered_count=$filtered_count"
         fi
 
-        echo "$filtered_candidates"
-        return 0
+        # ====================================================================
+        # WORK STEALING: Also include stealable beads (assigned to inactive workers)
+        # ====================================================================
+        # This fixes the bug where workers couldn't find work because beads
+        # were assigned to "coder" (stealable) but never included in results.
+        # See: nd-1sn8 (NEEDLE stuck: no work found)
+        if _needle_work_stealing_enabled; then
+            # Get ALL open beads (not just unassigned) to check for stealable ones
+            local all_open_beads
+            if [[ -n "$workspace" && -d "$workspace" ]]; then
+                all_open_beads=$(cd "$workspace" && br list --status open --priority 0,1,2,3 --json 2>/dev/null)
+            else
+                all_open_beads=$(br list --status open --priority 0,1,2,3 --json 2>/dev/null)
+            fi
+
+            # Get beads that have assignees (potential steal candidates)
+            local assigned_beads
+            assigned_beads=$(echo "$all_open_beads" | jq -c '
+                [.[] | select(
+                    .assignee != null and
+                    .blocked_by == null and
+                    (.deferred_until == null or .deferred_until == "") and
+                    (.issue_type == null or .issue_type != "human")
+                )]
+            ' 2>/dev/null)
+
+            local assigned_count
+            assigned_count=$(echo "$assigned_beads" | jq 'length' 2>/dev/null || echo "0")
+
+            if [[ "$assigned_count" -gt 0 ]]; then
+                _needle_debug "DIAG: Checking $assigned_count assigned beads for work stealing (br ready path)"
+
+                # Check each assigned bead to see if it's stealable
+                while IFS= read -r bead; do
+                    [[ -z "$bead" || "$bead" == "null" ]] && continue
+
+                    local bead_id assignee
+                    bead_id=$(echo "$bead" | jq -r '.id')
+                    assignee=$(echo "$bead" | jq -r '.assignee')
+
+                    # Check if this bead's claim is stealable
+                    if _needle_is_claim_stealable "$bead"; then
+                        # Check dependencies before including
+                        local dep_count open_deps
+                        dep_count=$(echo "$bead" | jq -r '.dependency_count // 0')
+
+                        if [[ "$dep_count" -gt 0 ]]; then
+                            local deps_status
+                            deps_status=$(br dep list "$bead_id" --json 2>/dev/null)
+                            open_deps=$(echo "$deps_status" | jq '[.[] | select(.status != "closed")] | length' 2>/dev/null || echo "1")
+                        else
+                            open_deps=0
+                        fi
+
+                        if [[ "$open_deps" -eq 0 ]]; then
+                            _needle_debug "DIAG: Adding stealable bead $bead_id (assignee=$assignee) to br ready results"
+                            filtered_candidates=$(echo "$filtered_candidates" | jq -c --argjson bead "$bead" '. + [$bead]')
+                        fi
+                    fi
+                done < <(echo "$assigned_beads" | jq -c '.[]')
+            fi
+        fi
+
+        # Log final count after work stealing
+        local final_count
+        final_count=$(echo "$filtered_candidates" | jq 'length' 2>/dev/null || echo "0")
+        _needle_debug "DIAG: br ready path returning $final_count beads (after work stealing)"
+
+        # Only return if we found beads; if empty, continue to fallback path
+        # which may have additional work stealing logic
+        if [[ "$final_count" -gt 0 ]]; then
+            echo "$filtered_candidates"
+            return 0
+        fi
+        # Empty results - fall through to try fallback path
+        _needle_debug "DIAG: br ready returned empty, falling through to fallback path"
     fi
 
     # Check for error response (beads_rust v0.1.13 schema bug)
@@ -503,6 +578,72 @@ _needle_get_claimable_beads() {
         "workspace=$workspace" \
         "count=$count" \
         "source=br_list_fallback"
+
+    # ========================================================================
+    # WORK STEALING: Include stealable beads assigned to inactive workers
+    # ========================================================================
+    # This fixes the bug where workers couldn't find work because beads
+    # were assigned to "coder" (stealable) but never included in results.
+    # See: nd-1sn8 (NEEDLE stuck: no work found)
+    if _needle_work_stealing_enabled; then
+        local stealable_beads
+        # Get beads assigned to stealable assignees (e.g., "coder")
+        stealable_beads=$(echo "$candidates" | jq -c '
+            [.[] | select(
+                .assignee != null and
+                .blocked_by == null and
+                (.deferred_until == null or .deferred_until == "") and
+                (.issue_type == null or .issue_type != "human")
+            )]
+        ' 2>/dev/null)
+
+        local stealable_count
+        stealable_count=$(echo "$stealable_beads" | jq 'length' 2>/dev/null || echo "0")
+
+        if [[ "$stealable_count" -gt 0 ]]; then
+            _needle_debug "DIAG: Checking $stealable_count assigned beads for work stealing"
+
+            # Check each assigned bead to see if it's stealable
+            while IFS= read -r bead; do
+                local bead_id assignee
+                bead_id=$(echo "$bead" | jq -r '.id')
+                assignee=$(echo "$bead" | jq -r '.assignee')
+
+                # Check if this bead's claim is stealable
+                if _needle_is_claim_stealable "$bead"; then
+                    # Also check dependencies before including
+                    local dep_count open_deps
+                    dep_count=$(echo "$bead" | jq -r '.dependency_count // 0')
+
+                    if [[ "$dep_count" -gt 0 ]]; then
+                        local deps_status
+                        deps_status=$(br dep list "$bead_id" --json 2>/dev/null)
+                        open_deps=$(echo "$deps_status" | jq '[.[] | select(.status != "closed")] | length' 2>/dev/null || echo "1")
+                    else
+                        open_deps=0
+                    fi
+
+                    if [[ "$open_deps" -eq 0 ]]; then
+                        _needle_debug "DIAG: Adding stealable bead $bead_id (assignee=$assignee)"
+                        final_filtered=$(echo "$final_filtered" | jq -c --argjson bead "$bead" '. + [$bead]')
+                    fi
+                fi
+            done < <(echo "$stealable_beads" | jq -c '.[]')
+        fi
+    fi
+
+    # Final count after work stealing
+    local final_count
+    final_count=$(echo "$final_filtered" | jq 'length' 2>/dev/null || echo "0")
+
+    if [[ "$final_count" -gt "$count" ]]; then
+        _needle_debug "DIAG: Work stealing added $((final_count - count)) beads"
+        _needle_diag_select "Work stealing added beads" \
+            "workspace=$workspace" \
+            "unassigned_count=$count" \
+            "stolen_count=$((final_count - count))" \
+            "total_count=$final_count"
+    fi
 
     echo "$final_filtered"
 }

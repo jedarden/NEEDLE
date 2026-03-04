@@ -33,6 +33,7 @@ source "$NEEDLE_ROOT_DIR/src/lib/paths.sh"
 source "$NEEDLE_ROOT_DIR/src/lib/json.sh"
 source "$NEEDLE_ROOT_DIR/src/lib/config.sh"
 source "$NEEDLE_ROOT_DIR/src/lib/utils.sh"
+source "$NEEDLE_ROOT_DIR/src/lib/workspace.sh"
 
 # Source runner modules
 source "$NEEDLE_ROOT_DIR/src/runner/state.sh"

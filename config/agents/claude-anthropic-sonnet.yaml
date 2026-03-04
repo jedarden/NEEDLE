@@ -13,8 +13,10 @@ model: sonnet          # Model identifier
 
 # Invocation template
 # Variables: ${WORKSPACE}, ${PROMPT}, ${BEAD_ID}, ${BEAD_TITLE}
+# NOTE: unset CLAUDECODE prevents nested session detection when running inside Claude Code
 invoke: |
   cd ${WORKSPACE} && \
+  unset CLAUDECODE && \
   ANTHROPIC_MODEL=claude-sonnet-4-5-20250929 \
   claude --print \
          --dangerously-skip-permissions \
