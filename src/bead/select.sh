@@ -46,7 +46,6 @@ fi
 
 # Source billing models module for priority weights
 if [[ -z "${_NEEDLE_BILLING_MODELS_LOADED:-}" ]]; then
-    local billing_path
     billing_path="${NEEDLE_SRC:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/lib/billing_models.sh"
     if [[ -f "$billing_path" ]]; then
         source "$billing_path"
