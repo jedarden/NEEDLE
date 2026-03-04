@@ -114,7 +114,7 @@ _needle_knot_verify_work_available() {
 
     # Method 3: Direct br list check with comprehensive filtering
     # Filters: open status, unclaimed, not blocked, not deferred, not HUMAN type
-    diag_direct_count=$(cd "$workspace" 2>/dev/null && br list --status open --json 2>/dev/null | \
+    diag_direct_count=$(cd "$workspace" 2>/dev/null && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
         jq '[.[] | select(.claimed_by == null or .claimed_by == "") |
                    select(.blocked_by == null or .blocked_by == "") |
                    select(.deferred_until == null or .deferred_until == "") |
@@ -126,7 +126,7 @@ _needle_knot_verify_work_available() {
     fi
 
     # Method 4: Check for any open beads at all (diagnostic only)
-    diag_any_open=$(cd "$workspace" 2>/dev/null && br list --status open --json 2>/dev/null | \
+    diag_any_open=$(cd "$workspace" 2>/dev/null && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
         jq 'length' 2>/dev/null || echo "0")
 
     if [[ "$diag_any_open" -gt 0 ]]; then
@@ -135,15 +135,15 @@ _needle_knot_verify_work_available() {
         _needle_debug "knot: found $diag_any_open open beads but none claimable - logging diagnostics"
 
         # Log why beads aren't claimable for debugging
-        diag_claimed=$(cd "$workspace" && br list --status open --json 2>/dev/null | \
+        diag_claimed=$(cd "$workspace" && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
             jq '[.[] | select(.claimed_by != null and .claimed_by != "")] | length' 2>/dev/null || echo "?")
-        diag_blocked=$(cd "$workspace" && br list --status open --json 2>/dev/null | \
+        diag_blocked=$(cd "$workspace" && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
             jq '[.[] | select(.blocked_by != null and .blocked_by != "")] | length' 2>/dev/null || echo "?")
-        diag_deferred=$(cd "$workspace" && br list --status open --json 2>/dev/null | \
+        diag_deferred=$(cd "$workspace" && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
             jq '[.[] | select(.deferred_until != null and .deferred_until != "")] | length' 2>/dev/null || echo "?")
-        diag_human_type=$(cd "$workspace" && br list --status open --json 2>/dev/null | \
+        diag_human_type=$(cd "$workspace" && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
             jq '[.[] | select(.issue_type == "human")] | length' 2>/dev/null || echo "?")
-        diag_has_deps=$(cd "$workspace" && br list --status open --json 2>/dev/null | \
+        diag_has_deps=$(cd "$workspace" && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
             jq '[.[] | select(.dependency_count != null and .dependency_count > 0)] | length' 2>/dev/null || echo "?")
 
         _needle_debug "knot: bead status - claimed: $diag_claimed, blocked: $diag_blocked, deferred: $diag_deferred, human: $diag_human_type, has_deps: $diag_has_deps"
@@ -257,7 +257,7 @@ _needle_knot_has_existing_alert() {
 
     # Look for open human beads with needle-stuck label in the workspace
     local existing
-    existing=$(br list --workspace="$workspace" --status open --type human --json 2>/dev/null | \
+    existing=$(br list --workspace="$workspace" --status open --priority 0,1,2,3 --type human --json 2>/dev/null | \
                jq -r '.[] | select(.labels // [] | contains(["needle-stuck"])) | .id' 2>/dev/null | \
                head -1)
 

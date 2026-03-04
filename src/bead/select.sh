@@ -179,9 +179,9 @@ _needle_get_claimable_beads() {
     # FIX: Actually change to the workspace directory if provided
     if [[ -n "$workspace" && -d "$workspace" ]]; then
         _needle_debug "DIAG: Running br list in workspace: $workspace"
-        candidates=$(cd "$workspace" && br list --status open --json 2>/dev/null)
+        candidates=$(cd "$workspace" && br list --status open --priority 0,1,2,3 --json 2>/dev/null)
     else
-        candidates=$(br list --status open --json 2>/dev/null)
+        candidates=$(br list --status open --priority 0,1,2,3 --json 2>/dev/null)
     fi
     local list_exit=$?
 

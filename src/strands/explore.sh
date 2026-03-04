@@ -112,7 +112,7 @@ _needle_explore_count_unassigned() {
 
     # Fallback: use br list with client-side filtering
     # Count beads that are: status=open, unassigned, unblocked, not deferred
-    count=$(br list --workspace="$workspace" --status open --json 2>/dev/null | \
+    count=$(br list --workspace="$workspace" --status open --priority 0,1,2,3 --json 2>/dev/null | \
         jq '[.[] | select(.assignee == null and .blocked_by == null and (.deferred_until == null or .deferred_until == ""))] | length' 2>/dev/null)
 
     # Handle errors

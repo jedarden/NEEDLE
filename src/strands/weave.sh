@@ -232,7 +232,7 @@ _needle_weave_get_open_beads() {
     local workspace="$1"
 
     local open_beads
-    open_beads=$(br list --workspace="$workspace" --status open --json 2>/dev/null)
+    open_beads=$(br list --workspace="$workspace" --status open --priority 0,1,2,3 --json 2>/dev/null)
 
     if [[ -z "$open_beads" ]] || [[ "$open_beads" == "[]" ]] || [[ "$open_beads" == "null" ]]; then
         echo "[]"
