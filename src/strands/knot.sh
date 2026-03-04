@@ -93,22 +93,29 @@ _needle_knot_verify_work_available() {
 
     # Method 1: br ready --json (PRIMARY - most accurate)
     # This accounts for dependencies, claims, blocking, deferral, and human type
+    # FIX (nd-20a): Also filter out beads with assignees - they can't be claimed by this worker
+    # br ready may include assigned beads and human-type beads, so we need to exclude them
+    # Using "not contains" pattern to avoid bash escaping issues with !=
     diag_br_ready_count=$(cd "$workspace" 2>/dev/null && br ready --json 2>/dev/null | \
-        jq 'length' 2>/dev/null || echo "0")
+        jq 'map(select(.assignee == null or .assignee == "") |
+                   select(.issue_type == null or (.issue_type | contains("human") | not))) | length' 2>/dev/null || echo "0")
 
     if [[ "$diag_br_ready_count" -gt 0 ]]; then
-        _needle_debug "knot: pre-flight found $diag_br_ready_count claimable beads via br ready"
+        _needle_debug "knot: pre-flight found $diag_br_ready_count claimable beads via br ready (filtered for unassigned + non-human)"
         return 0  # Work available - DON'T create alert
     fi
 
     # Method 2: Check using needle-ready tool if available
     # needle-ready handles dependency status checking (nd-3jf fix)
+    # FIX (nd-20a): Also filter for unassigned + non-human beads
     local needle_ready="$workspace/bin/needle-ready"
     if [[ -x "$needle_ready" ]]; then
-        diag_needle_ready_count=$("$needle_ready" --json 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+        diag_needle_ready_count=$("$needle_ready" --json 2>/dev/null | \
+            jq 'map(select(.assignee == null or .assignee == "") |
+                       select(.issue_type == null or (.issue_type | contains("human") | not))) | length' 2>/dev/null || echo "0")
 
         if [[ "$diag_needle_ready_count" -gt 0 ]]; then
-            _needle_debug "knot: pre-flight found $diag_needle_ready_count claimable beads via needle-ready"
+            _needle_debug "knot: pre-flight found $diag_needle_ready_count claimable beads via needle-ready (filtered for unassigned + non-human)"
             return 0  # Work available - DON'T create alert
         fi
     fi
@@ -314,9 +321,11 @@ _needle_knot_double_check_work_available() {
 
     # Use br ready --json for a quick, accurate check
     # This accounts for dependencies, claims, blocking, deferral, and human type
+    # FIX (nd-20a): Also filter for unassigned + non-human beads
     local count
     count=$(cd "$workspace" 2>/dev/null && br ready --json 2>/dev/null | \
-        jq 'length' 2>/dev/null || echo "0")
+        jq 'map(select(.assignee == null or .assignee == "") |
+                   select(.issue_type == null or (.issue_type | contains("human") | not))) | length' 2>/dev/null || echo "0")
 
     if [[ "$count" -gt 0 ]]; then
         _needle_debug "knot: double-check found $count claimable beads"
