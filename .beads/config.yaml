@@ -45,3 +45,22 @@ mitosis:
   # skip_labels: Labels that prevent mitosis (comma-separated)
   # Beads with any of these labels will not be split
   skip_labels: no-mitosis,atomic,single-task
+
+# Work stealing configuration for multi-worker environments
+# Allows workers to claim beads assigned to inactive humans/workers
+select:
+  # work_stealing_enabled: Allow workers to steal assigned beads
+  work_stealing_enabled: true
+
+  # work_stealing_timeout: Seconds before a claim can be stolen (default: 1800)
+  # Reduced from 30 minutes to 5 minutes to prevent worker starvation
+  work_stealing_timeout: 300
+
+  # stealable_assignees: Users whose assignments can be stolen
+  # Typically human usernames that may have stale claims
+  stealable_assignees:
+    - coder
+
+  # check_worker_heartbeat: Verify if assigned worker is still alive
+  # Dead workers' beads can be stolen immediately
+  check_worker_heartbeat: true

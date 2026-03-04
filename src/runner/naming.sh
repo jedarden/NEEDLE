@@ -8,6 +8,10 @@
 # - Supporting custom --id override
 # - Handling exhaustion (26+ workers) with numeric suffix
 # - Validating identifier format
+#
+# DEPENDENCIES:
+#   - constants.sh (must be sourced first - provides NEEDLE_NATO_ALPHABET array)
+#   - output.sh (optional - for _needle_warn in get_identifier_with_override)
 
 # -----------------------------------------------------------------------------
 # Identifier Validation
