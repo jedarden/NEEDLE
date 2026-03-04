@@ -277,6 +277,7 @@ MODULES=(
     "src/cli/run.sh"
     "src/cli/version.sh"
     "src/cli/test-agent.sh"
+    "src/cli/agents.sh"
 )
 
 # Process each module
@@ -362,7 +363,7 @@ _needle_main() {
             _needle_show_version
             ;;
         agents|list-agents)
-            _needle_list_available_agents "$@"
+            _needle_agents "$@"
             ;;
         test-agent)
             _needle_cmd_test_agent "$@"
