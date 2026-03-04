@@ -365,16 +365,49 @@ _needle_unravel_parse_alternatives() {
     local analysis="$1"
 
     # Try to extract JSON from the analysis
-    local json_content
+    local json_content=""
 
-    # Look for JSON code block
-    if [[ "$analysis" =~ \`\`\`json[[:space:]]*(\{[\s\S]*\})[[:space:]]*\`\`\` ]]; then
-        json_content="${BASH_REMATCH[1]}"
-    elif [[ "$analysis" =~ \`\`\`[[:space:]]*(\{[\s\S]*\})[[:space:]]*\`\`\` ]]; then
-        json_content="${BASH_REMATCH[1]}"
-    else
-        # Try to find raw JSON object
-        json_content=$(echo "$analysis" | grep -oP '\{[\s\S]*"alternatives"[\s\S]*\}' | head -1)
+    # Method 1: Look for JSON code block with multiline extraction
+    if [[ "$analysis" =~ \`\`\`json ]]; then
+        # Extract content between ```json and ```
+        local in_block=false
+        local json_lines=()
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^\`\`\`json ]]; then
+                in_block=true
+                continue
+            fi
+            if [[ "$line" =~ ^\`\`\` ]] && [[ "$in_block" == "true" ]]; then
+                break
+            fi
+            if [[ "$in_block" == "true" ]]; then
+                json_lines+=("$line")
+            fi
+        done <<< "$analysis"
+        json_content=$(printf '%s\n' "${json_lines[*]}")
+    elif [[ "$analysis" =~ \`\`\`[[:space:]]*$ ]]; then
+        # Generic code block
+        local in_block=false
+        local json_lines=()
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^\`\`\`[[:space:]]*$ ]] && [[ "$in_block" == "false" ]]; then
+                in_block=true
+                continue
+            fi
+            if [[ "$line" =~ ^\`\`\` ]] && [[ "$in_block" == "true" ]]; then
+                break
+            fi
+            if [[ "$in_block" == "true" ]]; then
+                json_lines+=("$line")
+            fi
+        done <<< "$analysis"
+        json_content=$(printf '%s\n' "${json_lines[*]}")
+    fi
+
+    # Method 2: If no code block found, try to find raw JSON object
+    if [[ -z "$json_content" ]]; then
+        # Look for JSON object containing "alternatives"
+        json_content=$(echo "$analysis" | grep -o '{[^{}]*"alternatives"[^{}]*\[[^]]*\][^{}]*}' 2>/dev/null | head -1)
     fi
 
     if [[ -z "$json_content" ]]; then
@@ -477,20 +510,20 @@ _needle_unravel_create_alternatives() {
             --silent 2>/dev/null)
 
         if [[ $? -eq 0 ]] && [[ -n "$bead_id" ]]; then
-            _needle_info "unravel: created alternative bead: $bead_id - $title"
+            _needle_info "unravel: created alternative bead: $bead_id - $title" >&2
 
-            # Emit event for each alternative created
+            # Emit event for each alternative created (to stderr so it doesn't interfere with return value)
             _needle_emit_event "unravel.alternative_created" \
                 "Created alternative bead" \
                 "parent_id=$parent_id" \
                 "alternative_id=$bead_id" \
                 "title=$title" \
                 "reversible=$reversible" \
-                "workspace=$workspace"
+                "workspace=$workspace" >&2
 
             ((created++))
         else
-            _needle_warn "unravel: failed to create alternative bead: $title"
+            _needle_warn "unravel: failed to create alternative bead: $title" >&2
         fi
     done < <(echo "$alternatives" | jq -c '.[]' 2>/dev/null)
 

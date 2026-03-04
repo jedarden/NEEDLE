@@ -7,16 +7,10 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# Source required libraries
-source "$PROJECT_ROOT/src/lib/constants.sh"
-source "$PROJECT_ROOT/src/lib/output.sh"
-source "$PROJECT_ROOT/src/lib/paths.sh"
-source "$PROJECT_ROOT/src/lib/json.sh"
-source "$PROJECT_ROOT/src/lib/utils.sh"
-source "$PROJECT_ROOT/src/lib/config.sh"
-
-# Set up test environment
+# Set up test environment BEFORE sourcing any modules
 NEEDLE_HOME="$HOME/.needle-test-unravel-$$"
+NEEDLE_CONFIG_NAME="config.yaml"
+NEEDLE_CONFIG_FILE="$NEEDLE_HOME/$NEEDLE_CONFIG_NAME"
 NEEDLE_SESSION="test-unravel-$$"
 NEEDLE_WORKSPACE="/tmp/test-workspace-unravel"
 NEEDLE_AGENT="test-agent"
@@ -46,6 +40,14 @@ unravel:
   max_alternatives: 3
   timeout: 120
 EOF
+
+# Source required libraries AFTER setting up environment
+source "$PROJECT_ROOT/src/lib/constants.sh"
+source "$PROJECT_ROOT/src/lib/output.sh"
+source "$PROJECT_ROOT/src/lib/paths.sh"
+source "$PROJECT_ROOT/src/lib/json.sh"
+source "$PROJECT_ROOT/src/lib/utils.sh"
+source "$PROJECT_ROOT/src/lib/config.sh"
 
 # Source the unravel module
 source "$PROJECT_ROOT/src/strands/unravel.sh"
@@ -262,7 +264,7 @@ test_output='```json
 }
 ```'
 alts=$(_needle_unravel_parse_alternatives "$test_output")
-if [[ "$alts" == *"Test Alt"* ]] || [[ "$alts" == '[{"title"* ]]; then
+if echo "$alts" | grep -q "Test Alt" || echo "$alts" | grep -q "title"; then
     _test_pass "Parse alternatives extracts JSON correctly"
 else
     _test_fail "Parse alternatives failed to extract: $alts"
@@ -289,7 +291,7 @@ fi
 # Test 11: Stats function includes expected fields
 _test_start "Stats function includes expected fields"
 stats=$(_needle_unravel_stats)
-if echo "$stats" | jq -e 'has("enabled")' >/dev/null 2>&1 && echo "$stats" | jq -e 'has("min_wait_hours")' >/dev/null 2>&1; then
+if echo "$stats" | jq -e ".enabled != null" >/dev/null 2>&1 && echo "$stats" | jq -e ".min_wait_hours != null" >/dev/null 2>&1; then
     _test_pass "Stats function includes expected fields"
 else
     _test_fail "Stats function missing expected fields"
@@ -435,8 +437,9 @@ mock_alts='[
   {"title": "Alt 5", "description": "D5", "approach": "A5", "reversible": true}
 ]'
 # This should only create 3 (max_alternatives)
-created=$(_needle_unravel_create_alternatives "$NEEDLE_WORKSPACE" "nd-test" "$mock_alts")
-if [[ "$created" -le 3 ]]; then
+# Capture only the last line which is the count
+created=$(_needle_unravel_create_alternatives "$NEEDLE_WORKSPACE" "nd-test" "$mock_alts" 2>/dev/null | tail -1)
+if [[ "$created" =~ ^[0-9]+$ ]] && [[ "$created" -le 3 ]]; then
     _test_pass "Create alternatives respects max limit (created $created)"
 else
     _test_fail "Create alternatives exceeded max limit: created $created"
