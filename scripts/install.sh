@@ -146,15 +146,15 @@ get_latest_version() {
     fi
 }
 
-# Build tarball download URL
+# Build release download URL
 build_download_url() {
     local repo="$1"
     local version="$2"
 
     if [[ "$version" == "latest" ]]; then
-        echo "https://github.com/$repo/archive/refs/heads/main.tar.gz"
+        echo "https://github.com/$repo/releases/latest/download/needle"
     else
-        echo "https://github.com/$repo/archive/refs/tags/v${version#v}.tar.gz"
+        echo "https://github.com/$repo/releases/download/v${version#v}/needle"
     fi
 }
 
@@ -198,19 +198,19 @@ install_needle() {
     tmp_dir=$(mktemp -d)
     trap "rm -rf '$tmp_dir'" EXIT
 
-    # Download tarball
+    # Download single-file binary
     info "Downloading NEEDLE..."
     debug "Download URL: $url"
 
-    local tarball="$tmp_dir/needle.tar.gz"
+    local needle_file="$tmp_dir/needle"
 
     if command_exists curl; then
-        curl -fsSL -o "$tarball" "$url" || {
+        curl -fsSL -o "$needle_file" "$url" || {
             error "Download failed"
             exit 1
         }
     elif command_exists wget; then
-        wget -q -O "$tarball" "$url" || {
+        wget -q -O "$needle_file" "$url" || {
             error "Download failed"
             exit 1
         }
@@ -221,30 +221,12 @@ install_needle() {
 
     success "Downloaded NEEDLE"
 
-    # Extract tarball
-    info "Extracting..."
-    tar -xzf "$tarball" -C "$tmp_dir"
+    # Create installation directory structure
+    mkdir -p "$NEEDLE_INSTALL_DIR/bin"
 
-    # Find extracted directory (handles both needle-main and needle-X.Y.Z)
-    local extracted_dir
-    extracted_dir=$(find "$tmp_dir" -maxdepth 1 -type d -name "needle*" | head -1)
-
-    if [[ -z "$extracted_dir" || ! -d "$extracted_dir" ]]; then
-        error "Failed to extract archive"
-        exit 1
-    fi
-
-    # Remove existing installation
-    if [[ -d "$NEEDLE_INSTALL_DIR" ]]; then
-        info "Removing existing installation..."
-        rm -rf "$NEEDLE_INSTALL_DIR"
-    fi
-
-    # Move to install directory
-    mkdir -p "$(dirname "$NEEDLE_INSTALL_DIR")"
-    mv "$extracted_dir" "$NEEDLE_INSTALL_DIR"
-
-    # Make bin/needle executable
+    # Install the single-file binary
+    info "Installing..."
+    cp "$needle_file" "$NEEDLE_INSTALL_DIR/bin/needle"
     chmod +x "$NEEDLE_INSTALL_DIR/bin/needle"
 
     success "Installed NEEDLE to $NEEDLE_INSTALL_DIR"
@@ -273,16 +255,10 @@ install_needle() {
         success "$NEEDLE_BIN_DIR is already in PATH"
     fi
 
-    # Show installed agent configs
+    # Show info about embedded agents
     echo ""
-    info "Installed agent configurations:"
-    for config in "$NEEDLE_INSTALL_DIR/config/agents"/*.yaml; do
-        if [[ -f "$config" ]]; then
-            local name
-            name=$(basename "$config" .yaml)
-            printf '  %b•%b %s\n' "$CYAN" "$NC" "$name"
-        fi
-    done
+    info "Agent configurations are embedded in the binary"
+    info "They will be extracted to ~/.needle/agents/ on first run"
 
     return 0
 }
@@ -411,13 +387,11 @@ Examples:
 
 Installed Components:
   ~/.needle/              NEEDLE installation directory
-  ├── bin/needle          Main CLI entry point
-  ├── src/                Core modules
-  ├── config/agents/      Agent configurations (YAML)
-  │   ├── claude-anthropic-sonnet.yaml
-  │   ├── claude-anthropic-opus.yaml
-  │   └── ...
-  └── bootstrap/          Dependency installers
+  ├── bin/needle          Single-file self-contained CLI (with embedded configs)
+  └── agents/             Agent configurations (extracted on first run)
+      ├── claude-anthropic-sonnet.yaml
+      ├── claude-anthropic-opus.yaml
+      └── ...
 
   ~/.local/bin/needle     Symlink to bin/needle (added to PATH)
 
@@ -497,12 +471,6 @@ main() {
         exit 1
     fi
     success "Download tool available"
-
-    if ! command_exists tar; then
-        error "tar command not found"
-        exit 1
-    fi
-    success "tar available"
 
     # Install
     echo ""
