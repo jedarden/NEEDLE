@@ -14,6 +14,8 @@ NEEDLE_EXIT_ERROR=1
 NEEDLE_EXIT_USAGE=2
 NEEDLE_EXIT_CONFIG=3
 NEEDLE_EXIT_RUNTIME=4
+NEEDLE_EXIT_DEPENDENCY=5
+NEEDLE_EXIT_CANCELLED=130
 
 # Default paths
 NEEDLE_HOME="${NEEDLE_HOME:-$HOME/.needle}"
@@ -53,6 +55,7 @@ NEEDLE_SUBCOMMANDS=(
     "version"
     "upgrade"
     "rollback"
+    "setup"
     "agents"
     "heartbeat"
     "attach"
