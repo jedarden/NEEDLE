@@ -133,8 +133,13 @@ _needle_pluck_process_bead() {
     _needle_debug "Processing bead: $bead_id in workspace: $workspace"
 
     # Get bead details for title (needed for dispatch)
+    # NOTE: br show must run in workspace context to find bead
     local bead_json bead_title
-    bead_json=$(br show "$bead_id" --json 2>/dev/null)
+    if [[ -n "$workspace" && -d "$workspace" ]]; then
+        bead_json=$(cd "$workspace" && br show "$bead_id" --json 2>/dev/null)
+    else
+        bead_json=$(br show "$bead_id" --json 2>/dev/null)
+    fi
 
     if [[ -z "$bead_json" ]] || [[ "$bead_json" == "null" ]]; then
         _needle_error "Could not retrieve bead details: $bead_id"
@@ -187,7 +192,7 @@ _needle_pluck_process_bead() {
 
     if [[ -z "$prompt" ]]; then
         _needle_error "Failed to build prompt for bead: $bead_id"
-        _needle_mark_bead_failed "$bead_id" "prompt_build_failed"
+        _needle_mark_bead_failed "$bead_id" "prompt_build_failed" "" "$workspace"
         return 1
     fi
 
@@ -213,7 +218,7 @@ _needle_pluck_process_bead() {
             "agent=$agent" \
             "bead_id=$bead_id" \
             "error=dispatch_failed"
-        _needle_mark_bead_failed "$bead_id" "agent_dispatch_failed"
+        _needle_mark_bead_failed "$bead_id" "agent_dispatch_failed" "" "$workspace"
         return 1
     fi
 
@@ -225,27 +230,35 @@ _needle_pluck_process_bead() {
     # Step 5: Check exit code and mark bead appropriately
     if [[ "$exit_code" -eq 0 ]]; then
         # Success - mark bead as closed
-        _needle_mark_bead_completed "$bead_id" "$output_file" "$duration"
+        _needle_mark_bead_completed "$bead_id" "$output_file" "$duration" "$workspace"
         return 0
     else
         # Failure - mark bead as blocked/failed
-        _needle_mark_bead_failed "$bead_id" "exit_code_$exit_code" "$output_file"
+        _needle_mark_bead_failed "$bead_id" "exit_code_$exit_code" "$output_file" "$workspace"
         return 1
     fi
 }
 
 # Mark a bead as successfully completed
 #
-# Usage: _needle_mark_bead_completed <bead_id> [output_file] [duration_ms]
+# Usage: _needle_mark_bead_completed <bead_id> [output_file] [duration_ms] [workspace]
 _needle_mark_bead_completed() {
     local bead_id="$1"
     local output_file="${2:-}"
     local duration="${3:-0}"
+    local workspace="${4:-${NEEDLE_WORKSPACE:-$(pwd)}}"
 
     _needle_debug "Marking bead as completed: $bead_id"
 
     # Update bead status to closed
-    if br update "$bead_id" --status closed 2>/dev/null; then
+    # NOTE: br update must run in workspace context
+    local update_result=1
+    if [[ -n "$workspace" && -d "$workspace" ]]; then
+        (cd "$workspace" && br update "$bead_id" --status closed 2>/dev/null) && update_result=0
+    else
+        br update "$bead_id" --status closed 2>/dev/null && update_result=0
+    fi
+    if [[ $update_result -eq 0 ]]; then
         _needle_success "Bead completed: $bead_id (duration: ${duration}ms)"
 
         _needle_event_bead_completed "$bead_id" \
@@ -267,16 +280,24 @@ _needle_mark_bead_completed() {
 
 # Mark a bead as failed/blocked
 #
-# Usage: _needle_mark_bead_failed <bead_id> [reason] [output_file]
+# Usage: _needle_mark_bead_failed <bead_id> [reason] [output_file] [workspace]
 _needle_mark_bead_failed() {
     local bead_id="$1"
     local reason="${2:-unknown}"
     local output_file="${3:-}"
+    local workspace="${4:-${NEEDLE_WORKSPACE:-$(pwd)}}"
 
     _needle_debug "Marking bead as failed: $bead_id (reason: $reason)"
 
     # Update bead status to blocked with failed label
-    if br update "$bead_id" --status blocked --label failed --label "error:$reason" 2>/dev/null; then
+    # NOTE: br update must run in workspace context
+    local update_result=1
+    if [[ -n "$workspace" && -d "$workspace" ]]; then
+        (cd "$workspace" && br update "$bead_id" --status blocked --label failed --label "error:$reason" 2>/dev/null) && update_result=0
+    else
+        br update "$bead_id" --status blocked --label failed --label "error:$reason" 2>/dev/null && update_result=0
+    fi
+    if [[ $update_result -eq 0 ]]; then
         _needle_warn "Bead failed: $bead_id (reason: $reason)"
 
         _needle_event_bead_failed "$bead_id" \

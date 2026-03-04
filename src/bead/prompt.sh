@@ -52,8 +52,13 @@ _needle_build_prompt() {
     fi
 
     # Get bead details from br CLI
+    # NOTE: br show must run in workspace context to find bead
     local bead_json
-    bead_json=$(br show "$bead_id" --json 2>/dev/null)
+    if [[ -n "$workspace" && -d "$workspace" ]]; then
+        bead_json=$(cd "$workspace" && br show "$bead_id" --json 2>/dev/null)
+    else
+        bead_json=$(br show "$bead_id" --json 2>/dev/null)
+    fi
 
     if [[ -z "$bead_json" ]] || [[ "$bead_json" == "[]" ]] || [[ "$bead_json" == "null" ]]; then
         _needle_error "Bead not found: $bead_id"

@@ -1,0 +1,50 @@
+# NEEDLE Agent Configuration: Claude Code with GLM-4.7 (free tier)
+# Uses Claude Code CLI with the free GLM model
+
+# Agent metadata
+name: claude-code-glm-4.7
+description: Claude Code with GLM-4.7 free model (cost-effective)
+version: "1.0"
+
+# CLI identification
+runner: claude          # CLI executable name
+provider: glm           # Provider for rate limiting
+model: glm-4.7          # Model identifier
+
+# Invocation template
+# Variables: ${WORKSPACE}, ${PROMPT}, ${BEAD_ID}, ${BEAD_TITLE}
+# NOTE: unset CLAUDECODE prevents nested session detection when running inside Claude Code
+invoke: |
+  cd ${WORKSPACE} && \
+  unset CLAUDECODE && \
+  claude --print \
+         --model sonnet \
+         --dangerously-skip-permissions \
+         --output-format json \
+         --verbose \
+  <<'NEEDLE_PROMPT'
+  ${PROMPT}
+  NEEDLE_PROMPT
+
+# Input method
+input:
+  method: heredoc      # heredoc | stdin | file | args
+
+# Output parsing
+output:
+  format: json         # json | text | structured
+  success_codes: [0]
+  retry_codes: [1]
+  fail_codes: [2, 137]
+
+# Rate limits (GLM free tier - higher concurrency allowed)
+limits:
+  requests_per_minute: 120
+  max_concurrent: 10
+
+# Cost configuration
+# GLM-4.7-free is a free tier model
+cost:
+  type: unlimited
+  input_per_1k: 0
+  output_per_1k: 0
