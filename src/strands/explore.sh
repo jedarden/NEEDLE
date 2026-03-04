@@ -87,7 +87,7 @@ _needle_explore_find_beads_dirs() {
 }
 
 # Count unassigned beads in a workspace
-# Uses br CLI to query bead status with fallback for br ready bug
+# Uses br CLI to query bead status with --db flag for workspace targeting
 #
 # Usage: _needle_explore_count_unassigned <workspace>
 # Returns: Number of unassigned beads (0 on error)
@@ -100,9 +100,12 @@ _needle_explore_count_unassigned() {
         return 0
     fi
 
-    # Try br ready first
+    local db_path="$workspace/.beads/beads.db"
     local count
-    count=$(br ready --workspace="$workspace" --unassigned --count 2>/dev/null)
+
+    # Use br ready with --db flag to target the workspace database
+    # Count via JSON output and jq length
+    count=$(br ready --db="$db_path" --unassigned --json 2>/dev/null | jq 'length' 2>/dev/null)
 
     # If br ready returned a valid number, use it
     if [[ "$count" =~ ^[0-9]+$ ]]; then
@@ -112,7 +115,7 @@ _needle_explore_count_unassigned() {
 
     # Fallback: use br list with client-side filtering
     # Count beads that are: status=open, unassigned, unblocked, not deferred
-    count=$(br list --workspace="$workspace" --status open --priority 0,1,2,3 --json 2>/dev/null | \
+    count=$(br list --db="$db_path" --status open --priority 0,1,2,3 --json 2>/dev/null | \
         jq '[.[] | select(.assignee == null and .blocked_by == null and (.deferred_until == null or .deferred_until == ""))] | length' 2>/dev/null)
 
     # Handle errors
