@@ -1,6 +1,17 @@
 #!/bin/bash
 # Database health check - prevents worker starvation false alarms
 # Run periodically or before creating starvation alerts
+#
+# Exit codes:
+#   0 = Database healthy (no action needed, or checkpoint completed)
+#   1 = Corruption detected and rebuilt (caller should skip current action)
+#   2 = Error (rebuild failed or other error)
+#
+# Usage in worker starvation detection:
+#   if ! .beads/maintenance/db-health-check.sh; then
+#       # DB was corrupted and rebuilt, exit without creating alert
+#       exit 0
+#   fi
 
 BEADS_DIR="${BEADS_DIR:-.beads}"
 WAL_FILE="$BEADS_DIR/beads.db-wal"
@@ -33,11 +44,21 @@ rebuild_database() {
     local backup="$BEADS_DIR/beads.db.corrupted-$(date +%Y%m%d-%H%M%S)"
     [[ -f "$BEADS_DIR/beads.db" ]] && mv "$BEADS_DIR/beads.db" "$backup"
     [[ -f "$WAL_FILE" ]] && rm -f "$WAL_FILE"
+    [[ -f "$BEADS_DIR/beads.db-shm" ]] && rm -f "$BEADS_DIR/beads.db-shm"
 
     # Rebuild from JSONL source of truth
-    br sync --rebuild -q
+    if ! br sync --import-only 2>&1; then
+        echo "ERROR: Failed to rebuild database"
+        # Try to restore backup
+        if [[ -f "$backup" ]]; then
+            mv "$backup" "$BEADS_DIR/beads.db"
+            echo "Restored corrupted database from backup"
+        fi
+        return 1
+    fi
 
     echo "Database rebuilt successfully"
+    return 0
 }
 
 # Main execution
@@ -46,11 +67,18 @@ main() {
 
     if ! check_database_health; then
         echo "Database corruption detected!"
-        rebuild_database
-        return 0
+        if rebuild_database; then
+            # Return 1 to signal caller that corruption was found and fixed
+            # This allows worker to skip creating starvation alert
+            return 1
+        else
+            # Return 2 to signal error (rebuild failed)
+            return 2
+        fi
     fi
 
     echo "Database healthy"
+    return 0
 }
 
 # Allow sourcing or direct execution

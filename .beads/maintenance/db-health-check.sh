@@ -10,6 +10,17 @@
 #
 # The WAL checkpoint is now also triggered automatically by br sync operations,
 # but this script provides an additional safety net for long-running sessions.
+#
+# Exit codes:
+#   0 = Database healthy (no action needed, or checkpoint completed)
+#   1 = Corruption detected and rebuilt (caller should skip current action)
+#   2 = Error (rebuild failed or other error)
+#
+# Usage in worker starvation detection:
+#   if ! .beads/maintenance/db-health-check.sh; then
+#       # DB was corrupted and rebuilt, exit without creating alert
+#       exit 0
+#   fi
 
 set -e
 
@@ -78,7 +89,7 @@ if [ "$WAL_SIZE" -gt "$CRITICAL_THRESHOLD" ]; then
     # Check if JSONL source exists
     if [ ! -f ".beads/issues.jsonl" ]; then
         echo "❌ ERROR: issues.jsonl not found - cannot rebuild"
-        exit 1
+        exit 2
     fi
 
     echo "🔧 Rebuilding database from issues.jsonl..."
@@ -106,17 +117,21 @@ if [ "$WAL_SIZE" -gt "$CRITICAL_THRESHOLD" ]; then
                 --priority 4 2>/dev/null; then
                 echo "📝 Created notification bead"
             fi
+
+            # Exit 1 to signal caller that corruption was found and fixed
+            # This allows worker to skip creating starvation alert
+            exit 1
         else
             echo "❌ ERROR: br sync --import-only failed"
             # Restore backup
             mv "$BACKUP" .beads/beads.db
             echo "⚠️ Restored corrupted database from backup"
-            exit 1
+            exit 2
         fi
     else
         echo "⚠️ WARNING: br command not available - manual rebuild required"
         echo "   Run: br sync --import-only"
-        exit 1
+        exit 2
     fi
 
 elif [ "$WAL_SIZE" -gt "$WARNING_THRESHOLD" ]; then
