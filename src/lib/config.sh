@@ -89,6 +89,12 @@ _NEEDLE_CONFIG_DEFAULTS='{
       "docs": true,
       "coverage": false
     }
+  },
+  "select": {
+    "work_stealing_enabled": true,
+    "work_stealing_timeout": 1800,
+    "stealable_assignees": ["coder"],
+    "check_worker_heartbeat": true
   }
 }'
 
@@ -256,6 +262,24 @@ pulse:
     docs: true
     # coverage: Monitor test coverage trends
     coverage: false
+
+# Work stealing configuration
+# Allows idle workers to claim beads assigned to inactive assignees
+select:
+  # work_stealing_enabled: Enable/disable work stealing (default: true)
+  work_stealing_enabled: true
+
+  # work_stealing_timeout: Seconds before an assigned bead becomes stealable (default: 30 minutes)
+  work_stealing_timeout: 1800
+
+  # stealable_assignees: List of assignee names whose beads can be stolen (default: ["coder"])
+  # "coder" is the human user - their beads become stealable when stale
+  stealable_assignees:
+    - coder
+
+  # check_worker_heartbeat: Also check if assignee worker has no heartbeat (default: true)
+  # If true, beads assigned to workers without heartbeats become stealable immediately
+  check_worker_heartbeat: true
 '
 
 # Check if yq is available

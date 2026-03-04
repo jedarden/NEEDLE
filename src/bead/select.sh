@@ -52,6 +52,14 @@ if [[ -z "${_NEEDLE_BILLING_MODELS_LOADED:-}" ]]; then
     fi
 fi
 
+# Source config module for work stealing settings
+if [[ -z "${_NEEDLE_CONFIG_LOADED:-}" ]]; then
+    config_path="${NEEDLE_SRC:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/lib/config.sh"
+    if [[ -f "$config_path" ]]; then
+        source "$config_path"
+    fi
+fi
+
 # Priority weight configuration
 # P0 (critical) = 8x, P1 (high) = 4x, P2 (normal) = 2x, P3 (low) = 1x
 NEEDLE_PRIORITY_WEIGHTS=(
@@ -61,6 +69,12 @@ NEEDLE_PRIORITY_WEIGHTS=(
     1   # P3 - low
     1   # P4+ - backlog (same as P3)
 )
+
+# Work stealing defaults (overridden by config)
+NEEDLE_WORK_STEALING_ENABLED="${NEEDLE_WORK_STEALING_ENABLED:-true}"
+NEEDLE_WORK_STEALING_TIMEOUT="${NEEDLE_WORK_STEALING_TIMEOUT:-1800}"  # 30 minutes
+NEEDLE_STEALABLE_ASSIGNEES="${NEEDLE_STEALABLE_ASSIGNEES:-coder}"
+NEEDLE_CHECK_WORKER_HEARTBEAT="${NEEDLE_CHECK_WORKER_HEARTBEAT:-true}"
 
 # Get weight for a given priority level
 # Usage: _needle_get_priority_weight <priority>
@@ -86,6 +100,227 @@ _needle_get_priority_weight() {
     fi
 
     echo "${NEEDLE_PRIORITY_WEIGHTS[$priority]}"
+}
+
+# ============================================================================
+# Work Stealing Functions
+# ============================================================================
+
+# Check if work stealing is enabled
+# Usage: _needle_work_stealing_enabled
+# Returns: 0 if enabled, 1 if disabled
+_needle_work_stealing_enabled() {
+    local enabled
+    enabled=$(get_config "select.work_stealing_enabled" "$NEEDLE_WORK_STEALING_ENABLED")
+
+    case "$enabled" in
+        true|True|TRUE|yes|Yes|YES|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Get work stealing timeout in seconds
+# Usage: _needle_get_work_stealing_timeout
+# Returns: timeout in seconds (default: 1800 = 30 minutes)
+_needle_get_work_stealing_timeout() {
+    local timeout
+    timeout=$(get_config "select.work_stealing_timeout" "$NEEDLE_WORK_STEALING_TIMEOUT")
+
+    # Ensure it's a valid number
+    if ! [[ "$timeout" =~ ^[0-9]+$ ]]; then
+        timeout=1800
+    fi
+
+    echo "$timeout"
+}
+
+# Check if an assignee is in the stealable list
+# Usage: _needle_is_stealable_assignee <assignee>
+# Returns: 0 if stealable, 1 if not
+_needle_is_stealable_assignee() {
+    local assignee="$1"
+
+    if [[ -z "$assignee" ]]; then
+        return 1  # No assignee means unassigned, not stealable
+    fi
+
+    # Get stealable assignees from config
+    local stealable_config
+    stealable_config=$(get_config "select.stealable_assignees" "$NEEDLE_STEALABLE_ASSIGNEES")
+
+    # Check if assignee is in the list (handles both JSON array and comma-separated string)
+    if echo "$stealable_config" | jq -e --arg a "$assignee" 'index($a) != null' &>/dev/null; then
+        return 0
+    fi
+
+    # Fallback: check as comma-separated string
+    local IFS=','
+    for stealable in $stealable_config; do
+        # Remove quotes and whitespace
+        stealable="${stealable//\"/}"
+        stealable="${stealable// /}"
+        if [[ "$assignee" == "$stealable" ]]; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Check if a worker has a recent heartbeat
+# Usage: _needle_worker_has_heartbeat <worker_name>
+# Returns: 0 if heartbeat exists and is recent, 1 if no heartbeat or stale
+_needle_worker_has_heartbeat() {
+    local worker_name="$1"
+    local check_heartbeat
+    check_heartbeat=$(get_config "select.check_worker_heartbeat" "$NEEDLE_CHECK_WORKER_HEARTBEAT")
+
+    # Skip heartbeat check if disabled
+    case "$check_heartbeat" in
+        false|False|FALSE|no|No|NO|0) return 0 ;;
+    esac
+
+    local heartbeat_dir="$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
+    local heartbeat_file="$heartbeat_dir/${worker_name}.json"
+
+    # No heartbeat file means worker is not active
+    if [[ ! -f "$heartbeat_file" ]]; then
+        return 1
+    fi
+
+    # Check if the process is still alive
+    local pid
+    pid=$(jq -r '.pid // 0' "$heartbeat_file" 2>/dev/null)
+
+    if [[ -n "$pid" ]] && [[ "$pid" != "0" ]] && [[ "$pid" != "null" ]]; then
+        if kill -0 "$pid" 2>/dev/null; then
+            return 0  # Worker is alive
+        fi
+    fi
+
+    return 1  # Worker is dead or no valid PID
+}
+
+# Check if a bead's claim is stale and can be stolen
+# Usage: _needle_is_claim_stealable <bead_json>
+# Returns: 0 if stealable, 1 if not
+_needle_is_claim_stealable() {
+    local bead_json="$1"
+
+    # Extract bead fields
+    local assignee claim_timestamp updated_at
+    assignee=$(echo "$bead_json" | jq -r '.assignee // .claimed_by // empty')
+    claim_timestamp=$(echo "$bead_json" | jq -r '.claim_timestamp // empty')
+    updated_at=$(echo "$bead_json" | jq -r '.updated_at // empty')
+
+    # Must have an assignee to be stealable
+    if [[ -z "$assignee" ]]; then
+        return 1
+    fi
+
+    # Check 1: Is assignee in the stealable list?
+    if _needle_is_stealable_assignee "$assignee"; then
+        # Check if claim is old enough
+        local claim_time=""
+        if [[ -n "$claim_timestamp" ]] && [[ "$claim_timestamp" != "null" ]]; then
+            claim_time="$claim_timestamp"
+        elif [[ -n "$updated_at" ]] && [[ "$updated_at" != "null" ]]; then
+            claim_time="$updated_at"
+        fi
+
+        if [[ -n "$claim_time" ]]; then
+            # Parse timestamp and check age
+            local claim_epoch now age timeout
+            claim_epoch=$(_needle_parse_iso8601 "$claim_time")
+            now=$(date +%s)
+            timeout=$(_needle_get_work_stealing_timeout)
+
+            if [[ -n "$claim_epoch" ]] && [[ "$claim_epoch" -gt 0 ]]; then
+                age=$((now - claim_epoch))
+                if ((age > timeout)); then
+                    _needle_debug "Bead claim is stealable: assignee=$assignee, age=${age}s, timeout=${timeout}s"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+
+    # Check 2: Does assignee have a heartbeat? (if worker checking enabled)
+    local check_heartbeat
+    check_heartbeat=$(get_config "select.check_worker_heartbeat" "$NEEDLE_CHECK_WORKER_HEARTBEAT")
+    case "$check_heartbeat" in
+        true|True|TRUE|yes|Yes|YES|1)
+            if ! _needle_worker_has_heartbeat "$assignee"; then
+                # No heartbeat - check if it's a stealable assignee or any worker
+                if _needle_is_stealable_assignee "$assignee"; then
+                    _needle_debug "Bead claim is stealable: assignee=$assignee has no heartbeat"
+                    return 0
+                fi
+                # For non-stealable assignees without heartbeat, still allow stealing
+                # This handles dead workers that aren't in the stealable list
+                _needle_debug "Bead claim is stealable: assignee=$assignee is dead worker"
+                return 0
+            fi
+            ;;
+    esac
+
+    return 1
+}
+
+# Parse ISO8601 timestamp to epoch seconds
+# Handles formats: 2026-03-03T10:09:09Z, 2026-03-03T10:09:09.123456Z, 2026-03-03T10:09:09+00:00
+# Reused from mend.sh for consistency
+_needle_parse_iso8601() {
+    local timestamp="$1"
+
+    if [[ -z "$timestamp" ]] || [[ "$timestamp" == "null" ]]; then
+        echo 0
+        return 1
+    fi
+
+    local epoch=0
+
+    # Try GNU date first (Linux)
+    if epoch=$(date -d "$timestamp" +%s 2>/dev/null) && [[ -n "$epoch" ]] && [[ "$epoch" =~ ^[0-9]+$ ]]; then
+        echo "$epoch"
+        return 0
+    fi
+
+    # Try BSD date (macOS) - strip milliseconds first
+    local stripped_ts="${timestamp%%.*}"
+    if epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${stripped_ts}" +%s 2>/dev/null) && [[ -n "$epoch" ]] && [[ "$epoch" =~ ^[0-9]+$ ]]; then
+        echo "$epoch"
+        return 0
+    fi
+
+    # Fallback: Parse ISO8601 manually (YYYY-MM-DDTHH:MM:SS)
+    if [[ "$timestamp" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2}) ]]; then
+        local year="${BASH_REMATCH[1]}"
+        local month="${BASH_REMATCH[2]}"
+        local day="${BASH_REMATCH[3]}"
+        local hour="${BASH_REMATCH[4]}"
+        local minute="${BASH_REMATCH[5]}"
+        local second="${BASH_REMATCH[6]}"
+
+        # Use Python for reliable conversion if available
+        if command -v python3 &>/dev/null; then
+            epoch=$(python3 -c "
+import datetime
+try:
+    dt = datetime.datetime(${year}, ${month}, ${day}, ${hour}, ${minute}, ${second})
+    print(int(dt.timestamp()))
+except:
+    print(0)
+" 2>/dev/null)
+            if [[ -n "$epoch" ]] && [[ "$epoch" =~ ^[0-9]+$ ]] && [[ "$epoch" != "0" ]]; then
+                echo "$epoch"
+                return 0
+            fi
+        fi
+    fi
+
+    echo 0
+    return 1
 }
 
 # Get claimable beads with fallback for br ready bug
