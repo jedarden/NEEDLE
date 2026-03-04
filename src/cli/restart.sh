@@ -390,7 +390,7 @@ _needle_restart() {
     # Summary
     _needle_print ""
     if [[ $failed -gt 0 ]]; then
-        _needle_warn "Restarted $started worker(s), $failed failed"
+        _needle_warn "Restarted $restarted worker(s), $failed failed"
         exit $NEEDLE_EXIT_ERROR
     else
         _needle_success "Restarted $restarted worker(s)"
