@@ -464,6 +464,364 @@ _pulse_create_bead() {
 }
 
 # ============================================================================
+# Security Vulnerability Detector (nd-21h)
+# ============================================================================
+
+# Map npm audit severity to standard severity
+# Usage: _pulse_map_npm_severity <npm_severity>
+# Returns: standard severity (critical, high, medium, low)
+_pulse_map_npm_severity() {
+    local npm_severity="$1"
+
+    case "${npm_severity,,}" in
+        critical) echo "critical" ;;
+        high)     echo "high" ;;
+        moderate) echo "medium" ;;
+        low)      echo "low" ;;
+        info)     echo "low" ;;
+        *)        echo "medium" ;;
+    esac
+}
+
+# Map pip-audit severity to standard severity
+# pip-audit uses CVSS scores, so we map based on those
+# Usage: _pulse_map_pip_severity <cvss_score>
+# Returns: standard severity (critical, high, medium, low)
+_pulse_map_pip_severity() {
+    local cvss_score="$1"
+
+    # Default to medium if score is missing or invalid
+    if [[ -z "$cvss_score" ]] || ! [[ "$cvss_score" =~ ^[0-9.]+$ ]]; then
+        echo "medium"
+        return 0
+    fi
+
+    # CVSS v3.1 severity ratings using awk for floating-point comparison
+    local severity
+    severity=$(awk -v score="$cvss_score" 'BEGIN {
+        if (score >= 9.0) print "critical"
+        else if (score >= 7.0) print "high"
+        else if (score >= 4.0) print "medium"
+        else print "low"
+    }')
+
+    echo "$severity"
+}
+
+# Run npm audit and parse vulnerabilities
+# Usage: _pulse_npm_audit <workspace>
+# Returns: JSON array of vulnerability issue objects
+_pulse_npm_audit() {
+    local workspace="$1"
+    local issues="[]"
+
+    # Check for package.json
+    if [[ ! -f "$workspace/package.json" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    # Check if npm is available
+    if ! command -v npm &>/dev/null; then
+        _needle_debug "pulse: npm not found, skipping Node.js vulnerability scan"
+        echo "[]"
+        return 0
+    fi
+
+    # Run npm audit in JSON format
+    local audit_output
+    audit_output=$(cd "$workspace" && npm audit --json 2>/dev/null) || {
+        # npm audit returns non-zero when vulnerabilities are found
+        # This is expected, so we continue processing
+        :
+    }
+
+    # Check if we got valid JSON
+    if [[ -z "$audit_output" ]] || ! echo "$audit_output" | jq -e . &>/dev/null; then
+        _needle_debug "pulse: npm audit returned invalid JSON or empty output"
+        echo "[]"
+        return 0
+    fi
+
+    # Parse vulnerabilities from npm audit output
+    # npm audit JSON format has a "vulnerabilities" object with package names as keys
+    local vuln_packages
+    vuln_packages=$(echo "$audit_output" | jq -r '.vulnerabilities | keys[]' 2>/dev/null)
+
+    if [[ -z "$vuln_packages" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    while IFS= read -r pkg_name; do
+        [[ -z "$pkg_name" ]] && continue
+
+        # Get vulnerability details
+        local vuln_info vuln_severity cve_ids advisory_url
+
+        vuln_info=$(echo "$audit_output" | jq -c ".vulnerabilities[\"$pkg_name\"]" 2>/dev/null)
+        vuln_severity=$(echo "$vuln_info" | jq -r '.severity // "moderate"' 2>/dev/null)
+        cve_ids=$(echo "$vuln_info" | jq -r '.via[]? | select(type == "object") | .cwe // empty' 2>/dev/null | head -1)
+        advisory_url=$(echo "$vuln_info" | jq -r '.via[]? | select(type == "object") | .url // empty' 2>/dev/null | head -1)
+
+        # Map to standard severity
+        local severity
+        severity=$(_pulse_map_npm_severity "$vuln_severity")
+
+        # Create fingerprint from package name and vulnerability info
+        local fingerprint="npm:${pkg_name}:${vuln_severity}"
+
+        # Build title and description
+        local title="Fix security vulnerability in npm package: ${pkg_name}"
+        local description="Security vulnerability detected in npm package **${pkg_name}**.
+
+**Severity:** ${severity}
+**NPM Severity:** ${vuln_severity}"
+
+        if [[ -n "$cve_ids" ]]; then
+            description+="
+**CWE:** ${cve_ids}"
+            fingerprint="npm:${pkg_name}:${cve_ids}"
+        fi
+
+        if [[ -n "$advisory_url" ]]; then
+            description+="
+
+**Advisory:** ${advisory_url}"
+        fi
+
+        description+="
+
+## Remediation
+Run \`npm audit fix\` to attempt automatic fixes, or manually update the package to a patched version."
+
+        # Create issue object
+        local issue
+        issue=$(jq -n \
+            --arg category "security" \
+            --arg severity "$severity" \
+            --arg title "$title" \
+            --arg description "$description" \
+            --arg fingerprint "$fingerprint" \
+            --arg labels "npm,vulnerability" \
+            '{
+                category: $category,
+                severity: $severity,
+                title: $title,
+                description: $description,
+                fingerprint: $fingerprint,
+                labels: $labels
+            }')
+
+        issues=$(echo "$issues" "$issue" | jq -s 'add' 2>/dev/null || echo "$issues")
+
+    done <<< "$vuln_packages"
+
+    echo "$issues"
+}
+
+# Run pip-audit and parse vulnerabilities
+# Usage: _pulse_pip_audit <workspace>
+# Returns: JSON array of vulnerability issue objects
+_pulse_pip_audit() {
+    local workspace="$1"
+    local issues="[]"
+
+    # Check for requirements.txt, pyproject.toml, or setup.py
+    local has_python_reqs=false
+    if [[ -f "$workspace/requirements.txt" ]] || \
+       [[ -f "$workspace/pyproject.toml" ]] || \
+       [[ -f "$workspace/setup.py" ]] || \
+       [[ -f "$workspace/requirements-dev.txt" ]]; then
+        has_python_reqs=true
+    fi
+
+    if [[ "$has_python_reqs" != "true" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    # Check if pip-audit is available
+    if ! command -v pip-audit &>/dev/null; then
+        _needle_debug "pulse: pip-audit not found, skipping Python vulnerability scan"
+        echo "[]"
+        return 0
+    fi
+
+    # Run pip-audit in JSON format
+    local audit_output
+    audit_output=$(cd "$workspace" && pip-audit --format json 2>/dev/null) || {
+        # pip-audit returns non-zero when vulnerabilities are found
+        :  # Continue processing
+    }
+
+    # Check if we got valid JSON
+    if [[ -z "$audit_output" ]] || ! echo "$audit_output" | jq -e . &>/dev/null; then
+        _needle_debug "pulse: pip-audit returned invalid JSON or empty output"
+        echo "[]"
+        return 0
+    fi
+
+    # Parse vulnerabilities from pip-audit output
+    # pip-audit JSON format is an array of package vulnerability objects
+    local vuln_count
+    vuln_count=$(echo "$audit_output" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$vuln_count" -eq 0 ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    # Iterate through vulnerabilities
+    local idx=0
+    while ((idx < vuln_count)); do
+        local vuln_info pkg_name pkg_version
+
+        vuln_info=$(echo "$audit_output" | jq -c ".[$idx]" 2>/dev/null)
+        pkg_name=$(echo "$vuln_info" | jq -r '.package.name // empty' 2>/dev/null)
+        pkg_version=$(echo "$vuln_info" | jq -r '.package.version // "unknown"' 2>/dev/null)
+
+        # Skip if no package name
+        if [[ -z "$pkg_name" ]]; then
+            ((idx++))
+            continue
+        fi
+
+        # Process each vulnerability in the package
+        local vulns_in_pkg vuln_idx
+        vulns_in_pkg=$(echo "$vuln_info" | jq '.vulnerabilities | length' 2>/dev/null || echo 0)
+        vuln_idx=0
+
+        while ((vuln_idx < vulns_in_pkg)); do
+            local vuln_detail cve_id cvss_score fix_versions advisory_url
+
+            vuln_detail=$(echo "$vuln_info" | jq -c ".vulnerabilities[$vuln_idx]" 2>/dev/null)
+            cve_id=$(echo "$vuln_detail" | jq -r '.id // empty' 2>/dev/null)
+            cvss_score=$(echo "$vuln_detail" | jq -r '.cvss?.score // .severity // empty' 2>/dev/null)
+            fix_versions=$(echo "$vuln_detail" | jq -r '.fix_versions | join(", ") // empty' 2>/dev/null)
+            advisory_url=$(echo "$vuln_detail" | jq -r '.aliases[]? | select(startswith("PYSEC") or startswith("GHSA")) // empty' 2>/dev/null | head -1)
+
+            # Map to standard severity
+            local severity
+            severity=$(_pulse_map_pip_severity "$cvss_score")
+
+            # Create fingerprint
+            local fingerprint="pip:${pkg_name}:${cve_id}"
+
+            # Build title and description
+            local title="Fix security vulnerability in Python package: ${pkg_name}"
+            local description="Security vulnerability detected in Python package **${pkg_name}** (version ${pkg_version}).
+
+**Severity:** ${severity}
+**CVE:** ${cve_id}"
+
+            if [[ -n "$advisory_url" ]]; then
+                description+="
+**Advisory:** ${advisory_url}"
+            fi
+
+            if [[ -n "$fix_versions" ]]; then
+                description+="
+
+## Remediation
+Update to a patched version: ${fix_versions}
+
+\`\`\`bash
+pip install ${pkg_name}>=${fix_versions%%,*}
+\`\`\`"
+            else
+                description+="
+
+## Remediation
+Check for a patched version of ${pkg_name} or consider replacing this dependency."
+            fi
+
+            # Create issue object
+            local issue
+            issue=$(jq -n \
+                --arg category "security" \
+                --arg severity "$severity" \
+                --arg title "$title" \
+                --arg description "$description" \
+                --arg fingerprint "$fingerprint" \
+                --arg labels "python,pip,vulnerability" \
+                '{
+                    category: $category,
+                    severity: $severity,
+                    title: $title,
+                    description: $description,
+                    fingerprint: $fingerprint,
+                    labels: $labels
+                }')
+
+            issues=$(echo "$issues" "$issue" | jq -s 'add' 2>/dev/null || echo "$issues")
+
+            ((vuln_idx++))
+        done
+
+        ((idx++))
+    done
+
+    echo "$issues"
+}
+
+# Main security vulnerability detector
+# Scans for vulnerabilities in Node.js and Python dependencies
+#
+# Usage: _pulse_detector_security <workspace> <agent>
+# Returns: JSON array of security issue objects
+_pulse_detector_security() {
+    local workspace="$1"
+    local agent="$2"
+
+    _needle_diag_strand "pulse" "Running security detector" \
+        "workspace=$workspace" \
+        "agent=$agent"
+
+    # Emit detector started event
+    _needle_telemetry_emit "pulse.detector_started" \
+        "detector=security" \
+        "workspace=$workspace"
+
+    local all_issues="[]"
+    local issues_found=0
+
+    # Run npm audit for Node.js projects
+    local npm_issues
+    npm_issues=$(_pulse_npm_audit "$workspace")
+    if [[ -n "$npm_issues" ]] && [[ "$npm_issues" != "[]" ]]; then
+        all_issues=$(echo "$all_issues" "$npm_issues" | jq -s 'add' 2>/dev/null || echo "$all_issues")
+        local npm_count
+        npm_count=$(echo "$npm_issues" | jq 'length' 2>/dev/null || echo 0)
+        ((issues_found += npm_count))
+        _needle_verbose "pulse: found $npm_count npm vulnerability(ies)"
+    fi
+
+    # Run pip-audit for Python projects
+    local pip_issues
+    pip_issues=$(_pulse_pip_audit "$workspace")
+    if [[ -n "$pip_issues" ]] && [[ "$pip_issues" != "[]" ]]; then
+        all_issues=$(echo "$all_issues" "$pip_issues" | jq -s 'add' 2>/dev/null || echo "$all_issues")
+        local pip_count
+        pip_count=$(echo "$pip_issues" | jq 'length' 2>/dev/null || echo 0)
+        ((issues_found += pip_count))
+        _needle_verbose "pulse: found $pip_count pip vulnerability(ies)"
+    fi
+
+    # Emit detector completed event
+    _needle_telemetry_emit "pulse.detector_completed" \
+        "detector=security" \
+        "workspace=$workspace" \
+        "issues_found=$issues_found"
+
+    _needle_diag_strand "pulse" "Security detector completed" \
+        "workspace=$workspace" \
+        "issues_found=$issues_found"
+
+    echo "$all_issues"
+}
+
+# ============================================================================
 # Issue Collection and Processing
 # ============================================================================
 

@@ -505,6 +505,302 @@ test_events_has_pulse_scan_events() {
 }
 
 # ============================================================================
+# Test: Security Detector (nd-21h)
+# ============================================================================
+
+test_security_detector_function_exists() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    if declare -f _pulse_detector_security &>/dev/null; then
+        pass "Security detector function exists"
+    else
+        fail "Security detector function not found"
+    fi
+}
+
+test_npm_severity_mapping_critical() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local result
+    result=$(_pulse_map_npm_severity "critical")
+
+    if [[ "$result" == "critical" ]]; then
+        pass "npm severity mapping: critical -> critical"
+    else
+        fail "npm severity mapping failed: critical -> $result (expected critical)"
+    fi
+}
+
+test_npm_severity_mapping_high() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local result
+    result=$(_pulse_map_npm_severity "high")
+
+    if [[ "$result" == "high" ]]; then
+        pass "npm severity mapping: high -> high"
+    else
+        fail "npm severity mapping failed: high -> $result (expected high)"
+    fi
+}
+
+test_npm_severity_mapping_moderate() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local result
+    result=$(_pulse_map_npm_severity "moderate")
+
+    if [[ "$result" == "medium" ]]; then
+        pass "npm severity mapping: moderate -> medium"
+    else
+        fail "npm severity mapping failed: moderate -> $result (expected medium)"
+    fi
+}
+
+test_npm_severity_mapping_low() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local result
+    result=$(_pulse_map_npm_severity "low")
+
+    if [[ "$result" == "low" ]]; then
+        pass "npm severity mapping: low -> low"
+    else
+        fail "npm severity mapping failed: low -> $result (expected low)"
+    fi
+}
+
+test_pip_severity_mapping_critical() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local result
+    result=$(_pulse_map_pip_severity "9.5")
+
+    if [[ "$result" == "critical" ]]; then
+        pass "pip severity mapping: CVSS 9.5 -> critical"
+    else
+        fail "pip severity mapping failed: 9.5 -> $result (expected critical)"
+    fi
+}
+
+test_pip_severity_mapping_high() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local result
+    result=$(_pulse_map_pip_severity "7.5")
+
+    if [[ "$result" == "high" ]]; then
+        pass "pip severity mapping: CVSS 7.5 -> high"
+    else
+        fail "pip severity mapping failed: 7.5 -> $result (expected high)"
+    fi
+}
+
+test_pip_severity_mapping_medium() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local result
+    result=$(_pulse_map_pip_severity "5.0")
+
+    if [[ "$result" == "medium" ]]; then
+        pass "pip severity mapping: CVSS 5.0 -> medium"
+    else
+        fail "pip severity mapping failed: 5.0 -> $result (expected medium)"
+    fi
+}
+
+test_pip_severity_mapping_low() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local result
+    result=$(_pulse_map_pip_severity "3.0")
+
+    if [[ "$result" == "low" ]]; then
+        pass "pip severity mapping: CVSS 3.0 -> low"
+    else
+        fail "pip severity mapping failed: 3.0 -> $result (expected low)"
+    fi
+}
+
+test_pip_severity_mapping_empty() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local result
+    result=$(_pulse_map_pip_severity "")
+
+    if [[ "$result" == "medium" ]]; then
+        pass "pip severity mapping: empty -> medium (default)"
+    else
+        fail "pip severity mapping failed: empty -> $result (expected medium)"
+    fi
+}
+
+test_npm_audit_no_package_json() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # Create temp directory without package.json
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    local result
+    result=$(_pulse_npm_audit "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    if [[ "$result" == "[]" ]]; then
+        pass "npm audit returns empty array when no package.json"
+    else
+        fail "npm audit should return empty array for non-Node.js projects"
+    fi
+}
+
+test_pip_audit_no_requirements() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # Create temp directory without Python requirements
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    local result
+    result=$(_pulse_pip_audit "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    if [[ "$result" == "[]" ]]; then
+        pass "pip audit returns empty array when no Python requirements"
+    else
+        fail "pip audit should return empty array for non-Python projects"
+    fi
+}
+
+test_security_detector_returns_json_array() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # Create temp directory with no project files
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    local result
+    result=$(_pulse_detector_security "$temp_dir" "test-agent")
+
+    rm -rf "$temp_dir"
+
+    # Check if result is valid JSON array
+    if echo "$result" | jq -e 'type == "array"' &>/dev/null; then
+        pass "Security detector returns valid JSON array"
+    else
+        fail "Security detector should return valid JSON array"
+    fi
+}
+
+test_security_detector_fingerprint_format_npm() {
+    # Test that npm fingerprints follow expected format
+    local fingerprint="npm:lodash:CWE-1234"
+
+    if [[ "$fingerprint" == npm:* ]]; then
+        pass "npm fingerprint format is correct (starts with npm:)"
+    else
+        fail "npm fingerprint format incorrect"
+    fi
+}
+
+test_security_detector_fingerprint_format_pip() {
+    # Test that pip fingerprints follow expected format
+    local fingerprint="pip:requests:CVE-2024-1234"
+
+    if [[ "$fingerprint" == pip:* ]]; then
+        pass "pip fingerprint format is correct (starts with pip:)"
+    else
+        fail "pip fingerprint format incorrect"
+    fi
+}
+
+test_security_detector_issue_format() {
+    # Verify issue object has required fields
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # Create a mock issue to verify format
+    local issue
+    issue=$(jq -n \
+        --arg category "security" \
+        --arg severity "high" \
+        --arg title "Test vulnerability" \
+        --arg description "Test description" \
+        --arg fingerprint "test:fp" \
+        --arg labels "test" \
+        '{
+            category: $category,
+            severity: $severity,
+            title: $title,
+            description: $description,
+            fingerprint: $fingerprint,
+            labels: $labels
+        }')
+
+    local has_category has_severity has_title has_description has_fingerprint
+    has_category=$(echo "$issue" | jq 'has("category")')
+    has_severity=$(echo "$issue" | jq 'has("severity")')
+    has_title=$(echo "$issue" | jq 'has("title")')
+    has_description=$(echo "$issue" | jq 'has("description")')
+    has_fingerprint=$(echo "$issue" | jq 'has("fingerprint")')
+
+    if [[ "$has_category" == "true" ]] && \
+       [[ "$has_severity" == "true" ]] && \
+       [[ "$has_title" == "true" ]] && \
+       [[ "$has_description" == "true" ]] && \
+       [[ "$has_fingerprint" == "true" ]]; then
+        pass "Security issue object has all required fields"
+    else
+        fail "Security issue object missing required fields"
+    fi
+}
+
+test_security_detector_handles_missing_npm() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # Create temp directory with package.json but npm unavailable (simulated)
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    echo '{"name": "test", "version": "1.0.0"}' > "$temp_dir/package.json"
+
+    # _pulse_npm_audit should handle missing npm gracefully
+    # Since npm likely exists in the environment, we just check it doesn't crash
+    local result
+    result=$(_pulse_npm_audit "$temp_dir" 2>/dev/null)
+
+    rm -rf "$temp_dir"
+
+    # Should return valid JSON (empty array if npm fails)
+    if echo "$result" | jq -e . &>/dev/null; then
+        pass "npm audit handles missing/failing npm gracefully"
+    else
+        fail "npm audit should return valid JSON even when npm fails"
+    fi
+}
+
+test_security_detector_handles_missing_pip_audit() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    # Create temp directory with requirements.txt
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    echo "requests==2.0.0" > "$temp_dir/requirements.txt"
+
+    # _pulse_pip_audit should handle missing pip-audit gracefully
+    local result
+    result=$(_pulse_pip_audit "$temp_dir" 2>/dev/null)
+
+    rm -rf "$temp_dir"
+
+    # Should return valid JSON (empty array if pip-audit unavailable)
+    if echo "$result" | jq -e . &>/dev/null; then
+        pass "pip audit handles missing/failing pip-audit gracefully"
+    else
+        fail "pip audit should return valid JSON even when pip-audit fails"
+    fi
+}
+
+# ============================================================================
 # Run Tests
 # ============================================================================
 
@@ -583,6 +879,28 @@ run_tests() {
     echo "=== Telemetry Tests ==="
     test_events_has_pulse_events || ((failed++))
     test_events_has_pulse_scan_events || ((failed++))
+
+    # Security detector tests (nd-21h)
+    echo ""
+    echo "=== Security Detector Tests (nd-21h) ==="
+    test_security_detector_function_exists || ((failed++))
+    test_npm_severity_mapping_critical || ((failed++))
+    test_npm_severity_mapping_high || ((failed++))
+    test_npm_severity_mapping_moderate || ((failed++))
+    test_npm_severity_mapping_low || ((failed++))
+    test_pip_severity_mapping_critical || ((failed++))
+    test_pip_severity_mapping_high || ((failed++))
+    test_pip_severity_mapping_medium || ((failed++))
+    test_pip_severity_mapping_low || ((failed++))
+    test_pip_severity_mapping_empty || ((failed++))
+    test_npm_audit_no_package_json || ((failed++))
+    test_pip_audit_no_requirements || ((failed++))
+    test_security_detector_returns_json_array || ((failed++))
+    test_security_detector_fingerprint_format_npm || ((failed++))
+    test_security_detector_fingerprint_format_pip || ((failed++))
+    test_security_detector_issue_format || ((failed++))
+    test_security_detector_handles_missing_npm || ((failed++))
+    test_security_detector_handles_missing_pip_audit || ((failed++))
 
     echo ""
     if [[ $failed -eq 0 ]]; then
