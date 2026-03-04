@@ -45,7 +45,8 @@ NEEDLE_SKIPPED_DEPS=()
 
 # Ensure cache directory exists
 _needle_ensure_cache_dir() {
-    local cache_dir="${NEEDLE_CACHE_DIR:-$HOME/.needle/cache}"
+    local cache_dir
+    cache_dir=$(_needle_get_cache_dir)
     mkdir -p "$cache_dir"
     echo "$cache_dir"
 }
