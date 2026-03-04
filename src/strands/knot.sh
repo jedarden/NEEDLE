@@ -85,6 +85,7 @@ _needle_knot_verify_work_available() {
     local diag_direct_count=0
     local diag_any_open=0
     local diag_claimed="?"
+    local diag_assigned="?"
     local diag_blocked="?"
     local diag_deferred="?"
     local diag_human_type="?"
@@ -129,6 +130,9 @@ _needle_knot_verify_work_available() {
     diag_any_open=$(cd "$workspace" 2>/dev/null && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
         jq 'length' 2>/dev/null || echo "0")
 
+    # Also track assigned beads (different from claimed - persistent assignment)
+    local diag_assigned=0
+
     if [[ "$diag_any_open" -gt 0 ]]; then
         # There are open beads but none are claimable
         # Log diagnostic info but don't alert (might be all claimed or blocked)
@@ -146,7 +150,25 @@ _needle_knot_verify_work_available() {
         diag_has_deps=$(cd "$workspace" && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
             jq '[.[] | select(.dependency_count != null and .dependency_count > 0)] | length' 2>/dev/null || echo "?")
 
-        _needle_debug "knot: bead status - claimed: $diag_claimed, blocked: $diag_blocked, deferred: $diag_deferred, human: $diag_human_type, has_deps: $diag_has_deps"
+        # Check for assigned beads (persistent assignment vs temporary claim)
+        # This detects when all work is assigned to specific workers - expected behavior
+        diag_assigned=$(cd "$workspace" && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
+            jq '[.[] | select(.assignee != null and .assignee != "")] | length' 2>/dev/null || echo "0")
+
+        _needle_debug "knot: bead status - claimed: $diag_claimed, assigned: $diag_assigned, blocked: $diag_blocked, deferred: $diag_deferred, human: $diag_human_type, has_deps: $diag_has_deps"
+
+        # FIX (nd-1lr alternative): If ALL beads are assigned to specific workers,
+        # this is EXPECTED behavior - the worker pool is fully utilized.
+        # Don't create a starvation alert, just log and return 1.
+        if [[ "$diag_assigned" -gt 0 ]] && [[ "$diag_assigned" -ge "$diag_any_open" ]]; then
+            _needle_info "knot: all $diag_any_open open beads are assigned to specific workers - expected behavior, skipping alert"
+            _needle_emit_event "knot.all_work_assigned" \
+                "All open beads are assigned to specific workers - expected worker pool utilization" \
+                "workspace=$workspace" \
+                "assigned_count=$diag_assigned" \
+                "total_open=$diag_any_open"
+            return 1  # No work available for THIS worker, but not an error
+        fi
 
         # Still return 1 (no work available) since beads aren't claimable
         # But this is a legitimate reason, not a false positive
@@ -159,6 +181,7 @@ _needle_knot_verify_work_available() {
         "direct_query=$diag_direct_count" \
         "any_open=$diag_any_open" \
         "claimed=$diag_claimed" \
+        "assigned=$diag_assigned" \
         "blocked=$diag_blocked" \
         "deferred=$diag_deferred" \
         "human_type=$diag_human_type" \
