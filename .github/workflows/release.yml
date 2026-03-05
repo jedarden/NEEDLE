@@ -30,8 +30,9 @@ jobs:
           fi
           echo "Build size: $(wc -c < dist/needle) bytes"
           echo "Build lines: $(wc -l < dist/needle)"
-          # Test that the binary runs
-          dist/needle --version || dist/needle version
+          # Verify it's a valid bash script (don't run --version as it requires br CLI)
+          head -1 dist/needle | grep -q '^#!/' && echo "Valid shebang found"
+          bash -n dist/needle && echo "Bash syntax OK"
 
       - name: Extract version from tag
         id: version
