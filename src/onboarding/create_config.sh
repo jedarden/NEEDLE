@@ -323,6 +323,18 @@ hooks:
   timeout: 30s
   fail_action: warn
 
+# File collision management
+# Controls how NEEDLE handles concurrent file edits across workers
+file_locks:
+  # timeout: Maximum time a file lock can be held before considered stale
+  # Supports: 30m (30 minutes), 1h (1 hour), 3600s (3600 seconds)
+  timeout: 30m
+  # stale_action: What to do when a lock is held too long
+  #   warn    - Log warning but keep lock (default)
+  #   release - Force release the stale lock
+  #   ignore  - Don't check for stale locks
+  stale_action: warn
+
 mitosis:
   enabled: true
   skip_types: bug,hotfix,incident

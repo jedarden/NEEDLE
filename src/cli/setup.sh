@@ -19,6 +19,7 @@ OPTIONS:
     -c, --check              Check only, don't install anything
     -r, --reinstall          Force reinstall all dependencies
     -y, --yes                Don't prompt for confirmation
+    -j, --json               Output dependency status as JSON
 
     -h, --help               Print help information
 
