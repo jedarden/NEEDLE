@@ -2923,6 +2923,394 @@ Suggested config changes:
   file_locks.ld_preload.agents: [opencode, aider]
 ```
 
+### Advanced Lock Features
+
+#### Read/Write Lock Distinction
+
+Not all file access requires exclusive locks. NEEDLE distinguishes:
+
+| Operation | Lock Type | Concurrency |
+|-----------|-----------|-------------|
+| Read, Glob, Grep, cat | Shared (read) | Multiple simultaneous |
+| Edit, Write, rm | Exclusive (write) | One at a time |
+
+**Lock structure with type:**
+```json
+{
+  "bead": "nd-2ov",
+  "worker": "alpha",
+  "path": "/src/cli/run.sh",
+  "type": "write",
+  "ts": 1709337600,
+  "readers": []
+}
+```
+
+**Shared lock structure (multiple readers):**
+```json
+{
+  "path": "/src/cli/run.sh",
+  "type": "read",
+  "readers": [
+    {"bead": "nd-2ov", "worker": "alpha", "ts": 1709337600},
+    {"bead": "bd-muv", "worker": "bravo", "ts": 1709337605}
+  ]
+}
+```
+
+**Lock compatibility matrix:**
+
+| Held \ Requested | Read | Write |
+|------------------|------|-------|
+| None | ✅ Grant | ✅ Grant |
+| Read | ✅ Grant | ❌ Block (wait for readers) |
+| Write | ❌ Block | ❌ Block |
+
+**API:**
+```bash
+checkout_file "$path" --read "$bead_id"   # Shared lock
+checkout_file "$path" --write "$bead_id"  # Exclusive lock
+```
+
+**Interception determines lock type automatically:**
+- `open()` with `O_RDONLY` → read lock
+- `open()` with `O_WRONLY|O_RDWR|O_CREAT|O_TRUNC` → write lock
+
+#### Intent Declaration (Proactive Reservation)
+
+Beads can optionally declare files they intend to modify upfront. This enables conflict detection before agent execution begins.
+
+**Declaration sources (checked in order):**
+1. Explicit `files:` field in bead metadata
+2. File paths parsed from bead description
+3. Historical patterns (beads with similar titles → similar files)
+
+**Bead with intent declaration:**
+```bash
+br create "Refactor authentication flow" \
+  --files="src/auth/login.ts,src/auth/logout.ts,src/auth/types.ts"
+```
+
+**Automatic extraction from description:**
+```bash
+# Bead description: "Fix bug in src/cli/run.sh where parse_args fails"
+# NEEDLE extracts: src/cli/run.sh
+
+extract_files_from_description() {
+    local desc="$1"
+    # Match common path patterns
+    echo "$desc" | grep -oE '[a-zA-Z0-9_./-]+\.(ts|js|py|sh|rs|go|rb|yaml|json|md)' | sort -u
+}
+```
+
+**Claim with pre-reservation:**
+```bash
+# On bead claim, attempt to reserve declared files
+claim_with_intent() {
+    local bead_id="$1"
+    local files=$(br show "$bead_id" --json | jq -r '.files // empty')
+
+    if [ -n "$files" ]; then
+        for file in $files; do
+            if ! checkout_file "$file" --write "$bead_id"; then
+                blocking=$(check_file "$file" | jq -r '.bead')
+                br dep add "$bead_id" "$blocking"
+                br update "$bead_id" --status open  # Release claim
+                return 1  # Find different bead
+            fi
+        done
+    fi
+    return 0  # All files reserved, proceed
+}
+```
+
+**Benefits:**
+- Zero wasted agent execution on conflicts
+- Conflicts become dependencies before work begins
+- Better scheduling (known file sets enable parallel planning)
+
+#### Optimistic Locking with 3-Way Merge
+
+Instead of blocking on conflict, allow concurrent edits and merge at completion:
+
+**Workflow:**
+```
+Bead A claims file.ts         Bead B claims file.ts
+    ↓                             ↓
+Snapshot: file.ts.A.base      Snapshot: file.ts.B.base
+    ↓                             ↓
+Agent A edits file.ts         Agent B edits file.ts
+    ↓                             ↓
+A completes first             B completes second
+    ↓                             ↓
+Commits file.ts               Attempts merge:
+                              git merge-file file.ts file.ts.B.base file.ts.A.committed
+                                  ↓
+                              ┌─ Clean merge ─┐    ┌─ Conflict ─┐
+                              │ Auto-merged!  │    │ Block, add │
+                              │ Both succeed  │    │ dependency │
+                              └───────────────┘    └────────────┘
+```
+
+**Implementation:**
+```bash
+# Before agent execution - snapshot base version
+prepare_optimistic_edit() {
+    local file="$1"
+    local bead_id="$2"
+    local snapshot="/dev/shm/needle-snapshots/${bead_id}/$(echo "$file" | md5sum | cut -d' ' -f1)"
+
+    mkdir -p "$(dirname "$snapshot")"
+    cp "$file" "$snapshot.base" 2>/dev/null || touch "$snapshot.base"
+    echo "$file" >> "$snapshot.files"
+}
+
+# After agent execution - attempt merge if concurrent edits occurred
+reconcile_optimistic_edits() {
+    local bead_id="$1"
+    local snapshot_dir="/dev/shm/needle-snapshots/${bead_id}"
+
+    [ -d "$snapshot_dir" ] || return 0
+
+    while read -r file; do
+        local hash=$(echo "$file" | md5sum | cut -d' ' -f1)
+        local base="$snapshot_dir/$hash.base"
+
+        # Check if file was modified by another bead since we started
+        local current_in_repo=$(git show HEAD:"$file" 2>/dev/null)
+        local our_base=$(cat "$base")
+
+        if [ "$current_in_repo" != "$our_base" ]; then
+            # Concurrent modification detected - attempt merge
+            local theirs=$(mktemp)
+            git show HEAD:"$file" > "$theirs"
+
+            if git merge-file "$file" "$base" "$theirs" 2>/dev/null; then
+                log_info "Auto-merged concurrent edits to $file"
+                emit_event "file.merge.success" "{\"bead\":\"$bead_id\",\"path\":\"$file\"}"
+            else
+                log_error "Merge conflict in $file"
+                emit_event "file.merge.conflict" "{\"bead\":\"$bead_id\",\"path\":\"$file\"}"
+                # Restore our version, add dependency, re-queue
+                git checkout HEAD -- "$file"
+                return 1
+            fi
+            rm "$theirs"
+        fi
+    done < "$snapshot_dir/files"
+
+    rm -rf "$snapshot_dir"
+    return 0
+}
+```
+
+**Configuration:**
+```yaml
+file_locks:
+  strategy: optimistic  # or: pessimistic (default)
+  merge:
+    enabled: true
+    tool: git-merge-file  # or: diff3, custom
+    on_conflict: block    # or: keep_ours, keep_theirs
+```
+
+#### Priority-Based Lock Queuing
+
+When a high-priority bead needs a file locked by a lower-priority bead:
+
+**Queue structure:**
+```json
+{
+  "path": "/src/cli/run.sh",
+  "holder": {"bead": "nd-low", "priority": 2, "worker": "alpha"},
+  "queue": [
+    {"bead": "nd-high", "priority": 0, "worker": "bravo", "ts": 1709337700}
+  ]
+}
+```
+
+**Priority bump mechanism:**
+```bash
+request_lock_with_priority() {
+    local path="$1"
+    local bead_id="$2"
+    local priority="$3"
+
+    local lock_info=$(check_file "$path")
+    if [ -z "$lock_info" ]; then
+        checkout_file "$path" --write "$bead_id"
+        return 0
+    fi
+
+    local holder_priority=$(echo "$lock_info" | jq -r '.holder.priority')
+    local holder_bead=$(echo "$lock_info" | jq -r '.holder.bead')
+
+    if [ "$priority" -lt "$holder_priority" ]; then
+        # We're higher priority - add to queue and signal holder
+        add_to_queue "$path" "$bead_id" "$priority"
+
+        emit_event "lock.priority_bump" "{
+            \"path\": \"$path\",
+            \"waiting_bead\": \"$bead_id\",
+            \"waiting_priority\": $priority,
+            \"holder_bead\": \"$holder_bead\",
+            \"holder_priority\": $holder_priority
+        }"
+
+        # Holder's worker receives signal to expedite or yield
+        signal_worker "$holder_bead" "PRIORITY_BUMP"
+    fi
+
+    # Add dependency and find other work
+    br dep add "$bead_id" "$holder_bead"
+    return 1
+}
+```
+
+**Worker response to priority bump:**
+```bash
+handle_priority_bump() {
+    log_warn "Priority bump received - higher priority bead waiting"
+    # Options:
+    # 1. Complete current work faster (reduce exploration)
+    # 2. Checkpoint and yield (if supported)
+    # 3. Continue but emit ETA for waiting bead
+}
+```
+
+#### Lock Lease Renewal
+
+Locks require periodic heartbeat to remain valid. Stale locks auto-release:
+
+**Heartbeat includes active locks:**
+```json
+{
+  "worker": "alpha",
+  "ts": 1709337600,
+  "bead": "nd-2ov",
+  "locks": [
+    "/src/cli/run.sh",
+    "/src/cli/init.sh"
+  ]
+}
+```
+
+**Lease renewal daemon:**
+```bash
+# Runs in worker's heartbeat loop
+renew_lock_leases() {
+    local bead_id="$1"
+
+    for lock in /dev/shm/needle-locks/*.lock; do
+        local holder=$(jq -r '.bead' "$lock/info" 2>/dev/null)
+        if [ "$holder" = "$bead_id" ]; then
+            # Renew lease
+            jq ".ts = $(date +%s)" "$lock/info" > "$lock/info.tmp"
+            mv "$lock/info.tmp" "$lock/info"
+        fi
+    done
+}
+
+# Lease expiry check (runs periodically)
+expire_stale_leases() {
+    local now=$(date +%s)
+    local lease_timeout=60  # seconds
+
+    for lock in /dev/shm/needle-locks/*.lock; do
+        [ -d "$lock" ] || continue
+        local ts=$(jq -r '.ts' "$lock/info" 2>/dev/null)
+        local bead=$(jq -r '.bead' "$lock/info" 2>/dev/null)
+
+        if (( now - ts > lease_timeout )); then
+            log_warn "Expiring stale lock: $lock (held by $bead, age=$((now - ts))s)"
+            emit_event "lock.expired" "{\"path\":\"$lock\",\"bead\":\"$bead\",\"age_s\":$((now - ts))}"
+            rm -rf "$lock"
+        fi
+    done
+}
+```
+
+**Configuration:**
+```yaml
+file_locks:
+  lease:
+    duration: 60s       # Lock valid for this long without renewal
+    renewal_interval: 15s  # Renew every N seconds
+    grace_period: 10s   # Extra time before forceful release
+```
+
+#### Hot File Detection and Split Recommendations
+
+NEEDLE tracks file contention and recommends architectural changes:
+
+**Contention tracking:**
+```bash
+# Updated on every conflict
+track_file_contention() {
+    local path="$1"
+    local contention_file="$HOME/.needle/state/metrics/file_contention.json"
+
+    # Increment conflict count for this file
+    jq --arg path "$path" '
+        .files[$path].conflicts += 1 |
+        .files[$path].last_conflict = now
+    ' "$contention_file" > "$contention_file.tmp"
+    mv "$contention_file.tmp" "$contention_file"
+}
+```
+
+**Analysis and recommendations:**
+```bash
+$ needle analyze hot-files
+
+📊 File Contention Analysis (last 30 days)
+
+🔥 HOT FILES (>10 conflicts):
+
+1. /src/cli/run.sh (47 conflicts)
+   ├─ Edited by 12 different beads
+   ├─ Functions involved:
+   │   ├─ parse_args (18 conflicts)
+   │   ├─ main (15 conflicts)
+   │   └─ validate_config (14 conflicts)
+   └─ Recommendation: SPLIT
+      Suggested structure:
+        src/cli/run/
+        ├─ args.sh      (parse_args, validate_args)
+        ├─ main.sh      (main, run_loop)
+        └─ config.sh    (validate_config, load_config)
+
+2. /src/agent/dispatch.sh (23 conflicts)
+   ├─ Edited by 8 different beads
+   └─ Recommendation: SPLIT by agent type
+      Suggested structure:
+        src/agent/
+        ├─ dispatch.sh  (common logic)
+        ├─ claude.sh    (Claude-specific)
+        ├─ opencode.sh  (OpenCode-specific)
+        └─ aider.sh     (Aider-specific)
+
+3. /README.md (12 conflicts)
+   └─ Recommendation: Consider section-based locking
+      or documentation-specific workflow
+
+💡 Tip: Run `needle refactor suggest /src/cli/run.sh` for
+   detailed split plan with migration steps.
+```
+
+**Auto-generated refactoring bead:**
+```bash
+$ needle analyze hot-files --create-beads
+
+✓ Created nd-split-1: Refactor /src/cli/run.sh into modular components
+  Priority: P2
+  Description: Split hot file to reduce contention (47 conflicts in 30 days)
+
+✓ Created nd-split-2: Refactor /src/agent/dispatch.sh by agent type
+  Priority: P2
+  Description: Split hot file to reduce contention (23 conflicts in 30 days)
+```
+
 ---
 
 ## Worker Heartbeat & Auto-Recovery
