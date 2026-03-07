@@ -6,39 +6,35 @@
 NEEDLE_HEARTBEAT_PAUSE_FILE="${NEEDLE_HEARTBEAT_PAUSE_FILE:-$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeat-pause}"
 
 _needle_heartbeat_help() {
-    _needle_print "Manage worker heartbeat and recovery
+    _needle_print "Manage worker heartbeat and auto-recovery
 
-Monitor worker health through heartbeat files and control
-automatic recovery behavior.
+Monitor worker health via heartbeats and manage the automatic
+recovery watchdog.
 
 USAGE:
     needle heartbeat <COMMAND> [OPTIONS]
 
 COMMANDS:
-    status           Show heartbeat status for all workers (default)
-    recover          Trigger manual recovery for stuck workers
-    pause            Pause automatic recovery
-    resume           Resume automatic recovery
+    status      Show heartbeat status of all workers
+    recover     Manually trigger recovery for stuck worker
+    pause       Pause automatic recovery
+    resume      Resume automatic recovery
 
 OPTIONS:
-    -j, --json       Output in JSON format (for status)
-    -w, --watch      Auto-refresh display every 2 seconds (for status)
-    -h, --help       Show this help message
+    -j, --json     Output as JSON
+    -h, --help     Print help information
 
 EXAMPLES:
-    # Show heartbeat status
+    # Check heartbeat status
     needle heartbeat status
 
     # Show status as JSON
     needle heartbeat status --json
 
-    # Continuous monitoring
-    needle heartbeat --watch
+    # Manually recover stuck worker
+    needle heartbeat recover alpha
 
-    # Trigger manual recovery
-    needle heartbeat recover
-
-    # Pause auto-recovery
+    # Pause auto-recovery (maintenance)
     needle heartbeat pause
 
     # Resume auto-recovery

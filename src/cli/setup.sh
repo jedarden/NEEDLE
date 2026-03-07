@@ -9,34 +9,39 @@
 _needle_setup_help() {
     _needle_print "Check and install NEEDLE dependencies
 
-This command checks for required dependencies (tmux, jq, yq, br) and
-optionally installs any that are missing.
+Verifies that required dependencies are installed and optionally
+installs missing ones.
 
 USAGE:
     needle setup [OPTIONS]
 
 OPTIONS:
-    -c, --check       Check only, don't install anything
-    -r, --reinstall   Force reinstall all dependencies
-    -y, --yes         Don't prompt for confirmation
-    -j, --json        Output in JSON format
-    -h, --help        Show this help message
+    -c, --check              Check only, don't install anything
+    -r, --reinstall          Force reinstall all dependencies
+    -y, --yes                Don't prompt for confirmation
+
+    -h, --help               Print help information
+
+DEPENDENCIES:
+    tmux     Terminal multiplexer for session management
+    jq       JSON processor for parsing agent output
+    yq       YAML processor for configuration
+    br       Beads CLI for task queue management
 
 EXAMPLES:
     # Check and install missing dependencies
     needle setup
 
-    # Check only without installing
+    # Check only (for CI/CD)
     needle setup --check
 
-    # Reinstall all dependencies
-    needle setup --reinstall
+    # Force reinstall everything
+    needle setup --reinstall --yes
 
-    # Install without prompting
-    needle setup --yes
-
-    # Get dependency status as JSON
-    needle setup --json
+EXIT CODES:
+    0    All dependencies installed/available
+    1    Missing dependencies (with --check)
+    2    Installation failed
 "
 }
 

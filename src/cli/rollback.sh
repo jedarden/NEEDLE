@@ -10,37 +10,29 @@ NEEDLE_ROLLBACK_CACHE_DIR="$NEEDLE_HOME/$NEEDLE_CACHE_DIR"
 # -----------------------------------------------------------------------------
 
 _needle_rollback_help() {
-    _needle_print "Rollback NEEDLE to a previous version
+    _needle_print "Rollback to a previous NEEDLE version
 
 Restores a previously installed version from the backup cache.
-If no version is specified, rolls back to the most recent backup.
 
 USAGE:
     needle rollback [OPTIONS]
 
 OPTIONS:
-    -v, --version <VER>      Rollback to specific version
-    -l, --list               List available backup versions
-    -y, --yes                Skip confirmation prompt
-    -h, --help               Show this help message
+    --version <VERSION>      Rollback to specific version
+    -l, --list               List available versions for rollback
+    -y, --yes                Rollback without confirmation
+
+    -h, --help               Print help information
 
 EXAMPLES:
-    # Rollback to most recent backup
+    # Rollback to previous version
     needle rollback
 
     # Rollback to specific version
-    needle rollback --version 0.2.0
+    needle rollback --version=1.1.0
 
-    # Show available backup versions
+    # List available backups
     needle rollback --list
-
-BACKUP LOCATION:
-    Backups are stored in: $NEEDLE_ROLLBACK_CACHE_DIR
-    Backup format: needle-VERSION.bak
-
-NOTES:
-    - A backup of the current version is created before rollback
-    - Use 'needle upgrade --rollback' for upgrade-specific rollback
 "
 }
 

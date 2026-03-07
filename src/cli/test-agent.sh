@@ -4,46 +4,45 @@
 
 # Help function for test-agent command
 _needle_test_agent_help() {
-    _needle_print "Test an agent adapter configuration.
+    _needle_print "Test an agent adapter configuration
 
-Validates that an agent is properly configured and can execute prompts.
+Validates an agent adapter by running a simple test prompt and
+checking the output format.
 
 USAGE:
     needle test-agent <AGENT> [OPTIONS]
 
 ARGUMENTS:
-    <AGENT>                 Agent name to test (e.g., claude-anthropic-sonnet)
+    <AGENT>     Agent adapter name (e.g., claude-anthropic-sonnet)
 
 OPTIONS:
-    -p, --prompt <TEXT>     Custom test prompt (default: simple echo test)
-    -t, --timeout <SECS>    Timeout for test execution (default: 60)
-    -v, --verbose           Show full agent output
-    -h, --help              Print this help message
+    -p, --prompt <TEXT>      Custom test prompt [default: \"echo hello\"]
+    -t, --timeout <SECS>     Timeout for test [default: 60]
+    -v, --verbose            Show full agent output
+
+    -h, --help               Print help information
 
 TESTS PERFORMED:
-    1. Agent config exists   - Verifies agent YAML is found
-    2. Runner in PATH        - Checks runner executable is available
-    3. Invoke template       - Validates template rendering
-    4. Agent execution       - Runs test prompt against agent
+    1. Agent CLI exists in PATH
+    2. Invoke template renders correctly
+    3. Agent executes and exits with code 0
+    4. Output is parseable
 
 EXAMPLES:
-    # Test default agent configuration
+    # Test an agent
     needle test-agent claude-anthropic-sonnet
 
     # Test with custom prompt
-    needle test-agent claude-anthropic-sonnet --prompt \"Write a haiku about testing\"
+    needle test-agent opencode-alibaba-qwen --prompt=\"print hello world\"
 
-    # Test with verbose output
-    needle test-agent claude-anthropic-sonnet -v
-
-    # Test with longer timeout
-    needle test-agent claude-anthropic-opus --timeout 120
+    # Verbose output for debugging
+    needle test-agent claude-anthropic-sonnet --verbose
 
 EXIT CODES:
-    0   All tests passed
-    1   Test failed or configuration error
-    2   Usage error (missing agent name, invalid options)
-    3   Configuration error
+    0    Agent working correctly
+    1    Agent CLI not found
+    2    Execution failed
+    3    Output parsing failed
 "
 }
 

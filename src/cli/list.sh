@@ -3,59 +3,49 @@
 # List running workers with status, bead, and workspace information
 
 _needle_list_help() {
-    _needle_print "List running workers
+    _needle_print "List running NEEDLE workers
 
-Shows information about active NEEDLE workers including their status,
-current bead, duration, and workspace.
+Shows all active workers with their current status, bead being
+processed, and runtime statistics.
 
 USAGE:
     needle list [OPTIONS]
 
 OPTIONS:
-    -a, --all              Include stopped/crashed workers
-    -j, --json             Output as JSON
-    -w, --wide             Show extended information (PID, started, agent)
-    --runner <NAME>        Filter by runner (e.g., claude, opencode)
-    --provider <NAME>      Filter by provider (e.g., anthropic, alibaba)
-    --model <NAME>         Filter by model (e.g., sonnet, qwen)
-    --workspace <PATH>     Filter by workspace path
-    -q, --quiet            Only show session names (one per line)
-    -h, --help             Show this help message
+    -a, --all                Include stopped/crashed workers
+    -j, --json               Output as JSON
+    -w, --wide               Show extended information
+
+    --runner <NAME>          Filter by runner (e.g., \"claude\")
+    --provider <NAME>        Filter by provider (e.g., \"anthropic\")
+    --model <NAME>           Filter by model (e.g., \"sonnet\")
+    --workspace <PATH>       Filter by workspace
+
+    -h, --help               Print help information
 
 OUTPUT COLUMNS:
-    WORKER     Full session name (needle-{runner}-{provider}-{model}-{id})
-    STATUS     Current status: idle, executing, draining, starting, unknown
-    BEAD       Current bead being processed (or \"(idle)\" if none)
-    DURATION   Time spent on current bead
-    WORKSPACE  Workspace directory path
+    WORKER      Session name (e.g., needle-claude-anthropic-sonnet-alpha)
+    STATUS      running | idle | executing | draining | stuck
+    BEAD        Current bead ID or \"(idle)\"
+    DURATION    Time on current bead or idle time
+    WORKSPACE   Workspace path
+    BEADS       Total beads completed this session
 
 EXAMPLES:
     # List all running workers
     needle list
 
-    # Output as JSON for scripting
-    needle list --json
-
-    # Show extended information
+    # Show extended info
     needle list --wide
 
-    # Filter by runner
-    needle list --runner claude
-
     # Filter by provider
-    needle list --provider anthropic
+    needle list --provider=anthropic
 
-    # Filter by model
-    needle list --model sonnet
+    # JSON output for scripting
+    needle list --json | jq '.[] | select(.status == \"executing\")'
 
-    # Filter by workspace
-    needle list --workspace /home/coder/project
-
-    # Include stopped workers
+    # Include crashed workers
     needle list --all
-
-    # Get just session names for scripting
-    needle list --quiet
 "
 }
 

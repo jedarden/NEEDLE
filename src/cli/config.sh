@@ -3,52 +3,38 @@
 # View and modify configuration
 
 _needle_config_help() {
-    _needle_print "View and modify NEEDLE configuration
+    _needle_print "View or edit NEEDLE configuration
 
-Allows viewing and editing the NEEDLE configuration file.
-Configuration is stored in YAML format at ~/.needle/config.yaml.
+Display current configuration or open editor for modifications.
 
 USAGE:
-    needle config <COMMAND> [OPTIONS]
+    needle config [COMMAND] [OPTIONS]
 
 COMMANDS:
-    show             Display current config (default)
-    get <KEY>        Get a configuration value
-    set <KEY> <VAL>  Set a configuration value
-    list             List all configuration values (alias for show)
-    edit             Open configuration in \$EDITOR
-    validate         Validate configuration syntax
-    path             Show all configuration file paths
+    show        Display current configuration (default)
+    edit        Open configuration in editor
+    validate    Validate configuration syntax
+    path        Show configuration file paths
 
 OPTIONS:
-    -j, --json       Output in JSON format (for show)
-    --global         Use global config (default)
-    --workspace      Use workspace config (.needle.yaml)
-    -h, --help       Show this help message
+    --global            Target global config (~/.needle/config.yaml)
+    --workspace         Target workspace config (.needle.yaml)
+
+    -j, --json          Output as JSON (for 'show')
+
+    -h, --help          Print help information
 
 EXAMPLES:
-    # Show all config values
+    # Show current config
     needle config show
 
-    # Show config as JSON
-    needle config show --json
-
-    # Show workspace config
-    needle config show --workspace
-
-    # Get a specific value
-    needle config get editor
-
-    # Set a value
-    needle config set editor vim
-
-    # Open config in editor
-    needle config edit
+    # Edit global config
+    needle config edit --global
 
     # Validate configuration
     needle config validate
 
-    # Show all config paths
+    # Show config file paths
     needle config path
 "
 }

@@ -3,34 +3,35 @@
 # View and filter worker logs
 
 _needle_logs_help() {
-    _needle_print "Usage: needle logs [WORKER] [OPTIONS]
-
-View or tail worker logs
+    _needle_print "View or tail worker logs
 
 Displays structured JSONL logs from worker sessions. Can filter
 by event type, time range, or bead.
 
-Arguments:
-    WORKER              Worker identifier [default: all workers]
+USAGE:
+    needle logs [WORKER] [OPTIONS]
 
-Options:
-    -f, --follow        Follow log output (like tail -f)
-    -n, --lines <N>     Number of lines to show [default: 50]
+ARGUMENTS:
+    [WORKER]    Worker identifier [default: all workers]
 
-    --since <TIME>      Show logs since timestamp or duration
-                        (e.g., \"2024-01-01\", \"1h\", \"30m\")
-    --until <TIME>      Show logs until timestamp
+OPTIONS:
+    -f, --follow             Follow log output (like tail -f)
+    -n, --lines <N>          Number of lines to show [default: 50]
 
-    --event <TYPE>      Filter by event type (e.g., \"bead.completed\")
-    --bead <ID>         Filter by bead ID
-    --strand <N>        Filter by strand number (1-7)
+    --since <TIME>           Show logs since timestamp or duration
+                             (e.g., \"2024-01-01\", \"1h\", \"30m\")
+    --until <TIME>           Show logs until timestamp
 
-    --raw               Show raw JSONL without formatting
-    -j, --json          Output as JSON array
+    --event <TYPE>           Filter by event type (e.g., \"bead.completed\")
+    --bead <ID>              Filter by bead ID
+    --strand <N>             Filter by strand number (1-7)
 
-    -h, --help          Print help information
+    --raw                    Show raw JSONL without formatting
+    -j, --json               Output as JSON array
 
-Event Types:
+    -h, --help               Print help information
+
+EVENT TYPES:
     worker.*      Worker lifecycle (started, stopped, idle)
     bead.*        Bead processing (claimed, completed, failed)
     strand.*      Strand transitions (started, fallthrough)
@@ -38,13 +39,26 @@ Event Types:
     heartbeat.*   Heartbeat events
     error.*       Error events
 
-Examples:
-    needle logs                           View recent logs for all workers
-    needle logs alpha --follow            Follow logs for worker alpha
-    needle logs --lines=100               Show last 100 lines
-    needle logs --event=bead.completed    Filter by event type
-    needle logs --bead=bd-123             Show logs for specific bead
-    needle logs --since=1h                Logs from last hour
+EXAMPLES:
+    # View recent logs for all workers
+    needle logs
+
+    # Follow logs for worker alpha
+    needle logs alpha --follow
+
+    # Show last 100 lines
+    needle logs --lines=100
+
+    # Filter by event type
+    needle logs --event=bead.completed
+
+    # Show logs for specific bead
+    needle logs --bead=bd-123
+
+    # Logs from last hour
+    needle logs --since=1h
+
+    # Raw JSONL output for parsing
     needle logs --raw | jq 'select(.event == \"bead.failed\")'
 "
 }

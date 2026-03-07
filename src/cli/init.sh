@@ -82,24 +82,32 @@ USAGE:
 
 OPTIONS:
     -f, --force              Overwrite existing configuration
-    -d, --defaults           Use all default values (non-interactive)
-    -w, --workspace <PATH>   Set workspace path (default: current directory)
-    -e, --editor <EDITOR>    Set default editor
-    -t, --timezone <TZ>      Set timezone (default: UTC)
-    -h, --help               Show this help message
+    -n, --non-interactive    Run without prompts (use defaults)
+
+    --workspace <PATH>       Preset workspace path (skips prompt)
+    --agent <NAME>           Preset agent name (skips prompt)
+
+    -h, --help               Print help information
 
 EXAMPLES:
     # Interactive setup
     needle init
 
-    # Non-interactive with all defaults
-    needle init --defaults
-
     # Re-run setup, overwriting existing config
     needle init --force
 
-    # Set editor, timezone, and workspace
-    needle init --editor vim --timezone America/New_York --workspace ~/myproject
+    # Scripted setup for CI/CD
+    needle init --non-interactive --workspace=/app --agent=claude-anthropic-sonnet
+
+    # Check if setup is needed
+    if needle init --check; then
+        needle init --non-interactive
+    fi
+
+NOTES:
+    - Any needle command in an unconfigured environment auto-redirects here
+    - Re-running init without --force preserves existing configuration
+    - Use --force to completely reset and reconfigure
 "
 }
 

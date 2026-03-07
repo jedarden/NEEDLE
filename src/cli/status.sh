@@ -3,27 +3,35 @@
 # Show current status and health of NEEDLE with dashboard view
 
 _needle_status_help() {
-    _needle_print "Show current status and health of NEEDLE
+    _needle_print "Show worker health and statistics
 
-Displays a comprehensive dashboard with information about workers,
-beads, strands, and effort metrics.
+Displays a dashboard of worker status, bead statistics, and
+system health metrics.
 
 USAGE:
     needle status [OPTIONS]
 
 OPTIONS:
-    -w, --watch       Auto-refresh display every 2 seconds
-    -j, --json        Output in JSON format
-    -h, --help        Show this help message
+    -w, --watch              Refresh continuously (every 2s)
+    -j, --json               Output as JSON
+
+    -h, --help               Print help information
+
+DASHBOARD SECTIONS:
+    Workers     Running/idle/stuck workers with current beads
+    Beads       Completed/failed/in-progress counts
+    Strands     Activity by strand
+    Effort      Token usage and cost estimates
+    Health      Heartbeat status, quarantined beads
 
 EXAMPLES:
     # Show status dashboard
     needle status
 
-    # Continuous monitoring
+    # Watch continuously
     needle status --watch
 
-    # Output as JSON for scripting
+    # JSON output for monitoring
     needle status --json
 "
 }

@@ -3,46 +3,46 @@
 # Attach to worker tmux sessions
 
 _needle_attach_help() {
-    _needle_print "Attach to worker tmux sessions
+    _needle_print "Attach to a worker's tmux session
 
-Connects to a running NEEDLE worker's tmux session for interactive
-monitoring or control. Detach with Ctrl+B, D to leave the worker running.
+Connects your terminal to a running worker's tmux session for
+monitoring or debugging. Detach with Ctrl+B, D.
 
 USAGE:
-    needle attach [WORKER] [OPTIONS]
+    needle attach [WORKER]
 
 ARGUMENTS:
     [WORKER]    Worker identifier or full session name
-                Can be:
-                - Identifier only (e.g., 'alpha', 'bravo')
-                - Full session name (e.g., 'needle-claude-anthropic-sonnet-alpha')
-                - Partial match (e.g., 'sonnet-alpha')
+                Can be: \"alpha\", \"bravo\", or full name like
+                \"needle-claude-anthropic-sonnet-alpha\"
+                [default: most recently started worker]
 
 OPTIONS:
-    -r, --read-only    Attach in read-only mode (no input allowed)
-    -l, --last         Attach to most recent worker
-    -h, --help         Show this help message
+    -r, --read-only          Attach in read-only mode (view only)
+    -l, --last               Attach to most recent worker
+
+    -h, --help               Print help information
 
 EXAMPLES:
-    # Attach to worker by identifier
+    # Attach to worker alpha
     needle attach alpha
 
     # Attach to most recent worker
     needle attach --last
 
-    # Attach in read-only mode
-    needle attach bravo --read-only
+    # Attach read-only (can't type, just watch)
+    needle attach alpha --read-only
 
-    # Attach using full session name
+    # Attach by full session name
     needle attach needle-claude-anthropic-sonnet-alpha
 
-    # Attach with partial match
-    needle attach sonnet-alpha
+DETACHING:
+    Press Ctrl+B, then D to detach from the session.
+    The worker continues running in the background.
 
-NOTES:
-    - Detach with Ctrl+B, D (default tmux keybinding)
-    - Workers continue running when detached
-    - Use 'needle list' to see available workers
+SEE ALSO:
+    needle list    List available workers to attach to
+    needle logs    View worker logs without attaching
 "
 }
 

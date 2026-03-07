@@ -3,21 +3,39 @@
 # List and manage agent adapters from YAML configurations
 
 _needle_agents_help() {
-    _needle_print "Usage: needle agents [OPTIONS]
+    _needle_print "List and manage agent adapters
 
-List and manage agent adapters.
+Shows configured agent adapters and their availability status.
+Can scan for new agents or test specific adapters.
+
+USAGE:
+    needle agents [OPTIONS]
 
 OPTIONS:
-    -s, --scan     Re-scan PATH for available agents
-    -j, --json     Output as JSON
-    -a, --all      Include unavailable agents
-    -h, --help     Print help
+    -s, --scan               Re-scan PATH for available agents
+    -j, --json               Output as JSON
+    -a, --all                Include unavailable agents
 
-Examples:
-    needle agents              List available agents
-    needle agents --all        List all agents (including missing)
-    needle agents --scan       Re-scan and list agents
-    needle agents --json       Output as JSON
+    -h, --help               Print help information
+
+OUTPUT:
+    NAME         Agent adapter name (e.g., claude-anthropic-sonnet)
+    RUNNER       CLI executable (e.g., claude)
+    STATUS       available | missing | auth-required
+    VERSION      Detected version if available
+
+EXAMPLES:
+    # List configured agents
+    needle agents
+
+    # Scan for new agents
+    needle agents --scan
+
+    # JSON output
+    needle agents --json
+
+SEE ALSO:
+    needle test-agent    Test a specific agent adapter
 "
 }
 

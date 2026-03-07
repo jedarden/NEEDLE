@@ -20,76 +20,70 @@
 _needle_run_help() {
     _needle_print "Start a worker to process beads from the queue
 
-Starts a NEEDLE worker that processes beads (tasks) from the queue.
-The worker will claim beads, execute them with the configured agent,
-and mark them as complete.
+Launches a NEEDLE worker that claims and executes beads. The worker
+runs in a tmux session for persistence and can be attached/detached.
 
 USAGE:
     needle run [OPTIONS]
 
 OPTIONS:
-    -w, --workspace <PATH>   Workspace directory containing .beads/
-                             [default: current directory]
-    -a, --agent <NAME>       Agent to use (e.g., claude-anthropic-sonnet)
-                             [default: from config or auto-detected]
-    -c, --count <N>          Number of workers to start
-                             [default: 1]
-    -n, --name <NAME>        Explicit session name (overrides auto-generated)
-    --budget <USD>           Budget override for this run
+    -w, --workspace <PATH>   Workspace directory to process beads from
+                             [default: current directory or config default]
+
+    -a, --agent <NAME>       Agent adapter to use for execution
                              [default: from config]
-    --no-hooks               Skip hook execution for this run
-    -d, --dry-run            Show what would be done without executing
-    -f, --force              Skip concurrency limit checks
-    --wait                   Wait for a slot to become available if limits reached
-    --status                 Show concurrency status for agent
-    -v, --verbose            Show detailed output
-    -h, --help               Show this help message
+
+    -i, --id <ID>            Worker identifier (e.g., \"alpha\", \"primary\")
+                             [default: auto-assigned NATO alphabet]
+
+    -c, --count <N>          Number of workers to spawn [default: 1]
+
+    --no-tmux                Run directly without tmux (for debugging)
+    --foreground             Run in foreground, don't detach
+
+    --strands <LIST>         Comma-separated strands to enable
+                             [default: from config]
+
+    -h, --help               Print help information
+
+STRANDS:
+    1. pluck     - Process beads from configured workspaces
+    2. explore   - Look for work in other workspaces
+    3. mend      - Maintenance and cleanup tasks
+    4. weave     - Create beads from documentation gaps (opt-in)
+    5. unravel   - Create alternatives for blocked beads (opt-in)
+    6. pulse     - Codebase health monitoring (opt-in)
+    7. knot      - Alert human when stuck
 
 EXAMPLES:
-    # Start a single worker with default options
+    # Start a worker with defaults
     needle run
 
-    # Start a worker with explicit workspace and agent
-    needle run --workspace=/path/to/project --agent=claude-anthropic-sonnet
+    # Start with explicit workspace and agent
+    needle run --workspace=/home/coder/project --agent=claude-anthropic-sonnet
 
-    # Start multiple workers
-    needle run -w /path/to/project -c 4
+    # Start 3 workers
+    needle run --count=3
 
-    # Run with budget override
-    needle run --budget 10.00
+    # Start with custom identifier
+    needle run --id=primary
 
-    # Skip hooks for this run
-    needle run --no-hooks
+    # Debug mode (no tmux, foreground)
+    needle run --no-tmux --foreground
 
-    # Preview what would be done
-    needle run --dry-run
+    # Enable only specific strands
+    needle run --strands=pluck,mend
 
-    # Check concurrency status before starting
-    needle run --agent=claude-anthropic-sonnet --status
+SESSION NAMING:
+    Workers are named using the configured pattern:
+    needle-{runner}-{provider}-{model}-{identifier}
 
-VALIDATION:
-    The following validations are performed before starting:
+    Example: needle-claude-anthropic-sonnet-alpha
 
-    1. Workspace must exist and contain a .beads/ directory
-    2. Agent must be installed and configured (or available in config)
-    3. Count must be a positive integer (1 or greater)
-    4. Budget must be a positive number (if specified)
-
-CONFIGURATION DEFAULTS:
-    Options not specified on the command line are loaded from:
-
-    1. Workspace config (.needle.yaml in workspace root)
-    2. Global config (~/.needle/config.yaml)
-    3. Built-in defaults
-
-CONCURRENCY LIMITS:
-    NEEDLE enforces three levels of concurrency limits:
-
-    1. Global limit     - Maximum total workers across all providers
-    2. Provider limit   - Maximum workers per provider (e.g., anthropic)
-    3. Model limit      - Maximum workers per agent (e.g., claude-anthropic-sonnet)
-
-    Use --force to bypass these checks (not recommended for normal use).
+SEE ALSO:
+    needle list      List running workers
+    needle attach    Attach to a worker session
+    needle stop      Stop worker(s)
 "
 }
 

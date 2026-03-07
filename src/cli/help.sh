@@ -21,17 +21,20 @@ _needle_help() {
         list)
             _needle_list_help
             ;;
-        status)
-            _needle_status_help
+        attach)
+            _needle_attach_help
             ;;
-        config)
-            _needle_config_help
+        stop)
+            _needle_stop_help
             ;;
         logs)
             _needle_logs_help
             ;;
-        version)
-            _needle_version_help
+        status)
+            _needle_status_help
+            ;;
+        setup)
+            _needle_setup_help
             ;;
         upgrade)
             _needle_upgrade_help
@@ -39,23 +42,23 @@ _needle_help() {
         rollback)
             _needle_rollback_help
             ;;
-        setup)
-            _needle_setup_help
-            ;;
-        pulse)
-            _needle_pulse_help
+        version)
+            _needle_version_help
             ;;
         agents)
             _needle_agents_help
             ;;
+        test-agent)
+            _needle_test_agent_help
+            ;;
         heartbeat)
             _needle_heartbeat_help
             ;;
-        attach)
-            _needle_attach_help
+        config)
+            _needle_config_help
             ;;
-        stop)
-            _needle_stop_help
+        pulse)
+            _needle_pulse_help
             ;;
         help)
             _needle_print "Display help for NEEDLE commands"
@@ -87,21 +90,21 @@ COMMANDS:
     init        Interactive first-time setup and onboarding
     run         Start a worker to process beads
     list        List running workers
-    status      Show worker health and statistics
+    attach      Attach to a worker's tmux session
+    stop        Stop running worker(s)
     logs        View or tail worker logs
-    attach      Attach to worker tmux sessions
-    stop        Stop running workers
+    status      Show worker health and statistics
 
-    agents      Detect and manage coding CLI agents
-    heartbeat   Manage worker heartbeat and recovery
-    pulse       Run codebase health scan manually
     setup       Check and install dependencies
     upgrade     Check for and install updates
     rollback    Rollback to a previous version
     version     Show version information
 
+    agents      List and manage agent adapters
+    test-agent  Test an agent adapter configuration
+
+    heartbeat   Manage worker heartbeat and recovery
     config      View or edit configuration
-    help        Show help information
 
 OPTIONS:
     -h, --help       Print help information
@@ -120,8 +123,8 @@ QUICK START:
     # List running workers
     needle list
 
-    # Show status
-    needle status
+    # Attach to a worker session
+    needle attach alpha
 
 CONFIGURATION:
     Global config:    ~/.needle/config.yaml
@@ -129,8 +132,8 @@ CONFIGURATION:
     Logs:             ~/.needle/logs/
 
 DOCUMENTATION:
-    Full docs:  https://github.com/coder/needle#readme
-    Issues:     https://github.com/coder/needle/issues
+    Full docs:  https://github.com/user/needle#readme
+    Issues:     https://github.com/user/needle/issues
 
 Use "needle help <command>" for more information about a command.
 EOF

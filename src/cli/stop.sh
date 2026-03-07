@@ -6,53 +6,53 @@
 NEEDLE_SHUTDOWN_DIR="${NEEDLE_SHUTDOWN_DIR:-$NEEDLE_HOME/$NEEDLE_STATE_DIR/shutdown}"
 
 _needle_stop_help() {
-    _needle_print "Stop running workers
+    _needle_print "Stop running NEEDLE worker(s)
 
-Gracefully or forcefully stop NEEDLE workers. By default, workers
-are given time to complete their current bead before shutting down.
+Stops one or more workers. By default, uses graceful shutdown which
+waits for the current bead to complete before exiting.
 
 USAGE:
     needle stop [WORKERS...] [OPTIONS]
 
 ARGUMENTS:
-    [WORKERS...]    Worker identifiers to stop (session names or identifiers)
+    [WORKERS...]    Worker identifiers to stop (e.g., \"alpha bravo\")
+                    Use --all to stop all workers
 
 OPTIONS:
-    -a, --all         Stop all running workers
-    -g, --graceful    Wait for current bead to complete [default]
-    -i, --immediate   Stop immediately, release current bead
-    -f, --force       Kill process without cleanup
-    --timeout <SECS>  Graceful shutdown timeout [default: 300]
-    -h, --help        Show this help message
+    -a, --all                Stop all running workers
+    -g, --graceful           Wait for current bead to complete [default]
+    -i, --immediate          Stop immediately, release current bead
+    -f, --force              Kill process without cleanup (last resort)
 
-STOP MODES:
-    graceful   Signal worker to stop after completing current bead.
-               Worker will exit naturally and cleanup state.
+    --timeout <SECONDS>      Graceful shutdown timeout [default: 300]
 
-    immediate  Signal worker to stop now. Any current bead is released
-               back to the queue for another worker to pick up.
+    -h, --help               Print help information
 
-    force      Kill the worker process immediately without cleanup.
-               Use only when worker is unresponsive.
+SHUTDOWN MODES:
+    graceful    Finish current bead, then exit cleanly
+    immediate   Release current bead to queue, exit now
+    force       SIGKILL the process (may orphan bead)
 
 EXAMPLES:
-    # Stop specific worker gracefully
-    needle stop needle-claude-anthropic-sonnet-alpha
-
-    # Stop worker by short identifier
+    # Stop worker alpha gracefully
     needle stop alpha
 
-    # Stop all workers
+    # Stop all workers gracefully
     needle stop --all
 
-    # Stop immediately (releases current bead)
-    needle stop --immediate needle-claude-anthropic-sonnet-alpha
+    # Stop immediately (release bead back to queue)
+    needle stop alpha --immediate
 
-    # Force kill unresponsive worker
-    needle stop --force needle-claude-anthropic-sonnet-alpha
+    # Stop all with custom timeout
+    needle stop --all --timeout=60
 
-    # Graceful stop with custom timeout
-    needle stop --timeout 600 needle-claude-anthropic-sonnet-alpha
+    # Force kill (use only if stuck)
+    needle stop alpha --force
+
+NOTES:
+    - Graceful shutdown waits for current bead to complete
+    - If timeout is reached, bead is released and worker exits
+    - Force stop may leave beads in inconsistent state
 "
 }
 

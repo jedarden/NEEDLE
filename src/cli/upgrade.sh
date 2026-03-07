@@ -15,46 +15,48 @@ NEEDLE_MAX_BACKUPS="${NEEDLE_MAX_BACKUPS:-5}"
 # -----------------------------------------------------------------------------
 
 _needle_upgrade_help() {
-    _needle_print "Upgrade NEEDLE to the latest or specified version
+    _needle_print "Check for and install NEEDLE updates
 
 Downloads and installs the latest version of NEEDLE from GitHub
-releases. Creates backups automatically and supports rollback.
+releases with automatic backup and rollback support.
 
 USAGE:
     needle upgrade [OPTIONS]
 
 OPTIONS:
-    -c, --check              Check for available updates without installing
-    -f, --force              Force upgrade even if already at latest version
-    -y, --yes                Skip confirmation prompt
-    -l, --local <FILE>       Install from local file (air-gapped environments)
-    -v, --version <VER>      Upgrade to specific version instead of latest
-    --list                   List available versions
-    --rollback               Rollback to previous version
-    --rollback-to <VER>      Rollback to specific version
-    -h, --help               Show this help message
+    -c, --check              Check for updates without installing
+    -y, --yes                Upgrade without confirmation
+    -f, --force              Reinstall even if already latest
+    -l, --list               List available versions
+
+    --version <VERSION>      Install specific version (e.g., \"1.2.0\")
+    --local <PATH>           Install from local file (air-gapped)
+
+    -h, --help               Print help information
 
 EXAMPLES:
-    # Upgrade to latest version
-    needle upgrade
-
-    # Check for updates only
+    # Check for updates
     needle upgrade --check
 
-    # Reinstall current version
-    needle upgrade --force
+    # Upgrade to latest
+    needle upgrade
+
+    # Upgrade without prompts
+    needle upgrade --yes
 
     # Install specific version
-    needle upgrade -v 0.2.0
+    needle upgrade --version=1.2.0
 
-    # Install from local file
-    needle upgrade --local ./needle-v0.3.0
-
-    # Restore previous version
-    needle upgrade --rollback
-
-    # Show available versions
+    # List available versions
     needle upgrade --list
+
+    # Air-gapped install
+    needle upgrade --local=/path/to/needle-1.3.0
+
+NOTES:
+    - Running workers continue with old version until restarted
+    - Use 'needle rollback' to revert if issues occur
+    - Previous version backed up to ~/.needle/cache/
 "
 }
 
