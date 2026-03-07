@@ -225,6 +225,12 @@ calculate_cost() {
         cost="0.00"
     fi
 
+    # Normalize zero costs to "0.00" format for consistency
+    # Check if cost is effectively zero (handles 0, 0.0, 0.00, 0.000000, etc.)
+    if awk "BEGIN {exit !($cost == 0)}" 2>/dev/null; then
+        cost="0.00"
+    fi
+
     echo "$cost"
 }
 
