@@ -39,11 +39,11 @@ NEEDLE supports three billing model behavior profiles that adjust strand executi
 **Behavior:**
 - **Budget enforcement:** None (no budget limits enforced)
 - **Priority threshold:** Maximum (all priorities P0-P4+ processed)
-- **Strand enablement:** All strands enabled
+- **Strand enablement:** All strands enabled except weave (still opt-in)
 - **Worker concurrency:** Maximum (20 workers default)
 - **Priority weights:** Base weights (no adjustments)
 
-**Best for:** Enterprise plans, unlimited API keys, maximum throughput needed
+**Best for:** Enterprise plans, unlimited API keys, local inference, maximum throughput needed
 
 ## Configuration
 
@@ -129,7 +129,7 @@ strands:
   pluck: auto      # ✓ Enabled
   explore: auto    # ✓ Enabled
   mend: auto       # ✓ Enabled
-  weave: auto      # ✓ Enabled
+  weave: auto      # ✗ Disabled (opt-in only)
   unravel: auto    # ✓ Enabled
   pulse: auto      # ✓ Enabled
   knot: auto       # ✓ Enabled
@@ -139,7 +139,7 @@ strands:
 - Processes all priorities (P0-P4+)
 - No budget enforcement
 - Runs 20 concurrent workers
-- All strands active
+- All strands active except weave (still opt-in)
 
 ### Explicit Strand Override
 

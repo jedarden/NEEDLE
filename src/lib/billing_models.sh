@@ -193,8 +193,15 @@ _needle_billing_is_strand_enabled() {
             return 0
             ;;
         unlimited)
-            # Maximum: enable everything
-            return 0
+            # Balanced: enable everything except weave (still opt-in)
+            case "$strand" in
+                weave)
+                    return 1  # Weave is opt-in even for unlimited
+                    ;;
+                *)
+                    return 0  # All other strands enabled
+                    ;;
+            esac
             ;;
         *)
             # Default: conservative profile

@@ -382,6 +382,92 @@ EOF
 }
 
 # =============================================================================
+# Test: _needle_billing_is_strand_enabled - unlimited
+# =============================================================================
+test_strand_enabled_unlimited_weave() {
+    local test_name="strand_enabled_unlimited_weave"
+
+    cat > "$NEEDLE_CONFIG_FILE" << 'EOF'
+billing:
+  model: unlimited
+strands:
+  weave: auto
+EOF
+
+    clear_config_cache
+
+    if _needle_billing_is_strand_enabled "weave" "unlimited"; then
+        _test_fail "$test_name - weave should be disabled in unlimited (opt-in)"
+    else
+        _test_pass "$test_name - weave disabled in unlimited (opt-in)"
+    fi
+}
+
+test_strand_enabled_unlimited_unravel() {
+    local test_name="strand_enabled_unlimited_unravel"
+
+    cat > "$NEEDLE_CONFIG_FILE" << 'EOF'
+billing:
+  model: unlimited
+strands:
+  unravel: auto
+EOF
+
+    clear_config_cache
+
+    if _needle_billing_is_strand_enabled "unravel" "unlimited"; then
+        _test_pass "$test_name - unravel enabled in unlimited"
+    else
+        _test_fail "$test_name - unravel should be enabled in unlimited"
+    fi
+}
+
+test_strand_enabled_unlimited_explore() {
+    local test_name="strand_enabled_unlimited_explore"
+
+    cat > "$NEEDLE_CONFIG_FILE" << 'EOF'
+billing:
+  model: unlimited
+strands:
+  explore: auto
+EOF
+
+    clear_config_cache
+
+    if _needle_billing_is_strand_enabled "explore" "unlimited"; then
+        _test_pass "$test_name - explore enabled in unlimited"
+    else
+        _test_fail "$test_name - explore should be enabled in unlimited"
+    fi
+}
+
+test_strand_enabled_unlimited_essential() {
+    local test_name="strand_enabled_unlimited_essential"
+
+    cat > "$NEEDLE_CONFIG_FILE" << 'EOF'
+billing:
+  model: unlimited
+strands:
+  pluck: auto
+  mend: auto
+  knot: auto
+EOF
+
+    clear_config_cache
+
+    local pluck_enabled mend_enabled knot_enabled
+    _needle_billing_is_strand_enabled "pluck" "unlimited" && pluck_enabled=1 || pluck_enabled=0
+    _needle_billing_is_strand_enabled "mend" "unlimited" && mend_enabled=1 || mend_enabled=0
+    _needle_billing_is_strand_enabled "knot" "unlimited" && knot_enabled=1 || knot_enabled=0
+
+    if [[ $pluck_enabled -eq 1 && $mend_enabled -eq 1 && $knot_enabled -eq 1 ]]; then
+        _test_pass "$test_name - essential strands enabled in unlimited"
+    else
+        _test_fail "$test_name - essential strands should be enabled in unlimited"
+    fi
+}
+
+# =============================================================================
 # Test: _needle_billing_is_strand_enabled - explicit override
 # =============================================================================
 test_strand_enabled_explicit_true() {
@@ -576,6 +662,10 @@ main() {
     test_strand_enabled_pay_per_token_pluck
     test_strand_enabled_pay_per_token_weave
     test_strand_enabled_use_or_lose_all
+    test_strand_enabled_unlimited_weave
+    test_strand_enabled_unlimited_unravel
+    test_strand_enabled_unlimited_explore
+    test_strand_enabled_unlimited_essential
     test_strand_enabled_explicit_true
     test_strand_enabled_explicit_false
     test_should_stop_strict_under_budget
