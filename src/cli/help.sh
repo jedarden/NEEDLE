@@ -42,6 +42,9 @@ _needle_help() {
         setup)
             _needle_setup_help
             ;;
+        pulse)
+            _needle_pulse_help
+            ;;
         agents)
             _needle_agents_help
             ;;
@@ -91,6 +94,7 @@ COMMANDS:
 
     agents      Detect and manage coding CLI agents
     heartbeat   Manage worker heartbeat and recovery
+    pulse       Run codebase health scan manually
     setup       Check and install dependencies
     upgrade     Check for and install updates
     rollback    Rollback to a previous version
