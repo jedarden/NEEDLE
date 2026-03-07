@@ -36,14 +36,26 @@ OPTIONS:
     -i, --id <ID>            Worker identifier (e.g., \"alpha\", \"primary\")
                              [default: auto-assigned NATO alphabet]
 
+    -n, --name <NAME>        Explicit session name (overrides auto-generated)
+
     -c, --count <N>          Number of workers to spawn [default: 1]
 
-    --no-tmux                Run directly without tmux (for debugging)
-    --foreground             Run in foreground, don't detach
+    --budget <USD>           Budget override for this run (e.g., \"10.00\")
 
     --strands <LIST>         Comma-separated strands to enable
                              [default: from config]
 
+    --no-hooks               Skip hook execution for this run
+
+    --no-tmux                Run directly without tmux (for debugging)
+    --foreground             Run in foreground, don't detach
+
+    -d, --dry-run            Show what would be done without executing
+    -f, --force              Skip concurrency limit checks
+    --status                 Show concurrency status for agent
+    --wait                   Wait for a slot if concurrency limit reached
+
+    -v, --verbose            Enable verbose output
     -h, --help               Print help information
 
 STRANDS:
@@ -293,6 +305,8 @@ _needle_run_parse_args() {
     local force=false
     local wait_for_slot=false
     local show_status=false
+    local no_tmux=false
+    local foreground=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
@@ -377,6 +391,14 @@ _needle_run_parse_args() {
                 show_status=true
                 shift
                 ;;
+            --no-tmux)
+                no_tmux=true
+                shift
+                ;;
+            --foreground)
+                foreground=true
+                shift
+                ;;
             -v|--verbose)
                 NEEDLE_VERBOSE=true
                 shift
@@ -414,6 +436,8 @@ _needle_run_parse_args() {
     NEEDLE_RAW_FORCE="$force"
     NEEDLE_RAW_WAIT="$wait_for_slot"
     NEEDLE_RAW_STATUS="$show_status"
+    NEEDLE_RAW_NO_TMUX="$no_tmux"
+    NEEDLE_RAW_FOREGROUND="$foreground"
 
     # Export flags
     NEEDLE_VALIDATED_NO_HOOKS="$no_hooks"
@@ -422,7 +446,9 @@ _needle_run_parse_args() {
     NEEDLE_VALIDATED_WAIT="$wait_for_slot"
     NEEDLE_VALIDATED_STATUS="$show_status"
     NEEDLE_VALIDATED_SESSION_NAME="$session_name"
-    export NEEDLE_VALIDATED_NO_HOOKS NEEDLE_VALIDATED_DRY_RUN NEEDLE_VALIDATED_FORCE NEEDLE_VALIDATED_WAIT NEEDLE_VALIDATED_STATUS NEEDLE_VALIDATED_SESSION_NAME
+    NEEDLE_VALIDATED_NO_TMUX="$no_tmux"
+    NEEDLE_VALIDATED_FOREGROUND="$foreground"
+    export NEEDLE_VALIDATED_NO_HOOKS NEEDLE_VALIDATED_DRY_RUN NEEDLE_VALIDATED_FORCE NEEDLE_VALIDATED_WAIT NEEDLE_VALIDATED_STATUS NEEDLE_VALIDATED_SESSION_NAME NEEDLE_VALIDATED_NO_TMUX NEEDLE_VALIDATED_FOREGROUND
 
     # Validate workspace
     if ! _needle_validate_workspace "$workspace"; then
@@ -494,6 +520,8 @@ _needle_run() {
     local force="$NEEDLE_VALIDATED_FORCE"
     local wait_for_slot="${NEEDLE_VALIDATED_WAIT:-false}"
     local show_status="$NEEDLE_VALIDATED_STATUS"
+    local no_tmux="${NEEDLE_VALIDATED_NO_TMUX:-false}"
+    local foreground="${NEEDLE_VALIDATED_FOREGROUND:-false}"
 
     # Handle --status flag
     if [[ "$show_status" == "true" ]]; then
@@ -619,6 +647,49 @@ _needle_run() {
         _needle_section "Validated Options (JSON)"
         _needle_export_validated_json
         exit $NEEDLE_EXIT_SUCCESS
+    fi
+
+    # Handle --no-tmux mode (run directly without tmux session)
+    if [[ "$no_tmux" == "true" ]]; then
+        _needle_info "Running in no-tmux mode (direct execution)"
+        [[ "$foreground" == "true" ]] && _needle_info "Foreground mode enabled"
+
+        # For single worker, run directly
+        if [[ "$count" -eq 1 ]]; then
+            # Generate identifier
+            local identifier
+            identifier=$(get_next_identifier "$agent")
+
+            # Set up environment for worker
+            export NEEDLE_WORKSPACE="$workspace"
+            export NEEDLE_AGENT="$agent"
+            export NEEDLE_WORKER_ID="$identifier"
+            export NEEDLE_SESSION="needle-$agent-$identifier"
+            export NEEDLE_RUNNER="${NEEDLE_AGENT[runner]:-}"
+            export NEEDLE_PROVIDER="${NEEDLE_AGENT[provider]:-}"
+            export NEEDLE_MODEL="${NEEDLE_AGENT[model]:-}"
+            export NEEDLE_IDENTIFIER="$identifier"
+
+            [[ -n "$budget" ]] && export NEEDLE_BUDGET="$budget"
+            [[ "$no_hooks" == "true" ]] && export NEEDLE_NO_HOOKS="true"
+
+            _needle_info "Starting worker: $NEEDLE_SESSION"
+            _needle_info "Workspace: $workspace"
+            _needle_info "Agent: $agent"
+
+            # Run worker directly (this blocks until complete)
+            _needle_run_worker \
+                --workspace "$workspace" \
+                --agent "$agent" \
+                --identifier "$identifier" \
+                ${budget:+--budget "$budget"} \
+                ${no_hooks:+--no-hooks} \
+                --session "$NEEDLE_SESSION"
+            exit $?
+        else
+            _needle_error "Multiple workers not supported with --no-tmux (use count=1)"
+            exit $NEEDLE_EXIT_USAGE
+        fi
     fi
 
     # Spawn workers
