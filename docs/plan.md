@@ -2641,6 +2641,288 @@ bd-muv becomes unblocked, FABRIC worker picks it up
 {"ts":"...","event":"file.stale","session":"...","data":{"bead":"nd-xxx","path":"/src/old.sh","age_s":3600,"action":"released"}}
 ```
 
+### Multi-Agent Interception Strategies
+
+Claude Code supports hooks natively, but other agents (OpenCode, Codex, Aider) do not. NEEDLE provides multiple interception strategies with increasing enforcement levels:
+
+#### Strategy 1: Prompt Injection (Soft Enforcement)
+
+Inject checkout instructions into the agent prompt:
+
+```bash
+# Prepended to every bead prompt sent to agent
+NEEDLE_CHECKOUT_INSTRUCTIONS="
+IMPORTANT: Before editing ANY file, you MUST run:
+    needle checkout <filepath>
+
+If checkout fails, DO NOT edit that file. Instead run:
+    needle status <filepath>
+to see which bead has it checked out, then move to other work.
+
+After completing edits, run:
+    needle release <filepath>
+"
+```
+
+**Pros:** Works with any LLM-based agent, zero setup
+**Cons:** Relies on instruction-following (~90% compliance)
+
+#### Strategy 2: Post-Execution Reconciliation (Reactive)
+
+Detect conflicts after agent execution and rollback:
+
+```bash
+# ~/.needle/hooks/post-execute.sh
+detect_file_conflicts() {
+    local changed_files=$(git diff --name-only HEAD)
+    local conflicts=0
+
+    for file in $changed_files; do
+        lock_info=$(check_file "$file")
+        if [ -n "$lock_info" ]; then
+            blocking_bead=$(echo "$lock_info" | jq -r '.bead')
+
+            if [ "$blocking_bead" != "$NEEDLE_BEAD_ID" ]; then
+                log_warn "CONFLICT: $file was edited but locked by $blocking_bead"
+
+                # Rollback this file
+                git checkout HEAD -- "$file"
+
+                # Add dependency
+                br dep add "$NEEDLE_BEAD_ID" "$blocking_bead"
+
+                # Emit conflict metric
+                emit_event "file.conflict.missed" "{
+                    \"bead\": \"$NEEDLE_BEAD_ID\",
+                    \"blocking_bead\": \"$blocking_bead\",
+                    \"path\": \"$file\",
+                    \"strategy\": \"post_exec_rollback\"
+                }"
+
+                ((conflicts++))
+            fi
+        fi
+    done
+
+    if [ $conflicts -gt 0 ]; then
+        log_error "$conflicts file conflicts detected and rolled back"
+        br update "$NEEDLE_BEAD_ID" --status open  # Re-queue
+        return 1
+    fi
+}
+```
+
+**Pros:** Catches everything, guaranteed consistency
+**Cons:** Wasted agent execution time on conflicts
+
+#### Strategy 3: LD_PRELOAD Shim (Hard Enforcement)
+
+Intercept file system calls at the libc level:
+
+```c
+// src/lock/libcheckout.c
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int (*real_open)(const char *, int, ...) = NULL;
+static int (*real_openat)(int, const char *, int, ...) = NULL;
+
+static int check_needle_lock(const char *path) {
+    // Shell out to checkout check (or use shared memory directly)
+    char cmd[4096];
+    snprintf(cmd, sizeof(cmd), "needle check-lock '%s' 2>/dev/null", path);
+    return system(cmd) == 0;  // 0 = locked, non-zero = free
+}
+
+int open(const char *path, int flags, ...) {
+    if (!real_open) real_open = dlsym(RTLD_NEXT, "open");
+
+    // Check write operations against lock
+    if (flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC)) {
+        if (check_needle_lock(path)) {
+            errno = EACCES;
+            return -1;  // Block the write
+        }
+    }
+
+    // Pass through to real open
+    va_list args;
+    va_start(args, flags);
+    mode_t mode = va_arg(args, mode_t);
+    va_end(args);
+    return real_open(path, flags, mode);
+}
+```
+
+**Build and use:**
+```bash
+gcc -shared -fPIC -o ~/.needle/lib/libcheckout.so src/lock/libcheckout.c -ldl
+
+# Launch agent with interception
+LD_PRELOAD=~/.needle/lib/libcheckout.so opencode --prompt "$prompt"
+```
+
+**Pros:** Guaranteed enforcement, works with any agent/tool
+**Cons:** Requires compilation, may interfere with some tools
+
+#### Strategy 4: fanotify (Kernel-Level)
+
+Use Linux fanotify for permission-based file access control:
+
+```bash
+# Requires CAP_SYS_ADMIN or root
+needle-fanotify-daemon --watch="$NEEDLE_WORKSPACE" --lock-dir=/dev/shm/needle-locks
+```
+
+**Pros:** Kernel-enforced, zero overhead for allowed operations
+**Cons:** Requires elevated privileges, Linux-only
+
+#### Recommended Configuration
+
+```yaml
+# ~/.needle/config.yaml
+file_locks:
+  # Enforcement strategy (layered)
+  strategies:
+    - prompt_injection    # Always on (soft)
+    - post_exec_rollback  # Always on (safety net)
+    - ld_preload: false   # Opt-in (hard enforcement)
+    - fanotify: false     # Opt-in (requires privileges)
+
+  # Strategy-specific settings
+  prompt_injection:
+    include_in_prompt: true
+    cli_tool: "needle checkout"
+
+  post_exec_rollback:
+    enabled: true
+    auto_dependency: true
+    requeue_on_conflict: true
+
+  ld_preload:
+    library: ~/.needle/lib/libcheckout.so
+    agents: [opencode, aider]  # Only for these agents
+```
+
+### Collision Metrics & Effectiveness Measurement
+
+To evaluate strategy effectiveness, NEEDLE tracks detailed collision metrics:
+
+#### Metric Events
+
+```jsonl
+{"ts":"...","event":"file.checkout.attempt","data":{"bead":"nd-2ov","path":"/src/run.sh","strategy":"prompt"}}
+{"ts":"...","event":"file.checkout.acquired","data":{"bead":"nd-2ov","path":"/src/run.sh"}}
+{"ts":"...","event":"file.checkout.blocked","data":{"bead":"bd-muv","path":"/src/run.sh","blocked_by":"nd-2ov","strategy":"prompt"}}
+{"ts":"...","event":"file.conflict.missed","data":{"bead":"bd-xyz","path":"/src/run.sh","blocked_by":"nd-2ov","strategy":"post_exec_rollback"}}
+{"ts":"...","event":"file.conflict.prevented","data":{"bead":"bd-xyz","path":"/src/run.sh","blocked_by":"nd-2ov","strategy":"ld_preload"}}
+```
+
+#### Metrics Aggregation
+
+```bash
+# ~/.needle/state/metrics/file_collisions.json
+{
+  "period": "2026-03-07T00:00:00Z/2026-03-08T00:00:00Z",
+  "totals": {
+    "checkout_attempts": 1247,
+    "checkouts_acquired": 1180,
+    "checkouts_blocked": 67,
+    "conflicts_missed": 3,        # Got through, caught by post_exec
+    "conflicts_prevented": 64     # Blocked by enforcement
+  },
+  "by_strategy": {
+    "prompt_injection": {
+      "attempts": 800,
+      "blocked": 45,
+      "missed": 3,
+      "effectiveness": 0.937      # 45/(45+3) = 93.7%
+    },
+    "post_exec_rollback": {
+      "caught": 3,
+      "rollbacks": 3
+    },
+    "ld_preload": {
+      "attempts": 447,
+      "blocked": 22,
+      "missed": 0,
+      "effectiveness": 1.0        # 100%
+    }
+  },
+  "hot_files": [
+    {"path": "/src/cli/run.sh", "conflicts": 12},
+    {"path": "/src/agent/dispatch.sh", "conflicts": 8},
+    {"path": "/README.md", "conflicts": 5}
+  ],
+  "conflict_pairs": [
+    {"bead_a": "nd-2ov", "bead_b": "bd-muv", "file": "/src/cli/run.sh", "count": 3}
+  ]
+}
+```
+
+#### Dashboard Metrics (FABRIC integration)
+
+FABRIC can display live collision metrics:
+
+```
+┌─ File Lock Status ────────────────────────────────────────────┐
+│ Active Locks: 4        Conflicts Today: 12      Missed: 1    │
+├───────────────────────────────────────────────────────────────┤
+│ Strategy Effectiveness (24h):                                 │
+│   prompt_injection:  ████████████████████░░░░  89.2%         │
+│   ld_preload:        █████████████████████████ 100%          │
+│   post_exec_rollback: caught 2 missed conflicts              │
+├───────────────────────────────────────────────────────────────┤
+│ Hot Files:                                                    │
+│   /src/cli/run.sh         ████████████  12 conflicts         │
+│   /src/agent/dispatch.sh  ████████      8 conflicts          │
+│   /README.md              █████         5 conflicts          │
+└───────────────────────────────────────────────────────────────┘
+```
+
+#### Effectiveness Analysis Commands
+
+```bash
+# View collision summary
+needle metrics collisions --period=24h
+
+# Identify hot files (frequently contested)
+needle metrics hot-files --top=10
+
+# Compare strategy effectiveness
+needle metrics strategies --compare
+
+# Export for analysis
+needle metrics export --format=csv --output=collisions.csv
+```
+
+#### Automated Tuning
+
+Based on metrics, NEEDLE can recommend configuration changes:
+
+```bash
+$ needle metrics recommend
+
+📊 Collision Analysis (last 7 days):
+
+⚠️  prompt_injection effectiveness: 89.2% (below 95% threshold)
+   Recommendation: Enable ld_preload for agents: opencode, aider
+
+⚠️  Hot file detected: /src/cli/run.sh (47 conflicts)
+   Recommendation: Consider splitting into smaller modules
+
+✓  post_exec_rollback caught 8 missed conflicts
+   These would have caused merge conflicts without this safety net
+
+Suggested config changes:
+  file_locks.ld_preload.enabled: true
+  file_locks.ld_preload.agents: [opencode, aider]
+```
+
 ---
 
 ## Worker Heartbeat & Auto-Recovery
