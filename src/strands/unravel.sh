@@ -301,62 +301,92 @@ _needle_unravel_build_prompt() {
     local bead_json="$3"
 
     # Extract bead details
-    local title description
+    local title description created blocked_reason
     title=$(echo "$bead_json" | jq -r '.title // "Untitled"')
     description=$(echo "$bead_json" | jq -r '.description // .body // ""')
+    created=$(echo "$bead_json" | jq -r '.created_at // .created // ""')
+    blocked_reason=$(echo "$bead_json" | jq -r '.blocked_reason // "Awaiting human input"')
+
+    # Calculate waiting since time
+    local waiting_since="Unknown"
+    if [[ -n "$created" ]]; then
+        if [[ "$created" =~ ^[0-9]+$ ]]; then
+            waiting_since=$(date -d "@$created" "+%Y-%m-%d %H:%M:%S" 2>/dev/null || echo "Unknown")
+        else
+            waiting_since="$created"
+        fi
+    fi
 
     local max_alternatives
     max_alternatives=$(_needle_unravel_get_max_alternatives)
 
     cat << PROMPT_EOF
-You are analyzing a blocked HUMAN bead to propose alternative approaches that can make progress without requiring the human decision.
+You are helping unblock a task that is waiting for human input.
 
-## HUMAN Bead Details
-- **ID:** $bead_id
-- **Title:** $title
-- **Description:**
-$description
+## Blocked Bead
+ID: $bead_id
+Title: $title
+Description: $description
+Blocked Reason: $blocked_reason
+Waiting Since: $waiting_since
 
-## Workspace
-$workspace
+## Context
+Workspace: $workspace
+This bead is blocked waiting for human input. Your job is to propose alternative approaches that could unblock progress while waiting.
 
-## Task
-Propose reversible alternative approaches that could make progress on the underlying goal WITHOUT requiring the human input that is blocking this bead.
+## Instructions
 
-## Alternative Criteria
-Good alternatives should:
-1. **Be reversible** - Can be undone if the human later provides different direction
-2. **Make progress** - Advance the underlying goal in some way
-3. **Not conflict** - Should not block or contradict potential human decisions
-4. **Be independent** - Can be pursued in parallel with the original blocked approach
+The above bead is blocked waiting for human input. Your job is to propose
+alternative approaches that could unblock progress while waiting.
 
-## Constraints
-- Maximum $max_alternatives alternatives to propose
-- Each alternative should be a distinct, actionable approach
-- If no good alternatives exist, return empty array
-- Prioritize low-risk, high-value alternatives
+1. Analyze why this bead is blocked
+2. Propose 1-$max_alternatives alternative approaches that:
+   - Work around the blocker without the human decision
+   - Are reversible or can be easily changed later
+   - Make progress on the underlying goal
+   - Are clearly labeled as "alternative pending human decision"
 
-## Output Format
-Return a JSON object with your analysis:
-
-\`\`\`json
+3. For each alternative, output:
 {
   "alternatives": [
     {
-      "title": "Short descriptive title for this alternative",
+      "title": "[ALTERNATIVE] Brief title",
+      "description": "What this alternative does and why it's reasonable",
+      "approach": "Detailed implementation approach",
+      "reversibility": "How easily this can be changed when human decides",
+      "tradeoffs": "What we gain vs what we risk",
+      "priority": 2,
+      "parent_bead": "$bead_id",
+      "labels": ["alternative", "pending-human-review"]
+    }
+  ]
+}
+
+4. Do NOT propose alternatives that:
+   - Make irreversible decisions the human should make
+   - Contradict explicit requirements
+   - Are just "wait longer"
+
+5. If no reasonable alternatives exist, output: {"alternatives": [], "reason": "explanation"}
+
+## Output Format
+Return ONLY a JSON object with your analysis (no markdown code blocks needed):
+
+{
+  "alternatives": [
+    {
+      "title": "[ALTERNATIVE] Short descriptive title",
       "description": "Detailed description of the alternative approach",
       "approach": "Step-by-step implementation plan",
-      "reversible": true,
-      "risks": ["list of potential risks"],
-      "benefits": ["list of expected benefits"]
+      "reversibility": "How easily this can be undone",
+      "tradeoffs": "What we gain vs what we risk"
     }
   ],
   "reasoning": "Brief explanation of why these alternatives were chosen",
   "recommendation": "Which alternative is recommended (if any)"
 }
-\`\`\`
 
-Analyze the HUMAN bead and propose alternatives.
+Analyze the blocked bead and propose alternatives now.
 PROMPT_EOF
 }
 
@@ -460,15 +490,14 @@ _needle_unravel_create_alternatives() {
         [[ -z "$alt" ]] && continue
 
         # Extract alternative fields
-        local title description approach reversible risks benefits
+        local title description approach reversibility tradeoffs
 
         if _needle_command_exists jq; then
             title=$(echo "$alt" | jq -r '.title // empty' 2>/dev/null)
             description=$(echo "$alt" | jq -r '.description // empty' 2>/dev/null)
             approach=$(echo "$alt" | jq -r '.approach // empty' 2>/dev/null)
-            reversible=$(echo "$alt" | jq -r '.reversible // true' 2>/dev/null)
-            risks=$(echo "$alt" | jq -r '.risks // [] | join(", ")' 2>/dev/null)
-            benefits=$(echo "$alt" | jq -r '.benefits // [] | join(", ")' 2>/dev/null)
+            reversibility=$(echo "$alt" | jq -r '.reversibility // empty' 2>/dev/null)
+            tradeoffs=$(echo "$alt" | jq -r '.tradeoffs // empty' 2>/dev/null)
         else
             continue
         fi
@@ -479,6 +508,11 @@ _needle_unravel_create_alternatives() {
             continue
         fi
 
+        # Add [ALTERNATIVE] prefix to title if not already present (per plan.md)
+        if [[ ! "$title" =~ ^\[ALTERNATIVE\] ]]; then
+            title="[ALTERNATIVE] $title"
+        fi
+
         # Build full description with approach details
         local full_description="$description"
 
@@ -486,23 +520,18 @@ _needle_unravel_create_alternatives() {
             full_description+="\n\n## Approach\n$approach"
         fi
 
-        if [[ -n "$risks" ]]; then
-            full_description+="\n\n## Risks\n- $risks"
+        if [[ -n "$tradeoffs" ]]; then
+            full_description+="\n\n## Tradeoffs\n$tradeoffs"
         fi
 
-        if [[ -n "$benefits" ]]; then
-            full_description+="\n\n## Benefits\n- $benefits"
-        fi
-
-        if [[ "$reversible" == "true" ]]; then
-            full_description+="\n\n**Reversible:** Yes - can be undone if human provides different direction"
-        else
-            full_description+="\n\n**Reversible:** No - proceed with caution"
+        if [[ -n "$reversibility" ]]; then
+            full_description+="\n\n**Reversibility:** $reversibility"
         fi
 
         full_description+="\n\n---\n**Alternative to:** $parent_id"
 
         # Create the alternative bead using wrapper (handles unassigned_by_default)
+        # Uses --parent to create proper parent-child relationship (per plan.md)
         local bead_id
         bead_id=$(_needle_create_bead \
             --workspace "$workspace" \
@@ -510,6 +539,7 @@ _needle_unravel_create_alternatives() {
             --description "$full_description" \
             --priority 2 \
             --type task \
+            --parent "$parent_id" \
             --label "alternative" \
             --label "for-$parent_id" \
             --label "pending-human-review" \

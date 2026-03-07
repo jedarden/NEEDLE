@@ -248,7 +248,7 @@ fi
 
 # Test 7: Build prompt includes max alternatives constraint
 _test_start "Build prompt includes max alternatives constraint"
-if echo "$prompt" | grep -q "Maximum 3 alternatives"; then
+if echo "$prompt" | grep -q "Propose 1-3 alternative"; then
     _test_pass "Build prompt includes max alternatives constraint"
 else
     _test_fail "Build prompt missing max alternatives constraint"
@@ -430,11 +430,11 @@ clear_config_cache
 _test_start "Create alternatives respects max limit"
 # Create mock alternatives JSON with more than max
 mock_alts='[
-  {"title": "Alt 1", "description": "D1", "approach": "A1", "reversible": true},
-  {"title": "Alt 2", "description": "D2", "approach": "A2", "reversible": true},
-  {"title": "Alt 3", "description": "D3", "approach": "A3", "reversible": true},
-  {"title": "Alt 4", "description": "D4", "approach": "A4", "reversible": true},
-  {"title": "Alt 5", "description": "D5", "approach": "A5", "reversible": true}
+  {"title": "Alt 1", "description": "D1", "approach": "A1", "reversibility": "Easy to undo", "tradeoffs": "Low risk"},
+  {"title": "Alt 2", "description": "D2", "approach": "A2", "reversibility": "Easy to undo", "tradeoffs": "Medium risk"},
+  {"title": "Alt 3", "description": "D3", "approach": "A3", "reversibility": "Easy to undo", "tradeoffs": "Low risk"},
+  {"title": "Alt 4", "description": "D4", "approach": "A4", "reversibility": "Easy to undo", "tradeoffs": "Medium risk"},
+  {"title": "Alt 5", "description": "D5", "approach": "A5", "reversibility": "Easy to undo", "tradeoffs": "Low risk"}
 ]'
 # This should only create 3 (max_alternatives)
 # Capture only the last line which is the count
@@ -444,6 +444,139 @@ if [[ "$created" =~ ^[0-9]+$ ]] && [[ "$created" -le 3 ]]; then
 else
     _test_fail "Create alternatives exceeded max limit: created $created"
 fi
+
+# Test 17: Alternative titles get [ALTERNATIVE] prefix
+_test_start "Alternative titles get [ALTERNATIVE] prefix"
+# Use a temp file to capture arguments from subshell
+CAPTURE_FILE=$(mktemp)
+br() {
+    case "$1" in
+        create)
+            # Write all args to capture file
+            echo "$@" > "$CAPTURE_FILE"
+            echo "nd-alternative-prefix-$$"
+            return 0
+            ;;
+        list)
+            echo '[]'
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+mock_alts='[{"title": "Test Alternative", "description": "Test", "approach": "Test approach", "reversibility": "Easy", "tradeoffs": "None"}]'
+_needle_unravel_create_alternatives "$NEEDLE_WORKSPACE" "nd-parent-test" "$mock_alts" 2>/dev/null | tail -1 >/dev/null
+# Check if [ALTERNATIVE] prefix was added to title
+if grep -q "\-\-title \[ALTERNATIVE\] Test Alternative" "$CAPTURE_FILE"; then
+    _test_pass "Alternative title has [ALTERNATIVE] prefix"
+else
+    _test_fail "Alternative title missing prefix. Got: $(cat "$CAPTURE_FILE")"
+fi
+rm -f "$CAPTURE_FILE"
+
+# Test 18: Alternative beads use --parent option
+_test_start "Alternative beads use --parent option for relationship"
+CAPTURE_FILE=$(mktemp)
+br() {
+    case "$1" in
+        create)
+            echo "$@" > "$CAPTURE_FILE"
+            echo "nd-alternative-parent-$$"
+            return 0
+            ;;
+        list)
+            echo '[]'
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+mock_alts='[{"title": "Test With Parent", "description": "Test", "approach": "Test approach", "reversibility": "Easy", "tradeoffs": "None"}]'
+_needle_unravel_create_alternatives "$NEEDLE_WORKSPACE" "nd-parent-123" "$mock_alts" 2>/dev/null | tail -1 >/dev/null
+if grep -q "\-\-parent nd-parent-123" "$CAPTURE_FILE"; then
+    _test_pass "Alternative bead uses --parent option"
+else
+    _test_fail "Alternative bead missing --parent option. Got: $(cat "$CAPTURE_FILE")"
+fi
+rm -f "$CAPTURE_FILE"
+
+# Test 19: Prompt template includes plan.md required fields
+_test_start "Prompt template includes plan.md required fields"
+prompt=$(_needle_unravel_build_prompt "nd-test-id" "$NEEDLE_WORKSPACE" '{"title": "Test Bead", "description": "Test description", "created_at": "1234567890"}')
+if echo "$prompt" | grep -q "Blocked Bead" && \
+   echo "$prompt" | grep -q "Waiting Since" && \
+   echo "$prompt" | grep -q "reversibility" && \
+   echo "$prompt" | grep -q "tradeoffs" && \
+   echo "$prompt" | grep -q "parent_bead"; then
+    _test_pass "Prompt template includes required plan.md fields"
+else
+    _test_fail "Prompt template missing required plan.md fields"
+fi
+
+# Test 20: Alternatives without prefix get prefix added
+_test_start "Alternatives without [ALTERNATIVE] prefix get prefix added"
+CAPTURE_FILE=$(mktemp)
+br() {
+    case "$1" in
+        create)
+            echo "$@" > "$CAPTURE_FILE"
+            echo "nd-alt-auto-prefix-$$"
+            return 0
+            ;;
+        list)
+            echo '[]'
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+# Create alternative without [ALTERNATIVE] prefix - it should be added
+mock_alts='[{"title": "Auto prefixed alternative", "description": "Test", "approach": "Test", "reversibility": "Easy", "tradeoffs": "None"}]'
+_needle_unravel_create_alternatives "$NEEDLE_WORKSPACE" "nd-parent" "$mock_alts" 2>/dev/null | tail -1 >/dev/null
+if grep -q "\-\-title \[ALTERNATIVE\] Auto prefixed alternative" "$CAPTURE_FILE"; then
+    _test_pass "Title without prefix gets [ALTERNATIVE] added"
+else
+    _test_fail "Title not properly prefixed. Got: $(cat "$CAPTURE_FILE")"
+fi
+rm -f "$CAPTURE_FILE"
+
+# Test 21: Alternatives already with prefix keep prefix
+_test_start "Alternatives already with [ALTERNATIVE] prefix keep prefix"
+CAPTURE_FILE=$(mktemp)
+br() {
+    case "$1" in
+        create)
+            echo "$@" > "$CAPTURE_FILE"
+            echo "nd-alt-existing-prefix-$$"
+            return 0
+            ;;
+        list)
+            echo '[]'
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+# Create alternative that already has [ALTERNATIVE] prefix - it should NOT be duplicated
+mock_alts='[{"title": "[ALTERNATIVE] Already prefixed", "description": "Test", "approach": "Test", "reversibility": "Easy", "tradeoffs": "None"}]'
+_needle_unravel_create_alternatives "$NEEDLE_WORKSPACE" "nd-parent" "$mock_alts" 2>/dev/null | tail -1 >/dev/null
+# Should have exactly one [ALTERNATIVE] prefix (not duplicated)
+if grep -q "\-\-title \[ALTERNATIVE\] Already prefixed" "$CAPTURE_FILE"; then
+    # Make sure it's not duplicated
+    prefix_count=$(grep -o "\[ALTERNATIVE\]" "$CAPTURE_FILE" | wc -l)
+    if [[ "$prefix_count" -eq 1 ]]; then
+        _test_pass "Title with existing prefix not duplicated"
+    else
+        _test_fail "Prefix was duplicated. Count: $prefix_count. Got: $(cat "$CAPTURE_FILE")"
+    fi
+else
+    _test_fail "Title improperly handled. Got: $(cat "$CAPTURE_FILE")"
+fi
+rm -f "$CAPTURE_FILE"
 
 # Summary
 echo ""

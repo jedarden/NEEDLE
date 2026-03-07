@@ -701,6 +701,10 @@ _needle_create_bead() {
                 br_args+=("$1" "$2")
                 shift 2
                 ;;
+            --parent)
+                br_args+=("$1" "$2")
+                shift 2
+                ;;
             --silent|--json|--dry-run)
                 br_args+=("$1")
                 shift
