@@ -40,6 +40,7 @@ OPTIONS:
     --no-hooks               Skip hook execution for this run
     -d, --dry-run            Show what would be done without executing
     -f, --force              Skip concurrency limit checks
+    --wait                   Wait for a slot to become available if limits reached
     --status                 Show concurrency status for agent
     -v, --verbose            Show detailed output
     -h, --help               Show this help message
@@ -296,6 +297,7 @@ _needle_run_parse_args() {
     local no_hooks=false
     local dry_run=false
     local force=false
+    local wait_for_slot=false
     local show_status=false
 
     # Parse arguments
@@ -373,6 +375,10 @@ _needle_run_parse_args() {
                 force=true
                 shift
                 ;;
+            --wait)
+                wait_for_slot=true
+                shift
+                ;;
             --status)
                 show_status=true
                 shift
@@ -412,15 +418,17 @@ _needle_run_parse_args() {
     NEEDLE_RAW_NO_HOOKS="$no_hooks"
     NEEDLE_RAW_DRY_RUN="$dry_run"
     NEEDLE_RAW_FORCE="$force"
+    NEEDLE_RAW_WAIT="$wait_for_slot"
     NEEDLE_RAW_STATUS="$show_status"
 
     # Export flags
     NEEDLE_VALIDATED_NO_HOOKS="$no_hooks"
     NEEDLE_VALIDATED_DRY_RUN="$dry_run"
     NEEDLE_VALIDATED_FORCE="$force"
+    NEEDLE_VALIDATED_WAIT="$wait_for_slot"
     NEEDLE_VALIDATED_STATUS="$show_status"
     NEEDLE_VALIDATED_SESSION_NAME="$session_name"
-    export NEEDLE_VALIDATED_NO_HOOKS NEEDLE_VALIDATED_DRY_RUN NEEDLE_VALIDATED_FORCE NEEDLE_VALIDATED_STATUS NEEDLE_VALIDATED_SESSION_NAME
+    export NEEDLE_VALIDATED_NO_HOOKS NEEDLE_VALIDATED_DRY_RUN NEEDLE_VALIDATED_FORCE NEEDLE_VALIDATED_WAIT NEEDLE_VALIDATED_STATUS NEEDLE_VALIDATED_SESSION_NAME
 
     # Validate workspace
     if ! _needle_validate_workspace "$workspace"; then
@@ -471,7 +479,8 @@ _needle_export_validated_json() {
     "budget": "$(_needle_json_escape "${NEEDLE_VALIDATED_BUDGET:-}")",
     "no_hooks": ${NEEDLE_VALIDATED_NO_HOOKS:-false},
     "dry_run": ${NEEDLE_VALIDATED_DRY_RUN:-false},
-    "force": ${NEEDLE_VALIDATED_FORCE:-false}
+    "force": ${NEEDLE_VALIDATED_FORCE:-false},
+    "wait": ${NEEDLE_VALIDATED_WAIT:-false}
 }
 EOF
 }
@@ -489,6 +498,7 @@ _needle_run() {
     local no_hooks="$NEEDLE_VALIDATED_NO_HOOKS"
     local dry_run="$NEEDLE_VALIDATED_DRY_RUN"
     local force="$NEEDLE_VALIDATED_FORCE"
+    local wait_for_slot="${NEEDLE_VALIDATED_WAIT:-false}"
     local show_status="$NEEDLE_VALIDATED_STATUS"
 
     # Handle --status flag
@@ -517,12 +527,46 @@ _needle_run() {
         _needle_verbose "Checking concurrency limits..."
 
         if ! _needle_check_concurrency "$agent" "$provider" "$count"; then
-            _needle_error "$NEEDLE_LIMIT_CHECK_MESSAGE"
-            _needle_info "$NEEDLE_LIMIT_CHECK_DETAILS"
-            _needle_print ""
-            _needle_info "Use --force to bypass this check (not recommended)"
-            _needle_info "Use --status to see current limit usage"
-            exit $NEEDLE_EXIT_USAGE
+            # Handle --wait option
+            if [[ "$wait_for_slot" == "true" ]]; then
+                _needle_info "$NEEDLE_LIMIT_CHECK_MESSAGE"
+                _needle_info "$NEEDLE_LIMIT_CHECK_DETAILS"
+                _needle_print ""
+                _needle_info "Waiting for a slot to become available..."
+
+                # Poll until slot is available
+                local wait_interval=5
+                local max_wait=3600  # 1 hour max wait
+                local waited=0
+
+                while [[ $waited -lt $max_wait ]]; do
+                    sleep $wait_interval
+                    ((waited += wait_interval))
+
+                    if _needle_check_concurrency "$agent" "$provider" "$count"; then
+                        _needle_success "Slot available after ${waited}s"
+                        break
+                    fi
+
+                    # Show progress every 30 seconds
+                    if [[ $((waited % 30)) -eq 0 ]]; then
+                        _needle_verbose "Still waiting... (${waited}s elapsed)"
+                    fi
+                done
+
+                if [[ $waited -ge $max_wait ]]; then
+                    _needle_error "Timeout waiting for slot after ${max_wait}s"
+                    exit $NEEDLE_EXIT_TIMEOUT
+                fi
+            else
+                _needle_error "$NEEDLE_LIMIT_CHECK_MESSAGE"
+                _needle_info "$NEEDLE_LIMIT_CHECK_DETAILS"
+                _needle_print ""
+                _needle_info "Options:"
+                _needle_info "  --wait     Wait for a slot to become available"
+                _needle_info "  --force    Override limit (use with caution)"
+                exit $NEEDLE_EXIT_USAGE
+            fi
         fi
 
         _needle_success "Concurrency check passed"
@@ -541,6 +585,7 @@ _needle_run() {
     _needle_verbose "Workers: $count"
     [[ -n "$budget" ]] && _needle_verbose "Budget: \$$budget"
     [[ "$no_hooks" == "true" ]] && _needle_verbose "Hooks: disabled"
+    [[ "$wait_for_slot" == "true" ]] && _needle_verbose "Wait: enabled"
     _needle_verbose "Force: $force"
 
     # Start watchdog monitor (ensures it's running)
