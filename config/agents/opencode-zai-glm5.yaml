@@ -1,0 +1,47 @@
+# NEEDLE Agent Configuration: OpenCode with ZhipuAI GLM-5
+# This configuration defines how NEEDLE invokes OpenCode with ZhipuAI GLM-5 model
+
+# Agent metadata
+name: opencode-zai-glm5
+description: OpenCode with ZhipuAI GLM-5
+version: "1.0"
+
+# CLI identification
+runner: opencode        # CLI executable name
+provider: zai           # Provider for rate limiting
+model: glm5             # Model identifier
+
+# Invocation template
+# Variables: ${WORKSPACE}, ${PROMPT}, ${BEAD_ID}, ${BEAD_TITLE}
+invoke: |
+  cd ${WORKSPACE} && \
+  OPENCODE_MODEL=glm-5 \
+  OPENCODE_API_BASE=https://open.bigmodel.cn/api/paas/v4 \
+  opencode --headless \
+           --yes \
+           --json-output \
+           --prompt-file ${PROMPT_FILE}
+
+# Input method
+input:
+  method: file          # heredoc | stdin | file | args
+
+# Output parsing
+output:
+  format: json          # json | text | structured
+  success_codes: [0]
+  retry_codes: [1]
+  fail_codes: [2, 137]
+
+# Rate limits
+limits:
+  max_concurrent: 10
+
+# Cost configuration (pay-per-token)
+cost:
+  type: pay-per-token
+  input_per_1k: 0.001
+  output_per_1k: 0.002
+
+# Timeout in seconds
+timeout: 900
