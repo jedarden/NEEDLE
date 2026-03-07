@@ -102,7 +102,12 @@ _NEEDLE_CONFIG_DEFAULTS='{
     "work_stealing_timeout": 1800,
     "stealable_assignees": ["coder"],
     "check_worker_heartbeat": true,
-    "unassigned_by_default": true
+    "unassigned_by_default": true,
+    "proactive_stealing_enabled": true,
+    "stealing_load_threshold": 2,
+    "stealing_idle_threshold": 60,
+    "stealing_priority_boost": 1,
+    "steal_from_active_workers": false
   },
   "updates": {
     "check_on_startup": true,
@@ -324,6 +329,29 @@ select:
   # allowing workers to claim them without waiting for work_stealing_timeout.
   # This prevents worker starvation when all beads are auto-assigned to the creator.
   unassigned_by_default: true
+
+  # === Advanced Work Stealing (Idle Worker Features) ===
+
+  # proactive_stealing_enabled: Enable proactive work stealing by idle workers (default: true)
+  # When enabled, idle workers will actively try to steal work from busy workers
+  proactive_stealing_enabled: true
+
+  # stealing_load_threshold: Min claimed beads before worker is "overloaded" (default: 2)
+  # Workers with this many or more claimed beads become targets for work stealing
+  stealing_load_threshold: 2
+
+  # stealing_idle_threshold: Seconds of idle time before worker can steal (default: 60)
+  # Workers must be idle for this long before they start stealing from others
+  stealing_idle_threshold: 60
+
+  # stealing_priority_boost: Priority weight multiplier for stolen beads (default: 1)
+  # Higher values make stolen beads more likely to be selected
+  stealing_priority_boost: 1
+
+  # steal_from_active_workers: Allow stealing from workers with heartbeats (default: false)
+  # WARNING: This can cause duplicate work if workers are actually processing
+  # Only enable if workers are known to be single-threaded and reliable
+  steal_from_active_workers: false
 
 # Self-update configuration
 # Controls how NEEDLE checks for and installs updates
@@ -781,6 +809,23 @@ select:
   # When true, beads created by NEEDLE are immediately released after creation,
   # allowing workers to claim them without waiting for work_stealing_timeout.
   unassigned_by_default: true
+
+  # === Advanced Work Stealing (Idle Worker Features) ===
+
+  # proactive_stealing_enabled: Enable proactive work stealing by idle workers (default: true)
+  proactive_stealing_enabled: true
+
+  # stealing_load_threshold: Min claimed beads before worker is "overloaded" (default: 2)
+  stealing_load_threshold: 2
+
+  # stealing_idle_threshold: Seconds of idle time before worker can steal (default: 60)
+  stealing_idle_threshold: 60
+
+  # stealing_priority_boost: Priority weight multiplier for stolen beads (default: 1)
+  stealing_priority_boost: 1
+
+  # steal_from_active_workers: Allow stealing from workers with heartbeats (default: false)
+  steal_from_active_workers: false
 
 # Self-update configuration
 # Controls how NEEDLE checks for and installs updates

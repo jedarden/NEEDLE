@@ -31,16 +31,18 @@ _needle_heartbeat_init() {
 }
 
 # Emit a heartbeat with current worker state
-# Usage: _needle_emit_heartbeat <status> [current_bead] [bead_started] [strand]
+# Usage: _needle_emit_heartbeat <status> [current_bead] [bead_started] [strand] [queue_depth]
 #   status: idle, executing, draining, starting
 #   current_bead: optional bead ID being processed
 #   bead_started: optional ISO8601 timestamp when bead processing started
 #   strand: optional strand number
+#   queue_depth: optional number of beads claimed by this worker
 _needle_emit_heartbeat() {
     local status="${1:-idle}"
     local current_bead="${2:-}"
     local bead_started="${3:-}"
     local strand="${4:-}"
+    local queue_depth="${5:-}"
 
     # Validate status
     case "$status" in
@@ -78,6 +80,7 @@ _needle_emit_heartbeat_jq() {
     local bead_started="$3"
     local strand="$4"
     local last_heartbeat="$5"
+    local queue_depth="${6:-}"
 
     # Build JSON object with jq, handling null values correctly
     local json
@@ -92,6 +95,7 @@ _needle_emit_heartbeat_jq() {
         --arg strand "$strand" \
         --arg workspace "${NEEDLE_WORKSPACE:-}" \
         --arg agent "${NEEDLE_AGENT:-unknown}" \
+        --argjson queue_depth "${queue_depth:-0}" \
         '{
             worker: $worker,
             pid: ($pid | tonumber),
@@ -102,7 +106,8 @@ _needle_emit_heartbeat_jq() {
             bead_started: (if $bead_started == "" then null else $bead_started end),
             strand: (if $strand == "" then null else ($strand | tonumber) end),
             workspace: (if $workspace == "" then null else $workspace end),
-            agent: $agent
+            agent: $agent,
+            queue_depth: $queue_depth
         }')
 
     if [[ $? -eq 0 && -n "$json" ]]; then
@@ -120,6 +125,7 @@ _needle_emit_heartbeat_builtin() {
     local bead_started="$3"
     local strand="$4"
     local last_heartbeat="$5"
+    local queue_depth="${6:-0}"
 
     # Escape values for JSON
     local worker_escaped
@@ -141,6 +147,7 @@ _needle_emit_heartbeat_builtin() {
     json+=",\"strand\":$(_needle_json_nullable_number "$strand")"
     json+=",\"workspace\":$(_needle_json_nullable "$NEEDLE_WORKSPACE")"
     json+=",\"agent\":\"$agent_escaped\""
+    json+=",\"queue_depth\":${queue_depth:-0}"
     json+="}"
 
     echo "$json" > "$NEEDLE_HEARTBEAT_FILE"

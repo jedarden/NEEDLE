@@ -76,6 +76,12 @@ NEEDLE_WORK_STEALING_TIMEOUT="${NEEDLE_WORK_STEALING_TIMEOUT:-1800}"  # 30 minut
 NEEDLE_STEALABLE_ASSIGNEES="${NEEDLE_STEALABLE_ASSIGNEES:-coder}"
 NEEDLE_CHECK_WORKER_HEARTBEAT="${NEEDLE_CHECK_WORKER_HEARTBEAT:-true}"
 
+# Proactive work stealing defaults
+NEEDLE_PROACTIVE_STEALING_ENABLED="${NEEDLE_PROACTIVE_STEALING_ENABLED:-true}"
+NEEDLE_STEALING_LOAD_THRESHOLD="${NEEDLE_STEALING_LOAD_THRESHOLD:-2}"
+NEEDLE_STEALING_IDLE_THRESHOLD="${NEEDLE_STEALING_IDLE_THRESHOLD:-60}"
+NEEDLE_STEAL_FROM_ACTIVE="${NEEDLE_STEAL_FROM_ACTIVE:-false}"
+
 # Get weight for a given priority level
 # Usage: _needle_get_priority_weight <priority>
 # Returns: weight multiplier (1-8)
@@ -199,6 +205,305 @@ _needle_worker_has_heartbeat() {
     fi
 
     return 1  # Worker is dead or no valid PID
+}
+
+# ============================================================================
+# Proactive Work Stealing Functions (for idle workers)
+# ============================================================================
+
+# Check if proactive work stealing is enabled
+# Usage: _needle_proactive_stealing_enabled
+# Returns: 0 if enabled, 1 if disabled
+_needle_proactive_stealing_enabled() {
+    local enabled
+    enabled=$(get_config "select.proactive_stealing_enabled" "$NEEDLE_PROACTIVE_STEALING_ENABLED")
+
+    case "$enabled" in
+        true|True|TRUE|yes|Yes|YES|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Get the load threshold for considering a worker "overloaded"
+# Usage: _needle_get_stealing_load_threshold
+# Returns: threshold number (default: 2)
+_needle_get_stealing_load_threshold() {
+    local threshold
+    threshold=$(get_config "select.stealing_load_threshold" "$NEEDLE_STEALING_LOAD_THRESHOLD")
+
+    # Ensure it's a valid number >= 1
+    if ! [[ "$threshold" =~ ^[0-9]+$ ]] || [[ "$threshold" -lt 1 ]]; then
+        threshold=2
+    fi
+
+    echo "$threshold"
+}
+
+# Get the idle time threshold before a worker can start stealing
+# Usage: _needle_get_stealing_idle_threshold
+# Returns: threshold in seconds (default: 60)
+_needle_get_stealing_idle_threshold() {
+    local threshold
+    threshold=$(get_config "select.stealing_idle_threshold" "$NEEDLE_STEALING_IDLE_THRESHOLD")
+
+    # Ensure it's a valid number
+    if ! [[ "$threshold" =~ ^[0-9]+$ ]]; then
+        threshold=60
+    fi
+
+    echo "$threshold"
+}
+
+# Check if we can steal from active workers (those with heartbeats)
+# Usage: _needle_can_steal_from_active
+# Returns: 0 if allowed, 1 if not
+_needle_can_steal_from_active() {
+    local allowed
+    allowed=$(get_config "select.steal_from_active_workers" "$NEEDLE_STEAL_FROM_ACTIVE")
+
+    case "$allowed" in
+        true|True|TRUE|yes|Yes|YES|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Get the queue depth (claimed beads count) for a worker
+# Usage: _needle_get_worker_queue_depth <worker_name>
+# Returns: Number of beads claimed by this worker
+_needle_get_worker_queue_depth() {
+    local worker_name="$1"
+    local heartbeat_dir="$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
+    local heartbeat_file="$heartbeat_dir/${worker_name}.json"
+
+    # Try to get queue_depth from heartbeat file
+    if [[ -f "$heartbeat_file" ]]; then
+        local depth
+        depth=$(jq -r '.queue_depth // 0' "$heartbeat_file" 2>/dev/null)
+        if [[ "$depth" =~ ^[0-9]+$ ]]; then
+            echo "$depth"
+            return 0
+        fi
+    fi
+
+    # Fallback: Count beads assigned to this worker in the database
+    local count
+    count=$(br list --assignee "$worker_name" --status open --json 2>/dev/null | jq 'length' 2>/dev/null || echo "0")
+    echo "${count:-0}"
+}
+
+# Check if a worker is overloaded (has too many claimed beads)
+# Usage: _needle_is_worker_overloaded <worker_name>
+# Returns: 0 if overloaded, 1 if not
+_needle_is_worker_overloaded() {
+    local worker_name="$1"
+
+    # Don't consider ourselves overloaded
+    if [[ "$worker_name" == "${NEEDLE_SESSION:-}" ]]; then
+        return 1
+    fi
+
+    local threshold
+    threshold=$(_needle_get_stealing_load_threshold)
+
+    local queue_depth
+    queue_depth=$(_needle_get_worker_queue_depth "$worker_name")
+
+    if [[ "$queue_depth" -ge "$threshold" ]]; then
+        _needle_debug "Worker $worker_name is overloaded: queue_depth=$queue_depth >= threshold=$threshold"
+        return 0
+    fi
+
+    return 1
+}
+
+# Find all workers that are overloaded and have stealable beads
+# Usage: _needle_get_overloaded_workers [--workspace <path>]
+# Returns: JSON array of worker info with queue depths
+_needle_get_overloaded_workers() {
+    local workspace=""
+    local threshold
+    threshold=$(_needle_get_stealing_load_threshold)
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --workspace)
+                workspace="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    # Get all unique assignees with claimed beads
+    local assignees
+    if [[ -n "$workspace" && -d "$workspace" ]]; then
+        assignees=$(cd "$workspace" && br list --status open --json 2>/dev/null | jq -r '[.[] | select(.assignee != null) | .assignee] | unique | .[]' 2>/dev/null)
+    else
+        assignees=$(br list --status open --json 2>/dev/null | jq -r '[.[] | select(.assignee != null) | .assignee] | unique | .[]' 2>/dev/null)
+    fi
+
+    local overloaded="[]"
+
+    # Check each assignee for overload
+    while IFS= read -r assignee; do
+        [[ -z "$assignee" || "$assignee" == "null" ]] && continue
+
+        # Skip ourselves
+        if [[ "$assignee" == "${NEEDLE_SESSION:-}" ]]; then
+            continue
+        fi
+
+        local queue_depth
+        queue_depth=$(_needle_get_worker_queue_depth "$assignee")
+
+        if [[ "$queue_depth" -ge "$threshold" ]]; then
+            # Check if worker is active or if we can steal from active
+            local is_active=false
+            if _needle_worker_has_heartbeat "$assignee"; then
+                is_active=true
+            fi
+
+            # Only include if worker is inactive OR we can steal from active
+            if [[ "$is_active" == "false" ]] || _needle_can_steal_from_active; then
+                overloaded=$(echo "$overloaded" | jq -c \
+                    --arg worker "$assignee" \
+                    --argjson depth "$queue_depth" \
+                    --argjson is_active "$is_active" \
+                    '. + [{worker: $worker, queue_depth: $depth, is_active: $is_active}]')
+            fi
+        fi
+    done <<< "$assignees"
+
+    echo "$overloaded"
+}
+
+# Find beads that can be stolen from overloaded workers
+# Usage: _needle_find_stealable_from_overloaded [--workspace <path>]
+# Returns: JSON array of stealable beads from overloaded workers
+_needle_find_stealable_from_overloaded() {
+    local workspace=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --workspace)
+                workspace="$2"
+                shift 2
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    # Get overloaded workers
+    local overloaded
+    overloaded=$(_needle_get_overloaded_workers --workspace "$workspace")
+
+    local overloaded_count
+    overloaded_count=$(echo "$overloaded" | jq 'length' 2>/dev/null || echo "0")
+
+    if [[ "$overloaded_count" -eq 0 ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    _needle_debug "Found $overloaded_count overloaded worker(s), checking for stealable beads"
+
+    # For each overloaded worker, get their beads and find stealable ones
+    local stealable_beads="[]"
+
+    while IFS= read -r worker_info; do
+        [[ -z "$worker_info" || "$worker_info" == "null" ]] && continue
+
+        local assignee
+        assignee=$(echo "$worker_info" | jq -r '.worker')
+
+        # Get beads assigned to this worker
+        local worker_beads
+        if [[ -n "$workspace" && -d "$workspace" ]]; then
+            worker_beads=$(cd "$workspace" && br list --assignee "$assignee" --status open --json 2>/dev/null)
+        else
+            worker_beads=$(br list --assignee "$assignee" --status open --json 2>/dev/null)
+        fi
+
+        # Filter to find stealable beads
+        while IFS= read -r bead; do
+            [[ -z "$bead" || "$bead" == "null" ]] && continue
+
+            local bead_id
+            bead_id=$(echo "$bead" | jq -r '.id')
+
+            # Check if this bead is stealable (using existing logic)
+            if _needle_is_claim_stealable "$bead"; then
+                # Also check dependencies
+                local dep_count open_deps
+                dep_count=$(echo "$bead" | jq -r '.dependency_count // 0')
+
+                if [[ "$dep_count" -gt 0 ]]; then
+                    local deps_status
+                    deps_status=$(br dep list "$bead_id" --json 2>/dev/null)
+                    open_deps=$(echo "$deps_status" | jq '[.[] | select(.status != "closed")] | length' 2>/dev/null || echo "1")
+                else
+                    open_deps=0
+                fi
+
+                if [[ "$open_deps" -eq 0 ]]; then
+                    _needle_debug "Found stealable bead $bead_id from overloaded worker $assignee"
+                    stealable_beads=$(echo "$stealable_beads" | jq -c --argjson bead "$bead" '. + [$bead]')
+                fi
+            fi
+        done < <(echo "$worker_beads" | jq -c '.[]' 2>/dev/null)
+    done < <(echo "$overloaded" | jq -c '.[]')
+
+    local stealable_count
+    stealable_count=$(echo "$stealable_beads" | jq 'length' 2>/dev/null || echo "0")
+
+    if [[ "$stealable_count" -gt 0 ]]; then
+        _needle_debug "Found $stealable_count stealable bead(s) from overloaded workers"
+    fi
+
+    echo "$stealable_beads"
+}
+
+# Get priority boost for stolen beads
+# Usage: _needle_get_stealing_priority_boost
+# Returns: multiplier (default: 1)
+_needle_get_stealing_priority_boost() {
+    local boost
+    boost=$(get_config "select.stealing_priority_boost" "1")
+
+    # Ensure it's a valid number >= 1
+    if ! [[ "$boost" =~ ^[0-9]+$ ]] || [[ "$boost" -lt 1 ]]; then
+        boost=1
+    fi
+
+    echo "$boost"
+}
+
+# Check if a bead was stolen from an overloaded worker
+# Adds metadata to track work stealing provenance
+# Usage: _needle_mark_bead_stolen <bead_id> <from_worker> [workspace]
+_needle_mark_bead_stolen() {
+    local bead_id="$1"
+    local from_worker="$2"
+    local workspace="${3:-${NEEDLE_WORKSPACE:-$(pwd)}}"
+    local timestamp
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    _needle_debug "Marking bead $bead_id as stolen from $from_worker"
+
+    # We could add a label or metadata here if br supported it
+    # For now, just log it
+    _needle_emit_event "bead.stolen" \
+        "Bead stolen from overloaded worker" \
+        "bead_id=$bead_id" \
+        "stolen_from=$from_worker" \
+        "stolen_by=${NEEDLE_SESSION:-unknown}" \
+        "timestamp=$timestamp"
 }
 
 # Check if a bead's claim is stale and can be stolen
@@ -478,12 +783,39 @@ _needle_get_claimable_beads() {
         final_count=$(echo "$filtered_candidates" | jq 'length' 2>/dev/null || echo "0")
         _needle_debug "DIAG: br ready path returning $final_count beads (after work stealing)"
 
-        # Only return if we found beads; if empty, continue to fallback path
-        # which may have additional work stealing logic
+        # Only return if we found beads; if empty, try proactive stealing
+        # then continue to fallback path which may have additional logic
         if [[ "$final_count" -gt 0 ]]; then
             echo "$filtered_candidates"
             return 0
         fi
+
+        # ====================================================================
+        # PROACTIVE WORK STEALING (br ready path)
+        # ====================================================================
+        # Try stealing from overloaded workers before falling through
+        if _needle_proactive_stealing_enabled; then
+            _needle_debug "DIAG: br ready empty, trying proactive work stealing"
+
+            local proactive_beads
+            proactive_beads=$(_needle_find_stealable_from_overloaded --workspace "$workspace")
+
+            local proactive_count
+            proactive_count=$(echo "$proactive_beads" | jq 'length' 2>/dev/null || echo "0")
+
+            if [[ "$proactive_count" -gt 0 ]]; then
+                _needle_debug "DIAG: Proactive stealing found $proactive_count bead(s) from overloaded workers"
+
+                _needle_diag_select "Proactive work stealing (br ready path)" \
+                    "workspace=$workspace" \
+                    "stolen_count=$proactive_count" \
+                    "source=overloaded_workers"
+
+                echo "$proactive_beads"
+                return 0
+            fi
+        fi
+
         # Empty results - fall through to try fallback path
         _needle_debug "DIAG: br ready returned empty, falling through to fallback path"
     fi
@@ -631,6 +963,47 @@ _needle_get_claimable_beads() {
                     fi
                 fi
             done < <(echo "$stealable_beads" | jq -c '.[]')
+        fi
+    fi
+
+    # ========================================================================
+    # PROACTIVE WORK STEALING: Steal from overloaded workers
+    # ========================================================================
+    # If we still have no work, check for overloaded workers we can steal from
+    local current_count
+    current_count=$(echo "$final_filtered" | jq 'length' 2>/dev/null || echo "0")
+
+    if [[ "$current_count" -eq 0 ]] && _needle_proactive_stealing_enabled; then
+        _needle_debug "DIAG: No unassigned beads, checking for overloaded workers"
+
+        local proactive_beads
+        proactive_beads=$(_needle_find_stealable_from_overloaded --workspace "$workspace")
+
+        local proactive_count
+        proactive_count=$(echo "$proactive_beads" | jq 'length' 2>/dev/null || echo "0")
+
+        if [[ "$proactive_count" -gt 0 ]]; then
+            _needle_debug "DIAG: Proactive stealing found $proactive_count bead(s) from overloaded workers"
+
+            # Add proactive stealable beads to our results
+            while IFS= read -r bead; do
+                [[ -z "$bead" || "$bead" == "null" ]] && continue
+
+                local bead_id assignee
+                bead_id=$(echo "$bead" | jq -r '.id')
+                assignee=$(echo "$bead" | jq -r '.assignee')
+
+                # Mark as stolen for tracking
+                _needle_mark_bead_stolen "$bead_id" "$assignee" "$workspace"
+
+                # Add to results
+                final_filtered=$(echo "$final_filtered" | jq -c --argjson bead "$bead" '. + [$bead]')
+            done < <(echo "$proactive_beads" | jq -c '.[]')
+
+            _needle_diag_select "Proactive work stealing" \
+                "workspace=$workspace" \
+                "stolen_count=$proactive_count" \
+                "source=overloaded_workers"
         fi
     fi
 
