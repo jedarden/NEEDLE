@@ -191,17 +191,62 @@ _needle_knot_verify_work_available() {
 
         _needle_debug "knot: bead status - claimed: $diag_claimed, assigned: $diag_assigned, blocked: $diag_blocked, deferred: $diag_deferred, human: $diag_human_type, has_deps: $diag_has_deps"
 
-        # FIX (nd-1lr alternative): If ALL beads are assigned to specific workers,
-        # this is EXPECTED behavior - the worker pool is fully utilized.
-        # Don't create a starvation alert, just log and return 1.
+        # FIX (nd-ane): If ALL beads are assigned to specific workers,
+        # check if those workers are actually active (have fresh heartbeats).
+        # If all assignees are active → skip alert (expected worker pool utilization).
+        # If some assignees are stale/dead → proceed with alert (work may be stuck).
         if [[ "$diag_assigned" -gt 0 ]] && [[ "$diag_assigned" -ge "$diag_any_open" ]]; then
-            _needle_info "knot: all $diag_any_open open beads are assigned to specific workers - expected behavior, skipping alert"
-            _needle_emit_event "knot.all_work_assigned" \
-                "All open beads are assigned to specific workers - expected worker pool utilization" \
-                "workspace=$workspace" \
-                "assigned_count=$diag_assigned" \
-                "total_open=$diag_any_open"
-            return 1  # No work available for THIS worker, but not an error
+            # Collect unique assignees from the open beads
+            local assignees
+            assignees=$(cd "$workspace" && br list --status open --priority 0,1,2,3 --json 2>/dev/null | \
+                jq -r '[.[].assignee | select(. != null and . != "")] | unique | .[]' 2>/dev/null)
+
+            if [[ -n "$assignees" ]]; then
+                local all_active=true
+                local active_count=0
+                local stale_count=0
+                local heartbeat_dir="$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
+
+                while IFS= read -r assignee; do
+                    [[ -z "$assignee" ]] && continue
+                    if _needle_knot_is_worker_active "$assignee" "$heartbeat_dir"; then
+                        ((active_count++))
+                    else
+                        ((stale_count++))
+                        all_active=false
+                    fi
+                done <<< "$assignees"
+
+                if [[ "$all_active" == "true" ]]; then
+                    _needle_info "knot: all $diag_any_open open beads are assigned to $active_count active workers - expected behavior, skipping alert"
+                    _needle_emit_event "knot.all_work_assigned" \
+                        "All open beads are assigned to active workers - expected worker pool utilization" \
+                        "workspace=$workspace" \
+                        "assigned_count=$diag_assigned" \
+                        "total_open=$diag_any_open" \
+                        "active_workers=$active_count"
+                    return 1  # No work available for THIS worker, but not an error
+                else
+                    _needle_warn "knot: all $diag_any_open beads assigned but $stale_count workers have stale/missing heartbeats - proceeding with alert"
+                    _needle_emit_event "knot.assigned_workers_stale" \
+                        "All beads assigned but some workers appear inactive" \
+                        "workspace=$workspace" \
+                        "assigned_count=$diag_assigned" \
+                        "total_open=$diag_any_open" \
+                        "active_workers=$active_count" \
+                        "stale_workers=$stale_count"
+                    # Fall through to alert creation
+                fi
+            else
+                # Assigned but can't determine assignees - skip alert conservatively
+                _needle_info "knot: all $diag_any_open open beads are assigned - skipping alert"
+                _needle_emit_event "knot.all_work_assigned" \
+                    "All open beads are assigned to specific workers - expected worker pool utilization" \
+                    "workspace=$workspace" \
+                    "assigned_count=$diag_assigned" \
+                    "total_open=$diag_any_open"
+                return 1
+            fi
         fi
 
         # Still return 1 (no work available) since beads aren't claimable
@@ -590,6 +635,78 @@ _needle_knot_collect_diagnostics() {
 # ============================================================================
 # Utility Functions
 # ============================================================================
+
+# Check if a worker has an active (fresh) heartbeat
+# A worker is considered active if it has a heartbeat file with a timestamp
+# within the heartbeat timeout window (default: 120s, matching watchdog config).
+#
+# Usage: _needle_knot_is_worker_active <worker_name> <heartbeat_dir>
+# Returns: 0 if active, 1 if stale/missing
+#
+# Implementation: nd-ane
+_needle_knot_is_worker_active() {
+    local worker_name="$1"
+    local heartbeat_dir="$2"
+
+    # Get heartbeat timeout from config (default: 120s, same as watchdog)
+    local timeout
+    timeout=$(get_config "watchdog.heartbeat_timeout" "120")
+
+    # Check if heartbeat directory exists
+    if [[ ! -d "$heartbeat_dir" ]]; then
+        _needle_debug "knot: no heartbeat directory - worker $worker_name considered inactive"
+        return 1
+    fi
+
+    # Look for a heartbeat file matching this worker
+    # Heartbeat files are named <session>.json, and the worker field inside
+    # matches the session. Try exact file match first, then scan files.
+    local hb_file="$heartbeat_dir/${worker_name}.json"
+    local found_match=false
+    local last_heartbeat=""
+
+    if [[ -f "$hb_file" ]]; then
+        found_match=true
+        last_heartbeat=$(jq -r '.last_heartbeat // ""' "$hb_file" 2>/dev/null)
+    else
+        # Scan heartbeat files for matching worker field
+        for f in "$heartbeat_dir"/*.json; do
+            [[ ! -f "$f" ]] && continue
+            local w
+            w=$(jq -r '.worker // ""' "$f" 2>/dev/null)
+            if [[ "$w" == "$worker_name" ]]; then
+                found_match=true
+                last_heartbeat=$(jq -r '.last_heartbeat // ""' "$f" 2>/dev/null)
+                break
+            fi
+        done
+    fi
+
+    if [[ "$found_match" != "true" ]] || [[ -z "$last_heartbeat" ]]; then
+        _needle_debug "knot: no heartbeat found for worker $worker_name - considered inactive"
+        return 1
+    fi
+
+    # Check if heartbeat is fresh (within timeout)
+    local now last_ts beat_age
+    now=$(date +%s)
+    last_ts=$(date -d "$last_heartbeat" +%s 2>/dev/null || echo 0)
+
+    if [[ "$last_ts" -eq 0 ]]; then
+        _needle_debug "knot: cannot parse heartbeat timestamp for worker $worker_name - considered inactive"
+        return 1
+    fi
+
+    beat_age=$((now - last_ts))
+
+    if ((beat_age <= timeout)); then
+        _needle_debug "knot: worker $worker_name is active (heartbeat ${beat_age}s old, timeout ${timeout}s)"
+        return 0
+    else
+        _needle_debug "knot: worker $worker_name is stale (heartbeat ${beat_age}s old, timeout ${timeout}s)"
+        return 1
+    fi
+}
 
 # Get statistics about knot strand activity
 # Usage: _needle_knot_stats

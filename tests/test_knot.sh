@@ -420,11 +420,17 @@ else
 fi
 unset MOCK_BR_READY_COUNT
 
-# Test 24: Pre-flight skips alert when ALL beads are assigned (nd-ane)
-# This tests the fix for the jq != operator shell escaping issue
-_test_start "Pre-flight skips alert when ALL beads are assigned (nd-ane)"
+# Test 24: Pre-flight skips alert when ALL beads are assigned to ACTIVE workers (nd-ane)
+_test_start "Pre-flight skips alert when ALL beads assigned to active workers (nd-ane)"
 export MOCK_BR_READY_COUNT=""
 export MOCK_BR_LIST_DATA='[{"id":"nd-assigned-1","title":"Assigned bead 1","status":"open","priority":2,"claimed_by":"","blocked_by":"","deferred_until":"","issue_type":"task","assignee":"worker-alpha"},{"id":"nd-assigned-2","title":"Assigned bead 2","status":"open","priority":1,"claimed_by":"","blocked_by":"","deferred_until":"","issue_type":"task","assignee":"worker-beta"}]'
+
+# Create fresh heartbeat files for both assigned workers
+HEARTBEAT_DIR="$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
+mkdir -p "$HEARTBEAT_DIR"
+NOW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "{\"worker\":\"worker-alpha\",\"pid\":1001,\"last_heartbeat\":\"$NOW_TS\",\"status\":\"executing\"}" > "$HEARTBEAT_DIR/worker-alpha.json"
+echo "{\"worker\":\"worker-beta\",\"pid\":1002,\"last_heartbeat\":\"$NOW_TS\",\"status\":\"executing\"}" > "$HEARTBEAT_DIR/worker-beta.json"
 
 # Capture output from verification
 output=$(_needle_knot_verify_work_available "$TEST_WORKSPACE_DIR" 2>&1)
@@ -434,13 +440,14 @@ result=$?
 if [[ $result -ne 0 ]]; then
     # Check that "all work assigned" event was emitted
     if echo "$output" | grep -q "knot.all_work_assigned"; then
-        _test_pass "Pre-flight correctly detected all work assigned and skipped alert"
+        _test_pass "Pre-flight correctly detected all work assigned to active workers"
     else
-        _test_fail "Pre-flight did not emit all_work_assigned event"
+        _test_fail "Pre-flight did not emit all_work_assigned event" "$(echo "$output" | tail -5)"
     fi
 else
     _test_fail "Pre-flight incorrectly found claimable beads when all are assigned"
 fi
+rm -f "$HEARTBEAT_DIR/worker-alpha.json" "$HEARTBEAT_DIR/worker-beta.json"
 unset MOCK_BR_READY_COUNT MOCK_BR_LIST_DATA
 
 # Test 25: Pre-flight creates alert when SOME beads are unassigned (nd-ane)
@@ -465,7 +472,95 @@ else
 fi
 unset MOCK_BR_READY_COUNT MOCK_BR_LIST_DATA
 
-# Test 26: Double-check function detects available work (nd-kon)
+# Test 26: Pre-flight proceeds with alert when assigned workers are STALE (nd-ane)
+_test_start "Pre-flight proceeds with alert when assigned workers are stale (nd-ane)"
+export MOCK_BR_READY_COUNT=""
+export MOCK_BR_LIST_DATA='[{"id":"nd-assigned-1","title":"Assigned bead 1","status":"open","priority":2,"claimed_by":"","blocked_by":"","deferred_until":"","issue_type":"task","assignee":"worker-stale-alpha"},{"id":"nd-assigned-2","title":"Assigned bead 2","status":"open","priority":1,"claimed_by":"","blocked_by":"","deferred_until":"","issue_type":"task","assignee":"worker-stale-beta"}]'
+
+# Create STALE heartbeat files (timestamp 10 minutes ago, well past 120s timeout)
+HEARTBEAT_DIR="$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
+mkdir -p "$HEARTBEAT_DIR"
+STALE_TS=$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-10M +%Y-%m-%dT%H:%M:%SZ)
+echo "{\"worker\":\"worker-stale-alpha\",\"pid\":2001,\"last_heartbeat\":\"$STALE_TS\",\"status\":\"executing\"}" > "$HEARTBEAT_DIR/worker-stale-alpha.json"
+echo "{\"worker\":\"worker-stale-beta\",\"pid\":2002,\"last_heartbeat\":\"$STALE_TS\",\"status\":\"executing\"}" > "$HEARTBEAT_DIR/worker-stale-beta.json"
+
+# Capture output from verification
+output=$(_needle_knot_verify_work_available "$TEST_WORKSPACE_DIR" 2>&1)
+result=$?
+
+# Should return 1 (no work) and emit "assigned_workers_stale" event (NOT all_work_assigned)
+if [[ $result -ne 0 ]]; then
+    if echo "$output" | grep -q "knot.assigned_workers_stale"; then
+        _test_pass "Pre-flight correctly detected stale workers and will proceed with alert"
+    elif echo "$output" | grep -q "knot.all_work_assigned"; then
+        _test_fail "Pre-flight incorrectly skipped alert for stale workers"
+    else
+        _test_fail "Pre-flight did not emit expected event" "$(echo "$output" | tail -5)"
+    fi
+else
+    _test_fail "Pre-flight incorrectly found claimable beads"
+fi
+rm -f "$HEARTBEAT_DIR/worker-stale-alpha.json" "$HEARTBEAT_DIR/worker-stale-beta.json"
+unset MOCK_BR_READY_COUNT MOCK_BR_LIST_DATA
+
+# Test 27: Pre-flight proceeds with alert when assigned workers have NO heartbeat (nd-ane)
+_test_start "Pre-flight proceeds with alert when assigned workers have no heartbeat (nd-ane)"
+export MOCK_BR_READY_COUNT=""
+export MOCK_BR_LIST_DATA='[{"id":"nd-assigned-1","title":"Assigned bead","status":"open","priority":2,"claimed_by":"","blocked_by":"","deferred_until":"","issue_type":"task","assignee":"worker-ghost"}]'
+
+# No heartbeat file for worker-ghost
+rm -f "$HEARTBEAT_DIR/worker-ghost.json"
+
+# Capture output from verification
+output=$(_needle_knot_verify_work_available "$TEST_WORKSPACE_DIR" 2>&1)
+result=$?
+
+if [[ $result -ne 0 ]]; then
+    if echo "$output" | grep -q "knot.assigned_workers_stale"; then
+        _test_pass "Pre-flight correctly detected missing heartbeat and will proceed with alert"
+    elif echo "$output" | grep -q "knot.all_work_assigned"; then
+        _test_fail "Pre-flight incorrectly skipped alert for worker with no heartbeat"
+    else
+        _test_fail "Pre-flight did not emit expected event" "$(echo "$output" | tail -5)"
+    fi
+else
+    _test_fail "Pre-flight incorrectly found claimable beads"
+fi
+unset MOCK_BR_READY_COUNT MOCK_BR_LIST_DATA
+
+# Test 28: _needle_knot_is_worker_active function tests (nd-ane)
+_test_start "Worker active check returns true for fresh heartbeat (nd-ane)"
+HEARTBEAT_DIR="$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
+mkdir -p "$HEARTBEAT_DIR"
+NOW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "{\"worker\":\"test-active-worker\",\"pid\":9001,\"last_heartbeat\":\"$NOW_TS\",\"status\":\"idle\"}" > "$HEARTBEAT_DIR/test-active-worker.json"
+if _needle_knot_is_worker_active "test-active-worker" "$HEARTBEAT_DIR"; then
+    _test_pass "Worker correctly detected as active"
+else
+    _test_fail "Worker with fresh heartbeat should be active"
+fi
+rm -f "$HEARTBEAT_DIR/test-active-worker.json"
+
+# Test 29: Worker active check returns false for stale heartbeat (nd-ane)
+_test_start "Worker active check returns false for stale heartbeat (nd-ane)"
+STALE_TS=$(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-10M +%Y-%m-%dT%H:%M:%SZ)
+echo "{\"worker\":\"test-stale-worker\",\"pid\":9002,\"last_heartbeat\":\"$STALE_TS\",\"status\":\"idle\"}" > "$HEARTBEAT_DIR/test-stale-worker.json"
+if ! _needle_knot_is_worker_active "test-stale-worker" "$HEARTBEAT_DIR"; then
+    _test_pass "Worker correctly detected as stale"
+else
+    _test_fail "Worker with stale heartbeat should be inactive"
+fi
+rm -f "$HEARTBEAT_DIR/test-stale-worker.json"
+
+# Test 30: Worker active check returns false for missing heartbeat (nd-ane)
+_test_start "Worker active check returns false for missing heartbeat (nd-ane)"
+if ! _needle_knot_is_worker_active "nonexistent-worker" "$HEARTBEAT_DIR"; then
+    _test_pass "Worker correctly detected as inactive (no heartbeat file)"
+else
+    _test_fail "Worker with no heartbeat should be inactive"
+fi
+
+# Test 31: Double-check function detects available work (nd-kon)
 _test_start "Double-check function detects available work (nd-kon)"
 export MOCK_BR_READY_COUNT=5
 if _needle_knot_double_check_work_available "$TEST_WORKSPACE_DIR"; then
@@ -475,7 +570,7 @@ else
 fi
 unset MOCK_BR_READY_COUNT
 
-# Test 27: Double-check function returns no work when none available (nd-kon)
+# Test 32: Double-check function returns no work when none available (nd-kon)
 _test_start "Double-check function returns no work when none available (nd-kon)"
 export MOCK_BR_READY_COUNT=""
 if ! _needle_knot_double_check_work_available "$TEST_WORKSPACE_DIR"; then
@@ -485,7 +580,7 @@ else
 fi
 unset MOCK_BR_READY_COUNT
 
-# Test 28: Alert creation skips when double-check finds work (nd-kon)
+# Test 33: Alert creation skips when double-check finds work (nd-kon)
 _test_start "Alert creation skips when double-check finds work (nd-kon)"
 # Clear rate limits first
 _needle_knot_clear_rate_limit "$TEST_WORKSPACE_DIR"
@@ -509,7 +604,7 @@ else
 fi
 unset MOCK_BR_READY_COUNT
 
-# Test 29: Alert creation proceeds when double-check confirms no work (nd-kon)
+# Test 34: Alert creation proceeds when double-check confirms no work (nd-kon)
 _test_start "Alert creation proceeds when double-check confirms no work (nd-kon)"
 # Clear rate limits first
 _needle_knot_clear_rate_limit "$TEST_WORKSPACE_DIR"
@@ -528,7 +623,7 @@ else
 fi
 unset MOCK_BR_READY_COUNT
 
-# Test 30: DB health check returns healthy when no script exists (nd-1jv)
+# Test 35: DB health check returns healthy when no script exists (nd-1jv)
 _test_start "DB health check returns healthy when no script exists (nd-1jv)"
 if _needle_knot_check_db_health "/nonexistent/workspace"; then
     _test_pass "DB health check correctly returned healthy when no script exists"
@@ -536,7 +631,7 @@ else
     _test_fail "DB health check should return healthy when script is missing"
 fi
 
-# Test 31: DB health check returns healthy when script exits 0 (nd-1jv)
+# Test 36: DB health check returns healthy when script exits 0 (nd-1jv)
 _test_start "DB health check returns healthy when script exits 0 (nd-1jv)"
 MOCK_HEALTH_DIR="$TEST_WORKSPACE_DIR/.beads/maintenance"
 mkdir -p "$MOCK_HEALTH_DIR"
@@ -552,7 +647,7 @@ else
     _test_fail "DB health check should return healthy when script exits 0"
 fi
 
-# Test 32: DB health check returns corruption when script exits 1 (nd-1jv)
+# Test 37: DB health check returns corruption when script exits 1 (nd-1jv)
 _test_start "DB health check returns corruption when script exits 1 (nd-1jv)"
 cat > "$MOCK_HEALTH_DIR/db-health-check.sh" << 'SCRIPT'
 #!/bin/bash
@@ -567,7 +662,7 @@ else
     _test_fail "DB health check should return corruption when script exits 1"
 fi
 
-# Test 33: DB health check treats exit 2 as healthy (error case) (nd-1jv)
+# Test 38: DB health check treats exit 2 as healthy (error case) (nd-1jv)
 _test_start "DB health check treats exit 2 as healthy (error case) (nd-1jv)"
 cat > "$MOCK_HEALTH_DIR/db-health-check.sh" << 'SCRIPT'
 #!/bin/bash
@@ -581,7 +676,7 @@ else
     _test_fail "DB health check should treat exit 2 as healthy to avoid suppressing alerts"
 fi
 
-# Test 34: Strand skips alert after DB corruption fix reveals work (nd-1jv)
+# Test 39: Strand skips alert after DB corruption fix reveals work (nd-1jv)
 _test_start "Strand skips alert after DB corruption fix reveals work (nd-1jv)"
 _needle_knot_clear_rate_limit "$TEST_WORKSPACE_DIR"
 MOCK_HEALTH_DIR="$TEST_WORKSPACE_DIR/.beads/maintenance"
