@@ -12,8 +12,10 @@ provider: anthropic     # Provider for rate limiting
 model: sonnet          # Model identifier
 
 # Invocation template
-# Variables: ${WORKSPACE}, ${PROMPT}, ${BEAD_ID}, ${BEAD_TITLE}
+# Variables: ${WORKSPACE}, ${PROMPT}, ${BEAD_ID}, ${BEAD_TITLE}, ${AGENT_DIR}
 # NOTE: unset CLAUDECODE prevents nested session detection when running inside Claude Code
+# The stream-parser.sh pipe converts raw JSONL into human-readable terminal output.
+# It lives in the agent config directory and is specific to this agent's output format.
 invoke: |
   cd ${WORKSPACE} && \
   unset CLAUDECODE && \
@@ -25,6 +27,7 @@ invoke: |
   <<'NEEDLE_PROMPT'
   ${PROMPT}
   NEEDLE_PROMPT
+  | ${AGENT_DIR}/stream-parser.sh
 
 # Input method
 input:

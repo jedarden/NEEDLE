@@ -338,8 +338,9 @@ _needle_load_agent() {
     NEEDLE_AGENT[requests_per_minute]=$(_needle_parse_yaml "$agent_file" '.limits.requests_per_minute' 2>/dev/null)
     NEEDLE_AGENT[max_concurrent]=$(_needle_parse_yaml "$agent_file" '.limits.max_concurrent' 2>/dev/null)
 
-    # Store file path for reference
+    # Store file path and directory for reference
     NEEDLE_AGENT[_file]="$agent_file"
+    NEEDLE_AGENT[agent_dir]="$(dirname "$agent_file")"
 
     # Set defaults for missing values
     [[ -z "${NEEDLE_AGENT[name]:-}" ]] && NEEDLE_AGENT[name]="$agent_name"
@@ -396,7 +397,7 @@ _needle_validate_agent() {
     fi
 
     # Validate output format
-    local valid_formats="json text structured"
+    local valid_formats="json text structured stream-json"
     if [[ -n "${NEEDLE_AGENT[output_format]:-}" ]]; then
         if [[ ! " $valid_formats " =~ " ${NEEDLE_AGENT[output_format]} " ]]; then
             _needle_error "Invalid output format: ${NEEDLE_AGENT[output_format]} (valid: $valid_formats)"

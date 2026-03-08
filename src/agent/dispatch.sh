@@ -152,7 +152,7 @@ _needle_get_tee_command() {
 # -----------------------------------------------------------------------------
 
 # Render invoke template with variable substitution
-# Variables: ${WORKSPACE}, ${PROMPT}, ${BEAD_ID}, ${BEAD_TITLE}
+# Variables: ${WORKSPACE}, ${PROMPT}, ${BEAD_ID}, ${BEAD_TITLE}, ${AGENT_DIR}
 #
 # Usage: _needle_render_invoke <template> <workspace> <prompt> <bead_id> <bead_title>
 # Returns: Rendered template string
@@ -180,6 +180,10 @@ _needle_render_invoke() {
 
     # Replace ${BEAD_TITLE}
     rendered="${rendered//\$\{BEAD_TITLE\}/$bead_title}"
+
+    # Replace ${AGENT_DIR} - directory containing the agent config and stream-parser
+    local agent_dir="${NEEDLE_AGENT[agent_dir]:-}"
+    rendered="${rendered//\$\{AGENT_DIR\}/$agent_dir}"
 
     # Replace ${PROMPT} - this is the tricky one
     # In heredoc templates, ${PROMPT} appears inside the heredoc block
@@ -209,6 +213,11 @@ _needle_render_invoke_args() {
     rendered="${rendered//\$\{WORKSPACE\}/$workspace}"
     rendered="${rendered//\$\{BEAD_ID\}/$bead_id}"
     rendered="${rendered//\$\{BEAD_TITLE\}/$bead_title}"
+
+    # Replace ${AGENT_DIR} - directory containing the agent config and stream-parser
+    local agent_dir="${NEEDLE_AGENT[agent_dir]:-}"
+    rendered="${rendered//\$\{AGENT_DIR\}/$agent_dir}"
+
     rendered="${rendered//\$\{PROMPT\}/$escaped_prompt}"
 
     echo "$rendered"
