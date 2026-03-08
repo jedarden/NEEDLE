@@ -228,10 +228,10 @@ fi
 
 test_case "_needle_load_agent populates output format"
 _needle_load_agent "claude-anthropic-sonnet" 2>/dev/null
-if [[ "${NEEDLE_AGENT[output_format]}" == "json" ]]; then
+if [[ "${NEEDLE_AGENT[output_format]}" == "stream-json" ]]; then
     test_pass
 else
-    test_fail "Expected output_format='json', got '${NEEDLE_AGENT[output_format]}'"
+    test_fail "Expected output_format='stream-json', got '${NEEDLE_AGENT[output_format]}'"
 fi
 
 test_case "_needle_load_agent populates rate limits"

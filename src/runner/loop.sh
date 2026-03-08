@@ -267,7 +267,7 @@ _needle_check_config_reload() {
     # Note: Use || true to prevent set -e from triggering when counter is 0
     ((NEEDLE_CONFIG_CHECK_COUNTER++)) || true
     if [[ $NEEDLE_CONFIG_CHECK_COUNTER -lt $NEEDLE_CONFIG_CHECK_INTERVAL ]]; then
-        return 0  # No change, but not an error
+        return 1  # Not yet time to check, no reload happened
     fi
     NEEDLE_CONFIG_CHECK_COUNTER=0
 
@@ -328,9 +328,10 @@ _needle_check_config_reload() {
             "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
         _needle_success "Configuration reloaded successfully"
+        return 0  # Reload happened
     fi
 
-    return 0  # Always return 0 (compatible with set -e)
+    return 1  # No reload needed
 }
 
 # Validate configuration before hot-reload
