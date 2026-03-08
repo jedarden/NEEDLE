@@ -19,6 +19,48 @@ fi
 _NEEDLE_DISPATCH_PID=""
 _NEEDLE_DISPATCH_OUTPUT_FILE=""
 _NEEDLE_DISPATCH_START_TIME=0
+_NEEDLE_HEARTBEAT_BG_PID=""
+
+# -----------------------------------------------------------------------------
+# Background Heartbeat Process
+# -----------------------------------------------------------------------------
+
+# Start background heartbeat process during agent execution
+# This keeps the worker alive during long-running agent tasks
+# Usage: _needle_start_heartbeat_background <bead_id>
+_needle_start_heartbeat_background() {
+    local bead_id="$1"
+    local interval="${NEEDLE_HEARTBEAT_INTERVAL:-30}"
+
+    # Start background process that emits heartbeats
+    (
+        while true; do
+            # Check if heartbeat functions are available
+            if declare -f _needle_heartbeat_keepalive &>/dev/null; then
+                _needle_heartbeat_keepalive
+            elif declare -f _needle_emit_heartbeat &>/dev/null; then
+                _needle_emit_heartbeat "executing" "$bead_id"
+            fi
+            sleep "$interval"
+        done
+    ) &
+
+    _NEEDLE_HEARTBEAT_BG_PID=$!
+    _needle_debug "Started background heartbeat process: PID $_NEEDLE_HEARTBEAT_BG_PID (interval: ${interval}s)"
+}
+
+# Stop background heartbeat process
+# Usage: _needle_stop_heartbeat_background
+_needle_stop_heartbeat_background() {
+    if [[ -n "$_NEEDLE_HEARTBEAT_BG_PID" ]]; then
+        if kill -0 "$_NEEDLE_HEARTBEAT_BG_PID" 2>/dev/null; then
+            kill "$_NEEDLE_HEARTBEAT_BG_PID" 2>/dev/null
+            wait "$_NEEDLE_HEARTBEAT_BG_PID" 2>/dev/null
+            _needle_debug "Stopped background heartbeat process: PID $_NEEDLE_HEARTBEAT_BG_PID"
+        fi
+        _NEEDLE_HEARTBEAT_BG_PID=""
+    fi
+}
 
 # -----------------------------------------------------------------------------
 # Template Rendering
@@ -284,6 +326,9 @@ _needle_dispatch_agent() {
     start_time=$(_needle_get_time_ms)
     _NEEDLE_DISPATCH_START_TIME="$start_time"
 
+    # Start background heartbeat to keep worker alive during execution
+    _needle_start_heartbeat_background "$bead_id"
+
     # Render template and execute based on input method
     local exit_code
     local input_method="${NEEDLE_AGENT[input_method]:-heredoc}"
@@ -345,10 +390,14 @@ _needle_dispatch_agent() {
 
         *)
             _needle_error "Unknown input method: $input_method"
+            _needle_stop_heartbeat_background
             rm -f "$output_file"
             return 1
             ;;
     esac
+
+    # Stop background heartbeat now that agent has completed
+    _needle_stop_heartbeat_background
 
     # Record end time and calculate duration
     local end_time
@@ -383,6 +432,9 @@ _needle_get_time_ms() {
 # Clean up dispatch resources (call on exit or interrupt)
 # Usage: _needle_dispatch_cleanup
 _needle_dispatch_cleanup() {
+    # Stop background heartbeat process
+    _needle_stop_heartbeat_background
+
     # Kill any running process
     if [[ -n "$_NEEDLE_DISPATCH_PID" ]] && kill -0 "$_NEEDLE_DISPATCH_PID" 2>/dev/null; then
         _needle_debug "Killing dispatch process: $_NEEDLE_DISPATCH_PID"
