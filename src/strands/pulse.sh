@@ -815,6 +815,28 @@ _pulse_detector_security() {
         _needle_verbose "pulse: found $pip_count pip vulnerability(ies)"
     fi
 
+    # Run exposed secrets scan
+    local secrets_issues
+    secrets_issues=$(_pulse_scan_secrets "$workspace")
+    if [[ -n "$secrets_issues" ]] && [[ "$secrets_issues" != "[]" ]]; then
+        all_issues=$(echo "$all_issues" "$secrets_issues" | jq -s 'add' 2>/dev/null || echo "$all_issues")
+        local secrets_count
+        secrets_count=$(echo "$secrets_issues" | jq 'length' 2>/dev/null || echo 0)
+        ((issues_found += secrets_count))
+        _needle_verbose "pulse: found $secrets_count exposed secret(s)"
+    fi
+
+    # Run security anti-patterns scan
+    local antipattern_issues
+    antipattern_issues=$(_pulse_scan_security_antipatterns "$workspace")
+    if [[ -n "$antipattern_issues" ]] && [[ "$antipattern_issues" != "[]" ]]; then
+        all_issues=$(echo "$all_issues" "$antipattern_issues" | jq -s 'add' 2>/dev/null || echo "$all_issues")
+        local antipattern_count
+        antipattern_count=$(echo "$antipattern_issues" | jq 'length' 2>/dev/null || echo 0)
+        ((issues_found += antipattern_count))
+        _needle_verbose "pulse: found $antipattern_count security anti-pattern(s)"
+    fi
+
     # Emit detector completed event
     _needle_telemetry_emit "pulse.detector_completed" "info" \
         "detector=security" \
@@ -826,6 +848,355 @@ _pulse_detector_security() {
         "issues_found=$issues_found"
 
     echo "$all_issues"
+}
+
+# ============================================================================
+# Exposed Secrets Scanner (nd-21h)
+# ============================================================================
+
+# Scan source files for exposed secrets (API keys, tokens, passwords, etc.)
+#
+# Usage: _pulse_scan_secrets <workspace>
+# Returns: JSON array of secret issue objects
+_pulse_scan_secrets() {
+    local workspace="$1"
+    local issues="[]"
+
+    # Secret patterns: pattern_name:regex:severity
+    # Each entry is "name:severity:pattern"
+    local -a secret_patterns=(
+        "generic_api_key:high:(?i)(api[_-]?key|apikey)[[:space:]]*[=:][[:space:]]*['\"]?[A-Za-z0-9_\-]{20,}['\"]?"
+        "generic_secret:high:(?i)(secret[_-]?key|secret)[[:space:]]*[=:][[:space:]]*['\"]?[A-Za-z0-9_\-]{20,}['\"]?"
+        "generic_token:high:(?i)(access[_-]?token|auth[_-]?token|bearer[_-]?token)[[:space:]]*[=:][[:space:]]*['\"]?[A-Za-z0-9_\.\-]{20,}['\"]?"
+        "generic_password:high:(?i)(password|passwd|pwd)[[:space:]]*[=:][[:space:]]*['\"]?[^[:space:]'\"]{8,}['\"]?"
+        "aws_access_key:critical:(AKIA|ABIA|ACCA|AIPA)[A-Z0-9]{16}"
+        "aws_secret:critical:(?i)aws[_-]?secret[_-]?access[_-]?key[[:space:]]*[=:][[:space:]]*['\"]?[A-Za-z0-9/+]{40}['\"]?"
+        "github_token:critical:ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{82}"
+        "private_key:critical:-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+        "google_api_key:high:AIza[0-9A-Za-z\-_]{35}"
+        "slack_token:high:xox[baprs]-[A-Za-z0-9\-]+"
+        "stripe_key:critical:sk_(live|test)_[A-Za-z0-9]{24,}"
+        "sendgrid_key:high:SG\.[A-Za-z0-9_\-]{22,}\.[A-Za-z0-9_\-]{43,}"
+        "jwt_token:medium:eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+"
+        "basic_auth_url:high:https?://[^[:space:]@]+:[^[:space:]@]+@"
+    )
+
+    # File extensions to scan
+    local scan_extensions="-name '*.sh' -o -name '*.py' -o -name '*.js' -o -name '*.ts' -o -name '*.json' -o -name '*.yaml' -o -name '*.yml' -o -name '*.env' -o -name '*.conf' -o -name '*.config' -o -name '*.rb' -o -name '*.go' -o -name '*.java' -o -name '*.php' -o -name '*.toml' -o -name '*.ini' -o -name '*.xml' -o -name '*.properties'"
+
+    # Collect files to scan
+    local scan_files=()
+    while IFS= read -r -d '' file; do
+        scan_files+=("$file")
+    done < <(find "$workspace" -type f \( \
+        -name "*.sh" -o -name "*.py" -o -name "*.js" -o -name "*.ts" \
+        -o -name "*.json" -o -name "*.yaml" -o -name "*.yml" \
+        -o -name "*.env" -o -name "*.conf" -o -name "*.config" \
+        -o -name "*.rb" -o -name "*.go" -o -name "*.java" \
+        -o -name "*.php" -o -name "*.toml" -o -name "*.ini" \
+        -o -name "*.xml" -o -name "*.properties" \
+        \) -not -path "*/node_modules/*" -not -path "*/.git/*" \
+        -not -path "*/venv/*" -not -path "*/.venv/*" \
+        -not -path "*/dist/*" -not -path "*/build/*" \
+        -not -path "*/.env.example" \
+        -print0 2>/dev/null)
+
+    if [[ ${#scan_files[@]} -eq 0 ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    # Get max issues from config
+    local max_secrets
+    max_secrets=$(get_config "strands.pulse.max_secrets_per_run" "10")
+    local secrets_found=0
+
+    for file in "${scan_files[@]}"; do
+        [[ -f "$file" ]] || continue
+
+        # Skip .env.example files (they contain example/placeholder values)
+        local basename
+        basename=$(basename "$file")
+        if [[ "$basename" == ".env.example" ]] || [[ "$basename" == "*.example" ]]; then
+            continue
+        fi
+
+        local rel_path="${file#$workspace/}"
+
+        # Process each pattern
+        for pattern_entry in "${secret_patterns[@]}"; do
+            ((secrets_found >= max_secrets)) && break 2
+
+            local pattern_name pattern_severity pattern_regex
+            pattern_name="${pattern_entry%%:*}"
+            local remainder="${pattern_entry#*:}"
+            pattern_severity="${remainder%%:*}"
+            pattern_regex="${remainder#*:}"
+
+            # Search for the pattern in the file
+            local match_line match_num
+            match_line=$(grep -nP "$pattern_regex" "$file" 2>/dev/null | head -1)
+
+            if [[ -z "$match_line" ]]; then
+                continue
+            fi
+
+            match_num="${match_line%%:*}"
+            local match_content="${match_line#*:}"
+            # Redact the actual secret value for safety (show only first 4 chars of value)
+            match_content=$(echo "$match_content" | sed 's/\(=\s*["'"'"']\?\)[^[:space:]"'"'"']\{4\}\([^[:space:]"'"'"']*\)/\1****REDACTED****/g' 2>/dev/null || echo "${match_content:0:60}...")
+
+            local title="Exposed secret detected: ${pattern_name} in ${rel_path}"
+            local fingerprint="secret:${pattern_name}:${rel_path}:${match_num}"
+
+            local description="Potential exposed secret detected in **${rel_path}**.
+
+**Type:** ${pattern_name}
+**Severity:** ${pattern_severity}
+**Location:** ${rel_path}:${match_num}
+
+\`\`\`
+${match_content:0:120}
+\`\`\`
+
+## Risk
+Exposed secrets in source code can lead to unauthorized access if the code is shared or version-controlled. Even if the secret is rotated, it may remain in git history.
+
+## Remediation
+1. **Immediately rotate the exposed credential** - assume it is compromised
+2. Remove the secret from source code and git history (use \`git filter-branch\` or \`git-secrets\`)
+3. Store secrets in environment variables or a secrets manager
+4. Add the file pattern to \`.gitignore\` if it contains secrets
+5. Consider using tools like \`git-secrets\` or \`detect-secrets\` pre-commit hooks"
+
+            local issue
+            issue=$(jq -n \
+                --arg category "security" \
+                --arg severity "$pattern_severity" \
+                --arg title "$title" \
+                --arg description "$description" \
+                --arg fingerprint "$fingerprint" \
+                --arg labels "secret,exposed-credential,security" \
+                '{
+                    category: $category,
+                    severity: $severity,
+                    title: $title,
+                    description: $description,
+                    fingerprint: $fingerprint,
+                    labels: $labels
+                }')
+
+            issues=$(echo "$issues" | jq --argjson new_issue "$issue" '. + [$new_issue]' 2>/dev/null || echo "$issues")
+            ((secrets_found++))
+        done
+    done
+
+    echo "$issues"
+}
+
+# ============================================================================
+# Security Anti-patterns Scanner (nd-21h)
+# ============================================================================
+
+# Scan source files for security anti-patterns
+#
+# Usage: _pulse_scan_security_antipatterns <workspace>
+# Returns: JSON array of security anti-pattern issue objects
+_pulse_scan_security_antipatterns() {
+    local workspace="$1"
+    local issues="[]"
+
+    # Anti-pattern definitions: "name:severity:file_types:pattern:description"
+    # Using associative-array-like approach for readability
+    declare -a antipattern_names antipattern_severities antipattern_extensions antipattern_patterns antipattern_descriptions
+
+    # Shell: dangerous eval usage
+    antipattern_names+=("shell_eval")
+    antipattern_severities+=("high")
+    antipattern_extensions+=("sh bash")
+    antipattern_patterns+=('eval\s+.*\$')
+    antipattern_descriptions+=("Use of \`eval\` with variable expansion is dangerous and can allow code injection. Consider using safer alternatives like arrays or parameter expansion.")
+
+    # Python: dangerous eval/exec
+    antipattern_names+=("python_eval")
+    antipattern_severities+=("high")
+    antipattern_extensions+=("py")
+    antipattern_patterns+=('(eval|exec)\s*\(')
+    antipattern_descriptions+=("Use of \`eval()\` or \`exec()\` with untrusted input can allow arbitrary code execution. Avoid these functions or ensure input is strictly validated.")
+
+    # Python: unsafe deserialization (pickle)
+    antipattern_names+=("python_pickle")
+    antipattern_severities+=("high")
+    antipattern_extensions+=("py")
+    antipattern_patterns+=('pickle\.(loads?|Unpickler)')
+    antipattern_descriptions+=("Use of \`pickle.load()\` on untrusted data is dangerous. Pickle can execute arbitrary code during deserialization. Use safer formats like JSON.")
+
+    # Python: SQL injection via string formatting
+    antipattern_names+=("python_sql_injection")
+    antipattern_severities+=("critical")
+    antipattern_extensions+=("py")
+    antipattern_patterns+=('execute\s*\(\s*[f"'"'"'][^"'"'"']*%(s|d)|execute\s*\(\s*"[^"]*"\s*%|execute\s*\(\s*f"')
+    antipattern_descriptions+=("Potential SQL injection: query built using string formatting instead of parameterized queries. Use parameterized queries or an ORM.")
+
+    # JavaScript/TypeScript: dangerous eval
+    antipattern_names+=("js_eval")
+    antipattern_severities+=("high")
+    antipattern_extensions+=("js ts jsx tsx")
+    antipattern_patterns+=('(^|[^a-zA-Z])(eval|Function)\s*\(')
+    antipattern_descriptions+=("Use of \`eval()\` or \`new Function()\` with untrusted input can lead to XSS and code injection. Avoid dynamic code execution.")
+
+    # JavaScript: innerHTML assignment
+    antipattern_names+=("js_innerhtml")
+    antipattern_severities+=("medium")
+    antipattern_extensions+=("js ts jsx tsx html")
+    antipattern_patterns+=('\.innerHTML\s*=\s*(?!["'"'"'`])')
+    antipattern_descriptions+=("Assigning untrusted data to \`innerHTML\` can lead to XSS. Use \`textContent\`, \`innerText\`, or DOM APIs instead.")
+
+    # JavaScript: document.write
+    antipattern_names+=("js_document_write")
+    antipattern_severities+=("medium")
+    antipattern_extensions+=("js ts jsx tsx html")
+    antipattern_patterns+=('document\.write\s*\(')
+    antipattern_descriptions+=("Use of \`document.write()\` is a potential XSS vector and is considered a security anti-pattern. Use DOM manipulation methods instead.")
+
+    # Shell: command injection via unquoted variables
+    antipattern_names+=("shell_cmd_injection")
+    antipattern_severities+=("high")
+    antipattern_extensions+=("sh bash")
+    antipattern_patterns+=('(system|exec|popen|shell_exec|passthru)\s*\(\s*\$')
+    antipattern_descriptions+=("Passing unvalidated variables to shell execution functions can enable command injection. Validate and sanitize all input before executing.")
+
+    # PHP: dangerous functions
+    antipattern_names+=("php_dangerous_functions")
+    antipattern_severities+=("high")
+    antipattern_extensions+=("php")
+    antipattern_patterns+=('(system|exec|popen|shell_exec|passthru|eval)\s*\(\s*\$')
+    antipattern_descriptions+=("PHP function with direct variable argument can enable command injection or code execution. Validate and sanitize all input.")
+
+    # Python: subprocess with shell=True
+    antipattern_names+=("python_subprocess_shell")
+    antipattern_severities+=("medium")
+    antipattern_extensions+=("py")
+    antipattern_patterns+=('subprocess\.(run|call|Popen|check_output|check_call)\s*\([^)]*shell\s*=\s*True')
+    antipattern_descriptions+=("Using \`subprocess\` with \`shell=True\` can enable command injection if any part of the command is untrusted. Use a list of arguments instead.")
+
+    # Python: os.system
+    antipattern_names+=("python_os_system")
+    antipattern_severities+=("medium")
+    antipattern_extensions+=("py")
+    antipattern_patterns+=('os\.(system|popen)\s*\(')
+    antipattern_descriptions+=("Use of \`os.system()\` or \`os.popen()\` with untrusted input can enable command injection. Prefer \`subprocess\` with a list of arguments.")
+
+    # Any: hardcoded localhost/IP in production code
+    antipattern_names+=("hardcoded_url")
+    antipattern_severities+=("low")
+    antipattern_extensions+=("py js ts go java rb php")
+    antipattern_patterns+=('(http://localhost|http://127\.0\.0\.1|http://0\.0\.0\.0)')
+    antipattern_descriptions+=("Hardcoded localhost URLs will not work in production. Use configuration/environment variables for service URLs.")
+
+    # Get max issues from config
+    local max_antipatterns
+    max_antipatterns=$(get_config "strands.pulse.max_antipatterns_per_run" "10")
+    local antipatterns_found=0
+
+    local num_patterns=${#antipattern_names[@]}
+
+    for ((i = 0; i < num_patterns; i++)); do
+        ((antipatterns_found >= max_antipatterns)) && break
+
+        local pname="${antipattern_names[$i]}"
+        local pseverity="${antipattern_severities[$i]}"
+        local pextensions="${antipattern_extensions[$i]}"
+        local ppattern="${antipattern_patterns[$i]}"
+        local pdesc="${antipattern_descriptions[$i]}"
+
+        # Build find arguments for the file extensions
+        local find_args=()
+        local first_ext=true
+        for ext in $pextensions; do
+            if [[ "$first_ext" == "true" ]]; then
+                find_args+=("-name" "*.${ext}")
+                first_ext=false
+            else
+                find_args+=("-o" "-name" "*.${ext}")
+            fi
+        done
+
+        # Find matching files
+        local match_files=()
+        while IFS= read -r -d '' file; do
+            match_files+=("$file")
+        done < <(find "$workspace" -type f \( "${find_args[@]}" \) \
+            -not -path "*/node_modules/*" -not -path "*/.git/*" \
+            -not -path "*/venv/*" -not -path "*/.venv/*" \
+            -not -path "*/dist/*" -not -path "*/build/*" \
+            -print0 2>/dev/null)
+
+        for file in "${match_files[@]}"; do
+            ((antipatterns_found >= max_antipatterns)) && break 2
+
+            [[ -f "$file" ]] || continue
+
+            # Skip test files (anti-patterns may be intentional in tests)
+            local rel_path="${file#$workspace/}"
+            if [[ "$rel_path" == *"test"* ]] || [[ "$rel_path" == *"spec"* ]] || [[ "$rel_path" == *"__tests__"* ]]; then
+                continue
+            fi
+
+            # Search for the anti-pattern
+            local match_line match_num
+            match_line=$(grep -nP "$ppattern" "$file" 2>/dev/null | head -1)
+
+            if [[ -z "$match_line" ]]; then
+                continue
+            fi
+
+            match_num="${match_line%%:*}"
+            local match_content="${match_line#*:}"
+            match_content="${match_content:0:120}"
+
+            local title="Security anti-pattern: ${pname} in ${rel_path}"
+            local fingerprint="antipattern:${pname}:${rel_path}:${match_num}"
+
+            local description="Security anti-pattern detected in **${rel_path}**.
+
+**Pattern:** ${pname}
+**Severity:** ${pseverity}
+**Location:** ${rel_path}:${match_num}
+
+\`\`\`
+${match_content}
+\`\`\`
+
+## Risk
+${pdesc}
+
+## Remediation
+Review the flagged code and replace with a secure alternative. Refer to OWASP guidelines for secure coding practices."
+
+            local issue
+            issue=$(jq -n \
+                --arg category "security" \
+                --arg severity "$pseverity" \
+                --arg title "$title" \
+                --arg description "$description" \
+                --arg fingerprint "$fingerprint" \
+                --arg labels "security,anti-pattern,${pname}" \
+                '{
+                    category: $category,
+                    severity: $severity,
+                    title: $title,
+                    description: $description,
+                    fingerprint: $fingerprint,
+                    labels: $labels
+                }')
+
+            issues=$(echo "$issues" | jq --argjson new_issue "$issue" '. + [$new_issue]' 2>/dev/null || echo "$issues")
+            ((antipatterns_found++))
+        done
+    done
+
+    echo "$issues"
 }
 
 # ============================================================================

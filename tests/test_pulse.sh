@@ -801,6 +801,310 @@ test_security_detector_handles_missing_pip_audit() {
 }
 
 # ============================================================================
+# Test: Exposed Secrets Scanner (nd-21h)
+# ============================================================================
+
+test_secrets_scanner_function_exists() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    if declare -f _pulse_scan_secrets &>/dev/null; then
+        pass "Secrets scanner function exists"
+    else
+        fail "Secrets scanner function not found"
+    fi
+}
+
+test_secrets_scanner_returns_json_array() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    local result
+    result=$(_pulse_scan_secrets "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    if echo "$result" | jq -e 'type == "array"' &>/dev/null; then
+        pass "Secrets scanner returns valid JSON array"
+    else
+        fail "Secrets scanner should return valid JSON array"
+    fi
+}
+
+test_secrets_scanner_detects_aws_key() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    # Create a file with a fake AWS access key pattern
+    cat > "$temp_dir/config.py" << 'EOF'
+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+AWS_REGION = "us-east-1"
+EOF
+
+    local result
+    result=$(_pulse_scan_secrets "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    local count
+    count=$(echo "$result" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$count" -gt 0 ]]; then
+        pass "Secrets scanner detects AWS access key pattern"
+    else
+        fail "Secrets scanner should detect AWS access key pattern"
+    fi
+}
+
+test_secrets_scanner_detects_github_token() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    # Create a file with a fake GitHub PAT pattern
+    cat > "$temp_dir/deploy.sh" << 'EOF'
+#!/bin/bash
+GITHUB_TOKEN=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef1234
+git clone https://github.com/org/repo.git
+EOF
+
+    local result
+    result=$(_pulse_scan_secrets "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    local count
+    count=$(echo "$result" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$count" -gt 0 ]]; then
+        pass "Secrets scanner detects GitHub token pattern"
+    else
+        fail "Secrets scanner should detect GitHub token pattern"
+    fi
+}
+
+test_secrets_scanner_fingerprint_format() {
+    # Test that secrets fingerprints follow expected format
+    local fingerprint="secret:aws_access_key:config.py:3"
+
+    if [[ "$fingerprint" == secret:* ]]; then
+        pass "Secrets fingerprint format is correct (starts with secret:)"
+    else
+        fail "Secrets fingerprint format incorrect"
+    fi
+}
+
+test_secrets_scanner_returns_empty_for_clean_dir() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    # Create a clean file with no secrets
+    cat > "$temp_dir/main.py" << 'EOF'
+def hello():
+    print("Hello, world!")
+EOF
+
+    local result
+    result=$(_pulse_scan_secrets "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    local count
+    count=$(echo "$result" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        pass "Secrets scanner returns empty array for clean directory"
+    else
+        fail "Secrets scanner should return empty array for clean directory (found $count)"
+    fi
+}
+
+test_secrets_scanner_issue_format() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    cat > "$temp_dir/config.py" << 'EOF'
+AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"
+EOF
+
+    local result
+    result=$(_pulse_scan_secrets "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    # Check issue has required fields
+    local has_fields
+    has_fields=$(echo "$result" | jq -e '.[0] | has("category") and has("severity") and has("title") and has("description") and has("fingerprint")' 2>/dev/null || echo "false")
+
+    if [[ "$has_fields" == "true" ]]; then
+        pass "Secrets scanner issue has all required fields"
+    else
+        fail "Secrets scanner issue missing required fields"
+    fi
+}
+
+# ============================================================================
+# Test: Security Anti-patterns Scanner (nd-21h)
+# ============================================================================
+
+test_antipatterns_scanner_function_exists() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    if declare -f _pulse_scan_security_antipatterns &>/dev/null; then
+        pass "Security anti-patterns scanner function exists"
+    else
+        fail "Security anti-patterns scanner function not found"
+    fi
+}
+
+test_antipatterns_scanner_returns_json_array() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    local result
+    result=$(_pulse_scan_security_antipatterns "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    if echo "$result" | jq -e 'type == "array"' &>/dev/null; then
+        pass "Anti-patterns scanner returns valid JSON array"
+    else
+        fail "Anti-patterns scanner should return valid JSON array"
+    fi
+}
+
+test_antipatterns_scanner_detects_python_eval() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    cat > "$temp_dir/app.py" << 'EOF'
+def process_input(user_input):
+    result = eval(user_input)
+    return result
+EOF
+
+    local result
+    result=$(_pulse_scan_security_antipatterns "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    local count
+    count=$(echo "$result" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$count" -gt 0 ]]; then
+        pass "Anti-patterns scanner detects Python eval() usage"
+    else
+        fail "Anti-patterns scanner should detect Python eval() usage"
+    fi
+}
+
+test_antipatterns_scanner_detects_subprocess_shell() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    cat > "$temp_dir/runner.py" << 'EOF'
+import subprocess
+
+def run_command(cmd):
+    subprocess.run(cmd, shell=True)
+EOF
+
+    local result
+    result=$(_pulse_scan_security_antipatterns "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    local count
+    count=$(echo "$result" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$count" -gt 0 ]]; then
+        pass "Anti-patterns scanner detects subprocess with shell=True"
+    else
+        fail "Anti-patterns scanner should detect subprocess with shell=True"
+    fi
+}
+
+test_antipatterns_scanner_skips_test_files() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    mkdir -p "$temp_dir/tests"
+
+    # Put anti-pattern in a test file - should be skipped
+    cat > "$temp_dir/tests/test_app.py" << 'EOF'
+import subprocess
+
+def test_command_execution():
+    # Testing shell execution in test context
+    subprocess.run("echo test", shell=True)
+EOF
+
+    local result
+    result=$(_pulse_scan_security_antipatterns "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    local count
+    count=$(echo "$result" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$count" -eq 0 ]]; then
+        pass "Anti-patterns scanner skips test files"
+    else
+        fail "Anti-patterns scanner should skip test files (found $count issues)"
+    fi
+}
+
+test_antipatterns_fingerprint_format() {
+    local fingerprint="antipattern:python_eval:app.py:5"
+
+    if [[ "$fingerprint" == antipattern:* ]]; then
+        pass "Anti-patterns fingerprint format is correct (starts with antipattern:)"
+    else
+        fail "Anti-patterns fingerprint format incorrect"
+    fi
+}
+
+test_antipatterns_scanner_issue_format() {
+    source "$PROJECT_ROOT/src/strands/pulse.sh" 2>/dev/null || true
+
+    local temp_dir
+    temp_dir=$(mktemp -d)
+
+    cat > "$temp_dir/app.py" << 'EOF'
+result = eval(user_input)
+EOF
+
+    local result
+    result=$(_pulse_scan_security_antipatterns "$temp_dir")
+
+    rm -rf "$temp_dir"
+
+    local has_fields
+    has_fields=$(echo "$result" | jq -e '.[0] | has("category") and has("severity") and has("title") and has("description") and has("fingerprint")' 2>/dev/null || echo "false")
+
+    if [[ "$has_fields" == "true" ]]; then
+        pass "Anti-patterns issue has all required fields"
+    else
+        fail "Anti-patterns issue missing required fields"
+    fi
+}
+
+# ============================================================================
 # Test: Documentation Drift Detector (nd-gn2)
 # ============================================================================
 
@@ -1441,6 +1745,28 @@ run_tests() {
     test_security_detector_issue_format || ((failed++))
     test_security_detector_handles_missing_npm || ((failed++))
     test_security_detector_handles_missing_pip_audit || ((failed++))
+
+    # Exposed secrets scanner tests (nd-21h)
+    echo ""
+    echo "=== Exposed Secrets Scanner Tests (nd-21h) ==="
+    test_secrets_scanner_function_exists || ((failed++))
+    test_secrets_scanner_returns_json_array || ((failed++))
+    test_secrets_scanner_detects_aws_key || ((failed++))
+    test_secrets_scanner_detects_github_token || ((failed++))
+    test_secrets_scanner_fingerprint_format || ((failed++))
+    test_secrets_scanner_returns_empty_for_clean_dir || ((failed++))
+    test_secrets_scanner_issue_format || ((failed++))
+
+    # Security anti-patterns scanner tests (nd-21h)
+    echo ""
+    echo "=== Security Anti-patterns Scanner Tests (nd-21h) ==="
+    test_antipatterns_scanner_function_exists || ((failed++))
+    test_antipatterns_scanner_returns_json_array || ((failed++))
+    test_antipatterns_scanner_detects_python_eval || ((failed++))
+    test_antipatterns_scanner_detects_subprocess_shell || ((failed++))
+    test_antipatterns_scanner_skips_test_files || ((failed++))
+    test_antipatterns_fingerprint_format || ((failed++))
+    test_antipatterns_scanner_issue_format || ((failed++))
 
     # Documentation drift detector tests (nd-gn2)
     echo ""
