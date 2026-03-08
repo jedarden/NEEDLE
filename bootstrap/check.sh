@@ -16,6 +16,7 @@ if [[ -z "${NEEDLE_DEPS_DECLARED:-}" ]]; then
         [jq]="1.6"
         [yq]="4.0"
         [br]="0.1"
+        [claude]="1.0"
     )
     NEEDLE_DEPS_DECLARED=1
 fi
@@ -27,6 +28,7 @@ if [[ -z "${NEEDLE_DEPS_NAMES_DECLARED:-}" ]]; then
         [jq]="JSON processor"
         [yq]="YAML processor"
         [br]="Beads queue manager"
+        [claude]="Claude AI coding agent"
     )
     NEEDLE_DEPS_NAMES_DECLARED=1
 fi
@@ -58,6 +60,10 @@ _parse_dep_version() {
         br)
             # br --version outputs version info
             version=$(br --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+([.][0-9]+)?' | head -1)
+            ;;
+        claude)
+            # claude --version outputs: 2.1.71 (Claude Code)
+            version=$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+([.][0-9]+)?' | head -1)
             ;;
         *)
             # Generic fallback: try --version or -V
@@ -322,6 +328,10 @@ _print_install_hints() {
                 ;;
             br)
                 echo "  Install br from https://github.com/anthropics/bead-runner"
+                ;;
+            claude)
+                echo "  Install Claude Code: npm install -g @anthropic-ai/claude-code"
+                echo "  Or visit: https://claude.ai/code"
                 ;;
         esac
     done

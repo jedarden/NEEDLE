@@ -24,7 +24,7 @@ _needle_init_check_deps() {
     local missing_list=()
 
     # Process each dependency in a consistent order
-    local deps_order=("br" "yq" "jq" "tmux")
+    local deps_order=("br" "yq" "jq" "tmux" "claude")
 
     for dep in "${deps_order[@]}"; do
         local status

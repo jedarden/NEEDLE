@@ -92,16 +92,15 @@ test_init_check_deps_missing_format() {
     source_modules
 
     # Run check and capture output
-    local output
+    local output exit_code
     output=$(_needle_init_check_deps 2>&1 || true)
+    _needle_init_check_deps &>/dev/null && exit_code=0 || exit_code=$?
 
-    # If yq is missing (likely), check for NOT FOUND
     if echo "$output" | grep -q "NOT FOUND"; then
         test_pass
-    elif echo "$output" | grep -q "All dependencies"; then
+    elif [[ "$exit_code" -eq 0 ]]; then
         # All deps present - skip this test
         printf "%bSKIP%b (all deps installed)\n" "\033[0;33m" "\033[0m"
-        ((tests_run++)) || true
     else
         test_fail "Missing 'NOT FOUND' status text for missing deps"
     fi
@@ -112,15 +111,15 @@ test_init_check_deps_missing_list() {
     test_start "_needle_init_check_deps shows missing deps list"
     source_modules
 
-    local output
+    local output exit_code
     output=$(_needle_init_check_deps 2>&1 || true)
+    _needle_init_check_deps &>/dev/null && exit_code=0 || exit_code=$?
 
     if echo "$output" | grep -q "Missing dependencies:"; then
         test_pass
-    elif echo "$output" | grep -q "All dependencies"; then
+    elif [[ "$exit_code" -eq 0 ]]; then
         # All deps present - skip
         printf "%bSKIP%b (all deps installed)\n" "\033[0;33m" "\033[0m"
-        ((tests_run++)) || true
     else
         test_fail "Missing 'Missing dependencies:' message"
     fi
@@ -131,15 +130,15 @@ test_init_check_deps_setup_hint() {
     test_start "_needle_init_check_deps suggests needle setup"
     source_modules
 
-    local output
+    local output exit_code
     output=$(_needle_init_check_deps 2>&1 || true)
+    _needle_init_check_deps &>/dev/null && exit_code=0 || exit_code=$?
 
     if echo "$output" | grep -q "needle setup"; then
         test_pass
-    elif echo "$output" | grep -q "All dependencies"; then
+    elif [[ "$exit_code" -eq 0 ]]; then
         # All deps present - skip
         printf "%bSKIP%b (all deps installed)\n" "\033[0;33m" "\033[0m"
-        ((tests_run++)) || true
     else
         test_fail "Missing 'needle setup' suggestion"
     fi
@@ -190,7 +189,7 @@ test_init_check_deps_checks_all_tools() {
     output=$(_needle_init_check_deps 2>&1 || true)
 
     # Check for all required tools in output
-    local tools=("br" "yq" "jq" "tmux")
+    local tools=("br" "yq" "jq" "tmux" "claude")
     for tool in "${tools[@]}"; do
         if ! echo "$output" | grep -q "$tool"; then
             test_fail "Missing check for $tool"

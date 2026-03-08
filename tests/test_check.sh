@@ -78,7 +78,7 @@ test_deps_contains_required() {
     test_start "NEEDLE_DEPS contains required tools"
     source_module
 
-    local required=("tmux" "jq" "yq" "br")
+    local required=("tmux" "jq" "yq" "br" "claude")
     for tool in "${required[@]}"; do
         if [[ -z "${NEEDLE_DEPS[$tool]:-}" ]]; then
             test_fail "Missing required dependency: $tool"
@@ -431,6 +431,25 @@ test_parse_version_br() {
     fi
 }
 
+# Test: _parse_dep_version for claude (if installed)
+test_parse_version_claude() {
+    test_start "_parse_dep_version for claude"
+    source_module
+
+    if command -v claude &>/dev/null; then
+        local version
+        version=$(_parse_dep_version "claude")
+        if [[ "$version" =~ ^[0-9]+\.[0-9]+ ]]; then
+            test_pass
+        else
+            test_fail "Invalid claude version: $version"
+        fi
+    else
+        printf "%bSKIP%b (claude not installed)\n" "\033[0;33m" "\033[0m"
+        ((tests_run++)) || true
+    fi
+}
+
 # Test: Module can be run directly with --help
 test_direct_run_help() {
     test_start "Module runs directly with --help"
@@ -632,6 +651,7 @@ test_parse_version_tmux
 test_parse_version_jq
 test_parse_version_yq
 test_parse_version_br
+test_parse_version_claude
 test_direct_run_help
 test_direct_run_json
 test_direct_run_quiet
