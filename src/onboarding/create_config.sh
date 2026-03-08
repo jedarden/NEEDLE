@@ -455,11 +455,11 @@ file_locks:
 
 mitosis:
   enabled: true
-  skip_types: bug,hotfix,incident
-  skip_labels: no-mitosis,atomic,single-task
+  skip_types: bug,hotfix
+  skip_labels: no-mitosis,atomic
   max_children: 5
   min_children: 2
-  min_complexity: 100
+  min_complexity: 3
   timeout: 60
 
 knot:

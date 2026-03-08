@@ -53,11 +53,11 @@ _NEEDLE_CONFIG_DEFAULTS='{
   },
   "mitosis": {
     "enabled": true,
-    "skip_types": "bug,hotfix,incident",
-    "skip_labels": "no-mitosis,atomic,single-task",
+    "skip_types": "bug,hotfix",
+    "skip_labels": "no-mitosis,atomic",
     "max_children": 5,
     "min_children": 2,
-    "min_complexity": 100,
+    "min_complexity": 3,
     "timeout": 60
   },
   "knot": {
@@ -206,10 +206,10 @@ mitosis:
   enabled: true
 
   # skip_types: Bead types that should not be split (comma-separated)
-  skip_types: bug,hotfix,incident
+  skip_types: bug,hotfix
 
   # skip_labels: Labels that prevent mitosis (comma-separated)
-  skip_labels: no-mitosis,atomic,single-task
+  skip_labels: no-mitosis,atomic
 
   # max_children: Maximum number of children per mitosis
   max_children: 5
@@ -217,8 +217,8 @@ mitosis:
   # min_children: Minimum children required to perform mitosis
   min_children: 2
 
-  # min_complexity: Minimum description length (lines) to consider mitosis
-  min_complexity: 100
+  # min_complexity: Minimum number of files/concerns before considering mitosis
+  min_complexity: 3
 
   # timeout: Timeout in seconds for mitosis analysis
   timeout: 60
@@ -777,10 +777,10 @@ mitosis:
   enabled: true
 
   # skip_types: Bead types that should not be split (comma-separated)
-  skip_types: bug,hotfix,incident
+  skip_types: bug,hotfix
 
   # skip_labels: Labels that prevent mitosis (comma-separated)
-  skip_labels: no-mitosis,atomic,single-task
+  skip_labels: no-mitosis,atomic
 
   # max_children: Maximum number of children per mitosis
   max_children: 5
@@ -788,8 +788,8 @@ mitosis:
   # min_children: Minimum children required to perform mitosis
   min_children: 2
 
-  # min_complexity: Minimum description length (lines) to consider mitosis
-  min_complexity: 100
+  # min_complexity: Minimum number of files/concerns before considering mitosis
+  min_complexity: 3
 
   # timeout: Timeout in seconds for mitosis analysis
   timeout: 60
@@ -976,7 +976,7 @@ validate_config() {
     fi
 
     local mitosis_min_complexity
-    mitosis_min_complexity=$(get_config "mitosis.min_complexity" "100")
+    mitosis_min_complexity=$(get_config "mitosis.min_complexity" "3")
 
     if [[ ! "$mitosis_min_complexity" =~ ^[0-9]+$ ]] || [[ "$mitosis_min_complexity" -lt 0 ]]; then
         _needle_error "Invalid mitosis.min_complexity: must be non-negative integer"
