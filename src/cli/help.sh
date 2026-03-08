@@ -105,6 +105,7 @@ COMMANDS:
 
     heartbeat   Manage worker heartbeat and recovery
     config      View or edit configuration
+    pulse       Run codebase health scan manually
 
 OPTIONS:
     -h, --help       Print help information
