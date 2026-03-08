@@ -96,7 +96,7 @@ NEEDLE_USE_COLOR="${NEEDLE_USE_COLOR:-true}"
 _needle_maybe_init() {
     # Commands that don't require initialization
     case "${1:-}" in
-        init|version|help|--help|-h|--version|-V|-x|upgrade|rollback|agents|attach|stop|test-agent|setup|pulse|_run_worker)
+        init|version|help|--help|-h|--version|-V|-x|upgrade|rollback|agents|attach|stop|test-agent|setup|pulse|completion|_run_worker)
             return 0
             ;;
     esac
@@ -739,21 +739,26 @@ BASH_COMPLETION
 
 # Helper function to get available agents
 _needle_get_agents() {
-    local agents_dir
-    agents_dir="${NEEDLE_HOME:-$HOME/.needle}/agents"
-    local builtin_dir
-    # Try to find builtin agents directory
-    builtin_dir="${${(%):-%x}:A:h:h}/config/agents"
-
+    local agents_dir="${NEEDLE_HOME:-$HOME/.needle}/agents"
+    local builtin_dir="${${(%):-%x}:A:h:h}/config/agents"
     local -a agents=()
+    local f name
+
     # User agents
     if [[ -d "$agents_dir" ]]; then
-        agents+=(${${f:-$(print -m "$agents_dir"/*.yaml(.:r:t))}%.*})
+        for f in "$agents_dir"/*.yaml(N.) "$agents_dir"/*.yml(N.); do
+            agents+=("${f:t:r}")
+        done
     fi
-    # Builtin agents
+
+    # Builtin agents (deduplicated - user takes precedence)
     if [[ -d "$builtin_dir" ]]; then
-        agents+=(${${f:-$(print -m "$builtin_dir"/*.yaml(.:r:t))}%.*})
+        for f in "$builtin_dir"/*.yaml(N.) "$builtin_dir"/*.yml(N.); do
+            name="${f:t:r}"
+            [[ -z "${agents[(r)$name]}" ]] && agents+=("$name")
+        done
     fi
+
     print -l ${(u)agents}
 }
 
