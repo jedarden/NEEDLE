@@ -23,6 +23,9 @@
 #     post_complete: ~/.needle/hooks/post-complete.sh
 #     on_failure: ~/.needle/hooks/on-failure.sh
 #     on_quarantine: ~/.needle/hooks/on-quarantine.sh
+#     pre_commit: ~/.needle/hooks/pre-commit.sh
+#     post_task: ~/.needle/hooks/post-task.sh
+#     error_recovery: ~/.needle/hooks/error-recovery.sh
 #     timeout: 30s
 #     fail_action: warn  # warn | abort | ignore
 
@@ -49,6 +52,9 @@ NEEDLE_HOOK_TYPES=(
     "post_complete"
     "on_failure"
     "on_quarantine"
+    "pre_commit"
+    "post_task"
+    "error_recovery"
 )
 
 # ============================================================================
@@ -433,6 +439,24 @@ _needle_release_bead_locks_on_close() {
 # Usage: _needle_hook_on_quarantine [bead_id]
 _needle_hook_on_quarantine() {
     _needle_run_hook "on_quarantine" "${1:-}"
+}
+
+# Run pre_commit hook
+# Usage: _needle_hook_pre_commit [bead_id]
+_needle_hook_pre_commit() {
+    _needle_run_hook "pre_commit" "${1:-}"
+}
+
+# Run post_task hook
+# Usage: _needle_hook_post_task [bead_id]
+_needle_hook_post_task() {
+    _needle_run_hook "post_task" "${1:-}"
+}
+
+# Run error_recovery hook
+# Usage: _needle_hook_error_recovery [bead_id]
+_needle_hook_error_recovery() {
+    _needle_run_hook "error_recovery" "${1:-}"
 }
 
 # ============================================================================

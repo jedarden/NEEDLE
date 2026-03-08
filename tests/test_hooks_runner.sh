@@ -227,10 +227,10 @@ else
     test_fail "Create sample hook should succeed"
 fi
 
-# Test 14: All 8 hook types are registered
+# Test 14: All 11 hook types are registered
 echo ""
-echo "Test 14: All 8 hook points are registered"
-expected_hooks=(pre_claim post_claim pre_execute post_execute pre_complete post_complete on_failure on_quarantine)
+echo "Test 14: All 11 hook points are registered"
+expected_hooks=(pre_claim post_claim pre_execute post_execute pre_complete post_complete on_failure on_quarantine pre_commit post_task error_recovery)
 missing_hooks=()
 for hook in "${expected_hooks[@]}"; do
     found=false
@@ -243,7 +243,7 @@ for hook in "${expected_hooks[@]}"; do
     [[ "$found" == "false" ]] && missing_hooks+=("$hook")
 done
 if [[ ${#missing_hooks[@]} -eq 0 ]]; then
-    test_pass "All 8 hook types registered: ${expected_hooks[*]}"
+    test_pass "All 11 hook types registered: ${expected_hooks[*]}"
 else
     test_fail "Missing hook types: ${missing_hooks[*]}"
 fi
