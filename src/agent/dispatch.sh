@@ -120,16 +120,16 @@ _needle_dispatch_heredoc() {
     _needle_debug "Dispatching with heredoc method"
 
     if [[ "$timeout" -gt 0 ]]; then
-        timeout "$timeout" bash -c "$rendered" > "$output_file" 2>&1
-        local exit_code=$?
+        timeout "$timeout" bash -c "$rendered" 2>&1 | tee "$output_file"
+        local exit_code=${PIPESTATUS[0]}
         # timeout returns 124 when timed out
         if [[ $exit_code -eq 124 ]]; then
             _needle_warn "Command timed out after ${timeout}s"
         fi
         return $exit_code
     else
-        bash -c "$rendered" > "$output_file" 2>&1
-        return $?
+        bash -c "$rendered" 2>&1 | tee "$output_file"
+        return ${PIPESTATUS[0]}
     fi
 }
 
@@ -147,15 +147,15 @@ _needle_dispatch_stdin() {
     _needle_debug "Dispatching with stdin method"
 
     if [[ "$timeout" -gt 0 ]]; then
-        echo "$prompt" | timeout "$timeout" bash -c "$invoke_cmd" > "$output_file" 2>&1
-        local exit_code=$?
+        echo "$prompt" | timeout "$timeout" bash -c "$invoke_cmd" 2>&1 | tee "$output_file"
+        local exit_code=${PIPESTATUS[1]}
         if [[ $exit_code -eq 124 ]]; then
             _needle_warn "Command timed out after ${timeout}s"
         fi
         return $exit_code
     else
-        echo "$prompt" | bash -c "$invoke_cmd" > "$output_file" 2>&1
-        return $?
+        echo "$prompt" | bash -c "$invoke_cmd" 2>&1 | tee "$output_file"
+        return ${PIPESTATUS[1]}
     fi
 }
 
@@ -184,14 +184,14 @@ _needle_dispatch_file() {
 
     local exit_code
     if [[ "$timeout" -gt 0 ]]; then
-        timeout "$timeout" bash -c "$resolved_cmd" > "$output_file" 2>&1
-        exit_code=$?
+        timeout "$timeout" bash -c "$resolved_cmd" 2>&1 | tee "$output_file"
+        exit_code=${PIPESTATUS[0]}
         if [[ $exit_code -eq 124 ]]; then
             _needle_warn "Command timed out after ${timeout}s"
         fi
     else
-        bash -c "$resolved_cmd" > "$output_file" 2>&1
-        exit_code=$?
+        bash -c "$resolved_cmd" 2>&1 | tee "$output_file"
+        exit_code=${PIPESTATUS[0]}
     fi
 
     # Clean up the prompt file
@@ -213,15 +213,15 @@ _needle_dispatch_args() {
     _needle_debug "Dispatching with args method"
 
     if [[ "$timeout" -gt 0 ]]; then
-        timeout "$timeout" bash -c "$rendered" > "$output_file" 2>&1
-        local exit_code=$?
+        timeout "$timeout" bash -c "$rendered" 2>&1 | tee "$output_file"
+        local exit_code=${PIPESTATUS[0]}
         if [[ $exit_code -eq 124 ]]; then
             _needle_warn "Command timed out after ${timeout}s"
         fi
         return $exit_code
     else
-        bash -c "$rendered" > "$output_file" 2>&1
-        return $?
+        bash -c "$rendered" 2>&1 | tee "$output_file"
+        return ${PIPESTATUS[0]}
     fi
 }
 
