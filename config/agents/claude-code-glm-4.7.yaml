@@ -14,11 +14,13 @@ model: glm-4.7          # Model identifier
 # Invocation template
 # Variables: ${WORKSPACE}, ${PROMPT}, ${BEAD_ID}, ${BEAD_TITLE}
 # NOTE: unset CLAUDECODE prevents nested session detection when running inside Claude Code
+# Uses in-cluster zai-proxy for rate limiting and API key management
 invoke: |
   cd ${WORKSPACE} && \
   unset CLAUDECODE && \
+  ANTHROPIC_BASE_URL=http://zai-proxy.devpod.svc.cluster.local:8080/v1 \
+  ANTHROPIC_MODEL=glm-4-flash \
   claude --print \
-         --model sonnet \
          --dangerously-skip-permissions \
          --output-format json \
          --verbose \
