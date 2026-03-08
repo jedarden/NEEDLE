@@ -138,15 +138,16 @@ if [[ -z "$BEAD_ID" ]]; then
     exit 0
 fi
 
-# Attempt to checkout the file
-if checkout_file "$FILE_PATH" "$BEAD_ID" "$WORKER_ID"; then
+# Attempt to checkout the file (capture output and status separately)
+BLOCKING_INFO=$(checkout_file "$FILE_PATH" "$BEAD_ID" "$WORKER_ID")
+CHECKOUT_STATUS=$?
+
+if [[ $CHECKOUT_STATUS -eq 0 ]]; then
     _log_info "File checked out: $FILE_PATH"
     exit 0
 fi
 
 # File is locked by another bead
-# Read blocking bead info from stdout of checkout_file
-BLOCKING_INFO=$(cat)
 BLOCKING_BEAD=""
 
 if command -v jq &>/dev/null; then

@@ -390,7 +390,7 @@ release_bead_locks() {
 
         # Remove the lock file
         if rm -f "$lock_file" 2>/dev/null; then
-            ((released_count++))
+            released_count=$((released_count + 1))
 
             # Emit release telemetry event
             _needle_telemetry_emit "file.release" "info" \
@@ -398,7 +398,7 @@ release_bead_locks() {
                 "path=$filepath" \
                 "held_for_ms=$held_for_ms"
         else
-            ((failed_count++))
+            failed_count=$((failed_count + 1))
             _needle_warn "Failed to release lock: $lock_file"
         fi
     done
@@ -454,7 +454,7 @@ check_file() {
 #   list_locks
 #   list_locks "nd-2ov"
 list_locks() {
-    local filter_bead_id="$1"
+    local filter_bead_id="${1:-}"
     local lock_pattern="${NEEDLE_LOCK_DIR}/*"
     local locks=()
 
@@ -566,7 +566,7 @@ check_stale_locks() {
         age_s=$(( now - ts ))
 
         if (( age_s > timeout_s )); then
-            ((stale_count++))
+            stale_count=$((stale_count + 1))
 
             _needle_warn "Stale lock detected: $filepath (held by $bead for ${age_s}s)"
 
@@ -684,7 +684,7 @@ cleanup_reaped_locks() {
 
             # Release all locks for this bead
             release_bead_locks "$bead_id"
-            ((cleaned_count++))
+            cleaned_count=$((cleaned_count + 1))
         fi
 
         # Mark as checked
