@@ -94,6 +94,10 @@ process_module() {
             s/^[ \t]*if\s+!\s+declare.*?;\s*then\s*\n\s*fi\s*\n//gm;
             # Pattern 3: if COMMAND; then\nfi (general case)
             s/^[ \t]*if\s+[^;\n]+;\s*then\s*\n\s*fi\s*\n//gm;
+            # Pattern 4: if ... then\n(empty)\nelse\n...\nfi → just the else body
+            s/^([ \t]*)if\s+[^;\n]+;\s*then\s*\n\s*else\s*\n(.*?)\n\s*fi\s*\n/$2\n/gm;
+            # Pattern 5: if [[ ... ]]; then\n(empty)\nelse\n...\nfi → just the else body
+            s/^([ \t]*)if\s+\[\[.*?\]\]\s*;\s*then\s*\n\s*else\s*\n(.*?)\n\s*fi\s*\n/$2\n/gm;
         }
     ')
 
