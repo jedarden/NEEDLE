@@ -4196,6 +4196,10 @@ NEEDLE/
 │   │   └── defaults/           # Default hook templates
 │   │       ├── pre-claim.sh
 │   │       └── post-complete.sh
+│   ├── lock/
+│   │   ├── checkout.sh         # File checkout/lock API (RAM-based /dev/shm locks)
+│   │   ├── metrics.sh          # File collision metrics and aggregation
+│   │   └── libcheckout.c       # (planned) C library for LD_PRELOAD enforcement
 │   ├── watchdog/
 │   │   ├── heartbeat.sh        # Emit heartbeat updates
 │   │   ├── monitor.sh          # Background watchdog process
