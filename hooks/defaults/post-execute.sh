@@ -51,6 +51,26 @@
 set -euo pipefail
 
 # ============================================================================
+# FILE CONFLICT RECONCILIATION (Strategy 2: Post-Execution Reactive)
+# ============================================================================
+#
+# Detect and roll back any file changes that conflict with active file locks
+# held by other beads. This is the safety net for missed conflicts.
+#
+# To ENABLE: uncomment the block below.
+# Requires: NEEDLE_SRC_DIR to be set (or the reconcile module to be on PATH).
+#
+# RECONCILE_MODULE="${NEEDLE_SRC_DIR:-}/hooks/post-execute-reconcile.sh"
+#
+# if [[ -f "$RECONCILE_MODULE" ]]; then
+#     source "$RECONCILE_MODULE"
+#     if ! detect_file_conflicts; then
+#         echo "File conflicts detected and rolled back — bead re-queued"
+#         exit 2  # Abort completion, bead will be re-queued
+#     fi
+# fi
+
+# ============================================================================
 # CLEANUP EXAMPLES (Uncomment to enable)
 # ============================================================================
 
