@@ -4,21 +4,21 @@
 
 NEEDLE (**N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort) is a task tracking and effort logging system designed to navigate through queued deliverables while maintaining a comprehensive record of work performed.
 
-## Current Status (Updated: 2026-03-04)
+## Current Status (Updated: 2026-03-09)
 
 | Metric | Count |
 |--------|-------|
-| **Open beads** | 33 |
-| **Closed beads** | 103 |
-| **Completion** | ~76% |
+| **Open beads** | 9 |
+| **Closed beads** | 294 |
+| **Completion** | ~97% |
 
 ### Completion by Priority
 | Priority | Open | Description |
 |----------|------|-------------|
-| P0 | 5 | Critical blockers |
-| P1 | 12 | Core features |
-| P2 | 9 | Important features |
-| P3 | 7 | Enhancements |
+| P0 | 0 | Critical blockers |
+| P1 | 1 | Core features |
+| P2 | 5 | Important features |
+| P3 | 3 | Enhancements |
 
 ## Completed Phases
 
@@ -30,102 +30,96 @@ NEEDLE (**N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffor
 - telemetry/budget.sh - Budget tracking
 - Basic test coverage
 
-### Phase 2: Worker System (Partial)
-- ✅ Heartbeat emission (nd-fjz)
-- ✅ Rate limiting per provider (nd-1ws)
-- ✅ Configuration hot-reload (nd-1ww)
-- ✅ Alternative solutions framework
-- ✅ Worker starvation detection (with false positive fixes)
+### Phase 2: Worker System ✅ COMPLETE
+- Heartbeat emission
+- Rate limiting per provider
+- Configuration hot-reload
+- Alternative solutions framework
+- Worker starvation detection
+- Single worker invocation
+- Multi-worker spawning
+- Worker naming module
 
-## In Progress
+### Phase 3: Strands & CLI ✅ COMPLETE
+- All 7 strands implemented (Pluck, Explore, Weave, Knot, Unravel, Pulse, Mend)
+- All CLI commands implemented (init, run, list, status, config, logs, agents, etc.)
+- Hook system with 11 default templates
+- Shell completion for bash/zsh
+- Pulse detectors (security, dependencies, docs, coverage, TODOs, linter, dead code)
+- File checkout system with /dev/shm locks
+- Bead mitosis with configurable settings
+- Agent adapters (Claude, OpenCode, Codex, Aider, zai-glm5)
 
-### Priority 0 - Critical
-| Bead | Title | Status |
-|------|-------|--------|
-| nd-2gc | Implement Strand 1: Pluck | Open |
-| nd-2ov | Implement needle run: Single worker invocation | Open |
-| nd-qni | Implement worker loop: Core structure | Open |
-| nd-xnj | Implement worker naming module | Open |
-| nd-ytw | Worker starvation alert | Needs review |
+## Open Work
 
-### Priority 1 - Core Features
-| Bead | Title | Status |
-|------|-------|--------|
-| nd-14y | Implement needle init: Interactive prompts | Open |
-| nd-1z9 | Implement watchdog monitor process | Open |
-| nd-20k | Implement needle init: Dependency checker | Open |
-| nd-2kh | Implement workspace setup module | Open |
-| nd-2pw | Implement needle run: Multi-worker spawning | Open |
-| nd-32x | Fix external worker discovery mechanism | Open |
-| nd-33b | Implement needle agents command | Open |
-| nd-38g | Implement needle setup command | Open |
-| nd-39i | Implement dependency detection module | Open |
-| nd-3jf | Update external worker dependencies | Open |
-| nd-n0y | Implement dependency installation module | Open |
-| nd-vt9 | Implement config creation module | Open |
+### Priority 1 - Core
+| Bead | Title |
+|------|-------|
+| nd-lohp | Fix malformed README.md |
 
-### Priority 2 - Important Features
-| Bead | Title | Status |
-|------|-------|--------|
-| nd-1ak | Improve starvation alert false positive detection | Open |
-| nd-1bt | Alternative: Simplify requirements | Open |
-| nd-1xl | Improve starvation alert verification | Open |
-| nd-2lv | Implement bead selection test suite | Open |
-| nd-2q6 | Implement needle init: State files | Open |
-| nd-2uy | Implement bead claim test suite | Open |
-| nd-338 | Implement needle restart command | Open |
-| nd-bqi | Create default hook templates | Open |
-| nd-kon | Implement stale alert detection | Open |
+### Priority 2 - Important
+| Bead | Title |
+|------|-------|
+| nd-19jr | Add end-to-end integration tests for multi-worker scenarios |
+| nd-p7wn | Create CONTRIBUTING.md developer guide |
+| nd-2u1t | Add config validation schema and enforcement |
+| nd-3bsj | Implement upgrade/rollback test suite |
+| nd-1kue | Create ARCHITECTURE.md system design document |
+| nd-1a6b | Add error handling standardization module |
 
 ### Priority 3 - Enhancements
-| Bead | Title | Status |
-|------|-------|--------|
-| nd-1fr | Implement Pulse detector: Dependency freshness | Open |
-| nd-20p | Implement Strand 5: Unravel | Open |
-| nd-21h | Implement Pulse detector: Security scan | Open |
-| nd-2e5 | Implement billing model profiles | Open |
-| nd-2h3 | Implement mitosis configuration settings | Open |
-| nd-2oy | Implement Strand 6 Pulse: Framework | Open |
-| nd-gn2 | Implement Pulse detectors: Quality checks | Open |
+| Bead | Title |
+|------|-------|
+| nd-2iin | Add performance benchmarking tests |
+| nd-307v | Document hook error handling specification |
 
 ## Architecture
 
 ```
 NEEDLE/
 ├── bin/                    # CLI entry points
-│   ├── needle              # Main CLI
+│   ├── needle              # Main CLI (1,103 lines)
 │   ├── needle-ready        # Show ready beads
 │   └── needle-db-rebuild   # Database rebuild
 ├── src/
-│   ├── cli/                # CLI commands
+│   ├── cli/                # 21 CLI subcommands
 │   ├── lib/                # Shared libraries
-│   ├── strands/            # Strand implementations
+│   ├── strands/            # 7 strand implementations
 │   │   ├── engine.sh       # Strand execution engine
-│   │   ├── explore.sh      # Strand 2: Explore
-│   │   ├── weave.sh        # Strand 3: Weave
-│   │   └── knot.sh         # Strand 4: Knot
-│   ├── bead/               # Bead management
-│   ├── runner/             # Worker runner
-│   ├── telemetry/          # Telemetry & budget
-│   └── onboarding/         # Setup & config
-├── tests/                  # Test suites
-└── docs/                   # Documentation
+│   │   ├── pluck.sh        # Strand 1: Claim beads
+│   │   ├── explore.sh      # Strand 2: Discover workspaces
+│   │   ├── weave.sh        # Strand 3: Doc gap analysis
+│   │   ├── knot.sh         # Strand 4: Resolve stuck workers
+│   │   ├── unravel.sh      # Strand 5: Alternative approaches
+│   │   ├── pulse.sh        # Strand 6: Quality monitoring
+│   │   └── mend.sh         # Strand 7: Maintenance
+│   ├── bead/               # Bead management (select, claim, mitosis)
+│   ├── runner/             # Worker loop, state, tmux, limits
+│   ├── telemetry/          # Events, budget, tokens, effort
+│   ├── agent/              # Agent dispatch & adapters
+│   ├── hooks/              # Hook runner & validation
+│   ├── lock/               # File checkout system
+│   └── onboarding/         # Setup & config creation
+├── tests/                  # 60 test files
+├── docs/                   # Documentation
+│   └── plan.md             # Full implementation spec (151KB)
+└── config/agents/          # Agent adapter configs
 ```
 
 ## Strand System
 
 NEEDLE uses strands (prioritized work strategies):
 
-1. **Pluck** (P0) - Claim available beads from queue
+1. **Pluck** - Claim available beads from queue
 2. **Explore** - Discover new workspaces
-3. **Weave** - Create dependency relationships
-4. **Knot** - Resolve stuck workers
-5. **Unravel** - Create alternative approaches
-6. **Pulse** - Proactive quality improvements
+3. **Mend** - Maintenance and cleanup
+4. **Weave** - Create beads from documentation gaps
+5. **Knot** - Resolve stuck workers
+6. **Unravel** - Create alternative approaches
+7. **Pulse** - Proactive quality improvements
 
 ## Next Milestones
 
-1. **Worker Loop Completion** - Finish nd-qni, nd-2ov for functional workers
-2. **CLI Commands** - Complete init, run, agents, setup commands
-3. **Strand Implementation** - Pluck, Unravel, Pulse strands
-4. **Testing** - Comprehensive test suites for bead selection and claims
+1. **Documentation** - Fix README, create ARCHITECTURE.md and CONTRIBUTING.md
+2. **Testing** - End-to-end integration tests, upgrade/rollback tests, performance benchmarks
+3. **Robustness** - Config validation, error handling standardization, hook error specification
