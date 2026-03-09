@@ -80,6 +80,33 @@ _needle_heartbeat() {
     esac
 }
 
+# Help for heartbeat status subcommand
+_needle_heartbeat_status_help() {
+    _needle_print "Show heartbeat status of all workers
+
+Display a dashboard showing the health and status of all active workers,
+including their last heartbeat time, current bead, and health indicators.
+
+USAGE:
+    needle heartbeat status [OPTIONS]
+
+OPTIONS:
+    -j, --json     Output status as JSON format
+    -w, --watch    Continuously refresh status display
+    -h, --help     Show this help message
+
+EXAMPLES:
+    # Show status dashboard
+    needle heartbeat status
+
+    # Get JSON output for scripting
+    needle heartbeat status --json
+
+    # Watch mode for live monitoring
+    needle heartbeat status --watch
+"
+}
+
 # Show heartbeat status for all workers
 _needle_heartbeat_status() {
     local json_output=false
@@ -97,7 +124,7 @@ _needle_heartbeat_status() {
                 shift
                 ;;
             -h|--help)
-                _needle_heartbeat_help
+                _needle_heartbeat_status_help
                 exit $NEEDLE_EXIT_SUCCESS
                 ;;
             *)
@@ -425,6 +452,30 @@ _needle_format_duration() {
     fi
 }
 
+# Help for heartbeat recover subcommand
+_needle_heartbeat_recover_help() {
+    _needle_print "Trigger manual recovery for stuck workers
+
+Identify workers with stale heartbeats and trigger recovery actions.
+Recovery typically involves closing stuck beads and cleaning up
+heartbeat files.
+
+USAGE:
+    needle heartbeat recover [OPTIONS]
+
+OPTIONS:
+    -f, --force    Force recovery even if auto-recovery is paused
+    -h, --help     Show this help message
+
+EXAMPLES:
+    # Recover all stuck workers
+    needle heartbeat recover
+
+    # Force recovery even when paused
+    needle heartbeat recover --force
+"
+}
+
 # Trigger manual recovery
 _needle_heartbeat_recover_cmd() {
     local force=false
@@ -436,21 +487,7 @@ _needle_heartbeat_recover_cmd() {
                 shift
                 ;;
             -h|--help)
-                _needle_print "Trigger manual recovery for stuck workers
-
-USAGE:
-    needle heartbeat recover [OPTIONS]
-
-OPTIONS:
-    -f, --force    Force recovery even if paused
-    -h, --help     Show this help message
-
-This command identifies workers with stale heartbeats and triggers
-recovery actions. Recovery typically involves:
-  - Closing stuck beads
-  - Cleaning up heartbeat files
-  - Notifying monitoring systems
-"
+                _needle_heartbeat_recover_help
                 exit $NEEDLE_EXIT_SUCCESS
                 ;;
             *)
@@ -532,12 +569,13 @@ recovery actions. Recovery typically involves:
     exit $NEEDLE_EXIT_SUCCESS
 }
 
-# Pause automatic recovery
-_needle_heartbeat_pause() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -h|--help)
-                _needle_print "Pause automatic recovery
+# Help for heartbeat pause subcommand
+_needle_heartbeat_pause_help() {
+    _needle_print "Pause automatic recovery
+
+Create a pause file that prevents the watchdog from automatically
+recovering stuck workers. Useful during maintenance, debugging,
+or when performing operations that may cause temporary delays.
 
 USAGE:
     needle heartbeat pause [OPTIONS]
@@ -545,9 +583,21 @@ USAGE:
 OPTIONS:
     -h, --help     Show this help message
 
-Creates a pause file that prevents the watchdog from automatically
-recovering stuck workers. Useful during maintenance or debugging.
+EXAMPLES:
+    # Pause auto-recovery
+    needle heartbeat pause
+
+    # Resume auto-recovery
+    needle heartbeat resume
 "
+}
+
+# Pause automatic recovery
+_needle_heartbeat_pause() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                _needle_heartbeat_pause_help
                 exit $NEEDLE_EXIT_SUCCESS
                 ;;
             *)
@@ -573,12 +623,12 @@ recovering stuck workers. Useful during maintenance or debugging.
     exit $NEEDLE_EXIT_SUCCESS
 }
 
-# Resume automatic recovery
-_needle_heartbeat_resume() {
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -h|--help)
-                _needle_print "Resume automatic recovery
+# Help for heartbeat resume subcommand
+_needle_heartbeat_resume_help() {
+    _needle_print "Resume automatic recovery
+
+Remove the pause file and allow the watchdog to automatically
+recover stuck workers.
 
 USAGE:
     needle heartbeat resume [OPTIONS]
@@ -586,9 +636,21 @@ USAGE:
 OPTIONS:
     -h, --help     Show this help message
 
-Removes the pause file and allows the watchdog to automatically
-recover stuck workers.
+EXAMPLES:
+    # Resume auto-recovery after maintenance
+    needle heartbeat resume
+
+    # Check current status
+    needle heartbeat status
 "
+}
+
+# Resume automatic recovery
+_needle_heartbeat_resume() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                _needle_heartbeat_resume_help
                 exit $NEEDLE_EXIT_SUCCESS
                 ;;
             *)

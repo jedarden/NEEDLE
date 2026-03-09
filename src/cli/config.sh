@@ -39,6 +39,34 @@ EXAMPLES:
 "
 }
 
+# Help for config show subcommand
+_needle_config_show_help() {
+    _needle_print "Display current configuration
+
+Show the contents of the configuration file. By default shows
+the global configuration, but can target workspace config.
+
+USAGE:
+    needle config show [OPTIONS]
+
+OPTIONS:
+    --global       Show global config (~/.needle/config.yaml)
+    --workspace    Show workspace config (.needle.yaml)
+    -j, --json     Output as JSON format
+    -h, --help     Show this help message
+
+EXAMPLES:
+    # Show global configuration
+    needle config show
+
+    # Show workspace configuration
+    needle config show --workspace
+
+    # Get JSON output for scripting
+    needle config show --json
+"
+}
+
 # Display current configuration
 _needle_config_show() {
     local json_output=false
@@ -50,7 +78,7 @@ _needle_config_show() {
             -j|--json) json_output=true; shift ;;
             --global) use_global=true; use_workspace=false; shift ;;
             --workspace) use_workspace=true; use_global=false; shift ;;
-            -h|--help) _needle_config_help; exit $NEEDLE_EXIT_SUCCESS ;;
+            -h|--help) _needle_config_show_help; exit $NEEDLE_EXIT_SUCCESS ;;
             *) shift ;;
         esac
     done
@@ -90,6 +118,33 @@ _needle_config_show() {
     fi
 }
 
+# Help for config edit subcommand
+_needle_config_edit_help() {
+    _needle_print "Open configuration in editor
+
+Open the configuration file in your default editor (\$EDITOR or vim).
+By default edits the global configuration.
+
+USAGE:
+    needle config edit [OPTIONS]
+
+OPTIONS:
+    --global       Edit global config (~/.needle/config.yaml)
+    --workspace    Edit workspace config (.needle.yaml)
+    -h, --help     Show this help message
+
+EXAMPLES:
+    # Edit global configuration
+    needle config edit
+
+    # Edit workspace configuration
+    needle config edit --workspace
+
+    # Use a specific editor
+    EDITOR=nano needle config edit
+"
+}
+
 # Edit configuration file
 _needle_config_edit() {
     local use_global=true
@@ -98,7 +153,7 @@ _needle_config_edit() {
         case "$1" in
             --global) use_global=true; shift ;;
             --workspace) use_global=false; shift ;;
-            -h|--help) _needle_config_help; exit $NEEDLE_EXIT_SUCCESS ;;
+            -h|--help) _needle_config_edit_help; exit $NEEDLE_EXIT_SUCCESS ;;
             *) shift ;;
         esac
     done
@@ -123,9 +178,44 @@ _needle_config_edit() {
     ${editor} "$config_file"
 }
 
+# Help for config validate subcommand
+_needle_config_validate_help() {
+    _needle_print "Validate configuration syntax
+
+Check the configuration file for valid YAML syntax and report
+any errors found.
+
+USAGE:
+    needle config validate [OPTIONS]
+
+OPTIONS:
+    -h, --help     Show this help message
+
+EXAMPLES:
+    # Validate default configuration
+    needle config validate
+
+    # Validate after editing
+    needle config edit && needle config validate
+"
+}
+
 # Validate configuration syntax
 _needle_config_validate() {
-    local config_file="${1:-$NEEDLE_CONFIG_FILE}"
+    # Check for help flag first
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                _needle_config_validate_help
+                exit $NEEDLE_EXIT_SUCCESS
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
+    local config_file="${NEEDLE_CONFIG_FILE}"
 
     if [[ ! -f "$config_file" ]]; then
         _needle_error "Configuration file not found: $config_file"
@@ -164,8 +254,43 @@ _needle_config_validate() {
     fi
 }
 
+# Help for config path subcommand
+_needle_config_path_help() {
+    _needle_print "Show configuration file paths
+
+Display the paths to all configuration files and directories
+used by NEEDLE.
+
+USAGE:
+    needle config path [OPTIONS]
+
+OPTIONS:
+    -h, --help     Show this help message
+
+EXAMPLES:
+    # Show all configuration paths
+    needle config path
+
+    # Use in scripts
+    needle config path | grep 'Global'
+"
+}
+
 # Show all configuration paths
 _needle_config_path() {
+    # Check for help flag first
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                _needle_config_path_help
+                exit $NEEDLE_EXIT_SUCCESS
+                ;;
+            *)
+                shift
+                ;;
+        esac
+    done
+
     _needle_section "Configuration Paths"
     _needle_table_row "Global config" "$NEEDLE_CONFIG_FILE"
     _needle_table_row "Workspace config" ".needle.yaml"
@@ -231,7 +356,7 @@ _needle_config() {
             ;;
 
         path)
-            _needle_config_path
+            _needle_config_path "$@"
             ;;
 
         -h|--help|help)
