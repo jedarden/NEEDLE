@@ -121,49 +121,38 @@ _needle_select_bead() {
         return 1
     fi
 
-    # Validate JSON structure
-    if ! echo "$candidates" | jq -e '.[0]' &>/dev/null 2>&1; then
-        _needle_warn "Invalid response from br ready: expected JSON array"
+    # Single jq call: validate, extract id and priority as tab-separated
+    local bead_data
+    bead_data=$(echo "$candidates" | jq -r '.[]? | select(.id != null and .id != "") | [.id, (.priority // 2)] | @tsv' 2>/dev/null)
+
+    if [[ -z "$bead_data" ]]; then
+        _needle_debug "No valid beads in response"
         return 1
     fi
 
-    # Count candidates
-    local candidate_count
-    candidate_count=$(echo "$candidates" | jq 'length')
-
-    if [[ $candidate_count -eq 0 ]]; then
-        _needle_debug "Empty bead queue"
-        return 1
-    fi
-
-    _needle_debug "Found $candidate_count claimable bead(s)"
-
-    # Build weighted arrays for selection
-    # Using cumulative weight approach for efficiency
+    # Build weighted arrays using inline weight lookup (no subprocess per bead)
     local beads=()
     local weights=()
     local total_weight=0
 
-    while IFS= read -r bead; do
-        local id priority weight
-
-        id=$(echo "$bead" | jq -r '.id // empty')
+    while IFS=$'\t' read -r id priority; do
         [[ -z "$id" ]] && continue
 
-        priority=$(echo "$bead" | jq -r '.priority // 2')
-        weight=$(_needle_claim_get_weight "$priority")
+        # Inline weight calculation - avoids subprocess call per bead
+        local weight
+        if ! [[ "$priority" =~ ^[0-9]+$ ]]; then priority=2; fi
+        case "$priority" in
+            0) weight=10 ;; 1) weight=5 ;; 2) weight=2 ;; *) weight=1 ;;
+        esac
 
         beads+=("$id")
         weights+=("$weight")
         total_weight=$((total_weight + weight))
-
-        _needle_verbose "Bead $id: priority=$priority, weight=$weight"
-
-    done < <(echo "$candidates" | jq -c '.[]')
+    done <<< "$bead_data"
 
     # Check if we have any weighted entries
     if [[ ${#beads[@]} -eq 0 ]]; then
-        _needle_warn "No valid beads after weighting"
+        _needle_debug "No valid beads after weighting"
         return 1
     fi
 
@@ -607,36 +596,24 @@ _needle_claim_stats() {
         return 0
     fi
 
-    local total_beads weighted_pool_size
-    total_beads=$(echo "$candidates" | jq 'length')
-    weighted_pool_size=0
-
-    # Count by priority and calculate weighted pool size
-    declare -A priority_counts
-    local priority bead_weight
-
-    while IFS= read -r bead; do
-        priority=$(echo "$bead" | jq -r '.priority // 2')
-        bead_weight=$(_needle_claim_get_weight "$priority")
-        weighted_pool_size=$((weighted_pool_size + bead_weight))
-        priority_counts[$priority]=$((${priority_counts[$priority]:-0} + 1))
-    done < <(echo "$candidates" | jq -c '.[]')
-
-    # Build statistics JSON
-    local by_priority_json="{"
-    local first=true
-    for p in $(echo "${!priority_counts[@]}" | tr ' ' '\n' | sort -n); do
-        if [[ "$first" == "true" ]]; then
-            first=false
-        else
-            by_priority_json+=","
-        fi
-        local w=$(_needle_claim_get_weight "$p")
-        by_priority_json+="\"P$p\":{\"count\":${priority_counts[$p]},\"weight\":$w}"
-    done
-    by_priority_json+="}"
-
-    echo "{\"total_beads\":$total_beads,\"weighted_pool_size\":$weighted_pool_size,\"by_priority\":$by_priority_json}"
+    # Single jq call to compute all statistics
+    echo "$candidates" | jq -c '
+        def get_weight: if . == 0 then 10 elif . == 1 then 5 elif . == 2 then 2 else 1 end;
+        length as $total |
+        [.[] | .priority // 2] |
+        group_by(.) |
+        map({
+            priority: .[0],
+            count: length,
+            weight: (.[0] | get_weight),
+            total_weight: (length * (.[0] | get_weight))
+        }) |
+        {
+            total_beads: $total,
+            weighted_pool_size: (map(.total_weight) | add // 0),
+            by_priority: (map({("P\(.priority)"): {count: .count, weight: .weight}}) | add // {})
+        }
+    '
 }
 
 # ============================================================================
