@@ -45,7 +45,7 @@ _needle_fabric_get_endpoint() {
 
     # FABRIC not configured
     echo ""
-    return 1
+    return 0
 }
 
 # Check if FABRIC forwarding is enabled
