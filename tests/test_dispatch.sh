@@ -14,6 +14,7 @@ export NEEDLE_CONFIG_FILE="$NEEDLE_HOME/config.yaml"
 export NEEDLE_CONFIG_NAME="config.yaml"
 export NEEDLE_QUIET=true
 export NEEDLE_VERBOSE=false
+export NEEDLE_HEARTBEAT_INTERVAL=1  # Use 1s interval to prevent test hangs
 
 # Source required modules
 source "$PROJECT_DIR/src/lib/constants.sh"
