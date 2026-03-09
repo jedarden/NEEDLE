@@ -1000,6 +1000,153 @@ reload_config() {
     load_config
 }
 
+# ============================================================================
+# Workspace Configuration Support
+# ============================================================================
+
+# Workspace config cache (simple string, one workspace at a time)
+NEEDLE_WORKSPACE_CONFIG_CACHE=""
+NEEDLE_WORKSPACE_CONFIG_CACHE_PATH=""
+
+# Load and cache workspace config (.needle.yaml merged with global config)
+# Merges: defaults -> global config -> workspace .needle.yaml
+# Usage: load_workspace_config <workspace_dir>
+# Returns: JSON format merged configuration
+load_workspace_config() {
+    local workspace_dir="${1:-}"
+
+    if [[ -z "$workspace_dir" ]]; then
+        load_config
+        return 0
+    fi
+
+    # Return cached config if for same workspace
+    if [[ -n "$NEEDLE_WORKSPACE_CONFIG_CACHE" ]] && \
+       [[ "$NEEDLE_WORKSPACE_CONFIG_CACHE_PATH" == "$workspace_dir" ]]; then
+        echo "$NEEDLE_WORKSPACE_CONFIG_CACHE"
+        return 0
+    fi
+
+    local ws_config_file="$workspace_dir/.needle.yaml"
+    local global_config
+    global_config=$(load_config)
+
+    if [[ ! -f "$ws_config_file" ]]; then
+        # No workspace config, use global config
+        NEEDLE_WORKSPACE_CONFIG_CACHE="$global_config"
+        NEEDLE_WORKSPACE_CONFIG_CACHE_PATH="$workspace_dir"
+        echo "$global_config"
+        return 0
+    fi
+
+    local merged
+    if _needle_has_yq; then
+        # Use yq to merge: global config overridden by workspace config
+        merged=$(echo "$global_config" | yq eval-all 'select(fileIndex==0) * select(fileIndex==1)' - "$ws_config_file" 2>/dev/null)
+        if [[ $? -ne 0 ]] || [[ -z "$merged" ]]; then
+            _needle_warn "Workspace config merge failed, using global config"
+            merged="$global_config"
+        fi
+    elif python3 -c "import yaml" 2>/dev/null; then
+        # Use Python for merging
+        merged=$(python3 -c "
+import yaml
+import json
+import sys
+
+global_config_json = '''$global_config'''
+
+def deep_merge(base, override):
+    '''Recursively merge override into base'''
+    result = dict(base)
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+try:
+    global_cfg = json.loads(global_config_json)
+except Exception:
+    global_cfg = {}
+
+try:
+    with open('$ws_config_file', 'r') as f:
+        ws_cfg = yaml.safe_load(f)
+    if ws_cfg is None:
+        ws_cfg = {}
+    merged = deep_merge(global_cfg, ws_cfg)
+    print(json.dumps(merged))
+except Exception:
+    print(json.dumps(global_cfg))
+" 2>/dev/null)
+        if [[ $? -ne 0 ]] || [[ -z "$merged" ]]; then
+            _needle_warn "Workspace config merge failed, using global config"
+            merged="$global_config"
+        fi
+    else
+        # No yq or Python yaml: use global config only
+        _needle_warn "Cannot merge workspace config (requires yq or python3+PyYAML)"
+        merged="$global_config"
+    fi
+
+    NEEDLE_WORKSPACE_CONFIG_CACHE="$merged"
+    NEEDLE_WORKSPACE_CONFIG_CACHE_PATH="$workspace_dir"
+    echo "$merged"
+}
+
+# Clear workspace config cache
+# Usage: clear_workspace_cache [workspace_dir]
+# If workspace_dir is provided, only clears if it matches cached path.
+# If omitted, clears unconditionally.
+clear_workspace_cache() {
+    local workspace_dir="${1:-}"
+
+    if [[ -z "$workspace_dir" ]] || [[ "$NEEDLE_WORKSPACE_CONFIG_CACHE_PATH" == "$workspace_dir" ]]; then
+        NEEDLE_WORKSPACE_CONFIG_CACHE=""
+        NEEDLE_WORKSPACE_CONFIG_CACHE_PATH=""
+    fi
+}
+
+# Get config value with workspace override support
+# Merges global config with workspace .needle.yaml overrides
+# Usage: get_workspace_config <workspace_dir> <key> [default]
+# Key format: dot-notation like "runner.polling_interval"
+get_workspace_config() {
+    local workspace_dir="$1"
+    local key="$2"
+    local default="${3:-}"
+    local value
+    local ws_merged
+
+    ws_merged=$(load_workspace_config "$workspace_dir")
+
+    if _needle_has_yq; then
+        value=$(echo "$ws_merged" | yq ".$key" 2>/dev/null)
+    elif command -v jq &>/dev/null; then
+        local jq_path
+        jq_path=$(_needle_path_to_jq "$key")
+        value=$(echo "$ws_merged" | jq -r "$jq_path" 2>/dev/null)
+    else
+        value="null"
+    fi
+
+    if [[ "$value" == "null" ]] || [[ -z "$value" ]]; then
+        echo "$default"
+    else
+        echo "$value"
+    fi
+}
+
+# Reload workspace configuration (clears cache and reloads)
+# Usage: reload_workspace_config <workspace_dir>
+reload_workspace_config() {
+    local workspace_dir="${1:-}"
+    clear_workspace_cache "$workspace_dir"
+    load_workspace_config "$workspace_dir"
+}
+
 # Get config value (simple YAML key extraction) - legacy function
 # Usage: _needle_config_get <key>
 _needle_config_get() {

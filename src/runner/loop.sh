@@ -111,6 +111,11 @@ NEEDLE_LOOP_DEFAULT_IDLE_TIMEOUT="300s"
 NEEDLE_LOOP_DEFAULT_MAX_EMPTY="5"
 NEEDLE_LOOP_SHUTDOWN_GRACE_PERIOD="5"
 
+# Runtime config values (updated on hot-reload and workspace config changes)
+NEEDLE_LOOP_CURRENT_POLLING_INTERVAL="2"
+NEEDLE_LOOP_CURRENT_IDLE_TIMEOUT="300"
+NEEDLE_LOOP_CURRENT_MAX_CONSECUTIVE_EMPTY="5"
+
 # ============================================================================
 # Backoff and Crash Recovery Configuration
 # ============================================================================
@@ -690,18 +695,45 @@ _needle_loop_handle_shutdown() {
 # Configuration Helper
 # ============================================================================
 
-# Get configuration value with fallback
+# Get configuration value with workspace override support
+# Uses workspace .needle.yaml override when NEEDLE_WORKSPACE is set
 # Usage: _needle_loop_get_config <key> <default>
 _needle_loop_get_config() {
     local key="$1"
     local default="$2"
 
-    # Try get_config from config.sh if available
-    if declare -f get_config &>/dev/null; then
+    # Use workspace-aware config lookup when workspace is set
+    if [[ -n "${NEEDLE_WORKSPACE:-}" ]] && declare -f get_workspace_config &>/dev/null; then
+        get_workspace_config "$NEEDLE_WORKSPACE" "$key" "$default"
+    elif declare -f get_config &>/dev/null; then
         get_config "$key" "$default"
     else
         echo "$default"
     fi
+}
+
+# Apply workspace config overrides to runtime variables
+# Called after hot-reload to update polling interval, idle timeout, etc.
+# Usage: _needle_apply_workspace_config_overrides
+_needle_apply_workspace_config_overrides() {
+    # Re-read runtime configuration values that may have changed
+    local new_polling_interval
+    new_polling_interval=$(_needle_loop_get_config "runner.polling_interval" "$NEEDLE_LOOP_DEFAULT_POLLING_INTERVAL")
+    new_polling_interval="${new_polling_interval%s}"
+
+    local new_idle_timeout
+    new_idle_timeout=$(_needle_loop_get_config "runner.idle_timeout" "$NEEDLE_LOOP_DEFAULT_IDLE_TIMEOUT")
+    new_idle_timeout="${new_idle_timeout%s}"
+
+    local new_max_consecutive_empty
+    new_max_consecutive_empty=$(_needle_loop_get_config "runner.max_consecutive_empty" "$NEEDLE_LOOP_DEFAULT_MAX_EMPTY")
+
+    # Export updated values via global variables for the loop to pick up
+    NEEDLE_LOOP_CURRENT_POLLING_INTERVAL="$new_polling_interval"
+    NEEDLE_LOOP_CURRENT_IDLE_TIMEOUT="$new_idle_timeout"
+    NEEDLE_LOOP_CURRENT_MAX_CONSECUTIVE_EMPTY="$new_max_consecutive_empty"
+
+    _needle_debug "Applied workspace config overrides: polling_interval=${new_polling_interval}s, idle_timeout=${new_idle_timeout}s"
 }
 
 # ============================================================================
@@ -782,19 +814,14 @@ _needle_worker_loop() {
     local consecutive_empty=0
     local idle_start=""
 
-    # Get configuration values
-    local polling_interval
-    polling_interval=$(_needle_loop_get_config "runner.polling_interval" "$NEEDLE_LOOP_DEFAULT_POLLING_INTERVAL")
+    # Initialize runtime config variables (workspace-aware)
+    # These are updated on hot-reload via _needle_apply_workspace_config_overrides
+    _needle_apply_workspace_config_overrides
 
-    local idle_timeout
-    idle_timeout=$(_needle_loop_get_config "runner.idle_timeout" "$NEEDLE_LOOP_DEFAULT_IDLE_TIMEOUT")
-
-    # Remove 's' suffix
-    polling_interval="${polling_interval%s}"
-    idle_timeout="${idle_timeout%s}"
-
-    local max_consecutive_empty
-    max_consecutive_empty=$(_needle_loop_get_config "runner.max_consecutive_empty" "$NEEDLE_LOOP_DEFAULT_MAX_EMPTY")
+    # Use mutable references to runtime config (updated on hot-reload)
+    local polling_interval="$NEEDLE_LOOP_CURRENT_POLLING_INTERVAL"
+    local idle_timeout="$NEEDLE_LOOP_CURRENT_IDLE_TIMEOUT"
+    local max_consecutive_empty="$NEEDLE_LOOP_CURRENT_MAX_CONSECUTIVE_EMPTY"
 
     _needle_debug "Configuration: polling_interval=${polling_interval}s, idle_timeout=${idle_timeout}s"
     _needle_debug "Starting worker loop for workspace: $workspace, agent: $agent"
@@ -828,7 +855,14 @@ _needle_worker_loop() {
         _needle_heartbeat_keepalive
 
         # Check for config hot-reload (every N iterations)
-        _needle_check_config_reload
+        # If config reloaded (returns 0), apply workspace overrides and update local vars
+        if _needle_check_config_reload; then
+            _needle_apply_workspace_config_overrides
+            polling_interval="$NEEDLE_LOOP_CURRENT_POLLING_INTERVAL"
+            idle_timeout="$NEEDLE_LOOP_CURRENT_IDLE_TIMEOUT"
+            max_consecutive_empty="$NEEDLE_LOOP_CURRENT_MAX_CONSECUTIVE_EMPTY"
+            _needle_debug "Runtime config updated: polling_interval=${polling_interval}s, idle_timeout=${idle_timeout}s"
+        fi
 
         # Run strand engine to find work
         local strand_result
