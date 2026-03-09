@@ -422,6 +422,48 @@ _needle_install_br() {
     chmod +x "$cache_dir/br"
 }
 
+# Install ubs (ultimate_bug_scanner)
+_needle_install_ubs() {
+    echo "Installing ultimate_bug_scanner..."
+
+    local cache_dir
+    cache_dir=$(_needle_ensure_cache_dir)
+
+    # UBS uses an install script
+    local install_url="https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh"
+
+    # Download and run installer
+    # Ensure cache directory is in PATH for the installer
+    local install_script
+    install_script=$(mktemp)
+    _needle_download "$install_url" "$install_script" || {
+        echo "Failed to download UBS installer script" >&2
+        rm -f "$install_script"
+        return 1
+    }
+
+    # Make the installer output to our cache directory
+    NEEDLE_CACHE_DIR="$cache_dir" bash "$install_script" || {
+        local ret=$?
+        echo "UBS installer failed with exit code $ret" >&2
+        rm -f "$install_script"
+        return 1
+    }
+
+    rm -f "$install_script"
+
+    # Verify installation
+    if [[ -f "$cache_dir/ubs" ]]; then
+        chmod +x "$cache_dir/ubs"
+        echo "UBS installed to $cache_dir/ubs"
+    elif command -v ubs &>/dev/null; then
+        echo "UBS installed successfully"
+    else
+        echo "UBS installation completed but binary not found" >&2
+        return 1
+    fi
+}
+
 # Generic installer dispatcher
 _needle_install_dep() {
     local dep="$1"
@@ -438,6 +480,9 @@ _needle_install_dep() {
             ;;
         br)
             _needle_install_br
+            ;;
+        ubs)
+            _needle_install_ubs
             ;;
         *)
             echo "Unknown dependency: $dep" >&2

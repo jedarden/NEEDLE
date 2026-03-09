@@ -17,6 +17,7 @@ if [[ -z "${NEEDLE_DEPS_DECLARED:-}" ]]; then
         [yq]="4.0"
         [br]="0.1"
         [claude]="1.0"
+        [ubs]="1.0"
     )
     NEEDLE_DEPS_DECLARED=1
 fi
@@ -29,6 +30,7 @@ if [[ -z "${NEEDLE_DEPS_NAMES_DECLARED:-}" ]]; then
         [yq]="YAML processor"
         [br]="Beads queue manager"
         [claude]="Claude AI coding agent"
+        [ubs]="Bug scanner"
     )
     NEEDLE_DEPS_NAMES_DECLARED=1
 fi
@@ -64,6 +66,10 @@ _parse_dep_version() {
         claude)
             # claude --version outputs: 2.1.71 (Claude Code)
             version=$(claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+([.][0-9]+)?' | head -1)
+            ;;
+        ubs)
+            # ubs --version outputs: ultimate_bug_scanner vX.X.X
+            version=$(ubs --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+([.][0-9]+)?' | head -1)
             ;;
         *)
             # Generic fallback: try --version or -V
@@ -332,6 +338,11 @@ _print_install_hints() {
             claude)
                 echo "  Install Claude Code: npm install -g @anthropic-ai/claude-code"
                 echo "  Or visit: https://claude.ai/code"
+                ;;
+            ubs)
+                echo "  Install ultimate_bug_scanner (UBS):"
+                echo "    curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/ultimate_bug_scanner/master/install.sh | bash"
+                echo "  Or visit: https://github.com/Dicklesworthstone/ultimate_bug_scanner"
                 ;;
         esac
     done
