@@ -88,13 +88,7 @@ NEEDLE_STEAL_FROM_ACTIVE="${NEEDLE_STEAL_FROM_ACTIVE:-false}"
 _needle_get_priority_weight() {
     local priority="${1:-2}"  # Default to P2 (normal)
 
-    # Use billing model module if available (adjusts weights based on billing model)
-    if declare -f _needle_billing_get_priority_weight &>/dev/null; then
-        _needle_billing_get_priority_weight "$priority"
-        return 0
-    fi
-
-    # Fallback: use base priority weights
+    # Use base priority weights
     # Validate priority is a number
     if ! [[ "$priority" =~ ^[0-9]+$ ]]; then
         priority=2
