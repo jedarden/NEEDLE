@@ -8,17 +8,17 @@ NEEDLE (**N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffor
 
 | Metric | Count |
 |--------|-------|
-| **Open beads** | 0 |
+| **Open beads** | 5 |
 | **Closed beads** | 305 |
-| **Completion** | 100% |
+| **Completion** | ~98% |
 
 ### Completion by Priority
 | Priority | Open | Description |
 |----------|------|-------------|
 | P0 | 0 | Critical blockers |
 | P1 | 0 | Core features / bug fixes |
-| P2 | 0 | Important features |
-| P3 | 0 | Enhancements |
+| P2 | 4 | Test coverage for untested CLI commands |
+| P3 | 1 | Enhancements |
 
 ## Completed Phases
 
@@ -52,7 +52,17 @@ NEEDLE (**N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffor
 
 ## Open Work
 
-All planned work is complete. The implementation is fully aligned with `docs/plan.md`.
+### Phase 4: Test Coverage Gaps (In Progress)
+
+Several CLI commands are implemented but lack dedicated unit tests:
+
+| Bead | Command | Priority | Lines |
+|------|---------|----------|-------|
+| nd-33cj | needle status | P2 | 489 |
+| nd-z9lg | needle stop | P2 | 358 |
+| nd-1j86 | needle logs | P2 | 484 |
+| nd-p16c | needle analyze / needle refactor | P2 | 468 |
+| nd-1osl | needle attach / needle version | P3 | 452 |
 
 ## Architecture
 
