@@ -104,13 +104,11 @@ _needle_maybe_init() {
             ;;
     esac
 
-    # Check if initialized
-    if ! _needle_is_initialized; then
-        _needle_warn "NEEDLE is not initialized"
-        _needle_info "Redirecting to 'needle init'..."
+    # Check if initialization is needed
+    if _needle_needs_init; then
+        _needle_print "No configuration found. Starting first-time setup..."
         _needle_print ""
-        _needle_init
-        exit $?
+        exec needle init "$@"
     fi
 }
 

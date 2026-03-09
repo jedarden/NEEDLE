@@ -417,6 +417,21 @@ _needle_is_initialized() {
     [[ -f "$NEEDLE_CONFIG_FILE" ]]
 }
 
+# Check if NEEDLE needs initialization (returns 0 if init is needed)
+_needle_needs_init() {
+    # No config file exists
+    [[ ! -f "$NEEDLE_CONFIG_FILE" ]] && return 0
+
+    # Config exists but is invalid/empty
+    [[ ! -s "$NEEDLE_CONFIG_FILE" ]] && return 0
+
+    # Dependencies not installed
+    ! command -v tmux &>/dev/null && return 0
+    ! command -v br &>/dev/null && return 0
+
+    return 1
+}
+
 # Check if config exists and is valid
 # Usage: config_exists
 config_exists() {
