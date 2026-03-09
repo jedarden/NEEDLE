@@ -142,6 +142,7 @@ NEEDLE_CONFIG_SCHEMA=(
 
     # fabric
     ["fabric.enabled"]="boolean|false|||"
+    ["fabric.endpoint"]="string|false|||"
     ["fabric.timeout"]="integer|false|0||"
     ["fabric.batching"]="boolean|false|||"
 )
