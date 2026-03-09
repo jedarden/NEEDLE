@@ -36,6 +36,11 @@ if [[ -z "${_NEEDLE_SELECT_LOADED:-}" ]]; then
     source "$(dirname "${BASH_SOURCE[0]}")/select.sh"
 fi
 
+# Source intent module for proactive file reservation
+if [[ -z "${_NEEDLE_INTENT_LOADED:-}" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/intent.sh"
+fi
+
 # ============================================================================
 # Claim-specific Priority Weights
 # ============================================================================
@@ -311,7 +316,7 @@ _needle_claim_bead() {
             "result_preview=${claim_result:0:100}"
 
         if [[ $claim_exit -eq 0 ]]; then
-            # Success! Emit telemetry and return
+            # Success! Emit telemetry
             _needle_event_bead_claimed "$bead_id" \
                 "actor=$actor" \
                 "attempt=$attempt" \
@@ -329,6 +334,28 @@ _needle_claim_bead() {
             # Run post_claim hook after successful claim
             if declare -f _needle_run_hook &>/dev/null; then
                 _needle_run_hook "post_claim" "$bead_id" >&2 || true
+            fi
+
+            # Attempt intent-based file reservation
+            # This returns:
+            #   0 - All files reserved successfully
+            #   1 - Conflict detected (bead already released, dependency added)
+            #   2 - No files declared (proceed normally)
+            if declare -f _needle_claim_with_intent &>/dev/null; then
+                local intent_result
+                _needle_claim_with_intent "$bead_id" ${workspace:+--workspace "$workspace"} --actor "$actor"
+                intent_result=$?
+
+                if [[ $intent_result -eq 1 ]]; then
+                    # Conflict detected - bead was released and dependency added
+                    # Return special code to trigger retry with different bead
+                    _needle_warn "File conflict detected for $bead_id, dependency added, trying another bead"
+                    attempt=$((attempt + 1))
+                    continue
+                elif [[ $intent_result -eq 0 ]]; then
+                    _needle_success "Intent-based reservation successful for $bead_id" >&2
+                fi
+                # intent_result == 2: no files to reserve, continue normally
             fi
 
             echo "$bead_id"
