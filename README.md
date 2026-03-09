@@ -2,134 +2,197 @@
 
 **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-**EEDle** is task tracking and effort logging system designed to navigate through queued deliverables while maintaining a comprehensive record of work performed.
+NEEDLE is a universal wrapper for headless coding CLI agents. It provides a priority-based task queue, parallel worker orchestration, and effort logging — all without external coordination services.
 
-## Purpose
+## Overview
 
-- **Navigate** through prioritized task queues
-- **track** enqueued deliverables from creation to completion
-- **log** effort and time spent on each task
-- **provide** visibility into work progress and resource allocation
+- **Agent Abstraction** — Unified interface for Claude Code, OpenCode, Codex CLI, Aider, and any headless coding CLI
+- **Task Navigation** — Priority-weighted bead queue processing across one or more workspaces
+- **Effort Logging** — Time, tokens, and cost tracking per deliverable
+- **Parallel Workers** — Multiple workers run independently via tmux; SQLite provides atomic claim semantics
 
-## Prerequisites
-- **bash** 4.0+
-- **jq** - JSON processor for CLI (`jq` is PATH on most Linux systems)
-- **br** - Beads CLI for available at https://github.com/Dicklesworthstone/beads_rust
-
-- **git** - Version control system
-
-- **fzf** - Fuzzy finder for file matching (optional)
-- **sqlite3** - Database engine (via br)
+NEEDLE wraps any headless CLI that can execute a prompt and exit. Workers claim beads, dispatch to the configured agent, and record results. NEEDLE auto-creates tmux sessions for session persistence.
 
 ## Installation
-### Option 1: Using pre-built binaries (Recommended)
+
+### Prerequisites
+
+| Dependency | Purpose | Auto-installed |
+|------------|---------|----------------|
+| `bash` 4.4+ | Shell execution | No (system) |
+| `tmux` 3.0+ | Session management | **Yes** |
+| `jq` 1.6+ | JSON parsing | **Yes** |
+| `yq` 4.0+ | YAML parsing | **Yes** |
+| `br` (beads_rust) | Bead queue management | **Yes** |
+
+At least one supported coding agent must be installed:
+
+| Agent | Install |
+|-------|---------|
+| Claude Code | `npm install -g @anthropic-ai/claude-code` |
+| OpenCode | `go install github.com/opencode-ai/opencode@latest` |
+| Codex CLI | `npm install -g @openai/codex` |
+| Aider | `pip install aider-chat` |
+
+### Install NEEDLE
+
 ```bash
-# Add br to PATH (requires sudo or admin)
-git clone https://github.com/Dicklesworthstone/beads_rust.git
-cd /NEEDLE_DIR}
-./ configure  #
-git clone https://github.com/anthropics/anthropic-cookbook.git
-cd /NEEDLE/docs
+# One-liner install (downloads binary, adds to PATH, runs needle init)
+curl -fsSL https://needle.dev/install | bash
 ```
 
-ln -s /anthropic-cookbook.pdf
-```
+Or manually:
 
-```
-
-### Option 2: From source (quick install)
 ```bash
-# Clone and run the setup script
-git clone https://github.com/anthropics/anthropic-cookbook.git
-cd /NEEDLE
-git submodule update --remote origin main
-```
-git submodule update --remote
-git pull origin main
+curl -fsSL https://github.com/user/needle/releases/latest/download/needle \
+  -o ~/.local/bin/needle
+chmod +x ~/.local/bin/needle
+needle init
 ```
 
-### Option 3: Manual installation
+`needle init` installs missing dependencies, detects available agents, and creates `~/.needle/config.yaml`.
+
+## Quick Start
+
 ```bash
-# Manual install (requires br CLI from beads_rust)
-# See: https://github.com/dicklesworthstone/beads_rust for installation instructions
-# Note: br CLI is a Rust project and not works on Linux and macOS.
-      See: https://github.com/Dicklesworthstone/beads_rust/releases
+# Interactive setup (first run)
+needle init
 
-# Option 4: Set up fzf for fuzzy finder
-      export Fzf=$(fzf --fuzzy_finder 2>/dev/null 2>/dev/null)
-      mkdir -p "$fzf_dir"
-    fi
-  fi
-}
+# Start a worker in the current workspace
+needle run
 
- echo "Fzf binary not found or not installed" >&2
-  # Try installing with cargo
-  cargo install --fzf --version 0.57.0 --features ripgrep
-  # Or, try installing via system package manager
-  if command -v fzf &>/dev/null 2>& 1; then
-    git clone https://github.com/dicklesworthstone/beads_rust
-    # Note: fzf requires ripgrep
-    fzf --version 0.57.0 2>/dev/null
-    echo "ERROR: fzf not found or not installed" >&2
-    exit 1
-  fi
-}
-```
+# Start a worker with explicit options
+needle run --workspace=/path/to/project --agent=claude-anthropic-sonnet
 
-echo "Checking fzf installation"
-`` exit 1
-  fi
-  echo "error: fzf not found or not installed"
-  # Try installing fzf via cargo
-      export CARGoc_fzf_repo="https://github.com/dicklesworthstone/beads_rust.git" --features ripgrep" --version 0.57.0"
-      cargo install --fzf --version 0.57.0 2>/dev/null
-    else
-      git clone --repository
-      git clone --repository https://github.com/anthropics/anthropic-cookbook.git
-      cd "$NEEDLE_repo"
-      echo "Repository not found. Skipping fzf installation."
-      return 1
-    fi
-  }
-}
+# Start multiple parallel workers
+needle run --workers=3 --workspace=/path/to/project
+
+# Check running workers
+needle list
+
+# Attach to a worker session
+needle attach alpha
+
+# Stop all workers
+needle stop --all
 ```
 
 ## Configuration
-Configuration is stored in `.beads/config.yaml`:
+
+Configuration layers (lowest → highest precedence):
+
+1. Built-in defaults
+2. Global config — `~/.needle/config.yaml`
+3. Workspace config — `<workspace>/.needle.yaml`
+4. Environment variables — `NEEDLE_*` prefix
+
+### `~/.needle/config.yaml`
 
 ```yaml
-# Beads Project Configuration
+agent: claude-anthropic-sonnet
+workspace: /path/to/project
+workers: 1
+
+strands:
+  pluck: true        # Primary work from configured workspaces
+  explore: auto      # Discover work in other workspaces
+  mend: auto         # Heartbeat checks, log rotation
+  weave: auto        # Create beads from documentation gaps
+  unravel: auto      # Propose alternatives for blocked beads
+  pulse: auto        # Proactive quality monitoring
+  knot: auto         # Alert humans when worker is stuck
+
+billing_model: pay_per_token  # or: subscription, free
+```
+
+### Environment Variable Overrides
+
+```bash
+NEEDLE_AGENT=opencode-alibaba-qwen      # Override active agent
+NEEDLE_WORKSPACE=/path/to/project       # Override workspace
+NEEDLE_WORKERS=4                        # Override worker count
+NEEDLE_LOG_LEVEL=debug                  # Log verbosity
+```
+
+### Workspace Bead Config (`.beads/config.yaml`)
+
+```yaml
 issue_prefix: nd
 default_priority: 2
 default_type: task
-
-# ... (rest of config)
 ```
 
-    fi
-  }
-}
-echo "Configuration file already exists. Skipping creation."
-echo "INFO: Configuration loaded from .beads/config.yaml" >&2
-}
+## CLI Commands
 
-}
+| Command | Description |
+|---------|-------------|
+| `needle init` | Interactive setup: install deps, detect agents, create config |
+| `needle run` | Start worker(s) in tmux sessions |
+| `needle list` | List running worker sessions |
+| `needle attach <id>` | Attach to a worker tmux session |
+| `needle stop [--all]` | Stop one or all workers |
+| `needle agents` | List configured agent adapters |
+| `needle agents --scan` | Re-scan PATH for available agents |
+| `needle setup` | Re-check and install dependencies |
+| `needle upgrade` | Download and install latest NEEDLE version |
+| `needle upgrade --check` | Check if a newer version is available |
+| `needle version` | Print current version |
+| `needle help` | Show full command reference |
 
-# Run needle with a command
-echo "$@"
-needle run --workspace "$NEEDLE_WORKSPACE"
+### `needle run` Options
+
 ```
-)
+--workspace=PATH     Workspace directory containing .beads/
+--agent=NAME         Agent adapter to use (e.g. claude-anthropic-sonnet)
+--workers=N          Number of parallel workers to start (default: 1)
+--identifier=ID      Worker name suffix (default: auto-assigned alpha/bravo/...)
+--non-interactive    Skip prompts; use defaults or provided flags
+```
 
-}
+## Architecture
 
-# --- end of usage message ---
-else
-    echo "Usage: $0 <command>"
-    needle help           # Show all commands
-    exit 1
-    ;;
-  exit 0
-fi
+NEEDLE has seven work-finding strategies called **strands**, tried in priority order each iteration:
 
-}
+| Priority | Strand | Purpose |
+|----------|--------|---------|
+| 1 | Pluck | Claim and execute beads from configured workspaces |
+| 2 | Explore | Discover work in other workspaces |
+| 3 | Mend | Maintenance: heartbeat checks, log rotation |
+| 4 | Weave | Create beads from documentation gaps |
+| 5 | Unravel | Propose alternatives for blocked beads |
+| 6 | Pulse | Proactive quality monitoring (security, deps, coverage) |
+| 7 | Knot | Alert humans when the worker is persistently stuck |
+
+The engine stops at the first strand that finds work. If all strands report no work, the worker sleeps and retries.
+
+**Bead claim atomicity** is provided by `br update --claim` (SQLite transactions). When multiple workers race to claim the same bead, exactly one succeeds; others retry with the next available bead.
+
+For a detailed design reference, see [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/plan.md](docs/plan.md).
+
+## State and Logs
+
+NEEDLE stores runtime state in `~/.needle/`:
+
+```
+~/.needle/
+├── config.yaml          # User configuration
+├── agents/              # Custom agent adapters
+├── logs/                # JSONL event logs per session
+├── state/
+│   ├── workers.json     # Active worker registry
+│   ├── heartbeats/      # Worker liveness files
+│   └── pulse/           # Codebase health scan state
+├── hooks/               # Lifecycle hooks (pre-claim, post-execute, ...)
+└── cache/               # Downloaded binaries and update artifacts
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, project structure, strand authoring, agent adapter specs, and the PR process.
+
+## Links
+
+- [beads_rust](https://github.com/Dicklesworthstone/beads_rust) — Bead queue CLI
+- [ARCHITECTURE.md](ARCHITECTURE.md) — Internal system design
+- [docs/plan.md](docs/plan.md) — Full implementation plan
+- [ROADMAP.md](ROADMAP.md) — Planned features
