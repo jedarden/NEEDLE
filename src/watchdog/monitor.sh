@@ -23,6 +23,24 @@ NEEDLE_WATCHDOG_HEARTBEATS_DIR=""
 # Initialize watchdog paths and configuration
 # Usage: _needle_watchdog_init
 _needle_watchdog_init() {
+    # jq is required for heartbeat parsing
+    if ! command -v jq &>/dev/null; then
+        echo "jq not found, attempting to install..." >&2
+        if command -v apt-get &>/dev/null; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq jq >&2
+        elif command -v brew &>/dev/null; then
+            brew install jq >&2
+        elif command -v yum &>/dev/null; then
+            sudo yum install -y jq >&2
+        elif command -v apk &>/dev/null; then
+            sudo apk add jq >&2
+        fi
+        if ! command -v jq &>/dev/null; then
+            echo "ERROR: jq is required for watchdog. Install with: sudo apt install jq" >&2
+            return 1
+        fi
+    fi
+
     NEEDLE_WATCHDOG_PID_FILE="$NEEDLE_HOME/$NEEDLE_STATE_DIR/watchdog.pid"
     NEEDLE_WATCHDOG_HEARTBEATS_DIR="$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
 
@@ -247,25 +265,14 @@ _needle_watchdog_check_single_heartbeat() {
     hb_data=$(cat "$hb_file" 2>/dev/null)
     [[ -z "$hb_data" ]] && return 0
 
-    # Extract fields
+    # Extract fields (jq is required, checked in _needle_watchdog_init)
     local worker pid last_heartbeat status current_bead bead_started
-
-    if command -v jq &>/dev/null; then
-        worker=$(echo "$hb_data" | jq -r '.worker // "unknown"')
-        pid=$(echo "$hb_data" | jq -r '.pid // 0')
-        last_heartbeat=$(echo "$hb_data" | jq -r '.last_heartbeat // ""')
-        status=$(echo "$hb_data" | jq -r '.status // "unknown"')
-        current_bead=$(echo "$hb_data" | jq -r '.current_bead // empty')
-        bead_started=$(echo "$hb_data" | jq -r '.bead_started // empty')
-    else
-        # Fallback: simple parsing
-        worker=$(echo "$hb_data" | grep -o '"worker":"[^"]*"' | head -1 | cut -d'"' -f4)
-        pid=$(echo "$hb_data" | grep -o '"pid":[0-9]*' | head -1 | cut -d':' -f2)
-        last_heartbeat=$(echo "$hb_data" | grep -o '"last_heartbeat":"[^"]*"' | head -1 | cut -d'"' -f4)
-        status=$(echo "$hb_data" | grep -o '"status":"[^"]*"' | head -1 | cut -d'"' -f4)
-        current_bead=$(echo "$hb_data" | grep -o '"current_bead":"[^"]*"' | head -1 | cut -d'"' -f4)
-        bead_started=$(echo "$hb_data" | grep -o '"bead_started":"[^"]*"' | head -1 | cut -d'"' -f4)
-    fi
+    worker=$(echo "$hb_data" | jq -r '.worker // "unknown"')
+    pid=$(echo "$hb_data" | jq -r '.pid // 0')
+    last_heartbeat=$(echo "$hb_data" | jq -r '.last_heartbeat // ""')
+    status=$(echo "$hb_data" | jq -r '.status // "unknown"')
+    current_bead=$(echo "$hb_data" | jq -r '.current_bead // empty')
+    bead_started=$(echo "$hb_data" | jq -r '.bead_started // empty')
 
     # Skip if we can't parse required fields
     [[ -z "$worker" ]] && return 0
@@ -343,7 +350,7 @@ _needle_watchdog_recover_worker() {
     local workspace="" agent="" hb_data=""
     if [[ -f "$hb_file" ]]; then
         hb_data=$(cat "$hb_file" 2>/dev/null)
-        if command -v jq &>/dev/null && [[ -n "$hb_data" ]]; then
+        if [[ -n "$hb_data" ]]; then
             workspace=$(echo "$hb_data" | jq -r '.workspace // ""' 2>/dev/null)
             agent=$(echo "$hb_data" | jq -r '.agent // ""' 2>/dev/null)
         fi
