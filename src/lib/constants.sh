@@ -3,10 +3,10 @@
 # Global constants and version information
 
 # Version information
-NEEDLE_VERSION="0.2.0"
+NEEDLE_VERSION="0.2.1"
 NEEDLE_VERSION_MAJOR=0
 NEEDLE_VERSION_MINOR=2
-NEEDLE_VERSION_PATCH=0
+NEEDLE_VERSION_PATCH=1
 
 # GitHub repository for self-update
 NEEDLE_GITHUB_REPO="${NEEDLE_GITHUB_REPO:-jedarden/NEEDLE}"

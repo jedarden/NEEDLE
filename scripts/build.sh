@@ -82,22 +82,20 @@ process_module() {
         # Modules are inline, so source commands will fail
         s/^[ \t]*source\s+[^\n]+\n//gm;
 
+        # Remove shellcheck source directives (left behind after source removal)
+        s/^[ \t]*#\s*shellcheck\s+source=[^\n]*\n//gm;
+
         # Remove _LOADED=true assignments (we set these all at the top now)
         s/^[ \t]*[A-Z_]+_LOADED=true\s*\n//gm;
 
-        # Clean up empty if-blocks that were left after removing source commands
+        # Clean up empty/comment-only if-blocks left after removing source commands
         # Run multiple times to handle nested empty blocks
         for my $i (1..5) {
-            # Pattern 1: if [[ ... ]]; then\nfi
-            s/^[ \t]*if\s+\[\[.*?\]\]\s*;\s*then\s*\n\s*fi\s*\n//gm;
-            # Pattern 2: if ! declare ...; then\nfi
-            s/^[ \t]*if\s+!\s+declare.*?;\s*then\s*\n\s*fi\s*\n//gm;
-            # Pattern 3: if COMMAND; then\nfi (general case)
-            s/^[ \t]*if\s+[^;\n]+;\s*then\s*\n\s*fi\s*\n//gm;
-            # Pattern 4: if ... then\n(empty)\nelse\n...\nfi → just the else body
-            s/^([ \t]*)if\s+[^;\n]+;\s*then\s*\n\s*else\s*\n(.*?)\n\s*fi\s*\n/$2\n/gm;
-            # Pattern 5: if [[ ... ]]; then\n(empty)\nelse\n...\nfi → just the else body
-            s/^([ \t]*)if\s+\[\[.*?\]\]\s*;\s*then\s*\n\s*else\s*\n(.*?)\n\s*fi\s*\n/$2\n/gm;
+            # Pattern: if ... then\n(only whitespace/comments)\nfi
+            s/^[ \t]*if\s+[^\n]+;\s*then\s*\n([ \t]*#[^\n]*\n|[ \t]*\n)*\s*fi\s*\n//gm;
+
+            # Pattern: if ... then\n(only whitespace/comments)\nelse\n...\nfi → just the else body
+            s/^[ \t]*if\s+[^\n]+;\s*then\s*\n([ \t]*#[^\n]*\n|[ \t]*\n)*\s*else\s*\n(.*?)\n\s*fi\s*\n/$2\n/gsm;
         }
     ')
 
@@ -228,21 +226,31 @@ MODULES=(
     # Core libraries (no dependencies)
     "src/lib/constants.sh"
     "src/lib/output.sh"
+    "src/lib/json.sh"
+    "src/lib/paths.sh"
     "src/lib/utils.sh"
     "src/lib/config.sh"
+    "src/lib/config_schema.sh"
     "src/lib/workspace.sh"
+    "src/lib/errors.sh"
+    "src/lib/diagnostic.sh"
+    "src/lib/billing_models.sh"
+    "src/lib/update_check.sh"
 
     # Bootstrap
     "src/bootstrap/paths.sh"
 
     # Telemetry
     "src/telemetry/events.sh"
+    "src/telemetry/fabric.sh"
     "src/telemetry/tokens.sh"
     "src/telemetry/budget.sh"
     "src/telemetry/effort.sh"
+    "src/telemetry/writer.sh"
 
     # Agent system
     "src/agent/loader.sh"
+    "src/agent/escape.sh"
     "src/agent/dispatch.sh"
 
     # Bead operations
@@ -250,12 +258,25 @@ MODULES=(
     "src/bead/select.sh"
     "src/bead/prompt.sh"
     "src/bead/mitosis.sh"
+    "src/bead/intent.sh"
+
+    # Lock system
+    "src/lock/checkout.sh"
+    "src/lock/metrics.sh"
+
+    # Quality
+    "src/quality/bug_scanner.sh"
 
     # Watchdog
     "src/watchdog/heartbeat.sh"
+    "src/watchdog/monitor.sh"
 
     # Hooks
     "src/hooks/runner.sh"
+    "src/hooks/agent_settings.sh"
+    "src/hooks/validate.sh"
+    # NOTE: file-checkout.sh and post-execute-reconcile.sh are standalone hook
+    # scripts (run as separate processes), not library modules. Do NOT bundle them.
 
     # Runner
     "src/runner/state.sh"
@@ -279,11 +300,28 @@ MODULES=(
     "src/onboarding/welcome.sh"
     "src/onboarding/agents.sh"
     "src/onboarding/create_config.sh"
+    "src/onboarding/workspace_setup.sh"
 
     # CLI commands
+    "src/cli/help.sh"
     "src/cli/init.sh"
     "src/cli/run.sh"
+    "src/cli/list.sh"
+    "src/cli/attach.sh"
+    "src/cli/stop.sh"
+    "src/cli/restart.sh"
+    "src/cli/logs.sh"
+    "src/cli/status.sh"
     "src/cli/version.sh"
+    "src/cli/config.sh"
+    "src/cli/heartbeat.sh"
+    "src/cli/setup.sh"
+    "src/cli/upgrade.sh"
+    "src/cli/rollback.sh"
+    "src/cli/pulse.sh"
+    "src/cli/metrics.sh"
+    "src/cli/analyze.sh"
+    "src/cli/refactor.sh"
     "src/cli/test-agent.sh"
     "src/cli/agents.sh"
 )
@@ -364,17 +402,65 @@ _needle_main() {
         run|start)
             _needle_run "$@"
             ;;
-        init|setup)
+        init)
             _needle_init "$@"
             ;;
-        version)
-            _needle_show_version
+        list|ls)
+            _needle_list "$@"
+            ;;
+        attach)
+            _needle_attach "$@"
+            ;;
+        stop)
+            _needle_stop "$@"
+            ;;
+        restart)
+            _needle_restart "$@"
+            ;;
+        logs)
+            _needle_logs "$@"
+            ;;
+        status)
+            _needle_status "$@"
+            ;;
+        config)
+            _needle_config "$@"
+            ;;
+        heartbeat)
+            _needle_heartbeat "$@"
+            ;;
+        setup)
+            _needle_setup "$@"
+            ;;
+        upgrade)
+            _needle_upgrade "$@"
+            ;;
+        rollback)
+            _needle_rollback "$@"
+            ;;
+        pulse)
+            _needle_pulse "$@"
+            ;;
+        metrics)
+            _needle_metrics "$@"
+            ;;
+        analyze)
+            _needle_analyze "$@"
+            ;;
+        refactor)
+            _needle_refactor "$@"
             ;;
         agents|list-agents)
             _needle_agents "$@"
             ;;
         test-agent)
             _needle_test_agent "$@"
+            ;;
+        version|-V)
+            _needle_show_version
+            ;;
+        _run_worker)
+            _needle_run_worker "$@"
             ;;
         help|--help|-h)
             _needle_show_help
@@ -402,17 +488,32 @@ Options:
 
 Commands:
   run               Start a NEEDLE worker
+  list              List running workers
+  attach            Attach to a worker's tmux session
+  stop              Stop running worker(s)
+  restart           Restart workers
+  logs              View or tail worker logs
+  status            Show worker health and statistics
   init              Initialize NEEDLE configuration
+  setup             Check and install dependencies
+  config            View or edit configuration
+  heartbeat         Manage worker heartbeat and recovery
   agents            List available agent configurations
   test-agent        Test an agent configuration
+  pulse             Run codebase health scan
+  metrics           Analyze file collision effectiveness
+  analyze           Analyze codebase patterns
+  refactor          Suggest refactoring opportunities
+  upgrade           Check for and install updates
+  rollback          Rollback to a previous version
   version           Show version information
   help              Show this help message
 
 Examples:
-  needle init                           Initialize NEEDLE
   needle run --workspace=/path --agent=claude-anthropic-sonnet
-  needle agents                         List available agents
-  needle test-agent claude-anthropic-sonnet
+  needle list
+  needle attach needle-claude-anthropic-sonnet-alpha
+  needle stop --all
 
 Documentation: https://github.com/jedarden/NEEDLE
 EOF

@@ -643,18 +643,21 @@ _needle_run() {
     # Start watchdog monitor (ensures it's running)
     # The watchdog monitors worker heartbeats and recovers stuck workers
     if [[ "$dry_run" != "true" ]]; then
-        # Source watchdog monitor module
-        local watchdog_module="${NEEDLE_LIB_DIR:-}/watchdog/monitor.sh"
-        if [[ ! -f "$watchdog_module" ]]; then
-            # Try relative path from script directory
-            watchdog_module="${NEEDLE_ROOT_DIR:-}/src/watchdog/monitor.sh"
-        fi
-
-        if [[ -f "$watchdog_module" ]]; then
-            source "$watchdog_module"
+        # Source watchdog monitor module (skip if already loaded, e.g. bundled binary)
+        if declare -f _needle_ensure_watchdog &>/dev/null; then
             _needle_ensure_watchdog
         else
-            _needle_warn "Watchdog module not found, skipping watchdog startup"
+            local watchdog_module="${NEEDLE_LIB_DIR:-}/watchdog/monitor.sh"
+            if [[ ! -f "$watchdog_module" ]]; then
+                watchdog_module="${NEEDLE_ROOT_DIR:-}/src/watchdog/monitor.sh"
+            fi
+
+            if [[ -f "$watchdog_module" ]]; then
+                source "$watchdog_module"
+                _needle_ensure_watchdog
+            else
+                _needle_warn "Watchdog module not found, skipping watchdog startup"
+            fi
         fi
     fi
 
@@ -1200,19 +1203,20 @@ _needle_run_worker() {
         exit $NEEDLE_EXIT_CONFIG
     fi
 
-    # Source the worker loop module
-    local loop_module="${NEEDLE_LIB_DIR:-}/runner/loop.sh"
-    if [[ ! -f "$loop_module" ]]; then
-        # Try relative path from script directory
-        loop_module="${NEEDLE_ROOT_DIR:-}/src/runner/loop.sh"
-    fi
+    # Source the worker loop module (skip if already loaded, e.g. bundled binary)
+    if ! declare -f _needle_worker_loop &>/dev/null; then
+        local loop_module="${NEEDLE_LIB_DIR:-}/runner/loop.sh"
+        if [[ ! -f "$loop_module" ]]; then
+            loop_module="${NEEDLE_ROOT_DIR:-}/src/runner/loop.sh"
+        fi
 
-    if [[ ! -f "$loop_module" ]]; then
-        _needle_error "Worker loop module not found: $loop_module"
-        exit $NEEDLE_EXIT_CONFIG
-    fi
+        if [[ ! -f "$loop_module" ]]; then
+            _needle_error "Worker loop module not found: $loop_module"
+            exit $NEEDLE_EXIT_CONFIG
+        fi
 
-    source "$loop_module"
+        source "$loop_module"
+    fi
 
     # Log worker start event
     _needle_debug "Starting worker: session=$session_name agent=$agent workspace=$workspace"
