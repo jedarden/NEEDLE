@@ -1,0 +1,18 @@
+# NEEDLE workspace configuration
+# Scoped to /home/coder/NEEDLE — workers should not roam outside this repo
+
+workspaces:
+  - .
+
+strands:
+  pluck: true
+  explore: true
+  mend: true
+  weave: false
+  unravel: true
+  pulse: true
+  knot: true
+
+  explore:
+    # max_depth: 0 prevents explore from climbing above /home/coder/NEEDLE
+    max_depth: 0
