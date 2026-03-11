@@ -247,8 +247,8 @@ checkout_file() {
                 _needle_metrics_record_event "conflict.prevented" "$bead_id" "$filepath" \
                     "blocked_by=$existing_bead"
 
-                # Return blocking bead info to stdout
-                echo "$lock_info"
+                # Return blocking bead info to stderr (stdout is captured as bead_id upstream)
+                echo "$lock_info" >&2
                 return 1
             fi
         done
@@ -295,7 +295,7 @@ checkout_file() {
             _needle_metrics_record_event "conflict.prevented" "$bead_id" "$filepath" \
                 "blocked_by=$existing_bead"
 
-            echo "$lock_info"
+            echo "$lock_info" >&2
             return 1
         fi
 
