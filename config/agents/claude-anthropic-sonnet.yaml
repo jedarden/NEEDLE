@@ -19,7 +19,7 @@ model: sonnet          # Model identifier
 invoke: |
   cd ${WORKSPACE} && \
   unset CLAUDECODE && \
-  ANTHROPIC_MODEL=claude-sonnet-4-5-20250929 \
+  ANTHROPIC_MODEL=claude-sonnet-4-6 \
   claude --print \
          --dangerously-skip-permissions \
          --output-format stream-json \
@@ -58,6 +58,6 @@ limits:
 # output_per_1k: cost per 1K output tokens (for pay_per_token)
 cost:
   type: pay_per_token
-  # Claude Sonnet 4.5 pricing (as of 2025)
+  # Claude Sonnet 4.6 pricing (as of 2026)
   input_per_1k: 0.003      # $3/1M input tokens
   output_per_1k: 0.015     # $15/1M output tokens

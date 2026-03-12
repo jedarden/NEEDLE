@@ -129,6 +129,17 @@ embed_agents() {
             echo ""
         fi
     done
+
+    # Embed stream-parser.sh script (required by all claude agent YAML configs)
+    local stream_parser="$agents_dir/stream-parser.sh"
+    if [[ -f "$stream_parser" ]]; then
+        echo "# Embedded stream-parser.sh script"
+        echo "_NEEDLE_EMBEDDED_STREAM_PARSER=\$(cat <<'__STREAM_PARSER_EOF__'"
+        cat "$stream_parser"
+        echo "__STREAM_PARSER_EOF__"
+        echo ")"
+        echo ""
+    fi
 }
 
 # Generate function to extract embedded agents
@@ -137,12 +148,6 @@ generate_agent_extractor() {
 # Extract embedded agents to NEEDLE_HOME if not already present
 _needle_extract_embedded_agents() {
     local agents_dir="${NEEDLE_HOME:-$HOME/.needle}/agents"
-
-    # Skip if agents directory already has files
-    if [[ -d "$agents_dir" ]] && [[ -n "$(ls -A "$agents_dir" 2>/dev/null)" ]]; then
-        return 0
-    fi
-
     mkdir -p "$agents_dir"
 
     for name in "${!_NEEDLE_EMBEDDED_AGENTS[@]}"; do
@@ -151,6 +156,13 @@ _needle_extract_embedded_agents() {
             echo "${_NEEDLE_EMBEDDED_AGENTS[$name]}" > "$target"
         fi
     done
+
+    # Always ensure stream-parser.sh is present and executable
+    local stream_parser_target="$agents_dir/stream-parser.sh"
+    if [[ ! -f "$stream_parser_target" ]] && [[ -n "${_NEEDLE_EMBEDDED_STREAM_PARSER:-}" ]]; then
+        echo "$_NEEDLE_EMBEDDED_STREAM_PARSER" > "$stream_parser_target"
+        chmod +x "$stream_parser_target"
+    fi
 }
 EXTRACTOR
 }
@@ -239,6 +251,7 @@ MODULES=(
 
     # Bootstrap
     "src/bootstrap/paths.sh"
+    "bootstrap/check.sh"
 
     # Telemetry
     "src/telemetry/events.sh"

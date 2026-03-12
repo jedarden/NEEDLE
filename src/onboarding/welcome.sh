@@ -84,7 +84,7 @@ _needle_show_banner_minimal() {
 _needle_welcome_init() {
     _needle_show_banner
 
-    if [[ "$NEEDLE_QUIET" == "true" ]]; then
+    if [[ "${NEEDLE_QUIET:-}" == "true" ]]; then
         return
     fi
 
@@ -98,7 +98,7 @@ _needle_welcome_init() {
 
 # Display post-initialization success message
 _needle_welcome_complete() {
-    if [[ "$NEEDLE_QUIET" == "true" ]]; then
+    if [[ "${NEEDLE_QUIET:-}" == "true" ]]; then
         return
     fi
 

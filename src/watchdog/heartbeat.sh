@@ -11,7 +11,13 @@ NEEDLE_HEARTBEAT_STARTED=""
 # Usage: _needle_heartbeat_init
 _needle_heartbeat_init() {
     # Set heartbeat file path based on session ID
-    NEEDLE_HEARTBEAT_FILE="$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats/${NEEDLE_SESSION}.json"
+    # NEEDLE_STATE_DIR may be a full path (set by _needle_run_worker) or relative.
+    # Use it directly if absolute, otherwise prepend NEEDLE_HOME.
+    if [[ "$NEEDLE_STATE_DIR" == /* ]]; then
+        NEEDLE_HEARTBEAT_FILE="$NEEDLE_STATE_DIR/heartbeats/${NEEDLE_SESSION}.json"
+    else
+        NEEDLE_HEARTBEAT_FILE="$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats/${NEEDLE_SESSION}.json"
+    fi
     NEEDLE_HEARTBEAT_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     # Ensure heartbeat directory exists

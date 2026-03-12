@@ -143,7 +143,7 @@ NEEDLE_LAST_FAILURE_TIME=""
 # ============================================================================
 
 # Track modification times for config files
-NEEDLE_CONFIG_LOADED_AT=0
+NEEDLE_GLOBAL_CONFIG_LOADED_AT=0
 NEEDLE_WS_CONFIG_LOADED_AT=0
 
 # Config check interval (checked every N loop iterations)
@@ -822,6 +822,9 @@ _needle_worker_loop_init() {
         "$NEEDLE_IDENTIFIER" \
         "$$" \
         "$NEEDLE_WORKSPACE"
+
+    # Initialize config change tracking timestamps (required before hot-reload checks)
+    _needle_init_config_tracking
 
     _NEEDLE_LOOP_INIT=true
     _needle_debug "Worker loop initialized"

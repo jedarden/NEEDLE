@@ -197,7 +197,7 @@ _needle_check_updates_on_startup() {
     esac
 
     # Skip if in quiet mode
-    if [[ "$NEEDLE_QUIET" == "true" ]]; then
+    if [[ "${NEEDLE_QUIET:-}" == "true" ]]; then
         return 0
     fi
 
