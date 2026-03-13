@@ -254,10 +254,19 @@ ${priority_label}
 ## Instructions
 You are working on this task in the context of the workspace above.
 
-Complete the task as described. When finished:
-- Commit your changes with a descriptive message
-- The commit message should reference the bead ID: ${bead_id}
-- Exit with code 0 on success, non-zero on failure
+Complete the task as described. Use the \`br\` CLI (\`~/.local/bin/br\`) to manage bead lifecycle:
+
+### Workflow
+1. Do the work described above
+2. Commit your changes with a descriptive message referencing bead ID: ${bead_id}
+3. Validate that your changes fully satisfy the bead requirements
+4. If validated: \`br close ${bead_id}\`
+5. If blocked or incomplete: \`br update ${bead_id} --status blocked\` and add a comment explaining why
+6. If the bead requires creating sub-beads, create them and add as blockers
+
+Use \`~/.local/bin/br --help\` and \`br <command> --help\` to understand available commands and options.
+
+Exit with code 0 on success, non-zero on failure.
 ${context_section}
 PROMPT
 }
