@@ -945,31 +945,26 @@ _needle_spawn_multiple_workers() {
 get_next_identifier() {
     if declare -f _needle_naming_get_next_identifier &>/dev/null; then
         _needle_naming_get_next_identifier "$1"
-    else
-        # Fallback: use naming.sh get_next_identifier if available
-        if declare -f get_next_identifier &>/dev/null; then
-            # Use the naming.sh function directly
+        return $?
+    fi
+
+    # Inline implementation using NATO alphabet
+    local agent="$1"
+    local prefix="needle-$agent-"
+    local existing
+    existing=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^$prefix" | sed 's/.*-//' || true)
+
+    for name in "${NEEDLE_NATO_ALPHABET[@]}"; do
+        if ! echo "$existing" | grep -qx "$name"; then
+            echo "$name"
             return 0
         fi
+    done
 
-        # Inline implementation using NATO alphabet
-        local agent="$1"
-        local prefix="needle-$agent-"
-        local existing
-        existing=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep "^$prefix" | sed 's/.*-//' || true)
-
-        for name in "${NEEDLE_NATO_ALPHABET[@]}"; do
-            if ! echo "$existing" | grep -qx "$name"; then
-                echo "$name"
-                return 0
-            fi
-        done
-
-        # All 26 NATO names used - add numeric suffix
-        local count
-        count=$(echo "$existing" | grep -c . 2>/dev/null || echo "0")
-        echo "alpha-$((count + 1))"
-    fi
+    # All 26 NATO names used - add numeric suffix
+    local count
+    count=$(echo "$existing" | grep -c . 2>/dev/null || echo "0")
+    echo "alpha-$((count + 1))"
 }
 
 # Get next available identifier from a list of already-used identifiers

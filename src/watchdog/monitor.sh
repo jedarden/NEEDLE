@@ -66,6 +66,7 @@ _needle_watchdog_init() {
     NEEDLE_WATCHDOG_HEARTBEAT_TIMEOUT=$(get_config 'watchdog.heartbeat_timeout' '120')
     NEEDLE_WATCHDOG_BEAD_TIMEOUT=$(get_config 'watchdog.bead_timeout' '600')
     NEEDLE_WATCHDOG_RECOVERY_ACTION=$(get_config 'watchdog.recovery_action' 'restart')
+    NEEDLE_WATCHDOG_STARTUP_GRACE=$(get_config 'watchdog.startup_grace' '10')
 
     return 0
 }
@@ -203,6 +204,14 @@ _needle_watchdog_run() {
     [[ ! -d "$log_dir" ]] && mkdir -p "$log_dir"
 
     _needle_watchdog_log "$watchdog_log" "watchdog.started" "Watchdog monitor started"
+
+    # Grace period: wait for workers to start and emit their first heartbeat
+    local grace="${NEEDLE_WATCHDOG_STARTUP_GRACE:-10}"
+    if [[ "$grace" -gt 0 ]]; then
+        _needle_watchdog_log "$watchdog_log" "watchdog.startup_grace" \
+            "Waiting ${grace}s for workers to initialize"
+        sleep "$grace"
+    fi
 
     # Main monitoring loop
     while true; do

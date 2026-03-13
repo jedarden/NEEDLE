@@ -101,6 +101,7 @@ NEEDLE_CONFIG_SCHEMA=(
     ["watchdog.heartbeat_timeout"]="integer|false|1||"
     ["watchdog.bead_timeout"]="integer|false|1||"
     ["watchdog.recovery_action"]="enum|false|||restart|stop"
+    ["watchdog.startup_grace"]="integer|false|0||"
 
     # pulse
     ["pulse.frequency"]="duration|false|||"

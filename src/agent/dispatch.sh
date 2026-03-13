@@ -45,6 +45,8 @@ _needle_start_heartbeat_background() {
     local interval="${NEEDLE_HEARTBEAT_INTERVAL:-30}"
 
     # Start background process that emits heartbeats
+    # Redirect stdout to stderr so heartbeat JSON doesn't pollute
+    # the dispatch_result captured via $() subshells
     (
         while true; do
             # Check if heartbeat functions are available
@@ -55,7 +57,7 @@ _needle_start_heartbeat_background() {
             fi
             sleep "$interval"
         done
-    ) &
+    ) >&2 &
 
     _NEEDLE_HEARTBEAT_BG_PID=$!
     _needle_debug "Started background heartbeat process: PID $_NEEDLE_HEARTBEAT_BG_PID (interval: ${interval}s)"
