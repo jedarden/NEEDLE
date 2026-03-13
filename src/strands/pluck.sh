@@ -222,8 +222,10 @@ _needle_pluck_process_bead() {
         return 1
     fi
 
-    # Parse dispatch result
-    IFS='|' read -r exit_code duration output_file <<< "$dispatch_result"
+    # Parse dispatch result (last line only — prior lines are agent stdout via tee)
+    local last_line
+    last_line=$(tail -n 1 <<< "$dispatch_result")
+    IFS='|' read -r exit_code duration output_file <<< "$last_line"
 
     _needle_debug "Agent completed: exit_code=$exit_code, duration=${duration}ms"
 

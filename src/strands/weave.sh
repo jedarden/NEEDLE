@@ -74,8 +74,10 @@ _needle_strand_weave() {
     local result
     result=$(_needle_dispatch_agent "$agent" "$workspace" "$prompt" "weave-analysis" "Weave documentation gap analysis" 120)
 
-    # Parse result
-    IFS='|' read -r exit_code duration output_file <<< "$result"
+    # Parse result (last line only — prior lines are agent stdout via tee)
+    local last_line
+    last_line=$(tail -n 1 <<< "$result")
+    IFS='|' read -r exit_code duration output_file <<< "$last_line"
 
     if [[ "$exit_code" -ne 0 ]]; then
         _needle_warn "weave: analysis failed with exit code $exit_code"

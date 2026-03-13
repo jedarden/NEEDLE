@@ -181,8 +181,10 @@ _needle_strand_unravel() {
             continue
         fi
 
-        # Parse dispatch result
-        IFS='|' read -r exit_code duration output_file <<< "$result"
+        # Parse dispatch result (last line only — prior lines are agent stdout via tee)
+        local last_line
+        last_line=$(tail -n 1 <<< "$result")
+        IFS='|' read -r exit_code duration output_file <<< "$last_line"
 
         if [[ "$exit_code" -ne 0 ]]; then
             _needle_warn "unravel: analysis failed with exit code $exit_code for bead $bead_id"
@@ -630,7 +632,9 @@ _needle_unravel_run() {
     result=$(_needle_dispatch_agent "$agent" "$workspace" "$prompt" "$human_bead_id" "unravel-manual" 120)
 
     local exit_code duration output_file
-    IFS='|' read -r exit_code duration output_file <<< "$result"
+    local last_line
+    last_line=$(tail -n 1 <<< "$result")
+    IFS='|' read -r exit_code duration output_file <<< "$last_line"
 
     if [[ "$exit_code" -ne 0 ]]; then
         _needle_error "Analysis failed with exit code $exit_code"

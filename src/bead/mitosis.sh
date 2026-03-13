@@ -399,9 +399,11 @@ _needle_analyze_for_mitosis() {
             return 1
         fi
 
-        # Parse result
+        # Parse result (last line only — prior lines are agent stdout via tee)
         local exit_code duration output_path
-        IFS='|' read -r exit_code duration output_path <<< "$result"
+        local last_line
+        last_line=$(tail -n 1 <<< "$result")
+        IFS='|' read -r exit_code duration output_path <<< "$last_line"
 
         if [[ ! -f "$output_path" ]]; then
             _needle_warn "Mitosis analysis output file not found"
