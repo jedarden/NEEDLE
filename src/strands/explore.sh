@@ -66,6 +66,13 @@ _needle_explore_get_max_depth() {
     get_config "strands.explore.max_depth" "3" 2>/dev/null
 }
 
+# Get cooldown seconds between spawn attempts
+# Usage: _needle_explore_get_cooldown
+# Returns: Cooldown period in seconds (default: 30)
+_needle_explore_get_cooldown() {
+    get_config "scaling.cooldown_seconds" "30" 2>/dev/null
+}
+
 # ============================================================================
 # Workspace Discovery Functions
 # ============================================================================
@@ -150,6 +157,95 @@ _needle_explore_count_workers() {
 }
 
 # ============================================================================
+# Cooldown State Management
+# ============================================================================
+
+# Get state file path for spawn cooldown tracking
+# Usage: _needle_explore_cooldown_state_file
+# Returns: Path to cooldown state file
+_needle_explore_cooldown_state_file() {
+    echo "$NEEDLE_HOME/$NEEDLE_STATE_DIR/explore_last_spawn.json"
+}
+
+# Check if enough time has passed since last spawn (cooldown)
+# Usage: _needle_explore_check_cooldown <agent> [<workspace>]
+# Returns: 0 if cooldown passed, 1 if still in cooldown
+_needle_explore_check_cooldown() {
+    local agent="$1"
+    local workspace="${2:-global}"
+
+    local cooldown
+    cooldown=$(_needle_explore_get_cooldown)
+
+    # If cooldown is 0, always allow
+    if [[ "$cooldown" -eq 0 ]]; then
+        return 0
+    fi
+
+    local state_file
+    state_file=$(_needle_explore_cooldown_state_file)
+
+    # Create state file if it doesn't exist
+    if [[ ! -f "$state_file" ]]; then
+        echo '{}' > "$state_file"
+        return 0
+    fi
+
+    local now
+    now=$(date +%s)
+
+    # Check last spawn time for this agent/workspace combination
+    local key="${agent}:${workspace}"
+    local last_spawn
+    last_spawn=$(jq -r --arg k "$key" '.[$k] // "0"' "$state_file" 2>/dev/null)
+
+    if [[ -z "$last_spawn" ]] || [[ "$last_spawn" == "0" ]]; then
+        return 0
+    fi
+
+    local elapsed=$((now - last_spawn))
+
+    if [[ "$elapsed" -lt "$cooldown" ]]; then
+        _needle_debug "Cooldown active: ${elapsed}s elapsed, need ${cooldown}s (agent: $agent, workspace: $workspace)"
+        return 1
+    fi
+
+    return 0
+}
+
+# Update last spawn time for cooldown tracking
+# Usage: _needle_explore_update_cooldown <agent> [<workspace>]
+# Returns: 0 on success, 1 on failure
+_needle_explore_update_cooldown() {
+    local agent="$1"
+    local workspace="${2:-global}"
+
+    local state_file
+    state_file=$(_needle_explore_cooldown_state_file)
+
+    # Create state file if it doesn't exist
+    if [[ ! -f "$state_file" ]]; then
+        echo '{}' > "$state_file"
+    fi
+
+    local now
+    now=$(date +%s)
+
+    local key="${agent}:${workspace}"
+    local tmp_file="${state_file}.tmp"
+
+    # Update the last spawn time for this agent/workspace
+    if jq --arg k "$key" --arg v "$now" '. + {($k): ($v | tonumber)}' "$state_file" > "$tmp_file" 2>/dev/null; then
+        mv "$tmp_file" "$state_file"
+        _needle_debug "Updated cooldown state: $key = $now"
+        return 0
+    else
+        _needle_warn "Failed to update cooldown state file"
+        return 1
+    fi
+}
+
+# ============================================================================
 # Worker Spawning Functions
 # ============================================================================
 
@@ -185,6 +281,12 @@ _needle_explore_spawn_worker() {
         return 1
     fi
 
+    # Check cooldown before spawning
+    if ! _needle_explore_check_cooldown "$agent" "$workspace"; then
+        _needle_debug "Cooldown active, not spawning worker for $workspace"
+        return 1
+    fi
+
     # Spawn worker in background
     # Use nohup to ensure it survives if parent exits
     local spawn_cmd="needle run --workspace=\"$workspace\" --agent=\"$agent\""
@@ -195,6 +297,9 @@ _needle_explore_spawn_worker() {
         local pid=$!
 
         _needle_info "Spawned worker (PID: $pid) for workspace: $workspace"
+
+        # Update cooldown state
+        _needle_explore_update_cooldown "$agent" "$workspace"
 
         # Emit spawn event
         _needle_emit_event "strand.explore.spawned" \
@@ -220,85 +325,74 @@ _needle_explore_spawn_worker() {
 # Workspace Search Functions
 # ============================================================================
 
-# Search parent directories for workspaces with work
-# Traverses up the directory tree looking for .beads directories
+# Search for workspaces with beads using auto-discovery.
+# Scans for .beads directories under the discovery root (default: $HOME),
+# then spawns workers for any workspace with enough unassigned beads.
 #
-# Usage: _needle_explore_search_parents <primary_workspace> <agent>
+# Usage: _needle_explore_search_workspaces <primary_workspace> <agent>
 # Returns: Number of workspaces found with work
-_needle_explore_search_parents() {
+_needle_explore_search_workspaces() {
     local primary_workspace="$1"
     local agent="$2"
-
-    local max_depth
-    max_depth=$(_needle_explore_get_max_depth)
 
     local spawn_threshold
     spawn_threshold=$(_needle_explore_get_spawn_threshold)
 
-    _needle_debug "Searching for workspaces (max_depth: $max_depth, spawn_threshold: $spawn_threshold)"
+    # Use pluck's auto-discovery if available, otherwise fall back to find
+    local search_root
+    search_root=$(get_config "discovery.root" "$HOME" 2>/dev/null)
+    search_root="${search_root/#\~/$HOME}"
 
-    # Start from parent of primary workspace
-    local search_dir
-    search_dir=$(dirname "$primary_workspace")
+    local max_depth
+    max_depth=$(get_config "discovery.max_depth" "4" 2>/dev/null)
 
-    local depth=0
+    _needle_debug "Exploring workspaces: root=$search_root depth=$max_depth spawn_threshold=$spawn_threshold"
+
     local workspaces_found=0
 
-    # Traverse up the directory tree
-    while [[ "$search_dir" != "/" && $depth -lt $max_depth ]]; do
-        _needle_verbose "Searching at depth $depth: $search_dir"
+    # Find all .beads directories
+    while IFS= read -r beads_dir; do
+        [[ -z "$beads_dir" ]] && continue
 
-        # Find .beads directories at this level
-        local beads_dirs
-        beads_dirs=$(_needle_explore_find_beads_dirs "$search_dir" 2)
+        local found_workspace
+        found_workspace=$(dirname "$beads_dir")
 
-        # Process each found .beads directory
-        while IFS= read -r beads_dir; do
-            [[ -z "$beads_dir" ]] && continue
+        # Skip primary workspace (pluck handles that)
+        if [[ "$found_workspace" == "$primary_workspace" ]]; then
+            continue
+        fi
 
-            # Get workspace path (parent of .beads)
-            local found_workspace
-            found_workspace=$(dirname "$beads_dir")
+        # Count unassigned beads
+        local bead_count
+        bead_count=$(_needle_explore_count_unassigned "$found_workspace")
 
-            # Skip if same as primary workspace
-            if [[ "$found_workspace" == "$primary_workspace" ]]; then
-                _needle_verbose "Skipping primary workspace: $found_workspace"
-                continue
+        if (( bead_count > 0 )); then
+            _needle_emit_event "strand.explore.found" \
+                "Found workspace with available beads" \
+                "workspace=$found_workspace" \
+                "bead_count=$bead_count"
+
+            ((workspaces_found++))
+
+            if (( bead_count >= spawn_threshold )); then
+                _needle_info "Found workspace with $bead_count beads (threshold: $spawn_threshold): $found_workspace"
+                _needle_explore_spawn_worker "$found_workspace" "$agent"
+            else
+                _needle_verbose "Workspace $found_workspace has $bead_count beads, below spawn threshold of $spawn_threshold"
             fi
-
-            # Count unassigned beads
-            local bead_count
-            bead_count=$(_needle_explore_count_unassigned "$found_workspace")
-
-            _needle_verbose "Workspace $found_workspace has $bead_count unassigned beads"
-
-            # Check if there's enough work to spawn
-            if (( bead_count > 0 )); then
-                # Emit discovery event
-                _needle_emit_event "strand.explore.found" \
-                    "Found workspace with available beads" \
-                    "workspace=$found_workspace" \
-                    "bead_count=$bead_count" \
-                    "depth=$depth"
-
-                ((workspaces_found++))
-
-                # Spawn worker if threshold met
-                if (( bead_count >= spawn_threshold )); then
-                    _needle_info "Found workspace with $bead_count beads (threshold: $spawn_threshold): $found_workspace"
-                    _needle_explore_spawn_worker "$found_workspace" "$agent"
-                else
-                    _needle_verbose "Workspace has $bead_count beads, below spawn threshold of $spawn_threshold"
-                fi
-            fi
-        done <<< "$beads_dirs"
-
-        # Move up one directory
-        search_dir=$(dirname "$search_dir")
-        ((depth++))
-    done
+        fi
+    done < <(find "$search_root" -maxdepth "$max_depth" -name ".beads" -type d \
+        -not -path "*/node_modules/*" \
+        -not -path "*/.git/*" \
+        -not -path "*/vendor/*" \
+        -not -path "*/.cache/*" 2>/dev/null)
 
     return $workspaces_found
+}
+
+# Legacy alias for backward compatibility
+_needle_explore_search_parents() {
+    _needle_explore_search_workspaces "$@"
 }
 
 # ============================================================================
@@ -339,9 +433,9 @@ _needle_strand_explore() {
         "primary_workspace=$workspace" \
         "agent=$agent"
 
-    # Search parent directories for workspaces with work
+    # Search for workspaces with beads via auto-discovery
     local workspaces_found=0
-    _needle_explore_search_parents "$workspace" "$agent"
+    _needle_explore_search_workspaces "$workspace" "$agent"
     workspaces_found=$?
 
     if (( workspaces_found > 0 )); then
@@ -384,11 +478,12 @@ _needle_strand_explore() {
 # Usage: _needle_explore_stats
 # Returns: JSON object with stats
 _needle_explore_stats() {
-    local threshold spawn_threshold max_workers max_depth
+    local threshold spawn_threshold max_workers max_depth cooldown
     threshold=$(_needle_explore_get_threshold)
     spawn_threshold=$(_needle_explore_get_spawn_threshold)
     max_workers=$(_needle_explore_get_max_workers)
     max_depth=$(_needle_explore_get_max_depth)
+    cooldown=$(_needle_explore_get_cooldown)
 
     _needle_json_object \
         "strand=explore" \
@@ -396,7 +491,8 @@ _needle_explore_stats() {
         "explore_threshold=$threshold" \
         "spawn_threshold=$spawn_threshold" \
         "max_workers=$max_workers" \
-        "max_depth=$max_depth"
+        "max_depth=$max_depth" \
+        "cooldown_seconds=$cooldown"
 }
 
 # ============================================================================
@@ -450,6 +546,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             echo "  explore_threshold: $(_needle_explore_get_threshold)"
             echo "  spawn_threshold: $(_needle_explore_get_spawn_threshold)"
             echo "  max_workers: $(_needle_explore_get_max_workers)"
+            echo "  cooldown_seconds: $(_needle_explore_get_cooldown)"
             echo "  max_depth: $(_needle_explore_get_max_depth)"
             ;;
         -h|--help)

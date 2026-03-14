@@ -132,6 +132,11 @@ NEEDLE_CONFIG_SCHEMA=(
     ["select.stealing_priority_boost"]="integer|false|0||"
     ["select.steal_from_active_workers"]="boolean|false|||"
 
+    # scaling
+    ["scaling.spawn_threshold"]="integer|false|1||"
+    ["scaling.max_workers_per_agent"]="integer|false|1||"
+    ["scaling.cooldown_seconds"]="integer|false|0||"
+
     # updates
     ["updates.check_on_startup"]="boolean|false|||"
     ["updates.check_interval"]="duration|false|||"
