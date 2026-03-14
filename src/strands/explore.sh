@@ -505,6 +505,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     source "$NEEDLE_SRC/lib/output.sh"
     source "$NEEDLE_SRC/lib/config.sh"
     source "$NEEDLE_SRC/lib/json.sh"
+    source "$NEEDLE_SRC/lib/paths.sh"
 
     case "${1:-}" in
         run)
