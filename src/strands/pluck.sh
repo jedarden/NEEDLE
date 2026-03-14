@@ -70,126 +70,26 @@ fi
 # Configuration Helpers
 # ============================================================================
 
-# Auto-discovery cache (avoid repeated find calls within same loop iteration)
-_NEEDLE_PLUCK_DISCOVERED_CACHE=""
-_NEEDLE_PLUCK_DISCOVERED_AT=0
-_NEEDLE_PLUCK_DISCOVERY_TTL=60  # seconds between rescans
-
-# Discover workspaces by scanning for .beads directories
-# Searches under a configurable root (default: $HOME) with depth limit.
-# Results are cached for $_NEEDLE_PLUCK_DISCOVERY_TTL seconds.
+# Get the workspace this worker was deployed to.
+# Pluck only works its assigned workspace — discovery is explore's job.
 #
-# Usage: _needle_pluck_discover_workspaces
-# Returns: Newline-separated list of workspace paths containing .beads
-_needle_pluck_discover_workspaces() {
-    local now
-    now=$(date +%s)
+# Usage: _needle_pluck_get_workspaces [deployed_workspace]
+# Returns: The single workspace path this worker should pluck from
+_needle_pluck_get_workspaces() {
+    local fallback="${1:-}"
 
-    # Return cache if fresh
-    if [[ -n "$_NEEDLE_PLUCK_DISCOVERED_CACHE" ]]; then
-        local age=$(( now - _NEEDLE_PLUCK_DISCOVERED_AT ))
-        if (( age < _NEEDLE_PLUCK_DISCOVERY_TTL )); then
-            echo "$_NEEDLE_PLUCK_DISCOVERED_CACHE"
+    if [[ -n "$fallback" ]]; then
+        local expanded="${fallback/#\~/$HOME}"
+        if [[ -d "$expanded" ]]; then
+            echo "$expanded"
             return 0
         fi
     fi
 
-    # Configurable search root and depth
-    local search_root
-    search_root=$(get_config "discovery.root" "$HOME" 2>/dev/null)
-    search_root="${search_root/#\~/$HOME}"
-
-    local max_depth
-    max_depth=$(get_config "discovery.max_depth" "4" 2>/dev/null)
-
-    local exclude_patterns
-    exclude_patterns=$(get_config "discovery.exclude" "" 2>/dev/null)
-
-    _needle_debug "Discovering workspaces: root=$search_root depth=$max_depth"
-
-    # Build find command with exclusions
-    local find_args=("$search_root" -maxdepth "$max_depth" -name ".beads" -type d)
-    # Always exclude common non-workspace dirs
-    find_args+=(-not -path "*/node_modules/*"
-                -not -path "*/.git/*"
-                -not -path "*/vendor/*"
-                -not -path "*/.cache/*")
-
-    local discovered=()
-    while IFS= read -r beads_dir; do
-        [[ -z "$beads_dir" ]] && continue
-        local ws_dir
-        ws_dir=$(dirname "$beads_dir")
-        discovered+=("$ws_dir")
-    done < <(find "${find_args[@]}" 2>/dev/null)
-
-    # Cache results
-    _NEEDLE_PLUCK_DISCOVERED_CACHE=$(printf '%s\n' "${discovered[@]}")
-    _NEEDLE_PLUCK_DISCOVERED_AT=$now
-
-    _needle_debug "Discovered ${#discovered[@]} workspace(s) with .beads"
-    echo "$_NEEDLE_PLUCK_DISCOVERED_CACHE"
+    # No workspace provided — shouldn't happen, but be safe
+    _needle_warn "pluck: no workspace configured"
+    return 1
 }
-
-# Get list of workspaces to scan for beads.
-# Merges configured workspaces with auto-discovered .beads directories.
-# Primary workspace (fallback) is always included at the front.
-#
-# Usage: _needle_pluck_get_workspaces [fallback_workspace]
-# Returns: Newline-separated list of unique workspace paths
-_needle_pluck_get_workspaces() {
-    local fallback="${1:-}"
-    local -A seen=()
-    local ordered=()
-
-    # 1. Primary workspace first (if provided)
-    if [[ -n "$fallback" ]]; then
-        local fallback_expanded="${fallback/#\~/$HOME}"
-        if [[ -d "$fallback_expanded" ]]; then
-            ordered+=("$fallback_expanded")
-            seen["$fallback_expanded"]=1
-        fi
-    fi
-
-    # 2. Configured workspaces
-    local config_workspaces
-    config_workspaces=$(get_config "workspaces" "" 2>/dev/null)
-
-    if [[ -n "$config_workspaces" ]] && [[ "$config_workspaces" != "null" ]]; then
-        local ws_list=""
-        if [[ "$config_workspaces" == "["* ]]; then
-            ws_list=$(echo "$config_workspaces" | jq -r '.[]' 2>/dev/null)
-        else
-            ws_list=$(echo "$config_workspaces" | tr ',' '\n')
-        fi
-
-        while IFS= read -r ws; do
-            [[ -z "$ws" ]] && continue
-            local expanded="${ws/#\~/$HOME}"
-            if [[ -d "$expanded" ]] && [[ -z "${seen[$expanded]:-}" ]]; then
-                ordered+=("$expanded")
-                seen["$expanded"]=1
-            fi
-        done <<< "$ws_list"
-    fi
-
-    # 3. Auto-discovered workspaces (scan for .beads dirs)
-    local discovered
-    discovered=$(_needle_pluck_discover_workspaces)
-
-    while IFS= read -r ws; do
-        [[ -z "$ws" ]] && continue
-        if [[ -z "${seen[$ws]:-}" ]]; then
-            ordered+=("$ws")
-            seen["$ws"]=1
-            _needle_debug "Auto-discovered workspace: $ws"
-        fi
-    done <<< "$discovered"
-
-    if [[ ${#ordered[@]} -eq 0 ]] && [[ -n "$fallback" ]]; then
-        echo "$fallback"
-        return 0
-    fi
 
     printf '%s\n' "${ordered[@]}"
 }
