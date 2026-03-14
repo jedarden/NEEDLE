@@ -251,6 +251,25 @@ bug_scanner:
   preflight_check: false        # Run a quick critical-only check before agent dispatch
 
 # ============================================================================
+# Debug
+# ============================================================================
+# Automatic bug bead creation for unexpected errors during NEEDLE operation.
+# When enabled, creates bug beads in a configured workspace when errors occur.
+#
+# Error types that trigger auto bead creation:
+#   quarantine  — Error escalation is "quarantine" (unrecoverable errors)
+#   unregistered — Error event type is not in the error registry
+#
+# Auto beads are rate-limited by error signature to prevent bead floods.
+debug:
+  auto_bead_on_error: false     # Enable/disable auto bead creation (default: false)
+  auto_bead_workspace: ""       # Workspace path where auto beads are created (required if enabled)
+  auto_bead_types:              # Error types that trigger auto bead creation (array)
+    - quarantine                #   - quarantine: errors with escalation=quarantine
+    - unregistered              #   - unregistered: unknown/unregistered error types
+  auto_bead_rate_limit: 3600    # Minimum seconds between duplicate filings (default: 3600 = 1 hour)
+
+# ============================================================================
 # Updates
 # ============================================================================
 # Automatic NEEDLE binary update checking and installation.

@@ -25,6 +25,12 @@ if ! declare -f _needle_telemetry_emit &>/dev/null; then
     source "$_NEEDLE_ERRORS_SRC/../telemetry/events.sh"
 fi
 
+# Ensure get_config is available (for debug.auto_bead_* config)
+if ! declare -f get_config &>/dev/null; then
+    _NEEDLE_ERRORS_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    source "$_NEEDLE_ERRORS_SRC/config.sh"
+fi
+
 # ============================================================================
 # Error Type Registry
 # ============================================================================
@@ -309,8 +315,16 @@ _needle_error_handle() {
     # Emit the JSONL event with exit_code included in data
     _needle_telemetry_emit "$event_type" "error" "exit_code=$exit_code" "$@"
 
+    # Get the escalation action
+    local escalation
+    escalation=$(_needle_error_get_escalation "$event_type")
+
+    # Auto-create bug bead for quarantine errors or unregistered error types
+    # This is called after telemetry emit so the error is logged regardless
+    _needle_error_auto_bead "$event_type" "$escalation" "exit_code=$exit_code" "$@" 2>/dev/null || true
+
     # Return the escalation action
-    _needle_error_get_escalation "$event_type"
+    printf '%s' "$escalation"
 }
 
 # Handle an error with retry count tracking
@@ -330,6 +344,171 @@ _needle_error_handle_with_retries() {
 
     # Return escalation action respecting retry limits
     _needle_error_escalation_with_retries "$event_type" "$retry_count"
+}
+
+# ============================================================================
+# Auto Bug Bead Creation
+# ============================================================================
+
+# Create a bug bead automatically when unexpected errors occur.
+# Called from _needle_error_handle() when escalation is quarantine or error type
+# is unregistered. Rate-limited by error signature to prevent bead floods.
+#
+# Usage: _needle_error_auto_bead <event_type> <escalation> [key=value ...]
+# Returns: 0 (always, errors are logged but non-fatal)
+#
+# Example:
+#   _needle_error_auto_bead "error.timeout" "quarantine" "bead_id=nd-123"
+_needle_error_auto_bead() {
+    local event_type="$1"
+    local escalation="$2"
+    shift 2
+
+    # Check if auto bead creation is enabled
+    local enabled
+    enabled=$(get_config "debug.auto_bead_on_error" "false" 2>/dev/null)
+    if [[ "$enabled" != "true" ]]; then
+        return 0
+    fi
+
+    # Get configured workspace
+    local workspace
+    workspace=$(get_config "debug.auto_bead_workspace" "" 2>/dev/null)
+    if [[ -z "$workspace" ]] || [[ ! -d "$workspace" ]]; then
+        _needle_debug "auto_bead: workspace not configured or invalid, skipping"
+        return 0
+    fi
+
+    # Check if br is available
+    if ! command -v br &>/dev/null; then
+        _needle_debug "auto_bead: br CLI not found, skipping"
+        return 0
+    fi
+
+    # Get configured auto bead types
+    local auto_types
+    auto_types=$(get_config "debug.auto_bead_types" "quarantine,unregistered" 2>/dev/null)
+
+    # Check if this error type should trigger auto bead creation
+    local should_create=false
+
+    # Check for quarantine escalation
+    if [[ "$escalation" == "quarantine" ]]; then
+        if [[ ",$auto_types," == *,quarantine,* ]]; then
+            should_create=true
+        fi
+    fi
+
+    # Check for unregistered error type
+    if ! _needle_error_is_registered "$event_type"; then
+        if [[ ",$auto_types," == *,unregistered,* ]]; then
+            should_create=true
+        fi
+    fi
+
+    if [[ "$should_create" != "true" ]]; then
+        return 0
+    fi
+
+    # Rate limit check by error signature (event_type + workspace)
+    local rate_limit
+    rate_limit=$(get_config "debug.auto_bead_rate_limit" "3600" 2>/dev/null)
+
+    local signature="${event_type}:$(basename "$workspace")"
+    local signature_hash
+    signature_hash=$(echo "$signature" | md5sum | cut -c1-8)
+
+    local state_dir="$NEEDLE_HOME/$NEEDLE_STATE_DIR"
+    local last_bead_file="$state_dir/auto_bead_${signature_hash}"
+
+    mkdir -p "$state_dir"
+
+    # Check rate limit
+    if [[ -f "$last_bead_file" ]]; then
+        local last_ts
+        last_ts=$(cat "$last_bead_file" 2>/dev/null)
+
+        if [[ -n "$last_ts" ]] && [[ "$last_ts" =~ ^[0-9]+$ ]]; then
+            local now
+            now=$(date +%s)
+            local elapsed=$((now - last_ts))
+
+            if ((elapsed < rate_limit)); then
+                _needle_debug "auto_bead: rate limited (${elapsed}s since last bead, need ${rate_limit}s)"
+                return 0
+            fi
+        fi
+    fi
+
+    # Record timestamp for rate limiting
+    date +%s > "$last_bead_file"
+
+    # Build bead title and body
+    local title="[AUTO] ${event_type}: Unexpected error in $(basename "$workspace")"
+
+    local body
+    body="# Auto-generated Bug Report
+
+## Error Event
+- **Event Type**: \`${event_type}\`
+- **Escalation**: \`${escalation}\`
+- **Workspace**: \`${workspace}\`
+- **Timestamp**: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+## Context
+"
+
+    # Parse key=value pairs from arguments
+    local context_parts=()
+    while [[ $# -gt 0 ]]; do
+        local kv="$1"
+        if [[ "$kv" =~ ^([a-zA-Z_][a-zA-Z0-9_]*)=(.*)$ ]]; then
+            local key="${BASH_REMATCH[1]}"
+            local value="${BASH_REMATCH[2]}"
+            context_parts+=("- **${key}**: \`${value}\`")
+        fi
+        shift
+    done
+
+    if [[ ${#context_parts[@]} -gt 0 ]]; then
+        body+=$'\n'
+        printf -v body '%s%s\n' "$body" "${context_parts[*]}"
+    fi
+
+    # Try to get worker log excerpt if available
+    local worker_id="${NEEDLE_WORKER_ID:-unknown}"
+    body+=$'\n'"## Worker Log (last 20 lines)
+
+Worker: \`${worker_id}\`
+
+\`\`\`
+"
+    local log_file="$NEEDLE_HOME/$NEEDLE_LOG_DIR/${worker_id}.log"
+    if [[ -f "$log_file" ]]; then
+        body+="$(tail -20 "$log_file" 2>/dev/null)"
+    else
+        body+="(log file not found)"
+    fi
+    body+=$'\n'"\\\`\`\`"
+
+    # Create the bead using br CLI
+    local bead_id
+    bead_id=$(cd "$workspace" 2>/dev/null && br create \
+        --type bug \
+        --title "$title" \
+        --description "$body" \
+        --label "auto-generated" \
+        --label "needle-error" \
+        --status open \
+        --silent 2>/dev/null)
+
+    if [[ -n "$bead_id" ]] && [[ "$bead_id" != "null" ]]; then
+        _needle_info "auto_bead: created bug bead ${bead_id} for ${event_type}"
+    else
+        _needle_warn "auto_bead: failed to create bead for ${event_type}"
+    fi
+
+    return 0
 }
 
 # ============================================================================

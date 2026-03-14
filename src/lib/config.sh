@@ -134,6 +134,12 @@ _NEEDLE_CONFIG_DEFAULTS='{
     "timeout": 300,
     "output_format": "json",
     "preflight_check": false
+  },
+  "debug": {
+    "auto_bead_on_error": false,
+    "auto_bead_workspace": "",
+    "auto_bead_types": ["quarantine", "unregistered"],
+    "auto_bead_rate_limit": 3600
   }
 }'
 
@@ -415,6 +421,25 @@ fabric:
 
   # batching: Enable event batching to reduce HTTP overhead (default: false)
   batching: false
+
+# Debug configuration for development and troubleshooting
+debug:
+  # auto_bead_on_error: Automatically create bug beads on unexpected errors (default: false)
+  auto_bead_on_error: false
+
+  # auto_bead_workspace: Workspace path where auto bug beads are created (required if enabled)
+  # Must be an absolute path to a valid beads workspace
+  auto_bead_workspace: ""
+
+  # auto_bead_types: Error types that trigger auto bead creation (comma-separated)
+  # Options: quarantine (escalation=quarantine), unregistered (unknown error type)
+  auto_bead_types:
+    - quarantine
+    - unregistered
+
+  # auto_bead_rate_limit: Minimum seconds between duplicate auto bead filings (default: 3600 = 1 hour)
+  # Prevents bead flood for recurring errors. Uses signature (event_type + workspace) for dedup.
+  auto_bead_rate_limit: 3600
 '
 
 # Check if yq is available

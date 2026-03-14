@@ -159,6 +159,11 @@ NEEDLE_CONFIG_SCHEMA=(
     ["fabric.endpoint"]="string|false|||"
     ["fabric.timeout"]="integer|false|0||"
     ["fabric.batching"]="boolean|false|||"
+
+    # debug
+    ["debug.auto_bead_on_error"]="boolean|false|||"
+    ["debug.auto_bead_workspace"]="string|false|||"
+    ["debug.auto_bead_rate_limit"]="integer|false|0||"
 )
 
 # ============================================================================
