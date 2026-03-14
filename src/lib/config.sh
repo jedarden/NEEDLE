@@ -945,6 +945,33 @@ fabric:
 
   # batching: Enable event batching to reduce HTTP overhead (default: false)
   batching: false
+
+# Bug scanner configuration for code quality gates
+# Uses ultimate_bug_scanner (UBS) to detect common bug patterns
+bug_scanner:
+  # enabled: Enable/disable bug scanning (default: true)
+  enabled: true
+
+  # severity_threshold: Minimum severity level to fail beads (default: error)
+  # Options: critical, error, warning, info
+  severity_threshold: error
+
+  # fail_on_issues: Fail bead completion when issues are found (default: true)
+  # When false, issues are logged but beads still complete
+  fail_on_issues: true
+
+  # create_follow_up: Create follow-up beads for fixing issues (default: true)
+  create_follow_up: true
+
+  # timeout: Maximum time for scan to complete in seconds (default: 300)
+  timeout: 300
+
+  # output_format: UBS output format (default: json)
+  output_format: json
+
+  # preflight_check: Run quick check before agent execution (default: false)
+  # When true, workspace is scanned for critical issues before agent starts
+  preflight_check: false
 EOF
 
     if [[ $? -eq 0 ]]; then
