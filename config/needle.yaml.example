@@ -202,9 +202,12 @@ file_locks:
   # strategy: Locking strategy for concurrent file access
   strategy: pessimistic
   # ld_preload: Intercept filesystem calls via LD_PRELOAD for deeper lock coverage
+  # Provides hard enforcement for agents without native hook support (OpenCode, Aider)
   ld_preload: false
   # ld_preload_lib: Path to the LD_PRELOAD shared library (required if ld_preload: true)
-  # ld_preload_lib: /usr/local/lib/needle_lock_intercept.so
+  # Build with: ./scripts/build-native.sh
+  # Default: ~/.needle/lib/libcheckout.so
+  # ld_preload_lib: ~/.needle/lib/libcheckout.so
 
   # Merge settings (applies when strategy: optimistic)
   merge:
