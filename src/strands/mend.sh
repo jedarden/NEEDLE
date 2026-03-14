@@ -123,6 +123,47 @@ _needle_strand_mend() {
 }
 
 # ============================================================================
+# Bead Release Helper
+# ============================================================================
+
+# Release a bead directly via sqlite3 using a known db_path
+# Usage: _needle_mend_release_bead <db_path> <bead_id> <reason>
+# Returns: 0 on success, 1 on failure
+_needle_mend_release_bead() {
+    local db_path="$1"
+    local bead_id="$2"
+    local reason="${3:-released}"
+
+    if ! command -v sqlite3 &>/dev/null; then
+        _needle_warn "mend: sqlite3 not available for bead release"
+        return 1
+    fi
+
+    if [[ ! -f "$db_path" ]]; then
+        _needle_warn "mend: database not found at $db_path"
+        return 1
+    fi
+
+    local sql_result
+    sql_result=$(sqlite3 "$db_path" \
+        "UPDATE issues SET
+            status = 'open',
+            assignee = NULL,
+            claimed_by = NULL,
+            claim_timestamp = NULL
+         WHERE id = '$bead_id' AND status = 'in_progress';
+         SELECT changes();" 2>&1)
+
+    if [[ "$sql_result" == "1" ]] || [[ "$sql_result" =~ ^[1-9][0-9]*$ ]]; then
+        _needle_info "Released bead: $bead_id ($reason) via sqlite3"
+        return 0
+    else
+        _needle_warn "Failed to release bead: $bead_id (sqlite3 returned: $sql_result)"
+        return 1
+    fi
+}
+
+# ============================================================================
 # Orphaned Claims Cleanup
 # ============================================================================
 
@@ -204,7 +245,7 @@ _needle_mend_orphaned_claims() {
             _needle_warn "Found orphaned claim: $bead_id (worker: $assignee - no heartbeat)"
 
             # Release the claim via SQL (br update --release doesn't exist)
-            if NEEDLE_WORKSPACE="$workspace" _needle_release_bead "$bead_id" --reason "orphaned_claim" --actor "mend_strand"; then
+            if _needle_mend_release_bead "$db_path" "$bead_id" "orphaned_claim"; then
                 _needle_info "Released orphaned claim: $bead_id"
 
                 # Emit event for monitoring
@@ -230,7 +271,7 @@ _needle_mend_orphaned_claims() {
                     _needle_warn "Found orphaned claim: $bead_id (worker: $assignee - process $pid dead)"
 
                     # Release the claim via SQL
-                    if NEEDLE_WORKSPACE="$workspace" _needle_release_bead "$bead_id" --reason "orphaned_claim" --actor "mend_strand"; then
+                    if _needle_mend_release_bead "$db_path" "$bead_id" "orphaned_claim"; then
                         _needle_info "Released orphaned claim: $bead_id"
 
                         # Emit event for monitoring
@@ -364,7 +405,7 @@ _needle_mend_stale_claims() {
             _needle_warn "Found stale claim: $bead_id (age: ${age}s, threshold: ${stale_threshold}s, assignee: ${assignee:-unknown})"
 
             # Release the stale claim using SQL fallback (works around br CLI CHECK constraint bug)
-            if _needle_release_bead "$bead_id" --reason "stale_claim_auto_release" --actor "mend_strand"; then
+            if _needle_mend_release_bead "$db_path" "$bead_id" "stale_claim_auto_release"; then
                 _needle_info "Released stale claim: $bead_id (held for ${age}s)"
 
                 # Emit event for monitoring
