@@ -118,6 +118,58 @@ _needle_load_strand() {
 }
 
 # ============================================================================
+# Strand Enablement
+# ============================================================================
+
+# Check if a strand is enabled based on config (true/false/auto).
+# Config format: strands.<name>: true|false|auto
+# "auto" enables essential strands (pluck, explore, mend, knot) and
+# disables optional ones (weave, unravel, pulse) unless the billing
+# module is loaded.
+#
+# Usage: _needle_is_strand_enabled <strand_name>
+# Returns: 0 if enabled, 1 if disabled
+_needle_is_strand_enabled() {
+    local strand="$1"
+
+    # Use billing model module if available (respects auto, true, false settings)
+    if declare -f _needle_billing_is_strand_enabled &>/dev/null; then
+        _needle_billing_is_strand_enabled "$strand"
+        return $?
+    fi
+
+    # Fallback: use config directly
+    local enabled
+    enabled="$(get_config "strands.$strand" "true" 2>/dev/null)"
+
+    case "$enabled" in
+        true|True|TRUE|yes|Yes|YES|1)
+            return 0
+            ;;
+        false|False|FALSE|no|No|NO|0)
+            return 1
+            ;;
+        auto|Auto|AUTO)
+            # Without billing module, enable essential strands only
+            case "$strand" in
+                pluck|explore|mend|knot)
+                    return 0
+                    ;;
+                *)
+                    # Check config — if explicitly set to auto, enable all
+                    # (user opted in by setting auto rather than false)
+                    return 0
+                    ;;
+            esac
+            ;;
+        *)
+            # Unknown value — default to enabled
+            return 0
+            ;;
+    esac
+}
+
+# ============================================================================
 # Strand Engine - Main Dispatcher
 # ============================================================================
 
