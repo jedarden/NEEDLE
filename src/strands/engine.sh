@@ -196,8 +196,17 @@ _needle_strand_engine() {
     local agent="$2"
 
     # Hardcoded strand order (priority waterfall).
+    # 1. pluck    - Claim open beads
+    # 2. mend     - Reclaim stale/hung in_progress beads (confirm worker liveness)
+    # 3. explore  - Search child folders for .beads/, then walk upward to siblings
+    #              Returns 2 + NEEDLE_EXPLORE_NEW_WORKSPACE to change workspace
+    #              and restart the loop (so pluck can claim in the new workspace)
+    # 4. weave    - Gap analysis: docs/code vs intended goals, create beads
+    # 5. pulse    - Security scan / utility checks, create beads as needed
+    # 6. unravel  - Attempt to solve human-tagged beads without human
+    # 7. knot     - Alert the human (failure state)
     # Enablement is controlled by config (true/false/auto per strand name).
-    local strands=(pluck explore mend weave unravel pulse knot)
+    local strands=(pluck mend explore weave pulse unravel knot)
 
     # DIAGNOSTIC: Log strand engine invocation with full context
     _needle_diag_engine "Strand engine started" \
@@ -208,29 +217,27 @@ _needle_strand_engine() {
         "path=$PATH" \
         "br_available=$(command -v br &>/dev/null && echo 'yes' || echo 'no')"
 
-    _needle_debug "DIAG: Strand engine started - workspace=$workspace, agent=$agent, NEEDLE_VERBOSE=${NEEDLE_VERBOSE:-false}"
     _needle_debug "Starting strand engine for workspace: $workspace, agent: $agent"
 
     # Track strand results for final diagnostic
     local strand_results=()
-    local strand_num=0
     local disabled_count=0
     local enabled_count=0
     local strand_count=${#strands[@]}
 
-    for strand in "${strands[@]}"; do
-        ((strand_num++))
+    # Use index-based loop so explore can restart it via workspace change
+    local strand_idx=0
+    local max_restarts=5  # Prevent infinite loops
+    local restart_count=0
+
+    while (( strand_idx < strand_count )); do
+        local strand="${strands[$strand_idx]}"
+        local strand_num=$((strand_idx + 1))
 
         _needle_verbose "Checking strand $strand_num/$strand_count: $strand"
 
         # Check if strand is enabled via config (true/false/auto)
         if ! _needle_is_strand_enabled "$strand"; then
-            _needle_emit_event "strand.skipped" \
-                "Strand $strand ($strand_num) is disabled" \
-                "strand=$strand_num" \
-                "name=$strand" \
-                "reason=disabled"
-
             _needle_diag_engine "Strand disabled, skipping" \
                 "strand=$strand" \
                 "strand_num=$strand_num"
@@ -238,6 +245,7 @@ _needle_strand_engine() {
             _needle_debug "Strand $strand ($strand_num) is disabled, skipping"
             strand_results+=("$strand:disabled")
             ((disabled_count++))
+            ((strand_idx++))
             continue
         fi
 
@@ -247,23 +255,10 @@ _needle_strand_engine() {
 
         # Verify strand function exists
         if ! declare -f "$func_name" &>/dev/null; then
-            _needle_emit_event "strand.skipped" \
-                "Strand $strand ($strand_num) function not found" \
-                "strand=$strand_num" \
-                "name=$strand" \
-                "reason=not_defined"
-
             strand_results+=("$strand:not_defined")
+            ((strand_idx++))
             continue
         fi
-
-        # Emit strand started event
-        _needle_emit_event "strand.started" \
-            "Starting strand $strand ($strand_num)" \
-            "strand=$strand_num" \
-            "name=$strand" \
-            "workspace=$workspace" \
-            "agent=$agent"
 
         _needle_diag_engine "Dispatching to strand" \
             "strand=$strand" \
@@ -280,17 +275,36 @@ _needle_strand_engine() {
         _needle_diag_engine "Strand returned result" \
             "strand=$strand" \
             "strand_num=$strand_num" \
-            "result=$result" \
-            "result_meaning=$([[ $result -eq 0 ]] && echo 'work_found' || echo 'no_work')"
+            "result=$result"
+
+        if [[ $result -eq 2 ]] && [[ -n "${NEEDLE_EXPLORE_NEW_WORKSPACE:-}" ]]; then
+            # Explore found a workspace with beads — change workspace and restart
+            workspace="$NEEDLE_EXPLORE_NEW_WORKSPACE"
+            unset NEEDLE_EXPLORE_NEW_WORKSPACE
+
+            ((restart_count++))
+            if (( restart_count > max_restarts )); then
+                _needle_warn "Engine hit max restarts ($max_restarts), stopping"
+                break
+            fi
+
+            _needle_telemetry_emit "engine.workspace_changed" "info" \
+                "new_workspace=$workspace" \
+                "changed_by=$strand" \
+                "restart_count=$restart_count"
+
+            _needle_info "Explore changed workspace to $workspace, restarting strands"
+
+            # Reset and restart from pluck
+            strand_results=()
+            disabled_count=0
+            enabled_count=0
+            strand_idx=0
+            continue
+        fi
 
         if [[ $result -eq 0 ]]; then
             # Work found and processed
-            _needle_emit_event "strand.completed" \
-                "Strand $strand ($strand_num) found work" \
-                "strand=$strand_num" \
-                "name=$strand" \
-                "result=work_found"
-
             _needle_diag_engine "Work found and completed" \
                 "strand=$strand" \
                 "strand_num=$strand_num" \
@@ -302,16 +316,9 @@ _needle_strand_engine() {
         fi
 
         # Fallthrough to next strand
-        _needle_emit_event "strand.fallthrough" \
-            "Strand $strand ($strand_num) found no work, continuing" \
-            "from=$strand_num" \
-            "from_name=$strand" \
-            "reason=no_work" \
-            "to=$((strand_num + 1))"
-
         _needle_verbose "Strand $strand ($strand_num): no work found, continuing"
-
         strand_results+=("$strand:no_work")
+        ((strand_idx++))
     done
 
     # All strands exhausted, no work found

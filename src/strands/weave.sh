@@ -262,7 +262,7 @@ _needle_weave_get_open_beads() {
 # ============================================================================
 
 # Build the weave analysis prompt
-# Returns: Prompt string for agent analysis
+# Includes actual file contents so the LLM can analyze gaps
 _needle_weave_build_prompt() {
     local workspace="$1"
     local doc_files="$2"
@@ -271,71 +271,158 @@ _needle_weave_build_prompt() {
     local max_beads
     max_beads=$(get_config "strands.weave.max_beads_per_run" "5")
 
-    # Build the prompt
+    # Build the prompt with actual file contents
     cat << PROMPT_EOF
-You are analyzing a codebase for gaps between documentation and implementation.
+You are performing a gap analysis on a codebase. Your job is to find gaps between
+what was documented/planned and what actually exists in the implementation.
 
-## Documentation Files
-$(_needle_weave_format_doc_list "$doc_files")
+## Workspace
+$workspace
 
-## Current Open Beads
+## Documentation Contents
+$(_needle_weave_format_doc_contents "$doc_files")
+
+## Codebase Structure
+$(_needle_weave_codebase_summary "$workspace")
+
+## Current Open Beads (already tracked — do NOT duplicate)
 $open_beads
+
+## Current In-Progress Beads (being worked on — do NOT duplicate)
+$(_needle_weave_get_in_progress_beads "$workspace")
 
 ## Instructions
 
-1. Read the documentation files above (ADRs, TODOs, ROADMAPs, README)
-2. Identify features, tasks, or fixes mentioned in docs that:
-   - Are NOT already tracked as open beads
-   - Are NOT already implemented in the codebase
-   - Are actionable and well-defined enough to work on
+Analyze the documentation contents and codebase structure above. Identify:
 
-3. For each gap found, output a JSON object:
+1. **Features described in docs but not implemented** — Look for described functionality,
+   architecture, or behavior that is missing from the actual codebase.
+
+2. **TODOs, FIXMEs, HACKs in code** — Find inline markers that indicate known gaps.
+
+3. **Incomplete implementations** — Functions that are stubbed, partially implemented,
+   or have placeholder logic (e.g., "return 0" where real logic should be).
+
+4. **Missing tests** — Code modules without corresponding test files.
+
+5. **Configuration gaps** — Documented config options that aren't implemented,
+   or code that references config keys that don't exist in defaults.
+
+For each gap, output a JSON object:
 {
   "gaps": [
     {
-      "title": "Brief title for the bead",
-      "description": "Detailed description of what needs to be done",
-      "source_file": "path/to/doc/that/mentions/this",
-      "source_line": "relevant quote from documentation",
+      "title": "Brief actionable title",
+      "description": "What needs to be done and why",
+      "source_file": "path/to/file/where/gap/was/found",
+      "source_line": "relevant quote or line reference",
       "priority": 2,
-      "type": "task|bug|feature",
-      "estimated_effort": "small|medium|large"
+      "type": "task|bug|feature"
     }
   ]
 }
 
-4. Only output gaps that are:
-   - Clearly defined in documentation
-   - Not duplicates of existing beads
-   - Actually missing from implementation
-
-5. If no gaps found, output: {"gaps": []}
+## Rules
+- Maximum $max_beads gaps per analysis
+- Do NOT duplicate existing open or in-progress beads
+- Only include concrete, actionable items
+- Skip aspirational items without clear implementation path
+- If no gaps found, output: {"gaps": []}
 
 ## Priority Values
-- 0 = critical (blocking issues, security concerns)
-- 1 = high (important features, significant improvements)
+- 0 = critical (security, data loss, blocking)
+- 1 = high (important features, significant bugs)
 - 2 = normal (standard tasks)
-- 3 = low (nice-to-have, minor improvements)
-
-## Constraints
-- Maximum $max_beads gaps to identify
-- Only include actionable items that can become beads
-- Skip items that are vague or purely aspirational
-- Prefer concrete, well-defined tasks
+- 3 = low (nice-to-have, cleanup)
 PROMPT_EOF
 }
 
-# Format documentation file list for prompt
-_needle_weave_format_doc_list() {
+# Format documentation files with their CONTENTS for the prompt
+_needle_weave_format_doc_contents() {
     local doc_files="$1"
+    local max_content_per_file=200  # lines per file to include
     local idx=1
 
     while IFS= read -r file; do
         if [[ -n "$file" ]] && [[ -f "$file" ]]; then
-            echo "$idx. $file"
+            echo ""
+            echo "### $idx. $file"
+            echo '```'
+            head -n "$max_content_per_file" "$file" 2>/dev/null
+            local total_lines
+            total_lines=$(wc -l < "$file" 2>/dev/null || echo 0)
+            if (( total_lines > max_content_per_file )); then
+                echo "... ($((total_lines - max_content_per_file)) more lines truncated)"
+            fi
+            echo '```'
             ((idx++))
         fi
     done <<< "$doc_files"
+}
+
+# Generate a summary of the codebase structure
+_needle_weave_codebase_summary() {
+    local workspace="$1"
+    local max_depth=3
+
+    echo '```'
+    # Show directory tree (excluding common noise)
+    if command -v tree &>/dev/null; then
+        tree -L "$max_depth" -I 'node_modules|.git|vendor|.cache|__pycache__|.beads|dist|build' \
+            --dirsfirst "$workspace" 2>/dev/null | head -80
+    else
+        find "$workspace" -maxdepth "$max_depth" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/vendor/*" \
+            -not -path "*/.cache/*" \
+            -not -path "*/__pycache__/*" \
+            -not -path "*/.beads/*" \
+            -not -path "*/dist/*" \
+            -not -path "*/build/*" \
+            2>/dev/null | sort | head -80
+    fi
+    echo '```'
+
+    # Show TODOs/FIXMEs in code
+    local todo_count
+    todo_count=$(grep -r -c 'TODO\|FIXME\|HACK\|XXX' "$workspace" \
+        --include='*.sh' --include='*.py' --include='*.js' --include='*.ts' \
+        --include='*.go' --include='*.rs' --include='*.yaml' --include='*.yml' \
+        2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+
+    if (( todo_count > 0 )); then
+        echo ""
+        echo "### Inline TODOs/FIXMEs ($todo_count found)"
+        echo '```'
+        grep -rn 'TODO\|FIXME\|HACK\|XXX' "$workspace" \
+            --include='*.sh' --include='*.py' --include='*.js' --include='*.ts' \
+            --include='*.go' --include='*.rs' --include='*.yaml' --include='*.yml' \
+            -not -path "*/.beads/*" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            2>/dev/null | head -30
+        echo '```'
+    fi
+}
+
+# Get in-progress beads to avoid duplicating work being done
+_needle_weave_get_in_progress_beads() {
+    local workspace="$1"
+
+    local in_progress
+    in_progress=$(br list --workspace="$workspace" --status in_progress --json 2>/dev/null)
+
+    if [[ -z "$in_progress" ]] || [[ "$in_progress" == "[]" ]] || [[ "$in_progress" == "null" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    if _needle_command_exists jq; then
+        echo "$in_progress" | jq -c '[.[] | {id, title}]' 2>/dev/null || echo "[]"
+    else
+        echo "[]"
+    fi
 }
 
 # ============================================================================
