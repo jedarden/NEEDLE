@@ -51,7 +51,7 @@ _maybe_heartbeat() {
         local now
         now=$(date +%s 2>/dev/null || echo "0")
         if (( now - _last_heartbeat_time >= _heartbeat_interval )); then
-            eval "$NEEDLE_HEARTBEAT_CMD" 2>/dev/null || true
+            bash -c "$NEEDLE_HEARTBEAT_CMD" 2>/dev/null || true
             _last_heartbeat_time="$now"
         fi
     fi
