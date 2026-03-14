@@ -121,6 +121,117 @@ scaling:
   cooldown_seconds: 30          # Minimum seconds between consecutive spawn attempts
 
 # ============================================================================
+# Hooks
+# ============================================================================
+# User-defined scripts executed at lifecycle events. Each hook receives
+# environment variables describing the current bead and worker state.
+#
+# Hook exit codes:
+#   0   — Success (continue normally)
+#   1   — Warning (log warning but continue)
+#   2   — Abort (stop current operation)
+#   3   — Skip (skip remaining hooks for this event)
+#   124 — Timeout (hook exceeded timeout limit)
+#
+# Hook points (all optional):
+#   pre_claim      — Before NEEDLE attempts to claim a bead
+#   post_claim     — After a bead is successfully claimed
+#   pre_execute    — Before the worker agent starts on a bead
+#   post_execute   — After the worker agent finishes (any outcome)
+#   pre_complete   — Before marking a bead as complete
+#   post_complete  — After a bead is marked complete
+#   on_failure     — When a bead fails or is quarantined
+#   on_quarantine  — When a bead is explicitly quarantined
+#   pre_commit     — Before committing work (git operations)
+#   post_task      — After the full bead lifecycle ends
+#   error_recovery — When NEEDLE attempts to recover from an error
+hooks:
+  # timeout: Maximum time to wait for any single hook script to complete
+  timeout: 30s
+  # fail_action: What to do when a hook exits non-zero
+  #   warn   — Log warning and continue (default)
+  #   abort  — Stop the current operation
+  #   ignore — Silently ignore hook failures
+  fail_action: warn
+
+  # Hook scripts (uncomment and set paths to enable)
+  # pre_claim:     ~/.needle/hooks/pre-claim.sh
+  # post_claim:    ~/.needle/hooks/post-claim.sh
+  # pre_execute:   ~/.needle/hooks/pre-execute.sh
+  # post_execute:  ~/.needle/hooks/post-execute.sh
+  # pre_complete:  ~/.needle/hooks/pre-complete.sh
+  # post_complete: ~/.needle/hooks/post-complete.sh
+  # on_failure:    ~/.needle/hooks/on-failure.sh
+  # on_quarantine: ~/.needle/hooks/on-quarantine.sh
+  # pre_commit:    ~/.needle/hooks/pre-commit.sh
+  # post_task:     ~/.needle/hooks/post-task.sh
+  # error_recovery: ~/.needle/hooks/error-recovery.sh
+
+# ============================================================================
+# File Locks
+# ============================================================================
+# Controls file locking behavior to prevent concurrent workers from writing
+# to the same files simultaneously.
+#
+# Strategies:
+#   pessimistic — Acquire exclusive lock before reading/writing (default)
+#   optimistic  — Write without locking; detect and merge conflicts after
+#
+# Merge conflict resolution (optimistic strategy only):
+#   git-merge-file — Use git's built-in three-way merge
+#   diff3          — Use diff3 for three-way merge
+#   custom         — Use a custom merge tool (set in merge.tool)
+file_locks:
+  # Maximum time a lock can be held before it is considered stale
+  timeout: 30m
+  # stale_action: What to do when a stale lock is detected
+  #   warn    — Log warning but keep the lock (default)
+  #   release — Force-release the stale lock
+  #   ignore  — Do not check for stale locks
+  stale_action: warn
+  # strategy: Locking strategy for concurrent file access
+  strategy: pessimistic
+  # ld_preload: Intercept filesystem calls via LD_PRELOAD for deeper lock coverage
+  ld_preload: false
+  # ld_preload_lib: Path to the LD_PRELOAD shared library (required if ld_preload: true)
+  # ld_preload_lib: /usr/local/lib/needle_lock_intercept.so
+
+  # Merge settings (applies when strategy: optimistic)
+  merge:
+    enabled: false               # Enable automatic merge on optimistic conflict
+    tool: git-merge-file         # Merge tool: git-merge-file | diff3 | custom
+    on_conflict: block           # Action when merge fails: block | keep_ours | keep_theirs
+
+# ============================================================================
+# Watchdog (Heartbeat)
+# ============================================================================
+# Monitors worker health via heartbeat signals. Workers that stop sending
+# heartbeats are assumed stuck and can be automatically recovered.
+watchdog:
+  interval: 30                  # Seconds between watchdog checks
+  heartbeat_timeout: 120        # Seconds without a heartbeat before worker is considered stuck
+  bead_timeout: 600             # Seconds a bead can be in_progress before forced recovery
+  recovery_action: restart      # Action when a stuck worker is detected: restart | stop
+  startup_grace: 60             # Seconds to wait before enforcing heartbeat checks on new workers
+
+# ============================================================================
+# Mitosis
+# ============================================================================
+# Controls automatic bead splitting. When enabled, complex beads can be
+# split into smaller child beads by the worker before starting execution.
+#
+# skip_types:   Comma-separated bead types to never split (e.g., bug, hotfix)
+# skip_labels:  Comma-separated labels that opt a bead out of splitting
+mitosis:
+  enabled: true                 # Enable automatic bead splitting
+  max_children: 5               # Maximum child beads a single bead can be split into
+  min_children: 2               # Minimum children required to justify splitting
+  min_complexity: 3             # Minimum estimated complexity score to consider splitting
+  timeout: 60                   # Seconds the mitosis analysis step may run before aborting
+  skip_types: bug,hotfix        # Never split beads of these types
+  skip_labels: no-mitosis,atomic # Never split beads with these labels
+
+# ============================================================================
 # Updates
 # ============================================================================
 # Automatic NEEDLE binary update checking and installation.
