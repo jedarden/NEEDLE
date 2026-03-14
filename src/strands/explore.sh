@@ -299,6 +299,101 @@ _needle_explore_spawn_worker() {
     fi
 }
 
+# Spawn workers based on spawn_threshold for a workspace with beads.
+# If unassigned bead count exceeds spawn_threshold, spawn additional workers.
+# Respects max_workers_per_agent and cooldown_seconds.
+#
+# Usage: _needle_explore_spawn_workers_if_needed <workspace> <agent>
+# Returns: 0 on success, 1 on failure
+_needle_explore_spawn_workers_if_needed() {
+    local workspace="$1"
+    local agent="$2"
+
+    # Check cooldown first before any calculations
+    if ! _needle_explore_check_cooldown "$agent" "$workspace"; then
+        _needle_debug "Auto-scaling: cooldown active, not spawning workers for $workspace"
+        return 1
+    fi
+
+    local spawn_threshold
+    spawn_threshold=$(_needle_explore_get_spawn_threshold)
+
+    # Get unassigned bead count
+    local bead_count
+    bead_count=$(_needle_explore_count_unassigned "$workspace")
+
+    if [[ "$bead_count" -le "$spawn_threshold" ]]; then
+        _needle_debug "Auto-scaling: bead count ($bead_count) does not exceed spawn_threshold ($spawn_threshold), not spawning"
+        return 0
+    fi
+
+    # Get max_workers and current workers
+    local max_workers
+    max_workers=$(_needle_explore_get_max_workers)
+
+    local current_workers
+    current_workers=$(_needle_explore_count_workers "$agent")
+
+    # Calculate how many workers we can spawn
+    local available_slots=$((max_workers - current_workers))
+
+    if [[ "$available_slots" -le 0 ]]; then
+        _needle_debug "Auto-scaling: at max workers limit ($max_workers), cannot spawn more"
+        return 1
+    fi
+
+    # Calculate how many workers to spawn based on bead count
+    # Spawn enough workers so each worker handles spawn_threshold beads
+    local workers_to_spawn=$(( (bead_count - spawn_threshold + spawn_threshold - 1) / spawn_threshold ))
+
+    # But don't exceed available slots
+    if [[ "$workers_to_spawn" -gt "$available_slots" ]]; then
+        workers_to_spawn="$available_slots"
+    fi
+
+    if [[ "$workers_to_spawn" -le 0 ]]; then
+        return 0
+    fi
+
+    _needle_info "Auto-scaling: spawning $workers_to_spawn worker(s) for $workspace (bead_count=$bead_count, threshold=$spawn_threshold)"
+
+    # Spawn workers in batch (cooldown already checked above)
+    local spawned=0
+    local i
+    for ((i = 0; i < workers_to_spawn; i++)); do
+        # Check max_workers on each iteration (in case something changed)
+        current_workers=$(_needle_explore_count_workers "$agent")
+        if (( current_workers >= max_workers )); then
+            _needle_debug "Auto-scaling: reached max workers ($max_workers), stopping spawn batch"
+            break
+        fi
+
+        if nohup needle run --workspace="$workspace" --agent="$agent" >/dev/null 2>&1 & then
+            local pid=$!
+            ((spawned++))
+            _needle_verbose "Auto-scaling: spawned worker (PID: $pid) for $workspace"
+        else
+            _needle_warn "Auto-scaling: failed to spawn worker $((i + 1)) for $workspace"
+        fi
+    done
+
+    # Update cooldown after spawn batch (not per-worker)
+    if [[ "$spawned" -gt 0 ]]; then
+        _needle_explore_update_cooldown "$agent" "$workspace"
+
+        _needle_telemetry_emit "explore.auto_scaling" "info" \
+            "workspace=$workspace" \
+            "agent=$agent" \
+            "bead_count=$bead_count" \
+            "spawn_threshold=$spawn_threshold" \
+            "workers_spawned=$spawned"
+        return 0
+    else
+        _needle_warn "Auto-scaling: failed to spawn any workers for $workspace"
+        return 1
+    fi
+}
+
 # ============================================================================
 # Phase 1: Search Children (Downward)
 # ============================================================================
@@ -464,6 +559,9 @@ _needle_strand_explore() {
     if [[ -n "$child_workspace" ]]; then
         _needle_info "explore: child workspace $child_workspace has beads, switching"
 
+        # Auto-scale: spawn additional workers if bead count exceeds threshold
+        _needle_explore_spawn_workers_if_needed "$child_workspace" "$agent"
+
         _needle_telemetry_emit "explore.workspace_switch" "info" \
             "from=$workspace" \
             "to=$child_workspace" \
@@ -496,6 +594,9 @@ _needle_strand_explore() {
 
     if [[ -n "$sibling_workspace" ]]; then
         _needle_info "explore: sibling workspace $sibling_workspace has beads, switching"
+
+        # Auto-scale: spawn additional workers if bead count exceeds threshold
+        _needle_explore_spawn_workers_if_needed "$sibling_workspace" "$agent"
 
         _needle_telemetry_emit "explore.workspace_switch" "info" \
             "from=$workspace" \

@@ -153,6 +153,9 @@ NEEDLE_CONFIG_SCHEMA=(
     ["file_locks.merge.enabled"]="boolean|false|||"
     ["file_locks.merge.tool"]="enum|false|||git-merge-file|diff3|custom"
     ["file_locks.merge.on_conflict"]="enum|false|||block|keep_ours|keep_theirs"
+    ["file_locks.lease.duration"]="duration|false|||"
+    ["file_locks.lease.renewal_interval"]="duration|false|||"
+    ["file_locks.lease.grace_period"]="duration|false|||"
 
     # fabric
     ["fabric.enabled"]="boolean|false|||"

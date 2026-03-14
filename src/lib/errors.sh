@@ -434,33 +434,66 @@ _needle_error_auto_bead() {
     rate_limit=$(get_config "debug.auto_bead_rate_limit" "3600" 2>/dev/null)
 
     local signature="${event_type}:$(basename "$workspace")"
-    local signature_hash
-    signature_hash=$(echo "$signature" | md5sum | cut -c1-8)
 
     local state_dir="$NEEDLE_HOME/$NEEDLE_STATE_DIR"
-    local last_bead_file="$state_dir/auto_bead_${signature_hash}"
+    local signatures_file="$state_dir/auto_bead_signatures.json"
 
     mkdir -p "$state_dir"
 
-    # Check rate limit
-    if [[ -f "$last_bead_file" ]]; then
-        local last_ts
-        last_ts=$(cat "$last_bead_file" 2>/dev/null)
+    # Initialize signatures file if it doesn't exist
+    if [[ ! -f "$signatures_file" ]]; then
+        echo "{}" > "$signatures_file"
+    fi
 
-        if [[ -n "$last_ts" ]] && [[ "$last_ts" =~ ^[0-9]+$ ]]; then
-            local now
-            now=$(date +%s)
-            local elapsed=$((now - last_ts))
+    # Check rate limit using JSON file
+    local last_ts=0
+    if python3 -c "import json" 2>/dev/null; then
+        last_ts=$(python3 - "$signatures_file" "$signature" 2>/dev/null <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+print(data.get(sys.argv[2], 0))
+PYEOF
+        )
+    fi
 
-            if ((elapsed < rate_limit)); then
-                _needle_debug "auto_bead: rate limited (${elapsed}s since last bead, need ${rate_limit}s)"
-                return 0
-            fi
+    if [[ -n "$last_ts" ]] && [[ "$last_ts" =~ ^[0-9]+$ ]]; then
+        local now
+        now=$(date +%s)
+        local elapsed=$((now - last_ts))
+
+        if ((elapsed >= rate_limit)); then
+            # Rate limit expired, proceed with bead creation
+            :
+        else
+            _needle_debug "auto_bead: rate limited (${elapsed}s since last bead, need ${rate_limit}s)"
+            return 0
         fi
     fi
 
     # Record timestamp for rate limiting
-    date +%s > "$last_bead_file"
+    local now
+    now=$(date +%s)
+    if python3 -c "import json" 2>/dev/null; then
+        python3 - "$signatures_file" "$signature" "$now" 2>/dev/null <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+data[sys.argv[2]] = int(sys.argv[3])
+with open(sys.argv[1], 'w') as f:
+    json.dump(data, f)
+PYEOF
+    fi
+    elif python3 -c "import json" 2>/dev/null; then
+        python3 - "$signatures_file" "$signature" "$now" 2>/dev/null <<'PYEOF'
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+data[sys.argv[2]] = int(sys.argv[3])
+with open(sys.argv[1], 'w') as f:
+    json.dump(data, f)
+PYEOF
+    fi
 
     # Build bead title and body
     local title="[AUTO] ${event_type}: Unexpected error in $(basename "$workspace")"

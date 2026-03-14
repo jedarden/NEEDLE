@@ -2,6 +2,11 @@
 # NEEDLE CLI Worker Heartbeat Module
 # Heartbeat emission for worker liveness tracking and stuck detection
 
+# Source lease management module for lock lease renewal
+if [[ -f "${NEEDLE_SRC:-$(dirname "${BASH_SOURCE[0]}")/../lock/lease.sh}" ]]; then
+    source "${NEEDLE_SRC:-$(dirname "${BASH_SOURCE[0]}")/../lock/lease.sh"
+fi
+
 # Heartbeat state variables
 NEEDLE_HEARTBEAT_FILE=""
 NEEDLE_HEARTBEAT_STARTED=""
@@ -270,6 +275,15 @@ _needle_heartbeat_keepalive() {
         else
             # Fallback: just emit idle
             _needle_emit_heartbeat "idle"
+        fi
+    fi
+
+    # Renew lock leases for the current bead (if lease module is loaded)
+    if declare -f renew_lock_leases &>/dev/null; then
+        local renewed
+        renewed=$(renew_lock_leases 2>/dev/null || echo "0")
+        if [[ "$renewed" -gt 0 ]]; then
+            _needle_debug "Renewed $renewed lock lease(s) during heartbeat keepalive"
         fi
     fi
 }

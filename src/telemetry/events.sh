@@ -736,6 +736,12 @@ _needle_event_file_priority_bump_received() {
     _needle_telemetry_emit "lock.priority_bump_received" "warn" "$@"
 }
 
+# Emit lock.expired event (lock lease expired due to missing heartbeat)
+# Usage: _needle_event_lock_expired [bead=...] [path=...] [worker=...] [age_s=...] [key=value ...]
+_needle_event_lock_expired() {
+    _needle_telemetry_emit "lock.expired" "warn" "$@"
+}
+
 # ============================================================================
 # Event Category Listing
 # ============================================================================
@@ -799,6 +805,7 @@ file.checkout
 file.conflict
 file.release
 file.stale
+lock.expired
 EOF
 }
 
