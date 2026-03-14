@@ -21,14 +21,18 @@
 # ============================================================================
 # PATH Setup (CRITICAL: Must be done before any br calls)
 # ============================================================================
-# Ensure ~/.local/bin is in PATH for br CLI access
-# This fixes worker starvation caused by br not being found
-if [[ -d "$HOME/.local/bin" ]]; then
-    case ":$PATH:" in
-        *":$HOME/.local/bin:"*) ;;
-        *) export PATH="$HOME/.local/bin:$PATH" ;;
-    esac
-fi
+# Ensure ~/.local/bin and system paths are in PATH
+# ~/.local/bin: br CLI access (fixes worker starvation)
+# /usr/bin, /usr/local/bin: sqlite3 and other system tools (fixes mend release)
+for _needle_path_dir in "$HOME/.local/bin" "/usr/local/bin" "/usr/bin"; do
+    if [[ -d "$_needle_path_dir" ]]; then
+        case ":$PATH:" in
+            *":$_needle_path_dir:"*) ;;
+            *) export PATH="$_needle_path_dir:$PATH" ;;
+        esac
+    fi
+done
+unset _needle_path_dir
 
 # Get NEEDLE_SRC if not already set
 if [[ -z "${NEEDLE_SRC:-}" ]]; then
