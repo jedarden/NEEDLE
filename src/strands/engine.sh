@@ -143,6 +143,10 @@ _needle_strand_engine() {
     local workspace="$1"
     local agent="$2"
 
+    # Hardcoded strand order (priority waterfall).
+    # Enablement is controlled by config (true/false/auto per strand name).
+    local strands=(pluck explore mend weave unravel pulse knot)
+
     # DIAGNOSTIC: Log strand engine invocation with full context
     _needle_diag_engine "Strand engine started" \
         "workspace=$workspace" \
@@ -155,60 +159,66 @@ _needle_strand_engine() {
     _needle_debug "DIAG: Strand engine started - workspace=$workspace, agent=$agent, NEEDLE_VERBOSE=${NEEDLE_VERBOSE:-false}"
     _needle_debug "Starting strand engine for workspace: $workspace, agent: $agent"
 
-    # Read strand list from config
-    local strand_entries=()
-    while IFS= read -r entry; do
-        [[ -z "$entry" ]] && continue
-        strand_entries+=("$entry")
-    done < <(_needle_get_strand_list)
-
-    if [[ ${#strand_entries[@]} -eq 0 ]]; then
-        _needle_warn "No strands configured — check strands list in config"
-        return 1
-    fi
-
     # Track strand results for final diagnostic
     local strand_results=()
     local strand_num=0
-    local strand_count=${#strand_entries[@]}
+    local disabled_count=0
+    local enabled_count=0
+    local strand_count=${#strands[@]}
 
-    for entry in "${strand_entries[@]}"; do
+    for strand in "${strands[@]}"; do
         ((strand_num++))
 
-        local resolved_path func_name strand_name
-        resolved_path=$(_needle_resolve_strand_path "$entry")
-        func_name=$(_needle_strand_func_name "$entry")
-        strand_name="$(basename "$entry" .sh)"
+        _needle_verbose "Checking strand $strand_num/$strand_count: $strand"
 
-        _needle_verbose "Checking strand $strand_num/$strand_count: $strand_name"
-
-        # Load strand (source if not already defined)
-        if ! _needle_load_strand "$resolved_path" "$func_name"; then
+        # Check if strand is enabled via config (true/false/auto)
+        if ! _needle_is_strand_enabled "$strand"; then
             _needle_emit_event "strand.skipped" \
-                "Strand $strand_name ($strand_num) failed to load" \
+                "Strand $strand ($strand_num) is disabled" \
                 "strand=$strand_num" \
-                "name=$strand_name" \
-                "reason=load_failed" \
-                "path=$entry"
+                "name=$strand" \
+                "reason=disabled"
 
-            strand_results+=("$strand_name:load_failed")
+            _needle_diag_engine "Strand disabled, skipping" \
+                "strand=$strand" \
+                "strand_num=$strand_num"
+
+            _needle_debug "Strand $strand ($strand_num) is disabled, skipping"
+            strand_results+=("$strand:disabled")
+            ((disabled_count++))
+            continue
+        fi
+
+        ((enabled_count++))
+
+        local func_name="_needle_strand_${strand}"
+
+        # Verify strand function exists
+        if ! declare -f "$func_name" &>/dev/null; then
+            _needle_emit_event "strand.skipped" \
+                "Strand $strand ($strand_num) function not found" \
+                "strand=$strand_num" \
+                "name=$strand" \
+                "reason=not_defined"
+
+            strand_results+=("$strand:not_defined")
             continue
         fi
 
         # Emit strand started event
         _needle_emit_event "strand.started" \
-            "Starting strand $strand_name ($strand_num)" \
+            "Starting strand $strand ($strand_num)" \
             "strand=$strand_num" \
-            "name=$strand_name" \
+            "name=$strand" \
             "workspace=$workspace" \
             "agent=$agent"
 
         _needle_diag_engine "Dispatching to strand" \
-            "strand=$strand_name" \
+            "strand=$strand" \
             "strand_num=$strand_num" \
             "workspace=$workspace"
 
-        _needle_verbose "Dispatching to strand: $strand_name"
+        _needle_verbose "Dispatching to strand: $strand"
 
         # Dispatch to strand
         local result
@@ -216,7 +226,7 @@ _needle_strand_engine() {
         result=$?
 
         _needle_diag_engine "Strand returned result" \
-            "strand=$strand_name" \
+            "strand=$strand" \
             "strand_num=$strand_num" \
             "result=$result" \
             "result_meaning=$([[ $result -eq 0 ]] && echo 'work_found' || echo 'no_work')"
@@ -224,32 +234,32 @@ _needle_strand_engine() {
         if [[ $result -eq 0 ]]; then
             # Work found and processed
             _needle_emit_event "strand.completed" \
-                "Strand $strand_name ($strand_num) found work" \
+                "Strand $strand ($strand_num) found work" \
                 "strand=$strand_num" \
-                "name=$strand_name" \
+                "name=$strand" \
                 "result=work_found"
 
             _needle_diag_engine "Work found and completed" \
-                "strand=$strand_name" \
+                "strand=$strand" \
                 "strand_num=$strand_num" \
                 "strands_checked=$strand_num" \
                 "total_strands=$strand_count"
 
-            _needle_success "Strand $strand_name ($strand_num): work completed"
+            _needle_success "Strand $strand ($strand_num): work completed"
             return 0  # Work done, exit engine
         fi
 
         # Fallthrough to next strand
         _needle_emit_event "strand.fallthrough" \
-            "Strand $strand_name ($strand_num) found no work, continuing" \
+            "Strand $strand ($strand_num) found no work, continuing" \
             "from=$strand_num" \
-            "from_name=$strand_name" \
+            "from_name=$strand" \
             "reason=no_work" \
             "to=$((strand_num + 1))"
 
-        _needle_verbose "Strand $strand_name ($strand_num): no work found, continuing"
+        _needle_verbose "Strand $strand ($strand_num): no work found, continuing"
 
-        strand_results+=("$strand_name:no_work")
+        strand_results+=("$strand:no_work")
     done
 
     # All strands exhausted, no work found
