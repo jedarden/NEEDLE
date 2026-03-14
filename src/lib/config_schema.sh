@@ -142,6 +142,8 @@ NEEDLE_CONFIG_SCHEMA=(
     # file_locks
     ["file_locks.timeout"]="duration|false|||"
     ["file_locks.stale_action"]="enum|false|||warn|release|ignore"
+    ["file_locks.ld_preload"]="boolean|false|||"
+    ["file_locks.ld_preload_lib"]="string|false|||"
 
     # fabric
     ["fabric.enabled"]="boolean|false|||"

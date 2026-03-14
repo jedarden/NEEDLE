@@ -476,6 +476,34 @@ NEEDLE_HB_EOF
         _needle_start_fabric_forwarder
     fi
 
+    # Wire LD_PRELOAD for non-Claude agents (opencode, aider, etc.)
+    # Claude Code has native hook support; other agents need libc-level enforcement.
+    local _ld_preload_set=false
+    local agent_runner="${NEEDLE_AGENT[runner]:-}"
+    if [[ "$agent_runner" != "claude" ]]; then
+        local ld_preload_enabled="false"
+        if declare -f get_config &>/dev/null; then
+            ld_preload_enabled=$(get_config "file_locks.ld_preload" "false")
+        fi
+        if [[ "$ld_preload_enabled" == "true" ]]; then
+            local lib_path="${NEEDLE_HOME:-$HOME/.needle}/lib/libcheckout.so"
+            if declare -f get_config &>/dev/null; then
+                local cfg_lib
+                cfg_lib=$(get_config "file_locks.ld_preload_lib" "")
+                [[ -n "$cfg_lib" ]] && lib_path="$cfg_lib"
+            fi
+            if [[ -f "$lib_path" ]]; then
+                export LD_PRELOAD="$lib_path"
+                export NEEDLE_BEAD_ID="$bead_id"
+                _ld_preload_set=true
+                _needle_debug "LD_PRELOAD enabled for non-Claude agent ($agent_runner): $lib_path"
+            else
+                _needle_warn "file_locks.ld_preload enabled but library not found: $lib_path"
+                _needle_warn "Run 'scripts/build-native.sh' to build libcheckout.so"
+            fi
+        fi
+    fi
+
     # Render template and execute based on input method
     local exit_code
     local input_method="${NEEDLE_AGENT[input_method]:-heredoc}"
@@ -538,6 +566,7 @@ NEEDLE_HB_EOF
         *)
             _needle_error "Unknown input method: $input_method"
             _needle_stop_heartbeat_background
+            [[ "$_ld_preload_set" == "true" ]] && unset LD_PRELOAD NEEDLE_BEAD_ID
             rm -f "$output_file"
             return 1
             ;;
@@ -549,6 +578,12 @@ NEEDLE_HB_EOF
     # Clean up heartbeat script and unset command
     rm -f "$_hb_script" 2>/dev/null
     unset NEEDLE_HEARTBEAT_CMD
+
+    # Clean up LD_PRELOAD if we set it
+    if [[ "$_ld_preload_set" == "true" ]]; then
+        unset LD_PRELOAD
+        unset NEEDLE_BEAD_ID
+    fi
 
     # Stop FABRIC event forwarder if it was started
     _needle_stop_fabric_forwarder
