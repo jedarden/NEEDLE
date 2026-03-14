@@ -62,22 +62,24 @@ When explore changes the workspace, the engine restarts from pluck. This means o
 
 ### 4. Weave
 
-**Purpose:** Gap analysis between documentation/plans and actual implementation.
+**Purpose:** Reconstruct the project's intended end-state and find gaps against reality.
 
-Weave is the first "generative" strand. When there are no beads to claim anywhere, weave analyzes the workspace to find gaps between what was planned and what exists. It dispatches an LLM agent with:
+Weave is the first "generative" strand. When there are no beads to claim anywhere, weave reconstructs what the project is trying to achieve by examining multiple sources of intent, then compares that against what actually exists. It dispatches an LLM agent with:
 
-- **Documentation contents:** README, ADRs, TODOs, ROADMAPs, changelogs (actual file contents, not just paths).
+- **Closed beads:** Completed work reveals the project's trajectory and direction.
+- **Genesis/plan beads:** High-level planning beads describing the intended end-state.
+- **Git history:** Recent commits and branch names show what has been built and where development is heading.
+- **Documentation contents:** README, ADRs, TODOs, ROADMAPs, plans, AGENTS.md, CLAUDE.md (actual file contents, not just paths).
 - **Codebase structure:** Directory tree and inline TODO/FIXME/HACK markers found in source files.
 - **Existing beads:** Open and in-progress beads, to avoid creating duplicates.
 
-The agent identifies concrete gaps: features described but not implemented, incomplete stubs, missing tests, configuration mismatches. Each gap becomes a new bead.
+The agent reconstructs the intended end-state from all sources, then identifies concrete gaps: features planned but not built, incomplete implementations, missing integration between components, untested code paths, and divergence from plans. Each gap becomes a new bead. There is no cap on how many beads weave can create — if it finds many gaps, it creates all necessary beads.
 
 **Produces work:** Yes (creates beads). If beads are created, returns 0 and pluck will claim them on the next cycle.
 
 **Configuration:**
 - `strands.weave.frequency` (default: 3600) - Minimum seconds between runs per workspace.
-- `strands.weave.max_beads_per_run` (default: 5) - Cap on beads created per analysis.
-- `strands.weave.max_doc_files` (default: 50) - Maximum documentation files to include.
+- `strands.weave.max_doc_files` (default: 15) - Maximum documentation files to include.
 
 ### 5. Pulse
 
@@ -99,7 +101,7 @@ Each detector that finds an issue creates a bead. Pulse is rate-limited to avoid
 
 Some beads are tagged `[human]` because they appear to require human action (e.g., providing credentials, making a business decision, performing a physical operation). Unravel looks at these blocked beads and asks: *is there an automated alternative?*
 
-For each human bead that has been waiting longer than `unravel.min_wait_hours` (default: 24), unravel dispatches an LLM agent to analyze the blocker and propose alternative approaches that:
+For each human bead (by default, immediately — no waiting period), unravel dispatches an LLM agent to analyze the blocker and propose alternative approaches that:
 
 - Work around the blocker without the human decision.
 - Are reversible or easily changed later.
@@ -110,7 +112,7 @@ The alternatives are created as child beads of the original human bead. The huma
 **Produces work:** Yes (creates alternative beads).
 
 **Configuration:**
-- `unravel.min_wait_hours` (default: 24) - Hours before considering alternatives.
+- `unravel.min_wait_hours` (default: 0) - Hours before considering alternatives. Set to 0 for immediate experimentation.
 - `unravel.max_alternatives` (default: 3) - Maximum alternatives per human bead.
 
 ### 7. Knot

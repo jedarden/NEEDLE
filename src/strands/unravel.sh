@@ -44,7 +44,7 @@ fi
 # ============================================================================
 
 # Default settings (can be overridden via config.yaml)
-NEEDLE_UNRAVEL_MIN_WAIT_HOURS="${NEEDLE_UNRAVEL_MIN_WAIT_HOURS:-24}"
+NEEDLE_UNRAVEL_MIN_WAIT_HOURS="${NEEDLE_UNRAVEL_MIN_WAIT_HOURS:-0}"
 NEEDLE_UNRAVEL_MAX_ALTERNATIVES="${NEEDLE_UNRAVEL_MAX_ALTERNATIVES:-3}"
 NEEDLE_UNRAVEL_TIMEOUT="${NEEDLE_UNRAVEL_TIMEOUT:-120}"
 
@@ -670,7 +670,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             echo ""
             echo "Configuration (config.yaml):"
             echo "  strands.unravel: false        # Opt-in only (default: disabled)"
-            echo "  unravel.min_wait_hours: 24    # Hours before considering alternatives"
+            echo "  unravel.min_wait_hours: 0     # Hours before considering alternatives (0 = immediate)"
             echo "  unravel.max_alternatives: 3   # Max alternatives per HUMAN bead"
             ;;
         *)
