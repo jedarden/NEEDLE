@@ -916,12 +916,13 @@ _pulse_scan_secrets() {
 
         # Skip .env.example files (they contain example/placeholder values)
         # Skip pulse.sh itself to avoid false positives from pattern definitions
+        # Skip test_pulse.sh to avoid false positives from scanner test fixtures
         local basename
         basename=$(basename "$file")
         if [[ "$basename" == ".env.example" ]] || [[ "$basename" == "*.example" ]]; then
             continue
         fi
-        if [[ "$basename" == "pulse.sh" ]]; then
+        if [[ "$basename" == "pulse.sh" ]] || [[ "$basename" == "test_pulse.sh" ]]; then
             continue
         fi
 
