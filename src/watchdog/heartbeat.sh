@@ -100,7 +100,7 @@ _needle_emit_heartbeat_jq() {
         --arg bead_started "$bead_started" \
         --arg strand "$strand" \
         --arg workspace "${NEEDLE_WORKSPACE:-}" \
-        --arg agent "${NEEDLE_AGENT:-unknown}" \
+        --arg agent "${NEEDLE_AGENT[name]:-unknown}" \
         --argjson queue_depth "${queue_depth:-0}" \
         '{
             worker: $worker,
@@ -137,7 +137,7 @@ _needle_emit_heartbeat_builtin() {
     local worker_escaped
     worker_escaped=$(_needle_json_escape "${NEEDLE_SESSION:-unknown}")
     local agent_escaped
-    agent_escaped=$(_needle_json_escape "${NEEDLE_AGENT:-unknown}")
+    agent_escaped=$(_needle_json_escape "${NEEDLE_AGENT[name]:-unknown}")
     local workspace_escaped
     workspace_escaped=$(_needle_json_escape "${NEEDLE_WORKSPACE:-}")
 

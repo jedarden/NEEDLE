@@ -170,35 +170,20 @@ _needle_status_get_strands() {
     local config
     config=$(load_config 2>/dev/null || echo "$_NEEDLE_CONFIG_DEFAULTS")
 
-    # Extract strand settings
-    local pluck explore mend weave unravel pulse knot
-
-    pluck=$(echo "$config" | jq -r '.strands.pluck // false' 2>/dev/null || echo "false")
-    explore=$(echo "$config" | jq -r '.strands.explore // false' 2>/dev/null || echo "false")
-    mend=$(echo "$config" | jq -r '.strands.mend // false' 2>/dev/null || echo "false")
-    weave=$(echo "$config" | jq -r '.strands.weave // false' 2>/dev/null || echo "false")
-    unravel=$(echo "$config" | jq -r '.strands.unravel // false' 2>/dev/null || echo "false")
-    pulse=$(echo "$config" | jq -r '.strands.pulse // false' 2>/dev/null || echo "false")
-    knot=$(echo "$config" | jq -r '.strands.knot // false' 2>/dev/null || echo "false")
-
-    # Build JSON with status (active/idle/disabled based on config and current activity)
-    jq -n \
-        --arg pluck "$pluck" \
-        --arg explore "$explore" \
-        --arg mend "$mend" \
-        --arg weave "$weave" \
-        --arg unravel "$unravel" \
-        --arg pulse "$pulse" \
-        --arg knot "$knot" \
-        '{
-            pluck: (if $pluck == "true" then "idle" else "disabled" end),
-            explore: (if $explore == "true" then "idle" else "disabled" end),
-            mend: (if $mend == "true" then "idle" else "disabled" end),
-            weave: (if $weave == "true" then "idle" else "disabled" end),
-            unravel: (if $unravel == "true" then "idle" else "disabled" end),
-            pulse: (if $pulse == "true" then "idle" else "disabled" end),
-            knot: (if $knot == "true" then "idle" else "disabled" end)
-        }'
+    # Build JSON from the configured strand list
+    if command -v jq &>/dev/null; then
+        echo "$config" | jq '
+            .strands // [] |
+            to_entries |
+            map({
+                key: (.value | split("/") | last | rtrimstr(".sh")),
+                value: "idle"
+            }) |
+            from_entries
+        ' 2>/dev/null || echo '{}'
+    else
+        echo '{}'
+    fi
 }
 
 # Get effort metrics from telemetry logs
@@ -389,12 +374,21 @@ _needle_status_display_strands() {
 
     _needle_print_color "$NEEDLE_COLOR_BOLD" "STRANDS"
 
-    # Strand order
-    local strands=("pluck" "explore" "mend" "weave" "unravel" "pulse" "knot")
+    # Iterate over configured strands from JSON keys (preserves config order)
+    local strand_names
+    strand_names=$(echo "$strands_json" | jq -r 'keys[]' 2>/dev/null)
 
-    for strand in "${strands[@]}"; do
+    if [[ -z "$strand_names" ]]; then
+        _needle_print "  (no strands configured)"
+        _needle_print ""
+        return
+    fi
+
+    local idx=1
+    while IFS= read -r strand; do
+        [[ -z "$strand" ]] && continue
         local status
-        status=$(echo "$strands_json" | jq -r ".$strand // \"disabled\"" 2>/dev/null || echo "disabled")
+        status=$(echo "$strands_json" | jq -r ".[\"$strand\"] // \"idle\"" 2>/dev/null || echo "idle")
 
         # Color-code status
         local status_display
@@ -402,16 +396,14 @@ _needle_status_display_strands() {
             active)
                 status_display="$NEEDLE_COLOR_GREEN$status$NEEDLE_COLOR_RESET"
                 ;;
-            idle)
-                status_display="$NEEDLE_COLOR_DIM$status$NEEDLE_COLOR_RESET"
-                ;;
             *)
                 status_display="$NEEDLE_COLOR_DIM$status$NEEDLE_COLOR_RESET"
                 ;;
         esac
 
-        _needle_print "  $(printf '%-10s' "$strand:")  $status_display"
-    done
+        printf '%b\n' "  $(printf '%2d. %-10s' "$idx" "$strand:")  $status_display"
+        ((idx++))
+    done <<< "$strand_names"
 
     _needle_print ""
 }
@@ -469,7 +461,7 @@ _needle_status_format_runtime() {
 
     # Try to parse the timestamp (format: 2026-03-02T01:23:45Z)
     if [[ "$started" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2}) ]]; then
-        started_epoch=$(date -d "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]} ${BASH_REMATCH[4]}:${BASH_REMATCH[5]}:${BASH_REMATCH[6]}" +%s 2>/dev/null || echo "$now")
+        started_epoch=$(date -d "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}-${BASH_REMATCH[3]} ${BASH_REMATCH[4]}:${BASH_REMATCH[5]}:${BASH_REMATCH[6]} UTC" +%s 2>/dev/null || echo "$now")
     else
         echo "?"
         return

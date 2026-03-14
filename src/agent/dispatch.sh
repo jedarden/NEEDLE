@@ -471,6 +471,18 @@ _needle_dispatch_agent() {
     # Start background heartbeat to keep worker alive during execution
     _needle_start_heartbeat_background "$bead_id"
 
+    # Export NEEDLE_HEARTBEAT_CMD for stream-parser.sh inline heartbeat emission
+    # This is more reliable than the background process since it fires on every
+    # JSONL event from the CLI, proving the agent is actively producing output.
+    local _hb_script
+    _hb_script=$(mktemp "${TMPDIR:-/tmp}/needle-hb-${bead_id}-XXXXXXXX.sh")
+    cat > "$_hb_script" <<NEEDLE_HB_EOF
+#!/bin/bash
+printf '{"worker":"${NEEDLE_SESSION}","pid":$$,"started":"${NEEDLE_HEARTBEAT_STARTED}","last_heartbeat":"%s","status":"executing","current_bead":"${bead_id}","workspace":"${NEEDLE_WORKSPACE}","agent":"${NEEDLE_AGENT[name]:-unknown}","queue_depth":0}' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "${NEEDLE_HEARTBEAT_FILE}"
+NEEDLE_HB_EOF
+    chmod +x "$_hb_script"
+    export NEEDLE_HEARTBEAT_CMD="bash $_hb_script"
+
     # Start FABRIC event forwarder if enabled and agent uses stream-json
     local output_format="${NEEDLE_AGENT[output_format]:-text}"
     if [[ "$output_format" == "stream-json" ]] || [[ "$output_format" == "streaming" ]]; then
@@ -546,6 +558,10 @@ _needle_dispatch_agent() {
 
     # Stop background heartbeat now that agent has completed
     _needle_stop_heartbeat_background
+
+    # Clean up heartbeat script and unset command
+    rm -f "$_hb_script" 2>/dev/null
+    unset NEEDLE_HEARTBEAT_CMD
 
     # Stop FABRIC event forwarder if it was started
     _needle_stop_fabric_forwarder
