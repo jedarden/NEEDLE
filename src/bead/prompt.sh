@@ -5,8 +5,8 @@
 # This module builds comprehensive prompts by assembling:
 # - Bead title and description
 # - Workspace context
-# - Mentioned files extracted from description
-# - Completion criteria and output format instructions
+# - Project context via three-tier genesis plan fallback
+# - Type-aware completion instructions
 
 # Source dependencies (if not already loaded)
 if [[ -z "${_NEEDLE_OUTPUT_LOADED:-}" ]]; then
@@ -16,10 +16,6 @@ fi
 if [[ -z "${_NEEDLE_CONSTANTS_LOADED:-}" ]]; then
     source "$(dirname "${BASH_SOURCE[0]}")/../lib/constants.sh"
 fi
-
-# Configuration for prompt building
-NEEDLE_PROMPT_MAX_FILE_LINES="${NEEDLE_PROMPT_MAX_FILE_LINES:-100}"
-NEEDLE_PROMPT_FILE_EXTENSIONS="${NEEDLE_PROMPT_FILE_EXTENSIONS:-py|js|ts|go|rs|sh|yaml|yml|json|md|txt|sql|proto|tf}"
 
 # Build a prompt for an agent to work on a bead
 # Usage: _needle_build_prompt <bead_id> <workspace>
@@ -84,10 +80,6 @@ _needle_build_prompt() {
 
     _needle_debug "Building prompt for bead: $bead_id (priority: $priority, status: $status)"
 
-    # Build additional context from mentioned files
-    local context
-    context=$(_needle_extract_file_context "$description" "$workspace")
-
     # Build the prompt
     _needle_format_prompt \
         --bead-id "$bead_id" \
@@ -97,8 +89,7 @@ _needle_build_prompt() {
         --workspace "$workspace" \
         --priority "$priority" \
         --status "$status" \
-        --type "$issue_type" \
-        --context "$context"
+        --type "$issue_type"
 }
 
 # Walk the blocker/dependency chain upward to find a genesis bead and resolve its plan path
@@ -194,83 +185,6 @@ _needle_find_genesis_plan() {
     return 1
 }
 
-# Extract file context from description
-# Finds files mentioned in the description and includes their content
-# Usage: _needle_extract_file_context <description> <workspace>
-# Returns: Formatted file context section (may be empty)
-_needle_extract_file_context() {
-    local description="$1"
-    local workspace="$2"
-    local context=""
-
-    # Extract file paths from description using configurable extensions
-    local mentioned_files
-    mentioned_files=$(echo "$description" | grep -oE "[a-zA-Z0-9_/.-]+\.($NEEDLE_PROMPT_FILE_EXTENSIONS)" 2>/dev/null | sort -u)
-
-    if [[ -z "$mentioned_files" ]]; then
-        echo ""
-        return 0
-    fi
-
-    _needle_debug "Found mentioned files: $(echo "$mentioned_files" | tr '\n' ' ')"
-
-    local files_found=false
-    for file in $mentioned_files; do
-        # Skip if file doesn't exist or is not readable
-        local file_path="$workspace/$file"
-        if [[ ! -f "$file_path" ]] || [[ ! -r "$file_path" ]]; then
-            _needle_verbose "Skipping non-existent file: $file"
-            continue
-        fi
-
-        if [[ "$files_found" == "false" ]]; then
-            context+="### Mentioned Files\n\n"
-            files_found=true
-        fi
-
-        # Include file content (limited to configured max lines)
-        local file_content
-        file_content=$(head -n "$NEEDLE_PROMPT_MAX_FILE_LINES" "$file_path" 2>/dev/null)
-
-        if [[ -n "$file_content" ]]; then
-            # Detect language from extension for syntax highlighting hint
-            local lang
-            lang=$(_needle_get_file_lang "$file")
-
-            context+="#### \`$file\`\n"
-            context+="\`\`\`$lang\n"
-            context+="$file_content"
-            context+="\n\`\`\`\n\n"
-        fi
-    done
-
-    echo -e "$context"
-}
-
-# Get language identifier for syntax highlighting
-# Usage: _needle_get_file_lang <filename>
-# Returns: language identifier (e.g., "bash", "python", "json")
-_needle_get_file_lang() {
-    local filename="$1"
-    local ext="${filename##*.}"
-
-    case "$ext" in
-        sh)     echo "bash" ;;
-        py)     echo "python" ;;
-        js)     echo "javascript" ;;
-        ts)     echo "typescript" ;;
-        go)     echo "go" ;;
-        rs)     echo "rust" ;;
-        yaml|yml) echo "yaml" ;;
-        json)   echo "json" ;;
-        md)     echo "markdown" ;;
-        sql)    echo "sql" ;;
-        proto)  echo "protobuf" ;;
-        tf)     echo "hcl" ;;
-        txt)    echo "" ;;
-        *)      echo "$ext" ;;
-    esac
-}
 
 # Generate type-specific workflow instructions
 # Usage: _needle_get_type_instructions <type> <bead_id>
@@ -382,11 +296,11 @@ INSTRUCTIONS
 }
 
 # Format the final prompt
-# Usage: _needle_format_prompt --bead-id <id> --title <title> ... --context <context>
+# Usage: _needle_format_prompt --bead-id <id> --title <title> ...
 # Returns: Formatted prompt string
 _needle_format_prompt() {
     local bead_id="" title="" description="" labels="" workspace=""
-    local priority="" status="" type="" context=""
+    local priority="" status="" type=""
 
     # Parse named arguments
     while [[ $# -gt 0 ]]; do
@@ -399,7 +313,6 @@ _needle_format_prompt() {
             --priority)     priority="$2"; shift 2 ;;
             --status)       status="$2"; shift 2 ;;
             --type)         type="$2"; shift 2 ;;
-            --context)      context="$2"; shift 2 ;;
             *)              shift ;;
         esac
     done
@@ -427,13 +340,45 @@ _needle_format_prompt() {
 $labels"
     fi
 
-    # Format context section
+    # Build three-tier project context section
     local context_section=""
-    if [[ -n "$context" ]]; then
+    local genesis_result
+    if genesis_result=$(_needle_find_genesis_plan "$bead_id" "$workspace" 2>/dev/null); then
+        local genesis_title="${genesis_result%%|*}"
+        local plan_path="${genesis_result#*|}"
+
+        if [[ -n "$plan_path" ]]; then
+            # Tier 1: Genesis bead found WITH an explicit plan path
+            context_section="
+
+## Project Context
+This bead is part of: Genesis: ${genesis_title}
+Project plan: ${plan_path}
+Review the plan to understand scope, conventions, and how this task fits."
+        else
+            # Tier 2: Genesis bead found, but NO explicit plan path
+            context_section="
+
+## Project Context
+This bead is part of: Genesis: ${genesis_title}
+The genesis bead does not reference a plan document directly.
+
+To understand the project's scope and conventions, discover the plan document by:
+- Examining closed beads for references to planning/design documents: \`br list --status closed --json\`
+- Searching git history for commits that introduced planning docs: \`git log --all --diff-filter=A --name-only --oneline\`
+- Use closed bead descriptions and git commit messages to identify the plan document and understand project intent"
+        fi
+    else
+        # Tier 3: No genesis bead in the chain
         context_section="
 
-## Additional Context
-$context"
+## Project Context
+This is a standalone task with no linked project plan.
+
+To understand conventions and intent for the files/components this task covers:
+- Find closed beads related to the files/components this task covers: \`br list --status closed --json\`
+- Cross-reference with git history for those artifacts: \`git log --oneline -- <relevant paths>\`
+- Use the pattern of prior changes to understand conventions and intent"
     fi
 
     # Get type-specific instructions
@@ -612,10 +557,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             echo "  escape <prompt>             Escape prompt for shell embedding"
             echo "  escape-json <prompt>        Escape prompt for JSON embedding"
             echo "  validate <prompt>           Validate prompt structure"
-            echo ""
-            echo "Environment variables:"
-            echo "  NEEDLE_PROMPT_MAX_FILE_LINES  Max lines per file (default: 100)"
-            echo "  NEEDLE_PROMPT_FILE_EXTENSIONS File extensions to include (regex)"
             ;;
         *)
             echo "Unknown command: ${1:-}"

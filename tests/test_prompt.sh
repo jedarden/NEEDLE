@@ -15,7 +15,6 @@ export NEEDLE_HOME="$TEST_DIR/.needle"
 export NEEDLE_STATE_DIR="state"
 export NEEDLE_QUIET=true
 export NEEDLE_VERBOSE=false
-export NEEDLE_PROMPT_MAX_FILE_LINES=50
 
 # Source required modules
 source "$PROJECT_DIR/src/lib/constants.sh"
@@ -79,137 +78,8 @@ unmock_br() {
     export PATH="${PATH//$TEST_DIR\/bin:/}"
 }
 
-# Create test files in workspace
-create_test_files() {
-    mkdir -p "$TEST_WORKSPACE/src/lib"
-
-    # Create a sample bash file
-    cat > "$TEST_WORKSPACE/src/lib/utils.sh" << 'EOF'
-#!/usr/bin/env bash
-# Utility functions
-
-hello() {
-    echo "Hello, World!"
-}
-
-goodbye() {
-    echo "Goodbye!"
-}
-EOF
-
-    # Create a sample Python file
-    cat > "$TEST_WORKSPACE/src/lib/helpers.py" << 'EOF'
-#!/usr/bin/env python3
-"""Helper functions for the application."""
-
-def greet(name):
-    """Greet someone by name."""
-    return f"Hello, {name}!"
-
-def farewell(name):
-    """Say goodbye to someone."""
-    return f"Goodbye, {name}!"
-EOF
-
-    # Create a sample JSON file
-    cat > "$TEST_WORKSPACE/config.json" << 'EOF'
-{
-    "name": "test-project",
-    "version": "1.0.0",
-    "settings": {
-        "debug": true
-    }
-}
-EOF
-}
-
 echo "=== NEEDLE Prompt Builder Tests ==="
 echo ""
-
-# Run file creation for all tests
-create_test_files
-
-# Test 1: Language detection
-test_case "Detects bash language from .sh extension"
-lang=$(_needle_get_file_lang "script.sh")
-if [[ "$lang" == "bash" ]]; then
-    test_pass
-else
-    test_fail "Expected 'bash', got '$lang'"
-fi
-
-test_case "Detects python language from .py extension"
-lang=$(_needle_get_file_lang "module.py")
-if [[ "$lang" == "python" ]]; then
-    test_pass
-else
-    test_fail "Expected 'python', got '$lang'"
-fi
-
-test_case "Detects javascript language from .js extension"
-lang=$(_needle_get_file_lang "app.js")
-if [[ "$lang" == "javascript" ]]; then
-    test_pass
-else
-    test_fail "Expected 'javascript', got '$lang'"
-fi
-
-test_case "Detects yaml language from .yaml extension"
-lang=$(_needle_get_file_lang "config.yaml")
-if [[ "$lang" == "yaml" ]]; then
-    test_pass
-else
-    test_fail "Expected 'yaml', got '$lang'"
-fi
-
-test_case "Returns extension for unknown file types"
-lang=$(_needle_get_file_lang "file.xyz")
-if [[ "$lang" == "xyz" ]]; then
-    test_pass
-else
-    test_fail "Expected 'xyz', got '$lang'"
-fi
-
-# Test 2: File context extraction
-test_case "Extracts mentioned files from description"
-description="Read the file src/lib/utils.sh and update it."
-context=$(_needle_extract_file_context "$description" "$TEST_WORKSPACE")
-
-if [[ "$context" == *"utils.sh"* ]] && [[ "$context" == *"hello()"* ]]; then
-    test_pass
-else
-    test_fail "Expected file context with utils.sh content"
-fi
-
-test_case "Returns empty for no mentioned files"
-description="This task has no file references."
-context=$(_needle_extract_file_context "$description" "$TEST_WORKSPACE")
-
-if [[ -z "$context" ]]; then
-    test_pass
-else
-    test_fail "Expected empty context, got: $context"
-fi
-
-test_case "Extracts multiple files from description"
-description="Update src/lib/utils.sh and src/lib/helpers.py files."
-context=$(_needle_extract_file_context "$description" "$TEST_WORKSPACE")
-
-if [[ "$context" == *"utils.sh"* ]] && [[ "$context" == *"helpers.py"* ]]; then
-    test_pass
-else
-    test_fail "Expected context with both files"
-fi
-
-test_case "Skips non-existent files"
-description="Read the file nonexistent.py and update it."
-context=$(_needle_extract_file_context "$description" "$TEST_WORKSPACE")
-
-if [[ -z "$context" ]]; then
-    test_pass
-else
-    test_fail "Expected empty context for non-existent file"
-fi
 
 # Test 3: Shell escaping
 test_case "Escapes single quotes in prompt"
@@ -359,22 +229,84 @@ else
     test_fail "Failed to build prompt with empty description"
 fi
 
-test_case "Includes mentioned files in prompt"
+test_case "Includes Tier 3 context for standalone bead (no genesis)"
 mock_br_show '[{
     "id": "nd-test4",
-    "title": "Task With Files",
-    "description": "Update the file src/lib/utils.sh",
+    "title": "Task With No Genesis",
+    "description": "A standalone task",
     "status": "open",
     "priority": 2
 }]'
 
 prompt=$(_needle_build_prompt "nd-test4" "$TEST_WORKSPACE" 2>/dev/null)
 
-if [[ "$prompt" == *"Mentioned Files"* ]] && [[ "$prompt" == *"utils.sh"* ]]; then
+if [[ "$prompt" == *"standalone task with no linked project plan"* ]]; then
     test_pass
 else
-    test_fail "Prompt missing file context"
+    test_fail "Expected Tier 3 standalone context"
 fi
+
+# Test three-tier genesis context
+test_case "Tier 1: Genesis with plan path included in prompt"
+# Mock: bead depends on genesis bead that has a plan path
+mkdir -p "$TEST_DIR/bin2"
+cat > "$TEST_DIR/bin2/br" << 'MOCKEOF'
+#!/bin/bash
+case "$1 $2 $3" in
+    "show nd-child --json")
+        echo '[{"id":"nd-child","title":"Child Task","description":"A child task","labels":[],"status":"open","priority":2,"issue_type":"task","dependencies":[{"id":"nd-genesis","rel":"blocked_by"}]}]'
+        ;;
+    "show nd-genesis --json")
+        echo '[{"id":"nd-genesis","title":"Genesis: MyProject","description":"## Genesis Bead\nTied to plan: /home/coding/myproject/docs/plan.md","labels":[],"status":"open","priority":1,"issue_type":"genesis","dependencies":[]}]'
+        ;;
+    *)
+        echo "[]" >&2
+        exit 1
+        ;;
+esac
+MOCKEOF
+chmod +x "$TEST_DIR/bin2/br"
+OLD_PATH="$PATH"
+export PATH="$TEST_DIR/bin2:$PATH"
+
+prompt=$(_needle_build_prompt "nd-child" "$TEST_WORKSPACE" 2>/dev/null)
+
+if [[ "$prompt" == *"Genesis: MyProject"* ]] && \
+   [[ "$prompt" == *"/home/coding/myproject/docs/plan.md"* ]] && \
+   [[ "$prompt" == *"Review the plan"* ]]; then
+    test_pass
+else
+    test_fail "Expected Tier 1 genesis+plan context"
+fi
+
+test_case "Tier 2: Genesis without plan path prompts discovery"
+cat > "$TEST_DIR/bin2/br" << 'MOCKEOF'
+#!/bin/bash
+case "$1 $2 $3" in
+    "show nd-child2 --json")
+        echo '[{"id":"nd-child2","title":"Child Task 2","description":"A child task","labels":[],"status":"open","priority":2,"issue_type":"task","dependencies":[{"id":"nd-genesis2","rel":"blocked_by"}]}]'
+        ;;
+    "show nd-genesis2 --json")
+        echo '[{"id":"nd-genesis2","title":"Genesis: AnotherProject","description":"## Genesis Bead\nOverview of the project.","labels":[],"status":"open","priority":1,"issue_type":"genesis","dependencies":[]}]'
+        ;;
+    *)
+        echo "[]" >&2
+        exit 1
+        ;;
+esac
+MOCKEOF
+
+prompt=$(_needle_build_prompt "nd-child2" "$TEST_WORKSPACE" 2>/dev/null)
+
+if [[ "$prompt" == *"Genesis: AnotherProject"* ]] && \
+   [[ "$prompt" == *"does not reference a plan document directly"* ]] && \
+   [[ "$prompt" == *"br list --status closed --json"* ]]; then
+    test_pass
+else
+    test_fail "Expected Tier 2 genesis-no-plan discovery instructions"
+fi
+
+export PATH="$OLD_PATH"
 
 # Test 7: Error handling
 test_case "Returns error for missing bead ID"
