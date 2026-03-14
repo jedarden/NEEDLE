@@ -134,33 +134,37 @@ _needle_mend_release_bead() {
     local bead_id="$2"
     local reason="${3:-released}"
 
-    if ! command -v sqlite3 &>/dev/null; then
-        _needle_warn "mend: sqlite3 not available for bead release"
-        return 1
-    fi
-
     if [[ ! -f "$db_path" ]]; then
         _needle_warn "mend: database not found at $db_path"
         return 1
     fi
 
-    local sql_result
-    sql_result=$(sqlite3 "$db_path" \
-        "UPDATE issues SET
-            status = 'open',
-            assignee = NULL,
-            claimed_by = NULL,
-            claim_timestamp = NULL
-         WHERE id = '$bead_id' AND status = 'in_progress';
-         SELECT changes();" 2>&1)
-
-    if [[ "$sql_result" == "1" ]] || [[ "$sql_result" =~ ^[1-9][0-9]*$ ]]; then
-        _needle_info "Released bead: $bead_id ($reason) via sqlite3"
+    # Use br update with --db to release the bead
+    if br update "$bead_id" --status open --assignee "" --db="$db_path" --lock-timeout 5000 2>/dev/null; then
+        _needle_info "Released bead: $bead_id ($reason) via br update"
         return 0
-    else
-        _needle_warn "Failed to release bead: $bead_id (sqlite3 returned: $sql_result)"
-        return 1
     fi
+
+    # Fallback: try sqlite3 if br update fails (CHECK constraint bug)
+    if command -v sqlite3 &>/dev/null; then
+        local sql_result
+        sql_result=$(sqlite3 "$db_path" \
+            "UPDATE issues SET
+                status = 'open',
+                assignee = NULL,
+                claimed_by = NULL,
+                claim_timestamp = NULL
+             WHERE id = '$bead_id' AND status = 'in_progress';
+             SELECT changes();" 2>&1)
+
+        if [[ "$sql_result" == "1" ]] || [[ "$sql_result" =~ ^[1-9][0-9]*$ ]]; then
+            _needle_info "Released bead: $bead_id ($reason) via sqlite3"
+            return 0
+        fi
+    fi
+
+    _needle_warn "Failed to release bead: $bead_id"
+    return 1
 }
 
 # ============================================================================
