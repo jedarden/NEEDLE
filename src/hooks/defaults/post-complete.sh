@@ -65,6 +65,34 @@ if [[ -n "${NEEDLE_COST:-}" ]] && [[ "${NEEDLE_COST}" != "0.00" ]] && [[ "${NEED
 fi
 
 # ============================================================================
+# Bead Cost Attribution
+# ============================================================================
+# Annotate the bead with cost data from session logs.
+# This joins effort.recorded events back to the bead record so cost is
+# visible per-bead in `br show <id>`.
+#
+# The runner (loop.sh, pluck.sh) also does this annotation, but we do it
+# here as well for redundancy and to support manual bead closures.
+if [[ -n "${NEEDLE_BEAD_ID:-}" ]] && [[ -n "${NEEDLE_WORKSPACE:-}" ]]; then
+    # Source the effort module if not already loaded
+    if declare -F _needle_annotate_bead_with_effort >/dev/null 2>&1; then
+        _needle_annotate_bead_with_effort "${NEEDLE_BEAD_ID}" "${NEEDLE_WORKSPACE}" 2>/dev/null || true
+    else
+        # Try to source and run directly
+        effort_module="${NEEDLE_HOME:-$HOME/.needle}/src/telemetry/effort.sh"
+        if [[ -f "$effort_module" ]]; then
+            # Source and run annotation in subshell to avoid polluting environment
+            (
+                source "$effort_module" >/dev/null 2>&1
+                if declare -F _needle_annotate_bead_with_effort >/dev/null 2>&1; then
+                    _needle_annotate_bead_with_effort "${NEEDLE_BEAD_ID}" "${NEEDLE_WORKSPACE}" 2>/dev/null || true
+                fi
+            )
+        fi
+    fi
+fi
+
+# ============================================================================
 # Example: Send Slack notification
 # ============================================================================
 # if [[ -n "${SLACK_WEBHOOK:-}" ]]; then
