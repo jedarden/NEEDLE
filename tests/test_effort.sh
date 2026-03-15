@@ -605,6 +605,68 @@ test_annotate_bead_missing_id() {
 }
 
 # =============================================================================
+# Test: record_effort stores strand and bead_type fields
+# =============================================================================
+test_record_effort_strand_and_type() {
+    local test_name="record_effort with strand and bead_type"
+
+    echo '{}' > "$NEEDLE_DAILY_SPEND_FILE"
+
+    record_effort "nd-strand-test" "0.01" "test-agent" 100 50 "pluck" "task"
+
+    if ! command -v jq &>/dev/null; then
+        _test_pass "$test_name - skipped (jq not available)"
+        return
+    fi
+
+    local today
+    today=$(date +%Y-%m-%d)
+
+    local strand_val
+    strand_val=$(jq -r ".[\"$today\"].beads[\"nd-strand-test\"].strand // empty" "$NEEDLE_DAILY_SPEND_FILE")
+    if [[ "$strand_val" == "pluck" ]]; then
+        _test_pass "$test_name - strand field stored correctly"
+    else
+        _test_fail "$test_name - expected strand=pluck, got: $strand_val"
+    fi
+
+    local type_val
+    type_val=$(jq -r ".[\"$today\"].beads[\"nd-strand-test\"].type // empty" "$NEEDLE_DAILY_SPEND_FILE")
+    if [[ "$type_val" == "task" ]]; then
+        _test_pass "$test_name - type field stored correctly"
+    else
+        _test_fail "$test_name - expected type=task, got: $type_val"
+    fi
+}
+
+# =============================================================================
+# Test: record_effort omits strand/type when not provided
+# =============================================================================
+test_record_effort_no_strand() {
+    local test_name="record_effort omits strand/type when not provided"
+
+    echo '{}' > "$NEEDLE_DAILY_SPEND_FILE"
+
+    record_effort "nd-nostrand-test" "0.01" "test-agent" 100 50
+
+    if ! command -v jq &>/dev/null; then
+        _test_pass "$test_name - skipped (jq not available)"
+        return
+    fi
+
+    local today
+    today=$(date +%Y-%m-%d)
+
+    local strand_val
+    strand_val=$(jq -r ".[\"$today\"].beads[\"nd-nostrand-test\"].strand // \"ABSENT\"" "$NEEDLE_DAILY_SPEND_FILE")
+    if [[ "$strand_val" == "ABSENT" ]]; then
+        _test_pass "$test_name - strand field absent when not provided"
+    else
+        _test_fail "$test_name - expected strand absent, got: $strand_val"
+    fi
+}
+
+# =============================================================================
 # Main test runner
 # =============================================================================
 main() {
@@ -626,6 +688,8 @@ main() {
     test_get_total_spend
     test_ensure_spend_file
     test_record_effort_missing_bead_id
+    test_record_effort_strand_and_type
+    test_record_effort_no_strand
     test_get_bead_effort_no_logs
     test_get_bead_effort_from_logs
     test_get_bead_effort_filters_bead

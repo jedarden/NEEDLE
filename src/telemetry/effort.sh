@@ -335,17 +335,28 @@ except:
 }
 
 # Record effort (cost) for a bead
-# Usage: record_effort <bead_id> <cost> [agent_name] [input_tokens] [output_tokens]
+# Usage: record_effort <bead_id> <cost> [agent_name] [input_tokens] [output_tokens] [strand] [bead_type]
 # Updates daily spend file atomically and emits telemetry event
 #
+# Arguments:
+#   bead_id       - Required: Bead identifier (e.g., nd-abc123)
+#   cost          - Required: Cost in USD (e.g., "0.0125")
+#   agent_name    - Optional: Agent name (default: unknown)
+#   input_tokens  - Optional: Input token count (default: 0)
+#   output_tokens - Optional: Output token count (default: 0)
+#   strand        - Optional: Strand name (e.g., pluck, weave, pulse)
+#   bead_type     - Optional: Bead type (e.g., task, feature, bug)
+#
 # Example:
-#   record_effort "nd-abc123" "0.0125" "claude-anthropic-sonnet" 1000 500
+#   record_effort "nd-abc123" "0.0125" "claude-anthropic-sonnet" 1000 500 "pluck" "task"
 record_effort() {
     local bead_id="${1:-}"
     local cost="${2:-0}"
     local agent="${3:-unknown}"
     local input_tokens="${4:-0}"
     local output_tokens="${5:-0}"
+    local strand="${6:-}"
+    local bead_type="${7:-}"
 
     if [[ -z "$bead_id" ]]; then
         _needle_warn "Cannot record effort: bead_id required"
@@ -375,19 +386,25 @@ record_effort() {
            --arg bead "$bead_id" \
            --arg agent "$agent" \
            --argjson in_tok "$input_tokens" \
-           --argjson out_tok "$output_tokens" '
+           --argjson out_tok "$output_tokens" \
+           --arg strand "$strand" \
+           --arg bead_type "$bead_type" '
             .[$date] = (.[$date] // {}) |
             .[$date].total = ((.[$date].total // 0) + ($cost | tonumber)) |
             .[$date].agents = (.[$date].agents // {}) |
             .[$date].agents[$agent] = ((.[$date].agents[$agent] // 0) + ($cost | tonumber)) |
             .[$date].beads = (.[$date].beads // {}) |
-            .[$date].beads[$bead] = {
-                cost: ($cost | tonumber),
-                agent: $agent,
-                input_tokens: $in_tok,
-                output_tokens: $out_tok,
-                timestamp: (now | todate)
-            }
+            .[$date].beads[$bead] = (
+                {
+                    cost: ($cost | tonumber),
+                    agent: $agent,
+                    input_tokens: $in_tok,
+                    output_tokens: $out_tok,
+                    timestamp: (now | todate)
+                }
+                + (if $strand != "" then {strand: $strand} else {} end)
+                + (if $bead_type != "" then {type: $bead_type} else {} end)
+            )
         ' "$spend_file" > "$tmp_file" 2>/dev/null
 
         if [[ $? -eq 0 ]] && [[ -s "$tmp_file" ]]; then
@@ -399,21 +416,26 @@ record_effort() {
         fi
     else
         # Fallback: use Python for atomic update
-        python3 -c "
+        python3 - "$cost" "$today" "$bead_id" "$agent" "$input_tokens" "$output_tokens" "$strand" "$bead_type" "$spend_file" << 'PYEOF' 2>/dev/null
 import json
 import os
+import sys
 import tempfile
+from datetime import datetime
 
 try:
-    cost_val = float('$cost')
-    date = '$today'
-    bead = '$bead_id'
-    agent = '$agent'
-    in_tok = $input_tokens
-    out_tok = $output_tokens
+    cost_val = float(sys.argv[1])
+    date = sys.argv[2]
+    bead = sys.argv[3]
+    agent = sys.argv[4]
+    in_tok = int(sys.argv[5])
+    out_tok = int(sys.argv[6])
+    strand = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] else None
+    bead_type = sys.argv[8] if len(sys.argv) > 8 and sys.argv[8] else None
+    spend_file = sys.argv[9]
 
     # Read existing data
-    with open('$spend_file', 'r') as f:
+    with open(spend_file, 'r') as f:
         data = json.load(f)
 
     # Initialize date entry if needed
@@ -425,25 +447,29 @@ try:
     data[date]['agents'][agent] = data[date]['agents'].get(agent, 0) + cost_val
 
     # Record bead details
-    from datetime import datetime
-    data[date]['beads'][bead] = {
+    bead_record = {
         'cost': cost_val,
         'agent': agent,
         'input_tokens': in_tok,
         'output_tokens': out_tok,
         'timestamp': datetime.utcnow().isoformat() + 'Z'
     }
+    if strand:
+        bead_record['strand'] = strand
+    if bead_type:
+        bead_record['type'] = bead_type
+    data[date]['beads'][bead] = bead_record
 
     # Atomic write
-    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname('$spend_file'))
+    fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(spend_file))
     with os.fdopen(fd, 'w') as f:
         json.dump(data, f, indent=2)
-    os.replace(tmp_path, '$spend_file')
+    os.replace(tmp_path, spend_file)
 
 except Exception as e:
     print(f'Error: {e}', file=sys.stderr)
-    exit(1)
-" 2>/dev/null
+    sys.exit(1)
+PYEOF
 
         if [[ $? -ne 0 ]]; then
             _needle_error "Failed to update daily spend file"
@@ -451,10 +477,17 @@ except Exception as e:
         fi
     fi
 
-    _needle_debug "Recorded effort: bead=$bead_id, cost=\$$cost, agent=$agent"
+    _needle_debug "Recorded effort: bead=$bead_id, cost=\$$cost, agent=$agent, strand=${strand:-}, type=${bead_type:-}"
 
-    # Emit effort.recorded telemetry event
-    _needle_event_effort_recorded "$bead_id" "$cost" "$agent" "$input_tokens" "$output_tokens"
+    # Emit effort.recorded telemetry event (include strand/type if available)
+    local effort_args=("bead_id=$bead_id" "cost=$cost" "agent=$agent" "input_tokens=$input_tokens" "output_tokens=$output_tokens")
+    if [[ -n "$strand" ]]; then
+        effort_args+=("strand=$strand")
+    fi
+    if [[ -n "$bead_type" ]]; then
+        effort_args+=("type=$bead_type")
+    fi
+    _needle_telemetry_emit "effort.recorded" "info" "${effort_args[@]}"
 
     return 0
 }
@@ -817,6 +850,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     # Source dependencies for standalone testing
     source "$(dirname "${BASH_SOURCE[0]}")/../lib/output.sh"
     source "$(dirname "${BASH_SOURCE[0]}")/../lib/constants.sh"
+    source "$(dirname "${BASH_SOURCE[0]}")/../lib/utils.sh"
 
     case "${1:-}" in
         calculate)
@@ -828,10 +862,10 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
         record)
             if [[ $# -lt 3 ]]; then
-                echo "Usage: $0 record <bead_id> <cost> [agent] [input_tokens] [output_tokens]"
+                echo "Usage: $0 record <bead_id> <cost> [agent] [input_tokens] [output_tokens] [strand] [bead_type]"
                 exit 1
             fi
-            record_effort "$2" "$3" "${4:-unknown}" "${5:-0}" "${6:-0}"
+            record_effort "$2" "$3" "${4:-unknown}" "${5:-0}" "${6:-0}" "${7:-}" "${8:-}"
             ;;
         spend)
             _needle_show_spend_summary "${2:-1}"

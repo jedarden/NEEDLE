@@ -331,8 +331,10 @@ EXAMPLES:
         esac
     done
 
-    # Source effort module to get spend file path
-    source "$NEEDLE_ROOT_DIR/src/telemetry/effort.sh"
+    # Source effort module to get spend file path (skip if already loaded)
+    if ! declare -f _needle_effort_spend_file &>/dev/null; then
+        source "$NEEDLE_ROOT_DIR/src/telemetry/effort.sh"
+    fi
 
     local spend_file
     spend_file=$(_needle_effort_spend_file)
