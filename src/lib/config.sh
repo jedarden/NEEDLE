@@ -2,6 +2,8 @@
 # NEEDLE CLI Configuration Management
 # Load, validate, and manage configuration with defaults merging
 
+_NEEDLE_CONFIG_LOADED=true
+
 # Config file location
 NEEDLE_CONFIG_FILE="${NEEDLE_CONFIG_FILE:-$NEEDLE_HOME/$NEEDLE_CONFIG_NAME}"
 

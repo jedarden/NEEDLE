@@ -41,6 +41,8 @@ if [[ -z "${_NEEDLE_CLAIM_LOADED:-}" ]]; then
     source "$(dirname "${BASH_SOURCE[0]}")/claim.sh"
 fi
 
+_NEEDLE_MITOSIS_LOADED=true
+
 # ============================================================================
 # Mitosis Configuration
 # ============================================================================
