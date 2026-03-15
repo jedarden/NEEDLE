@@ -527,7 +527,9 @@ PYEOF
 
     if [[ ${#context_parts[@]} -gt 0 ]]; then
         body+=$'\n'
-        printf -v body '%s%s\n' "$body" "${context_parts[*]}"
+        for _part in "${context_parts[@]}"; do
+            body+="${_part}"$'\n'
+        done
     fi
 
     # Try to get worker log excerpt if available
@@ -544,7 +546,7 @@ Worker: \`${worker_id}\`
     else
         body+="(log file not found)"
     fi
-    body+=$'\n'"\\\`\`\`"
+    body+=$'\n''```'
 
     # Create the bead using br CLI
     local bead_id
