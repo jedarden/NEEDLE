@@ -337,7 +337,7 @@ alternative approaches that could unblock progress while waiting.
 {
   "alternatives": [
     {
-      "title": "[ALTERNATIVE] Brief title",
+      "title": "[ALTERNATIVE] Concise summary of what this alternative approach does",
       "description": "What this alternative does and why it's reasonable",
       "approach": "Detailed implementation approach",
       "reversibility": "How easily this can be changed when human decides",
@@ -362,7 +362,7 @@ Return ONLY a JSON object with your analysis (no markdown code blocks needed):
 {
   "alternatives": [
     {
-      "title": "[ALTERNATIVE] Short descriptive title",
+      "title": "[ALTERNATIVE] Concise summary of what this alternative approach does",
       "description": "Detailed description of the alternative approach",
       "approach": "Step-by-step implementation plan",
       "reversibility": "How easily this can be undone",

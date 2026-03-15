@@ -227,7 +227,7 @@ Return ONLY a JSON object (no markdown code blocks):
 {
   "gaps": [
     {
-      "title": "Brief actionable title",
+      "title": "Concise title summarising what this bead does (e.g. 'Add rate limiting to Kalshi WebSocket client') — no generic placeholders",
       "description": "What needs to be done. Reference the source of the intent.",
       "source_file": "path/to/doc.md",
       "source_line": "The specific line or passage from the source doc",

@@ -397,9 +397,11 @@ A task should be split (mitosis = true) if it meets ANY of these criteria:
 - Minimum number of child tasks: 2 (if mitosis is triggered)
 - Each child should be independently actionable
 - Children may have sequential dependencies (blocked_by)
-- **CRITICAL: Never use generic titles like "Task part 1", "Task part 2", "Subtask N", or "Part N"**
-  Every child title must be a specific action phrase derived from the description content.
-  If you cannot produce a specific, meaningful title for each child, return mitosis: false.
+- **CRITICAL: Each child title must be a concise, specific summary of that child's own content and work.**
+  Write the title as if describing what the bead does, e.g. "Add rate limiting to Kalshi WebSocket client" or "Refactor price normalisation to handle null markets".
+  Do NOT use generic placeholders like "Task part 1", "Task part 2", "Subtask N", "Part N", or "Step N".
+  Do NOT copy the parent title verbatim into child titles.
+  If the parent bead's work cannot be divided into at least 2 meaningfully distinct tasks, return mitosis: false.
 
 ## Output Format
 Respond with ONLY a JSON object (no markdown, no code blocks):
@@ -409,7 +411,7 @@ Respond with ONLY a JSON object (no markdown, no code blocks):
   "reasoning": "Brief explanation of why mitosis should or should not occur",
   "children": [
     {
-      "title": "Child task title",
+      "title": "Concise summary of what this child bead specifically does",
       "description": "Detailed, file-specific description referencing actual paths from the workspace context",
       "affected_files": ["src/auth.py", "tests/test_auth.py"],
       "verification_cmd": "pytest tests/test_auth.py -q",
@@ -726,25 +728,17 @@ _needle_heuristic_mitosis_analysis() {
             done
             children+="]"
         else
-            # Fallback: numbered children with parent title and description preserved for context
-            local child_count=$((split_indicators > max_children ? max_children : split_indicators))
-            [[ $child_count -lt 2 ]] && child_count=2
-
-            children="["
-            for ((i=1; i<=child_count; i++)); do
-                if [[ $i -gt 1 ]]; then
-                    children+=","
-                fi
-                local child_json
-                child_json=$(jq -n \
-                    --arg t "$title (part $i of $child_count)" \
-                    --arg d "$description" \
-                    --argjson part "$i" \
-                    --argjson total "$child_count" \
-                    '{title: $t, description: ("Part \($part) of \($total):\n\n" + $d), blocked_by: []}')
-                children+="$child_json"
-            done
-            children+="]"
+            # Heuristic could not extract distinct action phrases from the description.
+            # Do not split: generic "Task part N" titles are not acceptable.
+            _needle_debug "Heuristic mitosis: could not extract distinct titles from description — skipping split"
+            cat <<HEURISTIC_RESULT
+{
+  "mitosis": false,
+  "reasoning": "Could not extract at least 2 distinct action phrases from the bead text. Titles must come from the bead content — generic titles are not permitted.",
+  "children": []
+}
+HEURISTIC_RESULT
+            return 0
         fi
 
         local child_count
