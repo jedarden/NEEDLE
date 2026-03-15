@@ -164,6 +164,10 @@ NEEDLE_CONFIG_SCHEMA=(
     ["fabric.timeout"]="integer|false|0||"
     ["fabric.batching"]="boolean|false|||"
 
+    # dashboard
+    ["dashboard.port"]="integer|false|1|65535|"
+    ["dashboard.host"]="string|false|||"
+
     # debug
     ["debug.auto_bead_on_error"]="boolean|false|||"
     ["debug.auto_bead_workspace"]="string|false|||"

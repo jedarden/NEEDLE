@@ -687,29 +687,30 @@ log_dir = sys.argv[2]
 
 total_input, total_output, total_cost, attempts = 0, 0, 0.0, 0
 
-for log_file in glob.glob(os.path.join(log_dir, '*.jsonl')):
-    try:
-        with open(log_file, 'r') as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                    if ev.get('event') in ('effort.recorded', 'bead.effort_recorded'):
-                        d = ev.get('data', {})
-                        if d.get('bead_id') == bead_id:
-                            total_input += int(d.get('input_tokens', 0) or 0)
-                            total_output += int(d.get('output_tokens', 0) or 0)
-                            try:
-                                total_cost += float(d.get('cost', '0') or '0')
-                            except (ValueError, TypeError):
-                                pass
-                            attempts += 1
-                except json.JSONDecodeError:
-                    pass
-    except IOError:
-        pass
+for pattern in ('*.log', '*.jsonl'):
+    for log_file in glob.glob(os.path.join(log_dir, pattern)):
+        try:
+            with open(log_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                        if ev.get('event') in ('effort.recorded', 'bead.effort_recorded'):
+                            d = ev.get('data', {})
+                            if d.get('bead_id') == bead_id:
+                                total_input += int(d.get('input_tokens', 0) or 0)
+                                total_output += int(d.get('output_tokens', 0) or 0)
+                                try:
+                                    total_cost += float(d.get('cost', '0') or '0')
+                                except (ValueError, TypeError):
+                                    pass
+                                attempts += 1
+                    except json.JSONDecodeError:
+                        pass
+        except IOError:
+            pass
 
 print(f'{total_input}|{total_output}|{total_cost:.6f}|{attempts}')
 PYEOF
@@ -854,3 +855,6 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
             ;;
     esac
 fi
+
+# Module loaded flag
+_NEEDLE_EFFORT_LOADED="true"

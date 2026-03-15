@@ -82,6 +82,7 @@ source "$NEEDLE_ROOT_DIR/src/cli/pulse.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/metrics.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/analyze.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/refactor.sh"
+source "$NEEDLE_ROOT_DIR/src/cli/dashboard.sh"
 source "$NEEDLE_ROOT_DIR/src/cli/help.sh"
 
 # -----------------------------------------------------------------------------
@@ -99,7 +100,7 @@ NEEDLE_USE_COLOR="${NEEDLE_USE_COLOR:-true}"
 _needle_maybe_init() {
     # Commands that don't require initialization
     case "${1:-}" in
-        init|version|help|--help|-h|--version|-V|-x|upgrade|rollback|agents|attach|stop|test-agent|setup|pulse|metrics|analyze|refactor|completion|_run_worker)
+        init|version|help|--help|-h|--version|-V|-x|upgrade|rollback|agents|attach|stop|test-agent|setup|pulse|metrics|analyze|refactor|dashboard|completion|_run_worker)
             return 0
             ;;
     esac
@@ -124,7 +125,7 @@ _needle_parse_global_options() {
     # Check if a subcommand is present (first non-option arg that's a known subcommand)
     for arg in "$@"; do
         case "$arg" in
-            init|run|list|ls|status|config|logs|version|upgrade|rollback|help|completion|agents|heartbeat|attach|stop|restart|test-agent|setup|pulse|metrics|analyze|refactor)
+            init|run|list|ls|status|config|logs|version|upgrade|rollback|help|completion|agents|heartbeat|attach|stop|restart|test-agent|setup|pulse|metrics|analyze|refactor|dashboard)
                 has_subcommand=true
                 break
                 ;;
@@ -284,6 +285,9 @@ _needle_route_command() {
         refactor)
             _needle_refactor "$@"
             ;;
+        dashboard)
+            _needle_dashboard "$@"
+            ;;
         _run_worker)
             # Internal command - not exposed to users
             _needle_run_worker "$@"
@@ -372,7 +376,7 @@ _needle_completion() {
     local global_opts="-v --verbose -q --quiet --no-color --color -h --help -V --version -x"
 
     # All available commands with descriptions
-    local commands="init run list ls status config logs version upgrade rollback agents heartbeat attach stop restart test-agent setup pulse help completion"
+    local commands="init run list ls status config logs version upgrade rollback agents heartbeat attach stop restart test-agent setup pulse metrics analyze refactor dashboard help completion"
 
     # Command-specific options
     local init_opts="-f --force -d --defaults -w --workspace -e --editor -t --timezone -h --help"
