@@ -552,8 +552,7 @@ Worker: \`${worker_id}\`
         --type bug \
         --title "$title" \
         --description "$body" \
-        --label "auto-generated" \
-        --label "needle-error" \
+        --labels "auto-generated,needle-error" \
         --status open \
         --silent 2>/dev/null)
 
