@@ -126,6 +126,113 @@ _needle_pluck_is_enabled() {
 }
 
 # ============================================================================
+# Per-Bead Failure Tracking
+# ============================================================================
+
+# Get the per-bead failure count from the bead's 'failure-count:N' label.
+#
+# Usage: _needle_get_bead_failure_count <bead_id> [workspace]
+# Outputs: Integer failure count (0 if no label found)
+_needle_get_bead_failure_count() {
+    local bead_id="$1"
+    local workspace="${2:-${NEEDLE_WORKSPACE:-$(pwd)}}"
+
+    local bead_json
+    if [[ -n "$workspace" && -d "$workspace" ]]; then
+        bead_json=$(cd "$workspace" && br show "$bead_id" --json 2>/dev/null)
+    else
+        bead_json=$(br show "$bead_id" --json 2>/dev/null)
+    fi
+
+    if [[ -z "$bead_json" ]]; then
+        echo "0"
+        return 0
+    fi
+
+    # Handle array or object response
+    local labels_json
+    if echo "$bead_json" | jq -e 'type == "array"' &>/dev/null; then
+        labels_json=$(echo "$bead_json" | jq -r '.[0].labels // [] | .[]' 2>/dev/null)
+    else
+        labels_json=$(echo "$bead_json" | jq -r '.labels // [] | .[]' 2>/dev/null)
+    fi
+
+    # Find 'failure-count:N' label and extract N
+    local count
+    count=$(echo "$labels_json" | grep '^failure-count:' | sed 's/failure-count://' | head -1)
+    if [[ -n "$count" ]] && [[ "$count" =~ ^[0-9]+$ ]]; then
+        echo "$count"
+    else
+        echo "0"
+    fi
+}
+
+# Increment the per-bead failure count label.
+# Reads current count, increments, updates the bead label, and returns new count.
+#
+# Usage: _needle_increment_bead_failure_count <bead_id> [workspace]
+# Outputs: New integer failure count
+_needle_increment_bead_failure_count() {
+    local bead_id="$1"
+    local workspace="${2:-${NEEDLE_WORKSPACE:-$(pwd)}}"
+
+    local current_count
+    current_count=$(_needle_get_bead_failure_count "$bead_id" "$workspace")
+    local new_count=$((current_count + 1))
+
+    # Build update args: add new label, remove old one if present
+    local update_args=("$bead_id" "--add-label" "failure-count:$new_count")
+    if [[ "$current_count" -gt 0 ]]; then
+        update_args+=("--remove-label" "failure-count:$current_count")
+    fi
+
+    if [[ -n "$workspace" && -d "$workspace" ]]; then
+        (cd "$workspace" && br update "${update_args[@]}" &>/dev/null) || true
+    else
+        br update "${update_args[@]}" &>/dev/null || true
+    fi
+
+    echo "$new_count"
+}
+
+# Quarantine a bead from the pluck strand (permanently close, not retryable).
+#
+# Usage: _needle_quarantine_bead_pluck <bead_id> [reason] [workspace]
+_needle_quarantine_bead_pluck() {
+    local bead_id="$1"
+    local reason="${2:-quarantined}"
+    local workspace="${3:-${NEEDLE_WORKSPACE:-$(pwd)}}"
+
+    _needle_debug "Quarantining bead: $bead_id (reason: $reason)"
+
+    local update_result=1
+    if [[ -n "$workspace" && -d "$workspace" ]]; then
+        (cd "$workspace" && br update "$bead_id" --status closed --add-label "quarantined" 2>/dev/null) && update_result=0
+    else
+        br update "$bead_id" --status closed --add-label "quarantined" 2>/dev/null && update_result=0
+    fi
+
+    if [[ $update_result -eq 0 ]]; then
+        _needle_telemetry_emit "bead.quarantined" "error" \
+            "bead_id=$bead_id" \
+            "reason=$reason" \
+            "session=${NEEDLE_SESSION:-unknown}" \
+            "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+        _needle_warn "Bead quarantined: $bead_id (reason: $reason)"
+
+        if declare -f _needle_run_hook &>/dev/null; then
+            _needle_run_hook "on_quarantine" "$bead_id"
+        fi
+
+        return 0
+    else
+        _needle_error "Failed to quarantine bead: $bead_id"
+        return 1
+    fi
+}
+
+# ============================================================================
 # Bead Processing Functions
 # ============================================================================
 
@@ -202,7 +309,7 @@ _needle_pluck_process_bead() {
 
     if [[ -z "$prompt" ]]; then
         _needle_error "Failed to build prompt for bead: $bead_id"
-        _needle_mark_bead_failed "$bead_id" "prompt_build_failed" "" "$workspace"
+        _needle_mark_bead_failed "$bead_id" "prompt_build_failed" "" "$workspace" "$agent"
         return 1
     fi
 
@@ -227,7 +334,7 @@ _needle_pluck_process_bead() {
         _needle_event_error_dispatch_failed "$bead_id" \
             "agent=$agent" \
             "error=dispatch_failed"
-        _needle_mark_bead_failed "$bead_id" "agent_dispatch_failed" "" "$workspace"
+        _needle_mark_bead_failed "$bead_id" "agent_dispatch_failed" "" "$workspace" "$agent"
         return 1
     fi
 
@@ -342,7 +449,7 @@ ${failure_context}"
         return 1
     else
         # Failure - mark bead as blocked/failed
-        _needle_mark_bead_failed "$bead_id" "exit_code_$exit_code" "$output_file" "$workspace"
+        _needle_mark_bead_failed "$bead_id" "exit_code_$exit_code" "$output_file" "$workspace" "$agent"
         return 1
     fi
 }
@@ -393,18 +500,61 @@ _needle_mark_bead_completed() {
     fi
 }
 
-# Mark a bead as failed/blocked
+# Mark a bead as failed/blocked.
+# Before marking blocked, increments the per-bead failure counter and attempts
+# forced mitosis when the failure threshold is reached. If forced mitosis
+# cannot decompose the bead, it is quarantined instead.
 #
-# Usage: _needle_mark_bead_failed <bead_id> [reason] [output_file] [workspace]
+# Usage: _needle_mark_bead_failed <bead_id> [reason] [output_file] [workspace] [agent]
 _needle_mark_bead_failed() {
     local bead_id="$1"
     local reason="${2:-unknown}"
     local output_file="${3:-}"
     local workspace="${4:-${NEEDLE_WORKSPACE:-$(pwd)}}"
+    local agent="${5:-${NEEDLE_LOOP_CURRENT_AGENT:-}}"
 
     _needle_debug "Marking bead as failed: $bead_id (reason: $reason)"
 
-    # Update bead status to blocked with failed label
+    # Track per-bead failure count via label
+    local bead_failure_count
+    bead_failure_count=$(_needle_increment_bead_failure_count "$bead_id" "$workspace")
+    _needle_debug "Per-bead failure count for $bead_id: $bead_failure_count"
+
+    # Check if forced mitosis should be attempted before falling back to block
+    if [[ -n "$agent" ]] && _needle_mitosis_force_enabled "$workspace"; then
+        local force_threshold
+        force_threshold=$(_needle_mitosis_force_threshold "$workspace")
+
+        if [[ "$bead_failure_count" -ge "$force_threshold" ]]; then
+            _needle_warn "Bead $bead_id has failed $bead_failure_count time(s) — attempting forced mitosis (threshold=$force_threshold)"
+            _needle_telemetry_emit "bead.force_mitosis.attempt" "warn" \
+                "bead_id=$bead_id" \
+                "failure_count=$bead_failure_count" \
+                "threshold=$force_threshold" \
+                "session=${NEEDLE_SESSION:-unknown}"
+
+            if _needle_check_mitosis "$bead_id" "$workspace" "$agent" "true" "$bead_failure_count"; then
+                # Mitosis succeeded — parent is now blocked by children
+                _needle_info "Forced mitosis succeeded for $bead_id — parent blocked by children"
+                _needle_telemetry_emit "bead.force_mitosis.success" "info" \
+                    "bead_id=$bead_id" \
+                    "failure_count=$bead_failure_count" \
+                    "session=${NEEDLE_SESSION:-unknown}"
+                return 0
+            else
+                # Mitosis cannot decompose — quarantine as truly atomic but consistently failing
+                _needle_warn "Forced mitosis failed for $bead_id — quarantining (atomic bead, $bead_failure_count failures)"
+                _needle_telemetry_emit "bead.force_mitosis.quarantine" "error" \
+                    "bead_id=$bead_id" \
+                    "failure_count=$bead_failure_count" \
+                    "session=${NEEDLE_SESSION:-unknown}"
+                _needle_quarantine_bead_pluck "$bead_id" "force_mitosis_exhausted" "$workspace"
+                return 0
+            fi
+        fi
+    fi
+
+    # Standard failure path: mark as blocked with failed label
     # NOTE: br update must run in workspace context
     local update_result=1
     if [[ -n "$workspace" && -d "$workspace" ]]; then

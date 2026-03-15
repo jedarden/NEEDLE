@@ -617,6 +617,340 @@ else
 fi
 
 # ============================================================================
+# Test Per-Bead Failure Tracking
+# ============================================================================
+
+test_case "_needle_get_bead_failure_count returns 0 when no failure-count label"
+create_test_config
+mock_br '[{"id":"bd-fc1","title":"Test","priority":2,"labels":[]}]'
+count=$(_needle_get_bead_failure_count "bd-fc1" "$TEST_DIR/workspace" 2>/dev/null)
+if [[ "$count" == "0" ]]; then
+    test_pass
+else
+    test_fail "Expected 0 for bead with no failure-count label, got: $count"
+fi
+
+test_case "_needle_get_bead_failure_count reads failure-count:N label"
+# Create a br mock that returns a bead with failure-count:2 label
+mkdir -p "$TEST_DIR/bin"
+cat > "$TEST_DIR/bin/br" << 'EOF'
+#!/bin/bash
+case "$1" in
+    show)
+        echo '[{"id":"bd-fc2","title":"Test","priority":2,"labels":["failure-count:2"]}]'
+        ;;
+    update)
+        echo "Updated"
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "$TEST_DIR/bin/br"
+export PATH="$TEST_DIR/bin:$PATH"
+
+count=$(_needle_get_bead_failure_count "bd-fc2" "$TEST_DIR/workspace" 2>/dev/null)
+if [[ "$count" == "2" ]]; then
+    test_pass
+else
+    test_fail "Expected 2 from failure-count:2 label, got: $count"
+fi
+
+test_case "_needle_increment_bead_failure_count increments from 0 to 1"
+mkdir -p "$TEST_DIR/bin"
+BR_LOG="$TEST_DIR/br_update_log.txt"
+> "$BR_LOG"
+cat > "$TEST_DIR/bin/br" << EOF
+#!/bin/bash
+case "\$1" in
+    show)
+        echo '[{"id":"bd-inc1","title":"Test","priority":2,"labels":[]}]'
+        ;;
+    update)
+        echo "\$@" >> "$BR_LOG"
+        echo "Updated"
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "$TEST_DIR/bin/br"
+export PATH="$TEST_DIR/bin:$PATH"
+
+new_count=$(_needle_increment_bead_failure_count "bd-inc1" "$TEST_DIR/workspace" 2>/dev/null)
+if [[ "$new_count" == "1" ]] && grep -q "failure-count:1" "$BR_LOG" 2>/dev/null; then
+    test_pass
+else
+    test_fail "Expected count=1 and failure-count:1 label in update args, got: count=$new_count"
+fi
+
+test_case "_needle_increment_bead_failure_count replaces old label on increment"
+mkdir -p "$TEST_DIR/bin"
+BR_LOG="$TEST_DIR/br_update_log2.txt"
+> "$BR_LOG"
+cat > "$TEST_DIR/bin/br" << EOF
+#!/bin/bash
+case "\$1" in
+    show)
+        echo '[{"id":"bd-inc2","title":"Test","priority":2,"labels":["failure-count:3"]}]'
+        ;;
+    update)
+        echo "\$@" >> "$BR_LOG"
+        echo "Updated"
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "$TEST_DIR/bin/br"
+export PATH="$TEST_DIR/bin:$PATH"
+
+new_count=$(_needle_increment_bead_failure_count "bd-inc2" "$TEST_DIR/workspace" 2>/dev/null)
+if [[ "$new_count" == "4" ]] && grep -q "failure-count:4" "$BR_LOG" 2>/dev/null && grep -q "failure-count:3" "$BR_LOG" 2>/dev/null; then
+    test_pass
+else
+    test_fail "Expected count=4, add failure-count:4, remove failure-count:3, got: count=$new_count log=$(cat $BR_LOG 2>/dev/null)"
+fi
+
+# ============================================================================
+# Test Forced Mitosis in _needle_mark_bead_failed
+# ============================================================================
+
+test_case "_needle_mark_bead_failed attempts force mitosis at threshold"
+create_test_config
+# Restore _needle_mark_bead_failed — may have been overridden to a no-op by _setup_verify_mocks
+source "$PROJECT_DIR/src/strands/pluck.sh" 2>/dev/null || true
+# Enable force mitosis with threshold=3
+cat > "$NEEDLE_CONFIG_FILE" << EOF
+strands:
+  pluck: true
+
+mitosis:
+  enabled: true
+  force_on_failure: true
+  force_failure_threshold: 3
+  skip_types: ""
+  skip_labels: ""
+EOF
+NEEDLE_CONFIG_CACHE=""
+
+# Mock br: bead has failure-count:3 already (so after increment it will be 3+1=4...
+# Actually we need current count to be 2 so increment gives 3)
+FORCE_MITOSIS_CALLED="false"
+BEAD_QUARANTINED="false"
+BEAD_BLOCKED="false"
+mkdir -p "$TEST_DIR/bin"
+BR_FORCE_LOG="$TEST_DIR/br_force_log.txt"
+> "$BR_FORCE_LOG"
+cat > "$TEST_DIR/bin/br" << EOF
+#!/bin/bash
+echo "\$@" >> "$BR_FORCE_LOG"
+case "\$1" in
+    show)
+        echo '[{"id":"bd-fm1","title":"Force Mitosis Test","priority":2,"labels":["failure-count:2"],"description":"line1\nline2\nline3\nline4\nline5\nline6"}]'
+        ;;
+    update)
+        echo "Updated"
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "$TEST_DIR/bin/br"
+export PATH="$TEST_DIR/bin:$PATH"
+
+# Mock _needle_check_mitosis to track force call
+_needle_check_mitosis_ORIGINAL=$(declare -f _needle_check_mitosis 2>/dev/null || echo "")
+_needle_check_mitosis() {
+    local bead_id="$1" workspace="$2" agent="$3" force="${4:-false}" failure_count="${5:-0}"
+    if [[ "$force" == "true" ]]; then
+        FORCE_MITOSIS_CALLED="true"
+        FORCE_MITOSIS_FAILURE_COUNT="$failure_count"
+    fi
+    return 0  # Simulate mitosis success
+}
+
+_needle_mark_bead_failed "bd-fm1" "test_reason" "" "$TEST_DIR/workspace" "test-agent" 2>/dev/null
+
+if [[ "$FORCE_MITOSIS_CALLED" == "true" ]] && [[ "$FORCE_MITOSIS_FAILURE_COUNT" == "3" ]]; then
+    test_pass
+else
+    test_fail "Expected force mitosis called with failure_count=3, got: called=$FORCE_MITOSIS_CALLED count=$FORCE_MITOSIS_FAILURE_COUNT"
+fi
+
+test_case "_needle_mark_bead_failed quarantines when forced mitosis returns false"
+create_test_config
+# Restore _needle_mark_bead_failed — may have been overridden to a no-op
+source "$PROJECT_DIR/src/strands/pluck.sh" 2>/dev/null || true
+cat > "$NEEDLE_CONFIG_FILE" << EOF
+strands:
+  pluck: true
+
+mitosis:
+  enabled: true
+  force_on_failure: true
+  force_failure_threshold: 3
+  skip_types: ""
+  skip_labels: ""
+EOF
+NEEDLE_CONFIG_CACHE=""
+
+BEAD_QUARANTINED2="false"
+mkdir -p "$TEST_DIR/bin"
+BR_QUARAN_LOG="$TEST_DIR/br_quaran_log.txt"
+> "$BR_QUARAN_LOG"
+cat > "$TEST_DIR/bin/br" << EOF
+#!/bin/bash
+echo "\$@" >> "$BR_QUARAN_LOG"
+case "\$1" in
+    show)
+        echo '[{"id":"bd-quar1","title":"Quarantine Test","priority":2,"labels":["failure-count:2"]}]'
+        ;;
+    update)
+        if echo "\$@" | grep -q "quarantined"; then
+            BEAD_QUARANTINED2=true
+        fi
+        echo "Updated"
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "$TEST_DIR/bin/br"
+export PATH="$TEST_DIR/bin:$PATH"
+
+# Mock _needle_check_mitosis to return failure (cannot decompose)
+_needle_check_mitosis() {
+    return 1  # Mitosis failed
+}
+
+_needle_mark_bead_failed "bd-quar1" "test_reason" "" "$TEST_DIR/workspace" "test-agent" 2>/dev/null
+
+# Check that br update was called with quarantined label
+if grep -q "quarantined" "$BR_QUARAN_LOG" 2>/dev/null; then
+    test_pass
+else
+    test_fail "Expected quarantined label in br update, got: $(cat $BR_QUARAN_LOG 2>/dev/null)"
+fi
+
+test_case "_needle_mark_bead_failed does not force mitosis below threshold"
+create_test_config
+# Restore _needle_mark_bead_failed — may have been overridden to a no-op
+source "$PROJECT_DIR/src/strands/pluck.sh" 2>/dev/null || true
+cat > "$NEEDLE_CONFIG_FILE" << EOF
+strands:
+  pluck: true
+
+mitosis:
+  enabled: true
+  force_on_failure: true
+  force_failure_threshold: 3
+  skip_types: ""
+  skip_labels: ""
+EOF
+NEEDLE_CONFIG_CACHE=""
+
+FORCE_MITOSIS_BELOW="false"
+mkdir -p "$TEST_DIR/bin"
+BR_BELOW_LOG="$TEST_DIR/br_below_log.txt"
+> "$BR_BELOW_LOG"
+cat > "$TEST_DIR/bin/br" << EOF
+#!/bin/bash
+echo "\$@" >> "$BR_BELOW_LOG"
+case "\$1" in
+    show)
+        # failure-count:1 means after increment it becomes 2, below threshold=3
+        echo '[{"id":"bd-below1","title":"Below Threshold","priority":2,"labels":["failure-count:1"]}]'
+        ;;
+    update)
+        echo "Updated"
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "$TEST_DIR/bin/br"
+export PATH="$TEST_DIR/bin:$PATH"
+
+_needle_check_mitosis() {
+    FORCE_MITOSIS_BELOW="true"
+    return 0
+}
+
+_needle_mark_bead_failed "bd-below1" "test_reason" "" "$TEST_DIR/workspace" "test-agent" 2>/dev/null
+
+if [[ "$FORCE_MITOSIS_BELOW" == "false" ]]; then
+    test_pass
+else
+    test_fail "Expected no force mitosis when failure count below threshold"
+fi
+
+test_case "_needle_mark_bead_failed skips force mitosis when disabled in config"
+create_test_config
+# Restore _needle_mark_bead_failed — may have been overridden to a no-op
+source "$PROJECT_DIR/src/strands/pluck.sh" 2>/dev/null || true
+cat > "$NEEDLE_CONFIG_FILE" << EOF
+strands:
+  pluck: true
+
+mitosis:
+  enabled: true
+  force_on_failure: false
+  force_failure_threshold: 3
+  skip_types: ""
+  skip_labels: ""
+EOF
+NEEDLE_CONFIG_CACHE=""
+
+FORCE_DISABLED_CALLED="false"
+mkdir -p "$TEST_DIR/bin"
+BR_DISABLED_LOG="$TEST_DIR/br_disabled_log.txt"
+> "$BR_DISABLED_LOG"
+cat > "$TEST_DIR/bin/br" << EOF
+#!/bin/bash
+echo "\$@" >> "$BR_DISABLED_LOG"
+case "\$1" in
+    show)
+        echo '[{"id":"bd-dis1","title":"Disabled Force","priority":2,"labels":["failure-count:5"]}]'
+        ;;
+    update)
+        echo "Updated"
+        exit 0
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "$TEST_DIR/bin/br"
+export PATH="$TEST_DIR/bin:$PATH"
+
+_needle_check_mitosis() {
+    FORCE_DISABLED_CALLED="true"
+    return 0
+}
+
+_needle_mark_bead_failed "bd-dis1" "test_reason" "" "$TEST_DIR/workspace" "test-agent" 2>/dev/null
+
+if [[ "$FORCE_DISABLED_CALLED" == "false" ]]; then
+    test_pass
+else
+    test_fail "Expected no force mitosis when force_on_failure=false"
+fi
+
+# ============================================================================
 # Test Direct Execution Support
 # ============================================================================
 
