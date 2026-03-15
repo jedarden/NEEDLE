@@ -435,7 +435,11 @@ def get_bead_costs() -> dict:
 
 
 def seed_from_file(filepath: str) -> int:
-    """Seed the buffer from a JSONL file."""
+    """Seed the buffer from a JSONL file.
+
+    Also updates the throughput tracker for bead.completed events so the
+    sparkline reflects historical completions loaded at startup.
+    """
     count = 0
     try:
         with open(filepath, "r") as f:
@@ -447,6 +451,10 @@ def seed_from_file(filepath: str) -> int:
                     event = json.loads(line)
                     events_buffer.append(event)
                     count += 1
+                    # Mirror the per-minute throughput tracking done in _handle_ingest
+                    event_type = event.get("type", event.get("event", ""))
+                    if event_type == "bead.completed":
+                        _update_throughput(event.get("ts", ""))
                 except json.JSONDecodeError:
                     continue
     except FileNotFoundError:

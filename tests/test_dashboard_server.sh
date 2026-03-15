@@ -399,6 +399,102 @@ else
 fi
 echo ""
 
+# ---------------------------------------------------------------------------
+# Seed-file tests — start a fresh server instance with --seed-file
+# ---------------------------------------------------------------------------
+
+_stop_server
+
+SEED_PORT=17843
+SEED_PID=""
+
+_start_seed_server() {
+    python3 "$SERVER_SCRIPT" --port "$SEED_PORT" --seed-file "$1" 2>/dev/null &
+    SEED_PID=$!
+    local retries=20
+    while [[ $retries -gt 0 ]]; do
+        if curl -sf --max-time 1 "http://localhost:$SEED_PORT/health" &>/dev/null; then
+            return 0
+        fi
+        sleep 0.2
+        retries=$((retries - 1))
+    done
+    echo "ERROR: Seed server did not start in time" >&2
+    return 1
+}
+
+_stop_seed_server() {
+    if [[ -n "$SEED_PID" ]] && kill -0 "$SEED_PID" 2>/dev/null; then
+        kill "$SEED_PID" 2>/dev/null
+        wait "$SEED_PID" 2>/dev/null || true
+        SEED_PID=""
+    fi
+}
+
+# Build a temp seed file
+SEED_FILE="$(mktemp /tmp/fabric-seed-XXXXXX.jsonl)"
+trap '_stop_seed_server; _stop_server; rm -f "$SEED_FILE"' EXIT
+
+SEED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cat >"$SEED_FILE" <<EOF
+{"type":"bead.completed","ts":"$SEED_TS","worker":"seeded-worker","bead_id":"nd-test1"}
+{"type":"bead.completed","ts":"$SEED_TS","worker":"seeded-worker","bead_id":"nd-test2"}
+{"type":"bead.failed","ts":"$SEED_TS","worker":"seeded-worker","data":{"bead_id":"nd-testF","reason":"timeout"}}
+EOF
+
+if ! _start_seed_server "$SEED_FILE"; then
+    echo "SKIP: Could not start seed server"
+else
+
+# Test 21: --seed-file loads events into the buffer
+echo "Test 21: --seed-file populates event buffer"
+seed_events=$(curl -sf --max-time 5 "http://localhost:$SEED_PORT/api/events" 2>/dev/null || echo "")
+if echo "$seed_events" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+assert d.get('count', 0) >= 3, f'expected >= 3 seeded events, got count={d.get(\"count\")}'
+" 2>/dev/null; then
+    _pass "--seed-file populates event buffer with seeded events"
+else
+    _fail "--seed-file did not populate event buffer (got: ${seed_events:0:200})"
+fi
+echo ""
+
+# Test 22: seeded bead.completed events appear in throughput history
+echo "Test 22: --seed-file updates throughput sparkline for bead.completed events"
+seed_throughput=$(curl -sf --max-time 5 "http://localhost:$SEED_PORT/api/throughput" 2>/dev/null || echo "")
+if echo "$seed_throughput" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+history = d.get('history', [])
+total = sum(h['count'] for h in history)
+assert total >= 2, f'expected >= 2 seeded completions in throughput, got total={total}'
+" 2>/dev/null; then
+    _pass "seeded bead.completed events update throughput sparkline"
+else
+    _fail "seeded bead.completed events not reflected in throughput (got: ${seed_throughput:0:200})"
+fi
+echo ""
+
+# Test 23: seeded bead.failed event appears in summary failures
+echo "Test 23: --seed-file populates failure alerts from bead.failed events"
+seed_summary=$(curl -sf --max-time 5 "http://localhost:$SEED_PORT/api/summary" 2>/dev/null || echo "")
+if echo "$seed_summary" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+failures = d.get('failures', [])
+assert any(f.get('type') == 'bead_failure' for f in failures), f'expected bead_failure in failures, got {failures}'
+" 2>/dev/null; then
+    _pass "seeded bead.failed event appears in summary failures"
+else
+    _fail "seeded bead.failed event not in summary failures (got: ${seed_summary:0:400})"
+fi
+echo ""
+
+fi  # _start_seed_server
+
+_stop_seed_server
+
 # Summary
 echo "=== Results: $pass passed, $fail failed ==="
 if [[ $fail -gt 0 ]]; then
