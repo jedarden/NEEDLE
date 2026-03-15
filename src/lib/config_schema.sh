@@ -85,6 +85,8 @@ NEEDLE_CONFIG_SCHEMA=(
     ["mitosis.min_children"]="integer|false|1||"
     ["mitosis.min_complexity"]="integer|false|0||"
     ["mitosis.timeout"]="integer|false|1||"
+    ["mitosis.force_on_failure"]="boolean|false|||"
+    ["mitosis.force_failure_threshold"]="integer|false|1||"
 
     # knot
     ["knot.rate_limit_interval"]="integer|false|0||"

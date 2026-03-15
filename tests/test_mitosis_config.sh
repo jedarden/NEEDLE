@@ -350,6 +350,80 @@ else
     test_fail "Expected custom_default for nonexistent key, got '$value'"
 fi
 
+# ============ Force On Failure Config Tests ============
+
+test_case "_needle_mitosis_force_enabled returns true when force_on_failure=true"
+mkdir -p "$TEST_CONFIG_DIR"
+cat > "$TEST_CONFIG_FILE" << 'EOF'
+mitosis:
+  enabled: true
+  force_on_failure: true
+  force_failure_threshold: 3
+EOF
+if _needle_mitosis_force_enabled; then
+    test_pass
+else
+    test_fail "Expected force_on_failure to be enabled"
+fi
+
+test_case "_needle_mitosis_force_enabled returns false when force_on_failure=false"
+mkdir -p "$TEST_CONFIG_DIR"
+cat > "$TEST_CONFIG_FILE" << 'EOF'
+mitosis:
+  enabled: true
+  force_on_failure: false
+EOF
+if ! _needle_mitosis_force_enabled; then
+    test_pass
+else
+    test_fail "Expected force_on_failure to be disabled"
+fi
+
+test_case "_needle_mitosis_force_threshold returns configured value"
+mkdir -p "$TEST_CONFIG_DIR"
+cat > "$TEST_CONFIG_FILE" << 'EOF'
+mitosis:
+  enabled: true
+  force_failure_threshold: 5
+EOF
+value=$(_needle_mitosis_force_threshold)
+if [[ "$value" == "5" ]]; then
+    test_pass
+else
+    test_fail "Expected '5', got '$value'"
+fi
+
+test_case "_needle_mitosis_force_threshold returns default when not configured"
+mkdir -p "$TEST_CONFIG_DIR"
+cat > "$TEST_CONFIG_FILE" << 'EOF'
+mitosis:
+  enabled: true
+EOF
+value=$(_needle_mitosis_force_threshold)
+if [[ "$value" == "3" ]]; then
+    test_pass
+else
+    test_fail "Expected default '3', got '$value'"
+fi
+
+test_case "_needle_mitosis_force_enabled respects workspace override"
+mkdir -p "$TEST_CONFIG_DIR"
+cat > "$TEST_CONFIG_FILE" << 'EOF'
+mitosis:
+  enabled: true
+  force_on_failure: true
+EOF
+mkdir -p "$TEST_DIR/workspace_force"
+cat > "$TEST_DIR/workspace_force/.needle.yaml" << 'EOF'
+mitosis:
+  force_on_failure: false
+EOF
+if ! _needle_mitosis_force_enabled "$TEST_DIR/workspace_force"; then
+    test_pass
+else
+    test_fail "Expected workspace override to disable force_on_failure"
+fi
+
 # ============ Summary ============
 echo ""
 echo "================================"

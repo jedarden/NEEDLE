@@ -428,6 +428,51 @@ else
 fi
 
 # ============================================================================
+# Force parameter — bypasses min_complexity
+# ============================================================================
+
+test_case "_needle_check_mitosis with force=true bypasses min_complexity for short description"
+# 2 lines < min_complexity=3, but force=true should bypass the check
+MOCK_BEAD_JSON='{"id":"nd-test","issue_type":"task","labels":[],"description":"line1\nline2","priority":2}'
+_needle_check_mitosis "nd-test" "$WS_DIR" "agent" "true" "3" &>/dev/null
+if grep -q "nd-test" "$ANALYZE_LOG" 2>/dev/null; then
+    test_pass
+else
+    test_fail "Expected analysis to be called when force=true despite short description"
+fi
+
+test_case "_needle_check_mitosis with force=false still applies min_complexity gate"
+# 2 lines < min_complexity=3 and force=false → should return 1
+MOCK_BEAD_JSON='{"id":"nd-test","issue_type":"task","labels":[],"description":"line1\nline2","priority":2}'
+_needle_check_mitosis "nd-test" "$WS_DIR" "agent" "false" "0" &>/dev/null
+rc=$?
+if [[ $rc -ne 0 ]]; then
+    test_pass
+else
+    test_fail "Expected non-zero exit for short description when force=false"
+fi
+
+test_case "_needle_check_mitosis with force=true still skips skip_labels"
+# Even with force=true, skip labels are respected
+MOCK_BEAD_JSON='{"id":"nd-test","issue_type":"task","labels":["no-mitosis"],"description":"line1\nline2","priority":2}'
+_needle_check_mitosis "nd-test" "$WS_DIR" "agent" "true" "3" &>/dev/null
+rc=$?
+if [[ $rc -ne 0 ]]; then
+    test_pass
+else
+    test_fail "Expected non-zero exit for no-mitosis label even with force=true"
+fi
+
+test_case "_needle_check_mitosis passes failure_count through to analyze"
+MOCK_BEAD_JSON='{"id":"nd-test","issue_type":"task","labels":[],"description":"line1\nline2","priority":2}'
+_needle_check_mitosis "nd-test" "$WS_DIR" "agent" "true" "5" &>/dev/null
+if grep -q "5" "$ANALYZE_LOG" 2>/dev/null; then
+    test_pass
+else
+    test_fail "Expected failure_count=5 to appear in analyze call args"
+fi
+
+# ============================================================================
 # Summary
 # ============================================================================
 

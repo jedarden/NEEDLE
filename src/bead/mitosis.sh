@@ -53,6 +53,8 @@ NEEDLE_MITOSIS_MAX_CHILDREN="${NEEDLE_MITOSIS_MAX_CHILDREN:-5}"
 NEEDLE_MITOSIS_MIN_CHILDREN="${NEEDLE_MITOSIS_MIN_CHILDREN:-2}"
 NEEDLE_MITOSIS_MIN_COMPLEXITY="${NEEDLE_MITOSIS_MIN_COMPLEXITY:-3}"
 NEEDLE_MITOSIS_TIMEOUT="${NEEDLE_MITOSIS_TIMEOUT:-60}"
+NEEDLE_MITOSIS_FORCE_ON_FAILURE="${NEEDLE_MITOSIS_FORCE_ON_FAILURE:-true}"
+NEEDLE_MITOSIS_FORCE_FAILURE_THRESHOLD="${NEEDLE_MITOSIS_FORCE_FAILURE_THRESHOLD:-3}"
 
 # ============================================================================
 # Configuration Accessors
@@ -130,6 +132,32 @@ _needle_mitosis_get_min_complexity() {
     _needle_mitosis_config "min_complexity" "$NEEDLE_MITOSIS_MIN_COMPLEXITY" "$workspace"
 }
 
+# Check if forced mitosis on repeated failure is enabled
+# Usage: _needle_mitosis_force_enabled [workspace]
+# Returns: 0 if enabled, 1 if disabled
+_needle_mitosis_force_enabled() {
+    local workspace="${1:-}"
+    local enabled
+    enabled=$(_needle_mitosis_config "force_on_failure" "$NEEDLE_MITOSIS_FORCE_ON_FAILURE" "$workspace")
+
+    case "$enabled" in
+        true|True|TRUE|yes|Yes|YES|1)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# Get the failure count threshold that triggers forced mitosis
+# Usage: _needle_mitosis_force_threshold [workspace]
+# Returns: Integer threshold (default: 3)
+_needle_mitosis_force_threshold() {
+    local workspace="${1:-}"
+    _needle_mitosis_config "force_failure_threshold" "$NEEDLE_MITOSIS_FORCE_FAILURE_THRESHOLD" "$workspace"
+}
+
 # ============================================================================
 # Mitosis Detection
 # ============================================================================
@@ -137,11 +165,13 @@ _needle_mitosis_get_min_complexity() {
 # Check if a bead should undergo mitosis
 # This is the main entry point for mitosis detection
 #
-# Usage: _needle_check_mitosis <bead_id> <workspace> <agent>
+# Usage: _needle_check_mitosis <bead_id> <workspace> <agent> [force] [failure_count]
 # Arguments:
-#   bead_id   - The bead ID to check
-#   workspace - The workspace path
-#   agent     - The agent name to use for analysis
+#   bead_id       - The bead ID to check
+#   workspace     - The workspace path
+#   agent         - The agent name to use for analysis
+#   force         - (optional) "true" to bypass min_complexity check (default: false)
+#   failure_count - (optional) Number of prior failures, included in forced prompt (default: 0)
 #
 # Return values:
 #   0 - Mitosis performed (bead was split into children)
@@ -157,6 +187,8 @@ _needle_check_mitosis() {
     local bead_id="$1"
     local workspace="$2"
     local agent="$3"
+    local force="${4:-false}"
+    local failure_count="${5:-0}"
 
     # Validate inputs
     if [[ -z "$bead_id" ]]; then
@@ -231,13 +263,18 @@ _needle_check_mitosis() {
     fi
 
     # Check minimum complexity (description lines)
-    local min_complexity description_lines
-    min_complexity=$(_needle_mitosis_get_min_complexity "$workspace")
-    description_lines=$(echo "$description" | wc -l)
+    # Bypassed when force=true (repeated failure signals task is too coarse regardless of size)
+    if [[ "$force" != "true" ]]; then
+        local min_complexity description_lines
+        min_complexity=$(_needle_mitosis_get_min_complexity "$workspace")
+        description_lines=$(echo "$description" | wc -l)
 
-    if [[ "$description_lines" -lt "$min_complexity" ]]; then
-        _needle_debug "Skipping mitosis: description too short ($description_lines lines < $min_complexity minimum)"
-        return 1
+        if [[ "$description_lines" -lt "$min_complexity" ]]; then
+            _needle_debug "Skipping mitosis: description too short ($description_lines lines < $min_complexity minimum)"
+            return 1
+        fi
+    else
+        _needle_debug "Forced mitosis: bypassing min_complexity check (failure_count=$failure_count)"
     fi
 
     # Emit mitosis check event
@@ -247,7 +284,7 @@ _needle_check_mitosis() {
 
     # Build analysis prompt and run mitosis analysis
     local analysis
-    analysis=$(_needle_analyze_for_mitosis "$bead_id" "$workspace" "$agent" "$bead_object")
+    analysis=$(_needle_analyze_for_mitosis "$bead_id" "$workspace" "$agent" "$bead_object" "$force" "$failure_count")
 
     if [[ -z "$analysis" ]]; then
         _needle_debug "Mitosis analysis returned empty result"
@@ -272,12 +309,14 @@ _needle_check_mitosis() {
 # ============================================================================
 
 # Build the mitosis analysis prompt
-# Usage: _needle_build_mitosis_prompt <bead_id> <workspace> <bead_object>
+# Usage: _needle_build_mitosis_prompt <bead_id> <workspace> <bead_object> [force] [failure_count]
 # Returns: Formatted prompt string
 _needle_build_mitosis_prompt() {
     local bead_id="$1"
     local workspace="$2"
     local bead_object="$3"
+    local force="${4:-false}"
+    local failure_count="${5:-0}"
 
     # Extract bead details
     local title description priority parent_labels
@@ -426,20 +465,37 @@ Output:
 
 Now analyze the task and respond with the JSON.
 MITOSIS_PROMPT
+
+    # Append forced-failure context when force=true
+    if [[ "$force" == "true" ]]; then
+        cat <<FORCE_PROMPT
+
+## Forced Decomposition Notice
+
+This task has failed ${failure_count} time(s) without success. Even if it appears atomic, find a way to decompose it into smaller, independently verifiable steps. Focus on:
+- Breaking implementation into sequentially testable pieces
+- Separating concerns (e.g., config changes vs. logic changes vs. tests)
+- Isolating the likely failure surface into a smaller scope
+
+If decomposition is truly impossible (e.g., a single-line fix with no separable parts), return mitosis: false.
+FORCE_PROMPT
+    fi
 }
 
 # Analyze a bead for mitosis using an agent
-# Usage: _needle_analyze_for_mitosis <bead_id> <workspace> <agent> <bead_object>
+# Usage: _needle_analyze_for_mitosis <bead_id> <workspace> <agent> <bead_object> [force] [failure_count]
 # Returns: JSON analysis result
 _needle_analyze_for_mitosis() {
     local bead_id="$1"
     local workspace="$2"
     local agent="$3"
     local bead_object="$4"
+    local force="${5:-false}"
+    local failure_count="${6:-0}"
 
     # Build the analysis prompt
     local prompt
-    prompt=$(_needle_build_mitosis_prompt "$bead_id" "$workspace" "$bead_object")
+    prompt=$(_needle_build_mitosis_prompt "$bead_id" "$workspace" "$bead_object" "$force" "$failure_count")
 
     # Get timeout from config (respect workspace override)
     local timeout

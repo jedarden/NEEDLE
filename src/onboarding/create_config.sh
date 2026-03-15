@@ -461,6 +461,8 @@ mitosis:
   min_children: 2
   min_complexity: 3
   timeout: 60
+  force_on_failure: true
+  force_failure_threshold: 3
 
 knot:
   rate_limit_interval: 3600
