@@ -288,8 +288,11 @@ _needle_strand_engine() {
 
             ((restart_count++))
             if (( restart_count > max_restarts )); then
-                _needle_warn "Engine hit max restarts ($max_restarts), stopping"
-                break
+                _needle_warn "Engine hit max restarts ($max_restarts), falling through to remaining strands"
+                # Continue from the strand AFTER explore instead of breaking.
+                # This allows weave/pulse/unravel/knot to run gap analysis.
+                ((strand_idx++))
+                continue
             fi
 
             _needle_telemetry_emit "engine.workspace_changed" "info" \
