@@ -18,14 +18,17 @@ export NEEDLE_VERBOSE=false
 export NEEDLE_LOG_INITIALIZED=true
 export NEEDLE_SESSION="test-session-checkout"
 
-# Stub telemetry to avoid side effects
-_needle_telemetry_emit() { return 0; }
-
 # Source required modules
 source "$PROJECT_DIR/src/lib/output.sh"
 source "$PROJECT_DIR/src/lib/utils.sh"
 source "$PROJECT_DIR/src/lib/json.sh"
 source "$PROJECT_DIR/src/lock/checkout.sh"
+
+# Stub telemetry to avoid side effects
+_needle_telemetry_emit() { return 0; }
+
+# Stub worker alive check: test worker IDs don't map to real tmux sessions
+_needle_lock_worker_alive() { return 0; }
 
 # Cleanup
 cleanup() {
@@ -153,7 +156,7 @@ fi
 test_case "checkout_file conflict output contains blocking bead"
 reset_locks
 checkout_file "/tmp/test-conflict2.sh" "nd-blocker" "worker-1" 2>/dev/null
-blocking_info=$(checkout_file "/tmp/test-conflict2.sh" "nd-waiter" "worker-2" 2>/dev/null) || true
+blocking_info=$(checkout_file "/tmp/test-conflict2.sh" "nd-waiter" "worker-2" 2>&1 >/dev/null) || true
 blocking_bead=$(echo "$blocking_info" | jq -r '.bead' 2>/dev/null || true)
 if [[ "$blocking_bead" == "nd-blocker" ]]; then
     test_pass
