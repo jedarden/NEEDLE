@@ -738,7 +738,11 @@ _needle_handle_exit_code() {
                     return 0
                 fi
                 # Mitosis failed - task is atomic and cannot be decomposed
-                # Fall through to normal release/retry flow
+                # Quarantine as truly atomic but consistently failing (matches pluck.sh behavior)
+                _needle_warn "Forced mitosis failed for $bead_id - quarantining (atomic task, $bead_fail_count failures)"
+                _needle_quarantine_bead "$bead_id" "force_mitosis_exhausted"
+                _needle_reset_backoff
+                return 0
             fi
 
             _needle_release_bead "$bead_id" "agent_failed"

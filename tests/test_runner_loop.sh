@@ -690,6 +690,7 @@ test_forced_mitosis_integration() {
     # Stub dependencies
     br() { return 0; }
     _needle_release_bead() { released=1; return 0; }
+    _needle_quarantine_bead() { quarantined=1; return 0; }
     _needle_increment_backoff() { return 0; }
     _needle_reset_backoff() { return 0; }
     _needle_apply_backoff() { return 0; }
@@ -730,7 +731,7 @@ test_forced_mitosis_integration() {
         exit 1
     fi
 
-    # Test fall-through path: mitosis fails (atomic task) → normal release
+    # Test quarantine path: mitosis fails (atomic task) → quarantine (not release)
     # Reset counts to trigger threshold again
     _needle_increment_bead_failure_count "nd-atomictest" >/dev/null
     _needle_increment_bead_failure_count "nd-atomictest" >/dev/null
@@ -738,15 +739,15 @@ test_forced_mitosis_integration() {
     mitosis_result=1  # mitosis fails (atomic)
 
     _needle_handle_exit_code "nd-atomictest" 1 "$NEEDLE_WORKSPACE" "test-agent"
-    if [[ "$mitosis_attempted" -eq 1 ]] && [[ "$released" -eq 1 ]]; then
-        echo "✓ Mitosis failure: atomic task falls through to normal release"
+    if [[ "$mitosis_attempted" -eq 1 ]] && [[ "$quarantined" -eq 1 ]] && [[ "$released" -eq 0 ]]; then
+        echo "✓ Mitosis failure: atomic task is quarantined (not released)"
     else
-        echo "✗ Atomic failure: mitosis_attempted=$mitosis_attempted, released=$released"
+        echo "✗ Atomic failure: mitosis_attempted=$mitosis_attempted, quarantined=$quarantined, released=$released"
         exit 1
     fi
 
     # Cleanup stubs
-    unset -f br _needle_release_bead _needle_increment_backoff _needle_reset_backoff _needle_apply_backoff
+    unset -f br _needle_release_bead _needle_quarantine_bead _needle_increment_backoff _needle_reset_backoff _needle_apply_backoff
     unset -f _needle_event_bead_failed _needle_telemetry_emit
     unset -f _needle_should_alert_human _needle_should_exit_worker
     unset -f _needle_mitosis_force_enabled _needle_mitosis_force_threshold
