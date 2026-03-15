@@ -65,21 +65,18 @@ TESTS_FAILED=0
 pass() {
     echo -e "${GREEN}✓${NC} $1"
     ((TESTS_PASSED++))
+    ((TESTS_RUN++))
 }
 
 fail() {
     echo -e "${RED}✗${NC} $1"
     ((TESTS_FAILED++))
+    ((TESTS_RUN++))
 }
 
 skip() {
     echo -e "${YELLOW}⊘${NC} $1"
-}
-
-test_case() {
-    local name="$1"
     ((TESTS_RUN++))
-    echo -n "Testing: $name... "
 }
 
 # Mock br commands for testing
