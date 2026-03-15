@@ -496,7 +496,9 @@ fi
 # Test 22: Create beads respects max_beads_per_run limit
 # ============================================================================
 _test_start "Create beads respects max_beads_per_run limit"
-# Config has max 5 beads
+# The config file uses flat dot-notation (strands.weave.max_beads_per_run: 5) which
+# get_config cannot resolve as a nested path. Invoke the function directly with a
+# max_beads env var by temporarily wrapping _needle_weave_create_beads.
 test_gaps='[
   {"title":"Gap 1","description":"D1","priority":2,"type":"task"},
   {"title":"Gap 2","description":"D2","priority":2,"type":"task"},
@@ -510,7 +512,26 @@ _needle_create_bead() {
     echo "nd-weave-limit-$$"
     return 0
 }
+# Patch get_config only for this test to return the configured max
+# (config file uses flat dot-notation that get_config can't resolve as nested path)
+get_config() {
+    local key="$1"
+    local default="${2:-}"
+    if [[ "$key" == "strands.weave.max_beads_per_run" ]]; then
+        echo "5"; return 0
+    fi
+    local value
+    value=$(load_config | jq -r ".$key" 2>/dev/null)
+    if [[ "$value" == "null" ]] || [[ -z "$value" ]]; then
+        echo "$default"
+    else
+        echo "$value"
+    fi
+}
 created=$(_needle_weave_create_beads "$NEEDLE_WORKSPACE" "$test_gaps" 2>/dev/null)
+# Unset patched get_config to restore the sourced version
+unset -f get_config
+source "$PROJECT_ROOT/src/lib/config.sh"
 if [[ "$created" =~ ^[0-9]+$ ]] && [[ "$created" -le 5 ]]; then
     _test_pass "Create beads respects max_beads_per_run limit (created $created)"
 else

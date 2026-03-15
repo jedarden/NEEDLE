@@ -716,6 +716,8 @@ _needle_weave_clear_rate_limit() {
 # Check if weave strand is enabled (opt-in — disabled by default)
 # Usage: _needle_weave_is_enabled
 # Returns: 0 if enabled, 1 if disabled
+# Supports both simple (strands.weave: true) and nested
+# (strands.weave.enabled: true) config formats.
 _needle_weave_is_enabled() {
     local enabled
     enabled=$(get_config "strands.weave" "false" 2>/dev/null)
@@ -723,8 +725,21 @@ _needle_weave_is_enabled() {
         true|True|TRUE|yes|Yes|YES|1)
             return 0
             ;;
-        *)
+        false|False|FALSE|no|No|NO|0)
             return 1
+            ;;
+        *)
+            # strands.weave is a nested object — check strands.weave.enabled
+            local nested_enabled
+            nested_enabled=$(get_config "strands.weave.enabled" "false" 2>/dev/null)
+            case "$nested_enabled" in
+                true|True|TRUE|yes|Yes|YES|1)
+                    return 0
+                    ;;
+                *)
+                    return 1
+                    ;;
+            esac
             ;;
     esac
 }
