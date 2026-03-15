@@ -388,7 +388,7 @@ At threshold `5`, a warning is emitted. At `7` consecutive failures the worker e
 
 ## 7. Telemetry Pipeline
 
-**Source:** `src/telemetry/events.sh`, `src/telemetry/tokens.sh`, `src/telemetry/budget.sh`, `src/telemetry/effort.sh`, `src/telemetry/fabric.sh`
+**Source:** `src/telemetry/events.sh`, `src/telemetry/tokens.sh`, `src/telemetry/budget.sh`, `src/telemetry/effort.sh`, `src/telemetry/fabric.sh`, `src/dashboard/server.py`, `src/cli/dashboard.sh`
 
 ### Four-Tier Architecture
 
@@ -405,7 +405,10 @@ Tier 2: Token & Cost Tracking ─── JSONL ──► ~/.needle/logs/effort.js
 Tier 3: Budget Enforcement    ─── blocks worker if limit exceeded
     │
     ▼
-Tier 4: FABRIC Forwarding     ─── HTTP ──► external endpoint (async)
+Tier 4: FABRIC Forwarding     ─── HTTP ──► POST /ingest (async, non-blocking)
+                                                  │
+                                                  ▼
+Tier 5: FABRIC Dashboard      ─── SSE  ──► browser (needle dashboard start)
 ```
 
 ### Tier 1 — Event Emission
@@ -470,6 +473,81 @@ When `fabric.enabled: true`, events are forwarded in real time to an external HT
 4. If the endpoint is unreachable, the forward fails silently; local JSONL files are unaffected.
 
 Config keys: `fabric.enabled`, `fabric.endpoint`, `fabric.timeout`.
+
+### Tier 5 — FABRIC Dashboard (consumer)
+
+**Source:** `src/dashboard/server.py`, `src/cli/dashboard.sh`
+
+The FABRIC Dashboard is the consumer side of the telemetry pipeline: a standalone Python HTTP server that receives forwarded events and serves a live browser UI. It requires no external services — the server and dashboard are self-contained.
+
+**Architecture:**
+
+```
+NEEDLE workers
+  → fabric.sh: POST /ingest → Dashboard server (src/dashboard/server.py)
+                                   │
+                          in-memory ring buffer (last 10k events)
+                                   │
+                    ┌──────────────┴───────────────┐
+                    │                               │
+             GET /stream (SSE)              GET / (dashboard HTML)
+                    │
+              browser clients
+```
+
+**Endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/ingest` | POST | Receive a JSONL event from fabric.sh |
+| `/stream` | GET | SSE stream — pushes new events to connected browsers |
+| `/` | GET | Self-contained dashboard HTML (no CDN, no build step) |
+| `/api/summary` | GET | Aggregate stats: active workers, beads/min, cost today, failures |
+| `/api/costs` | GET | Per-bead cost breakdown from `effort.recorded` events (sorted desc) |
+| `/api/throughput` | GET | 30-minute bead completion history for the sparkline |
+| `/api/events` | GET | Last N buffered events |
+| `/health` | GET | Liveness probe: `{"status": "ok", "uptime": "..."}` |
+
+**Dashboard panels:**
+
+- **Active workers** — name, current bead, elapsed time, tokens this session
+- **Strand activity** — per-strand run counts and last-run timestamps
+- **Bead throughput** — completions/min over time (30-minute sparkline)
+- **Cost tracker** — daily spend vs. budget, per-worker and per-bead breakdown
+- **Recent events** — live tail of the last 50 events with type-based coloring
+- **Failure alerts** — highlighted rows for `bead.failed` and `budget.warning` events
+
+**CLI integration (`needle dashboard`):**
+
+```bash
+needle dashboard start              # Start in background (daemonized via nohup)
+needle dashboard start --foreground # Start in foreground
+needle dashboard start --port 3000  # Custom port
+needle dashboard start --open       # Start and open browser
+needle dashboard status             # Check liveness (reads PID file + kill -0)
+needle dashboard stop               # Graceful shutdown (SIGTERM, then SIGKILL after 10s)
+needle dashboard restart            # stop + start
+needle dashboard logs [--follow]    # Tail ~/.needle/logs/dashboard.log
+```
+
+PID file: `~/.needle/dashboard.pid`. Log file: `~/.needle/logs/dashboard.log`.
+
+**Startup seeding:**
+
+Pass `--seed-file <events.jsonl>` to pre-populate the ring buffer from an existing log.
+The seeding pass also updates the throughput sparkline for historical `bead.completed` events.
+
+**Configuration:**
+
+```yaml
+dashboard:
+  port: 7842        # Default port
+  host: localhost   # Bind address; use "0.0.0.0" for Tailscale/remote access
+
+fabric:
+  enabled: true
+  endpoint: http://localhost:7842/ingest
+```
 
 ### File Layout
 

@@ -10,6 +10,7 @@ NEEDLE is a universal wrapper for headless coding CLI agents. It provides a prio
 - **Task Navigation** — Priority-weighted bead queue processing across one or more workspaces
 - **Effort Logging** — Time, tokens, and cost tracking per deliverable
 - **Parallel Workers** — Multiple workers run independently via tmux; SQLite provides atomic claim semantics
+- **Live Dashboard** — FABRIC real-time dashboard (`needle dashboard start`) shows active workers, bead throughput, cost, and a live event stream; no external services required
 
 NEEDLE wraps any headless CLI that can execute a prompt and exit. Workers claim beads, dispatch to the configured agent, and record results. NEEDLE auto-creates tmux sessions for session persistence.
 
@@ -134,6 +135,10 @@ default_type: task
 | `needle agents` | List configured agent adapters |
 | `needle agents --scan` | Re-scan PATH for available agents |
 | `needle setup` | Re-check and install dependencies |
+| `needle dashboard start` | Start the FABRIC real-time dashboard server |
+| `needle dashboard status` | Check if the dashboard is running |
+| `needle dashboard stop` | Stop the dashboard server |
+| `needle dashboard logs` | View dashboard logs |
 | `needle upgrade` | Download and install latest NEEDLE version |
 | `needle upgrade --check` | Check if a newer version is available |
 | `needle version` | Print current version |
@@ -183,7 +188,9 @@ NEEDLE stores runtime state in `~/.needle/`:
 │   ├── heartbeats/      # Worker liveness files
 │   └── pulse/           # Codebase health scan state
 ├── hooks/               # Lifecycle hooks (pre-claim, post-execute, ...)
-└── cache/               # Downloaded binaries and update artifacts
+├── cache/               # Downloaded binaries and update artifacts
+├── dashboard.pid        # PID file for the dashboard server (when running)
+└── logs/dashboard.log   # Dashboard server log output
 ```
 
 ## Contributing
