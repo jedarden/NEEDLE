@@ -828,10 +828,7 @@ fi
 exit 1
 EOF
 chmod +x "$MOCK_BR3"
-
-# Temporarily replace real br
-mv /home/coding/.local/bin/br /home/coding/.local/bin/br.real 2>/dev/null || true
-ln -sf "$MOCK_BR3" /home/coding/.local/bin/br
+ln -sf "$MOCK_BR3" "/tmp/br"
 
 # Clear state and create first bead
 STATE_DIR="$NEEDLE_HOME/$NEEDLE_STATE_DIR"
@@ -857,9 +854,7 @@ elif ! command -v python3 &>/dev/null; then
 fi
 
 # Cleanup
-rm -f /home/coding/.local/bin/br
-mv /home/coding/.local/bin/br.real /home/coding/.local/bin/br 2>/dev/null || true
-rm -f "$MOCK_BR3" "$TEST_CONFIG"
+rm -f "/tmp/br" "$MOCK_BR3" "$TEST_CONFIG"
 rm -rf "$TEST_WORKSPACE"
 rm -f "$STATE_DIR/auto_bead_signatures.json"
 
