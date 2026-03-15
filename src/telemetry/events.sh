@@ -854,6 +854,9 @@ bead.mitosis.child_created
 bead.mitosis.complete
 bead.mitosis.failed
 bead.mitosis.skipped
+bead.force_mitosis.attempt
+bead.force_mitosis.success
+bead.force_mitosis.quarantine
 error.claim_failed
 error.agent_crash
 error.timeout
