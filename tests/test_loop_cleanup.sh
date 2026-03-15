@@ -537,6 +537,85 @@ test_exit_137_uses_error_handle() {
     echo ""
 }
 
+# Test: exit code 137 emits error.agent_crash event with correct fields
+# Regression test for nd-vern: the auto-generated bug bead was created because
+# an agent running bead-2 was killed (exit code 137). The event must contain
+# bead_id and exit_code=137 in the data field so auto-bead context is correct.
+test_exit_137_event_fields() {
+    echo "=== Testing exit code 137 emits error.agent_crash with correct fields (nd-vern regression) ==="
+
+    setup_mock_environment
+
+    # Set up a log file directly; _needle_telemetry_emit will use the fallback
+    # append path when NEEDLE_LOG_FILE is set but NEEDLE_LOG_INITIALIZED is unset
+    local log_file="/tmp/needle-test-nd-vern-$$.jsonl"
+    export NEEDLE_LOG_FILE="$log_file"
+    unset NEEDLE_LOG_INITIALIZED
+    : > "$log_file"
+
+    # Mock _needle_quarantine_bead so the bead close doesn't fail
+    _needle_quarantine_bead() { return 0; }
+    export -f _needle_quarantine_bead
+
+    NEEDLE_FAILURE_COUNT=1
+    _needle_handle_exit_code "bead-2" 137 "$NEEDLE_WORKSPACE" "test-agent" 2>/dev/null
+
+    # Verify error.agent_crash event was written to log
+    if grep -q '"event":"error.agent_crash"' "$log_file" 2>/dev/null; then
+        echo "✓ exit code 137: error.agent_crash event emitted"
+    else
+        echo "✗ exit code 137: error.agent_crash event NOT found in log"
+        rm -f "$log_file"
+        exit 1
+    fi
+
+    # Verify exit_code=137 is in the event data
+    if command -v jq &>/dev/null; then
+        local logged_exit
+        logged_exit=$(grep '"event":"error.agent_crash"' "$log_file" | head -1 | jq -r '.data.exit_code // ""' 2>/dev/null)
+        if [[ "$logged_exit" == "137" ]]; then
+            echo "✓ exit code 137: event data.exit_code=137 (correct)"
+        else
+            echo "✗ exit code 137: event data.exit_code='$logged_exit' (expected 137)"
+            rm -f "$log_file"
+            exit 1
+        fi
+
+        local logged_bead
+        logged_bead=$(grep '"event":"error.agent_crash"' "$log_file" | head -1 | jq -r '.data.bead_id // ""' 2>/dev/null)
+        if [[ "$logged_bead" == "bead-2" ]]; then
+            echo "✓ exit code 137: event data.bead_id=bead-2 (correct)"
+        else
+            echo "✗ exit code 137: event data.bead_id='$logged_bead' (expected bead-2)"
+            rm -f "$log_file"
+            exit 1
+        fi
+    else
+        # Without jq, just verify the raw string content
+        if grep '"error.agent_crash"' "$log_file" | grep -q '"137"'; then
+            echo "✓ exit code 137: event contains exit_code 137"
+        else
+            echo "✗ exit code 137: event missing exit_code 137"
+            rm -f "$log_file"
+            exit 1
+        fi
+    fi
+
+    # Verify failure count was reset
+    if [[ $NEEDLE_FAILURE_COUNT -eq 0 ]]; then
+        echo "✓ exit code 137: failure count reset to 0"
+    else
+        echo "✗ exit code 137: failure count not reset, got $NEEDLE_FAILURE_COUNT"
+        rm -f "$log_file"
+        exit 1
+    fi
+
+    unset -f _needle_quarantine_bead
+    rm -f "$log_file"
+    cleanup_mock_environment
+    echo ""
+}
+
 # Run all tests
 echo "=========================================="
 echo "NEEDLE Worker Loop Cleanup/Recovery Tests"
@@ -552,6 +631,7 @@ test_cleanup_execution
 test_worker_cleanup
 test_crash_loop_alert
 test_backoff_config
+test_exit_137_event_fields
 test_exit_137_uses_error_handle
 
 echo ""
