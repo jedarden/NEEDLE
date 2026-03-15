@@ -292,13 +292,15 @@ _needle_claim_bead() {
     local sorted_candidates
     sorted_candidates=$(echo "$candidates" | jq -c 'sort_by(.priority // 2)')
 
-    # Track beads we've already tried to avoid infinite loops
-    local tried_beads=()
-
     # Outer loop: allow multiple passes through candidates if retry is needed
     local attempt=1
     while [[ $attempt -le $max_retries ]]; do
         _needle_debug "Claim attempt $attempt/$max_retries with $candidate_count candidates"
+
+        # Reset tried list at the start of each outer pass so we retry all
+        # candidates on the next attempt (handles race conditions where a
+        # previously-claimed bead may have been released since last attempt)
+        local tried_beads=()
 
         # Inner loop: try each candidate in priority order
         while IFS= read -r bead_json; do
@@ -446,14 +448,6 @@ _needle_claim_bead() {
         # All candidates tried in this pass
         _needle_debug "Attempt $attempt complete: tried ${#tried_beads[@]} candidates"
 
-        # If we've exhausted all candidates without success, break
-        if [[ ${#tried_beads[@]} -ge $candidate_count ]]; then
-            _needle_debug "All $candidate_count candidates exhausted"
-            break
-        fi
-
-        # Reset tried_beads for next pass and increment attempt
-        tried_beads=()
         attempt=$((attempt + 1))
     done
 

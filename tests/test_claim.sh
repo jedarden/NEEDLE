@@ -71,50 +71,58 @@ mock_br() {
     local claim_bead_id="${3:-}"
 
     # Create a mock br script
+    # NOTE: br update is called as: br update <bead_id> --claim --actor <actor>
+    # So $1="update", $2=<bead_id>, $3="--claim" — we check $* for "--claim"
     mkdir -p "$TEST_DIR/bin"
     cat > "$TEST_DIR/bin/br" << EOF
 #!/bin/bash
-case "\$1 \$2" in
-    "ready --unassigned"|"ready --workspace="*)
-        echo '$ready_data'
-        ;;
-    "update --claim")
-        # Extract bead_id from arguments
-        bead_id=""
-        actor=""
-        for arg in "\$@"; do
-            case "\$arg" in
-                --actor) next_is_actor=true ;;
-                *) if [[ "\$next_is_actor" == "true" ]]; then
-                    actor="\$arg"
-                    next_is_actor=false
-                elif [[ -z "\$bead_id" ]] && [[ "\$arg" =~ ^bd- ]] || [[ "\$arg" =~ ^nd- ]]; then
-                    bead_id="\$arg"
-                fi ;;
-            esac
-        done
+# Dispatch: claim vs other update
+if [[ "\$1" == "update" ]] && echo " \$* " | grep -q -- " --claim "; then
+    # Extract bead_id and actor from arguments
+    bead_id=""
+    actor=""
+    for arg in "\$@"; do
+        case "\$arg" in
+            --actor) next_is_actor=true ;;
+            *) if [[ "\${next_is_actor:-}" == "true" ]]; then
+                actor="\$arg"
+                next_is_actor=false
+            elif [[ -z "\$bead_id" ]] && ([[ "\$arg" =~ ^bd- ]] || [[ "\$arg" =~ ^nd- ]]); then
+                bead_id="\$arg"
+            fi ;;
+        esac
+    done
 
-        # Simulate claim behavior
+    # Simulate claim behavior
 EOF
 
     if [[ "$claim_success" == "true" ]]; then
         cat >> "$TEST_DIR/bin/br" << 'EOF'
-        echo "Claimed $bead_id for $actor"
-        exit 0
+    echo "Claimed $bead_id for $actor"
+    exit 0
 EOF
     elif [[ "$claim_success" == "race" ]]; then
         cat >> "$TEST_DIR/bin/br" << 'EOF'
-        echo "Race condition - bead already claimed" >&2
-        exit 4
+    echo "Race condition - bead already claimed" >&2
+    exit 4
 EOF
     else
         cat >> "$TEST_DIR/bin/br" << 'EOF'
-        echo "Claim failed" >&2
-        exit 1
+    echo "Claim failed" >&2
+    exit 1
 EOF
     fi
 
-    # Add show and release commands
+    # Add ready, show, and other update commands
+    cat >> "$TEST_DIR/bin/br" << 'EOF'
+fi
+
+case "$1 $2" in
+    "ready --unassigned"|"ready --workspace="*)
+EOF
+    cat >> "$TEST_DIR/bin/br" << EOF
+        echo '$ready_data'
+EOF
     cat >> "$TEST_DIR/bin/br" << 'EOF'
         ;;
     "show "*)
@@ -131,11 +139,7 @@ EOF
         fi
         ;;
     "update "*)
-        # Handle release
-        if echo "$@" | grep -q -- "--release"; then
-            echo "Released"
-            exit 0
-        fi
+        # Non-claim update (release, label, etc.)
         exit 0
         ;;
     *)
@@ -574,42 +578,43 @@ mkdir -p "$TEST_DIR/bin"
 cat > "$TEST_DIR/bin/br" << RACE_MOCK
 #!/bin/bash
 STATE_FILE="$CLAIM_STATE_FILE"
+# br update <bead_id> --claim --actor <actor> → $1="update", $3="--claim"
+if [[ "\$1" == "update" ]] && echo " \$* " | grep -q -- " --claim "; then
+    bead_id=""
+    actor=""
+    for arg in "\$@"; do
+        case "\$arg" in
+            --actor) next_is_actor=true ;;
+            *) if [[ "\${next_is_actor:-}" == "true" ]]; then
+                actor="\$arg"
+                next_is_actor=false
+            elif [[ -z "\$bead_id" ]] && [[ "\$arg" =~ ^bd- ]]; then
+                bead_id="\$arg"
+            fi ;;
+        esac
+    done
+
+    # Atomic claim check - only first caller succeeds
+    if mkdir "\${STATE_FILE}.lockdir" 2>/dev/null; then
+        claim_count=\$(cat "\$STATE_FILE" 2>/dev/null || echo "0")
+        if [[ "\$claim_count" -lt 1 ]]; then
+            echo "1" > "\$STATE_FILE"
+            echo "Claimed \$bead_id for \$actor"
+            rmdir "\${STATE_FILE}.lockdir" 2>/dev/null
+            exit 0
+        else
+            rmdir "\${STATE_FILE}.lockdir" 2>/dev/null
+            echo "Race condition - bead already claimed" >&2
+            exit 4
+        fi
+    else
+        echo "Race condition - concurrent access" >&2
+        exit 4
+    fi
+fi
 case "\$1 \$2" in
     "ready --unassigned"|"ready --workspace="*)
         echo '[{"id":"bd-concurrent","title":"Race Test","priority":0}]'
-        ;;
-    "update --claim")
-        bead_id=""
-        actor=""
-        for arg in "\$@"; do
-            case "\$arg" in
-                --actor) next_is_actor=true ;;
-                *) if [[ "\$next_is_actor" == "true" ]]; then
-                    actor="\$arg"
-                    next_is_actor=false
-                elif [[ -z "\$bead_id" ]] && [[ "\$arg" =~ ^bd- ]]; then
-                    bead_id="\$arg"
-                fi ;;
-            esac
-        done
-
-        # Atomic claim check - only first caller succeeds
-        if mkdir "\${STATE_FILE}.lockdir" 2>/dev/null; then
-            claim_count=\$(cat "\$STATE_FILE" 2>/dev/null || echo "0")
-            if [[ "\$claim_count" -lt 1 ]]; then
-                echo "1" > "\$STATE_FILE"
-                echo "Claimed \$bead_id for \$actor"
-                rmdir "\${STATE_FILE}.lockdir" 2>/dev/null
-                exit 0
-            else
-                rmdir "\${STATE_FILE}.lockdir" 2>/dev/null
-                echo "Race condition - bead already claimed" >&2
-                exit 4
-            fi
-        else
-            echo "Race condition - concurrent access" >&2
-            exit 4
-        fi
         ;;
     "show "*)
         echo '{"id":"bd-concurrent","assignee":null}'
