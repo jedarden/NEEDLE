@@ -533,16 +533,58 @@ PYEOF
     fi
 
     # Try to get worker log excerpt if available
+    # Use NEEDLE_SESSION for log file lookup (logs are named by session, not worker_id)
+    local session_name="${NEEDLE_SESSION:-unknown}"
     local worker_id="${NEEDLE_WORKER_ID:-unknown}"
     body+=$'\n'"## Worker Log (last 20 lines)
 
 Worker: \`${worker_id}\`
+Session: \`${session_name}\`
 
 \`\`\`
 "
-    local log_file="$NEEDLE_HOME/$NEEDLE_LOG_DIR/${worker_id}.log"
-    if [[ -f "$log_file" ]]; then
-        body+="$(tail -20 "$log_file" 2>/dev/null)"
+
+    # Worker logs are named ${NEEDLE_SESSION}.log, not ${NEEDLE_WORKER_ID}.log
+    # Try both .log (worker log) and .jsonl (telemetry log) formats
+    local log_file=""
+    local log_content=""
+
+    # Try worker log first (${session}.log)
+    # Note: NEEDLE_LOG_DIR may be a full path (from runner export) or relative name
+    if [[ -n "$NEEDLE_LOG_DIR" ]] && [[ "$session_name" != "unknown" ]]; then
+        local worker_log
+        if [[ "$NEEDLE_LOG_DIR" = /* ]]; then
+            # NEEDLE_LOG_DIR is already a full path
+            worker_log="$NEEDLE_LOG_DIR/${session_name}.log"
+        else
+            # NEEDLE_LOG_DIR is a relative directory name
+            worker_log="${NEEDLE_HOME:-$HOME/.needle}/$NEEDLE_LOG_DIR/${session_name}.log"
+        fi
+        if [[ -f "$worker_log" ]]; then
+            log_content=$(tail -20 "$worker_log" 2>/dev/null)
+            log_file="$worker_log"
+        fi
+    fi
+
+    # Fall back to JSONL telemetry log (${session}.jsonl)
+    if [[ -z "$log_content" ]] && [[ -n "$NEEDLE_LOG_DIR" ]] && [[ "$session_name" != "unknown" ]]; then
+        local jsonl_log
+        if [[ "$NEEDLE_LOG_DIR" = /* ]]; then
+            # NEEDLE_LOG_DIR is already a full path
+            jsonl_log="$NEEDLE_LOG_DIR/${session_name}.jsonl"
+        else
+            # NEEDLE_LOG_DIR is a relative directory name
+            jsonl_log="${NEEDLE_HOME:-$HOME/.needle}/$NEEDLE_LOG_DIR/${session_name}.jsonl"
+        fi
+        if [[ -f "$jsonl_log" ]]; then
+            # Show last 20 lines of JSONL log
+            log_content=$(tail -20 "$jsonl_log" 2>/dev/null)
+            log_file="$jsonl_log"
+        fi
+    fi
+
+    if [[ -n "$log_content" ]]; then
+        body+="$log_content"
     else
         body+="(log file not found)"
     fi
