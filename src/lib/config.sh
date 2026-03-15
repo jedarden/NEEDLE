@@ -675,6 +675,15 @@ get_config() {
     local default="${2:-}"
     local value
 
+    # Check for environment variable override: NEEDLE_CONFIG_OVERRIDE_<KEY_UPPER>
+    # e.g., key "debug.auto_bead_on_error" → NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR
+    local _override_key
+    _override_key="NEEDLE_CONFIG_OVERRIDE_$(echo "$key" | tr '[:lower:].' '[:upper:]_')"
+    if [[ -n "${!_override_key+x}" ]]; then
+        echo "${!_override_key}"
+        return 0
+    fi
+
     if _needle_has_yq; then
         value=$(load_config | yq ".$key" 2>/dev/null)
     else

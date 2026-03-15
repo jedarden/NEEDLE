@@ -211,6 +211,60 @@ else
     test_fail "Missing effort section"
 fi
 
+# Test: get_config honors NEEDLE_CONFIG_OVERRIDE_* env vars
+# Regression test for nd-tsbs: NEEDLE_CONFIG_OVERRIDE_* vars were silently ignored,
+# causing tests to create real beads when the production config had auto_bead_on_error: true
+test_case "get_config honors NEEDLE_CONFIG_OVERRIDE_* env vars"
+clear_config_cache
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR="false"
+value=$(get_config "debug.auto_bead_on_error" "false")
+unset NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR
+if [[ "$value" == "false" ]]; then
+    test_pass
+else
+    test_fail "Expected 'false' from override, got '$value'"
+fi
+
+test_case "NEEDLE_CONFIG_OVERRIDE_* takes precedence over config file"
+clear_config_cache
+# Write a config that sets a value to "from_file"
+mkdir -p "$TEST_CONFIG_DIR"
+echo 'strands:' > "$TEST_CONFIG_FILE"
+echo '  weave: true' >> "$TEST_CONFIG_FILE"
+export NEEDLE_CONFIG_OVERRIDE_STRANDS_WEAVE="false"
+value=$(get_config "strands.weave" "default")
+unset NEEDLE_CONFIG_OVERRIDE_STRANDS_WEAVE
+clear_config_cache
+if [[ "$value" == "false" ]]; then
+    test_pass
+else
+    test_fail "Expected 'false' from override, got '$value'"
+fi
+
+test_case "get_config returns file value when NEEDLE_CONFIG_OVERRIDE_* is not set"
+clear_config_cache
+mkdir -p "$TEST_CONFIG_DIR"
+echo 'strands:' > "$TEST_CONFIG_FILE"
+echo '  weave: true' >> "$TEST_CONFIG_FILE"
+value=$(get_config "strands.weave" "default")
+clear_config_cache
+if [[ "$value" == "true" ]]; then
+    test_pass
+else
+    test_fail "Expected 'true' from file, got '$value'"
+fi
+
+test_case "NEEDLE_CONFIG_OVERRIDE_* with empty string is honored"
+clear_config_cache
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_WORKSPACE=""
+value=$(get_config "debug.auto_bead_workspace" "fallback")
+unset NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_WORKSPACE
+if [[ "$value" == "" ]]; then
+    test_pass
+else
+    test_fail "Expected empty string from override, got '$value'"
+fi
+
 # ============ Summary ============
 echo ""
 echo "================================"
