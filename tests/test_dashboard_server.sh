@@ -399,6 +399,21 @@ else
 fi
 echo ""
 
+# Test 24: Dashboard HTML contains cost-breakdown panel element
+echo "Test 24: Dashboard HTML includes cost breakdown panel"
+html_resp=$(curl -sf --max-time 5 "http://localhost:$TEST_PORT/" 2>/dev/null || echo "")
+if echo "$html_resp" | grep -q "cost-breakdown-list"; then
+    _pass "Dashboard HTML includes cost-breakdown-list element"
+else
+    _fail "Dashboard HTML missing cost-breakdown-list element"
+fi
+if echo "$html_resp" | grep -q "Cost Breakdown"; then
+    _pass "Dashboard HTML includes 'Cost Breakdown' panel heading"
+else
+    _fail "Dashboard HTML missing 'Cost Breakdown' panel heading"
+fi
+echo ""
+
 # ---------------------------------------------------------------------------
 # Seed-file tests — start a fresh server instance with --seed-file
 # ---------------------------------------------------------------------------

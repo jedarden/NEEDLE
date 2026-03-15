@@ -601,6 +601,18 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         .sparkline { display: inline-block; vertical-align: middle; margin-left: 8px; }
         .sparkline svg { display: block; }
         .stat-inline { display: flex; align-items: center; gap: 4px; }
+        .bead-cost-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            padding: 6px 0;
+            border-bottom: 1px solid #2f3336;
+            font-size: 0.8125rem;
+        }
+        .bead-cost-row:last-child { border-bottom: none; }
+        .bead-cost-id { color: #1d9bf0; font-family: 'SF Mono', 'Fira Code', monospace; }
+        .bead-cost-meta { color: #71767b; font-size: 0.75rem; }
+        .bead-cost-usd { font-weight: 600; color: #e7e9ea; }
     </style>
 </head>
 <body>
@@ -635,6 +647,11 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
         <div class="panel">
             <h2>Failure Alerts</h2>
             <div id="failure-list"><div class="empty">No failures</div></div>
+        </div>
+
+        <div class="panel">
+            <h2>Cost Breakdown (per bead)</h2>
+            <div id="cost-breakdown-list"><div class="empty">No bead cost data</div></div>
         </div>
 
         <div class="panel" style="grid-column: span 2;">
@@ -813,6 +830,26 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
                     return `<div class="stat">
                         <span class="stat-label">${name}${lastTs ? ` <span class="ts">${lastTs}</span>` : ''}</span>
                         <span class="stat-value">${count}</span>
+                    </div>`;
+                }).join('');
+            }
+
+            // Per-bead cost breakdown
+            const costBreakdownDiv = document.getElementById('cost-breakdown-list');
+            const beadCosts = (s.bead_costs || {}).by_bead || [];
+            if (beadCosts.length === 0) {
+                costBreakdownDiv.innerHTML = '<div class="empty">No bead cost data</div>';
+            } else {
+                const topBeads = beadCosts.slice(0, 10);
+                costBreakdownDiv.innerHTML = topBeads.map(b => {
+                    const meta = [b.strand, b.type].filter(Boolean).join(' · ');
+                    const agents = (b.agents || []).join(', ');
+                    return `<div class="bead-cost-row">
+                        <div>
+                            <div class="bead-cost-id">${b.bead_id}</div>
+                            <div class="bead-cost-meta">${meta}${agents ? ' · ' + agents : ''} · ${b.attempts || 1} attempt${(b.attempts || 1) !== 1 ? 's' : ''}</div>
+                        </div>
+                        <div class="bead-cost-usd">$${(b.cost || 0).toFixed(4)}</div>
                     </div>`;
                 }).join('');
             }
