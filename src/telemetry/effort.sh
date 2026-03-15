@@ -650,11 +650,11 @@ _needle_get_bead_effort() {
         return 0
     fi
 
-    # Collect all session log files
+    # Collect all session log files (both .log and .jsonl extensions)
     local log_files=()
     while IFS= read -r f; do
         log_files+=("$f")
-    done < <(find "$log_dir" -maxdepth 1 -name "*.jsonl" -type f 2>/dev/null)
+    done < <(find "$log_dir" -maxdepth 1 \( -name "*.log" -o -name "*.jsonl" \) -type f 2>/dev/null)
 
     if [[ ${#log_files[@]} -eq 0 ]]; then
         echo "0|0|0|0"
