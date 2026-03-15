@@ -384,19 +384,27 @@ test_empty_in_progress_list() {
 }
 
 test_malformed_bead_skipped() {
-    # Should skip beads without valid IDs
+    # Should skip beads without valid IDs — must not emit events with empty bead_id
     local test_workspace="$TEST_DIR/workspace8"
     create_test_workspace "$test_workspace"
 
-    # Bead with no id field
+    # Bead with no id field and null assignee
     mock_br_for_orphan '[{"title":"No ID Bead","status":"in_progress","assignee":null}]'
     mkdir -p "$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
 
-    # Should not crash
-    if _needle_mend_orphaned_claims "$test_workspace" 2>&1; then
-        pass "Malformed bead handled gracefully"
+    local log_before
+    log_before=$(wc -l < "$TEST_LOG_FILE" 2>/dev/null || echo 0)
+
+    _needle_mend_orphaned_claims "$test_workspace" 2>&1 || true
+
+    local log_after
+    log_after=$(wc -l < "$TEST_LOG_FILE" 2>/dev/null || echo 0)
+
+    # No new events should have been emitted for the malformed bead
+    if [[ "$log_after" -eq "$log_before" ]]; then
+        pass "Malformed bead (no id) skipped — no spurious events emitted"
     else
-        pass "Malformed bead handled (may return 1)"
+        fail "Malformed bead emitted unexpected events (log grew from $log_before to $log_after lines)"
     fi
 }
 

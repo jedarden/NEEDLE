@@ -231,6 +231,11 @@ _needle_mend_orphaned_claims() {
         bead_id=$(echo "$bead" | jq -r '.id // empty')
         assignee=$(echo "$bead" | jq -r '.assignee // empty')
 
+        # Skip if we couldn't extract bead ID
+        if [[ -z "$bead_id" ]]; then
+            continue
+        fi
+
         # If no assignee, bead is in_progress with no owner — unconditionally orphaned
         if [[ -z "$assignee" ]]; then
             _needle_warn "Found ownerless in_progress bead: $bead_id (no assignee — unconditionally orphaned)"
@@ -248,11 +253,6 @@ _needle_mend_orphaned_claims() {
             else
                 _needle_warn "Failed to release ownerless bead: $bead_id"
             fi
-            continue
-        fi
-
-        # Skip if we couldn't extract bead ID
-        if [[ -z "$bead_id" ]]; then
             continue
         fi
 
