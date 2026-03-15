@@ -280,13 +280,42 @@ _needle_build_mitosis_prompt() {
     local bead_object="$3"
 
     # Extract bead details
-    local title description
+    local title description priority parent_labels
     title=$(echo "$bead_object" | jq -r '.title // "Untitled"')
     description=$(echo "$bead_object" | jq -r '.description // ""')
+    priority=$(echo "$bead_object" | jq -r '.priority // 2')
+    parent_labels=$(echo "$bead_object" | jq -r '.labels // []' | jq -r 'join(",")')
 
     # Get max children config (respect workspace override)
     local max_children
     max_children=$(_needle_mitosis_config "max_children" "$NEEDLE_MITOSIS_MAX_CHILDREN" "$workspace")
+
+    # Gather workspace context
+    local relevant_files recent_commits test_files
+
+    # Get relevant files from workspace (limit to 50 for context)
+    if [[ -d "$workspace" ]]; then
+        relevant_files=$(cd "$workspace" && git ls-files 2>/dev/null | head -50 | sed 's/^/  - /')
+        if [[ -z "$relevant_files" ]]; then
+            relevant_files="  (No git repository or no files found)"
+        fi
+
+        # Get recent commits for context
+        recent_commits=$(cd "$workspace" && git log --oneline -10 2>/dev/null | sed 's/^/  - /')
+        if [[ -z "$recent_commits" ]]; then
+            recent_commits="  (No git history available)"
+        fi
+
+        # Find existing test files
+        test_files=$(cd "$workspace" && git ls-files 2>/dev/null | grep -E 'test[_-]|spec|tests/' | head -20 | sed 's/^/  - /')
+        if [[ -z "$test_files" ]]; then
+            test_files="  (No test files found)"
+        fi
+    else
+        relevant_files="  (Workspace not accessible)"
+        recent_commits="  (Not in a workspace)"
+        test_files="  (Not in a workspace)"
+    fi
 
     cat <<MITOSIS_PROMPT
 # Mitosis Analysis Task
@@ -296,11 +325,24 @@ Analyze the following task to determine if it should be split into smaller subta
 ## Task Details
 - **ID:** $bead_id
 - **Title:** $title
+- **Priority:** P${priority}
+- **Parent Labels:** ${parent_labels:-<none>}
 - **Description:**
 $description
 
 ## Workspace
 $workspace
+
+## Workspace Context
+
+### Relevant Files (first 50)
+${relevant_files}
+
+### Recent Commits (last 10)
+${recent_commits}
+
+### Test Files
+${test_files}
 
 ## Mitosis Criteria
 A task should be split (mitosis = true) if it meets ANY of these criteria:
@@ -324,24 +366,50 @@ Respond with ONLY a JSON object (no markdown, no code blocks):
   "children": [
     {
       "title": "Child task title",
-      "description": "Detailed description of this subtask",
-      "blocked_by": []  // Array of "previous" or [] for parallel execution
+      "description": "Detailed, file-specific description referencing actual paths from the workspace context",
+      "affected_files": ["src/auth.py", "tests/test_auth.py"],
+      "verification_cmd": "pytest tests/test_auth.py -q",
+      "blocked_by": []
     }
   ]
 }
 
+## Important Notes
+- **affected_files**: List actual file paths from the workspace context that this child will modify
+- **verification_cmd**: Provide a specific test command to validate this child's work (e.g., "pytest tests/X.py", "npm test -- path/to/test")
+- **description**: Must reference actual files and include specific implementation details
+
 ## Examples
 
-### Example 1: Task needing mitosis
+### Example 1: Task needing mitosis with workspace context
 Input: "Implement user authentication and add password reset functionality and set up email verification"
+Workspace files include: src/auth.py, tests/test_auth.py, src/email.py, tests/test_email.py
 Output:
 {
   "mitosis": true,
   "reasoning": "Three distinct features that can be implemented independently",
   "children": [
-    {"title": "Implement user authentication", "description": "Add login/logout functionality", "blocked_by": []},
-    {"title": "Add password reset", "description": "Implement password reset flow", "blocked_by": ["previous"]},
-    {"title": "Set up email verification", "description": "Add email verification on signup", "blocked_by": ["previous"]}
+    {
+      "title": "Implement user authentication",
+      "description": "Add login/logout functionality to src/auth.py. Implement password hashing using bcrypt. Add session management.",
+      "affected_files": ["src/auth.py", "tests/test_auth.py"],
+      "verification_cmd": "pytest tests/test_auth.py -q",
+      "blocked_by": []
+    },
+    {
+      "title": "Add password reset",
+      "description": "Implement password reset flow in src/auth.py. Generate reset tokens and send via email using src/email.py.",
+      "affected_files": ["src/auth.py", "src/email.py", "tests/test_auth.py"],
+      "verification_cmd": "pytest tests/test_auth.py::test_password_reset -q",
+      "blocked_by": ["previous"]
+    },
+    {
+      "title": "Set up email verification",
+      "description": "Add email verification on signup. Modify src/auth.py to store verified flag. Use src/email.py for sending verification emails.",
+      "affected_files": ["src/auth.py", "src/email.py", "tests/test_auth.py", "tests/test_email.py"],
+      "verification_cmd": "pytest tests/test_auth.py::test_email_verification -q",
+      "blocked_by": ["previous"]
+    }
   ]
 }
 
