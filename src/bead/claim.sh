@@ -376,6 +376,14 @@ _needle_claim_bead() {
                 # NOTE: Redirect to stderr - stdout reserved for return value
                 _needle_success "Claimed bead: $bead_id" >&2
 
+                # Expose verification_cmd from the already-fetched bead JSON.
+                # This avoids an extra `br show` round-trip in verify.sh.
+                # Callers can read NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD directly.
+                local _claimed_verification_cmd
+                _claimed_verification_cmd=$(echo "$bead_json" | jq -r '.metadata.verification_cmd // empty' 2>/dev/null)
+                export NEEDLE_CLAIMED_BEAD_ID="$bead_id"
+                export NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD="${_claimed_verification_cmd:-}"
+
                 # Run post_claim hook after successful claim
                 if declare -f _needle_run_hook &>/dev/null; then
                     _needle_run_hook "post_claim" "$bead_id" >&2 || true

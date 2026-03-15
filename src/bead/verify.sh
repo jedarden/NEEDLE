@@ -2,7 +2,7 @@
 # NEEDLE Bead Verification Module
 # Post-execution verification of bead completion
 #
-# Implementation: nd-lroc (Part 1: nd-lvx2)
+# Implementation: nd-lroc (Part 1: nd-lvx2, nd-e9ux)
 #
 # This module provides:
 # - Runs verification_cmd after agent execution
@@ -17,6 +17,10 @@
 #   0 - Verification passed (bead is done)
 #   1 - Verification failed (needs re-dispatch or release)
 #   2 - No verification_cmd defined (skip verification)
+
+# Guard against re-sourcing
+[[ -n "${_NEEDLE_VERIFY_LOADED:-}" ]] && return 0
+_NEEDLE_VERIFY_LOADED=true
 
 # Source dependencies (if not already loaded)
 if [[ -z "${_NEEDLE_OUTPUT_LOADED:-}" ]]; then
@@ -66,6 +70,20 @@ _needle_get_verification_cmd() {
 
     if [[ -z "$bead_id" ]]; then
         return 1
+    fi
+
+    # Fast path: use verification_cmd cached by claim.sh to avoid re-fetching bead JSON.
+    # NEEDLE_CLAIMED_BEAD_ID and NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD are exported by
+    # _needle_claim_bead after a successful claim.
+    if [[ "${NEEDLE_CLAIMED_BEAD_ID:-}" == "$bead_id" ]] && \
+       [[ -n "${NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD+x}" ]]; then
+        if [[ -n "$NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD" ]]; then
+            echo "$NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD"
+            return 0
+        else
+            # Explicitly empty = no verification_cmd defined
+            return 1
+        fi
     fi
 
     # Get bead JSON - must run in workspace context
