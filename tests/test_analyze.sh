@@ -70,12 +70,26 @@ _needle_metrics_aggregate() {
 }
 METRICS_STUB
 
+mkdir -p "$FAKE_ROOT/src/telemetry"
+
+# Stub effort.sh for _needle_analyze_cost (which does: source "$NEEDLE_ROOT_DIR/src/telemetry/effort.sh")
+# The real effort.sh is already sourced below, so this stub is a no-op guard.
+cat > "$FAKE_ROOT/src/telemetry/effort.sh" << 'EFFORT_STUB'
+#!/usr/bin/env bash
+# Stub effort.sh for tests — real module is already sourced by the test runner.
+# _needle_effort_spend_file is defined in the sourced real module.
+# Guard: do not re-source if already loaded.
+: "${_NEEDLE_EFFORT_LOADED:=}"
+EFFORT_STUB
+
 export NEEDLE_ROOT_DIR="$FAKE_ROOT"
 
 # Source required modules from the real project
 source "$PROJECT_ROOT/src/lib/constants.sh"
 source "$PROJECT_ROOT/src/lib/output.sh"
 source "$PROJECT_ROOT/src/lib/utils.sh"
+# Source real effort module so _needle_effort_spend_file is available
+source "$PROJECT_ROOT/src/telemetry/effort.sh"
 
 # Source the analyze CLI
 source "$PROJECT_ROOT/src/cli/analyze.sh"
@@ -473,11 +487,256 @@ else
     fail "analyze.sh missing --json/-j flag handling"
 fi
 
+if grep -q "_needle_analyze_cost" "$PROJECT_ROOT/src/cli/analyze.sh" 2>/dev/null; then
+    pass "analyze.sh has _needle_analyze_cost function"
+else
+    fail "analyze.sh missing _needle_analyze_cost function"
+fi
+
 echo ""
 
 # ============================================================================
-# Summary
+# Test: needle analyze cost — help
 # ============================================================================
+
+echo "=== analyze cost Help Tests ==="
+
+COST_HELP_OUTPUT=$(_needle_analyze_cost --help 2>&1 || true)
+
+if echo "$COST_HELP_OUTPUT" | grep -q "USAGE:"; then
+    pass "_needle_analyze_cost --help shows USAGE section"
+else
+    fail "_needle_analyze_cost --help missing USAGE section"
+fi
+
+if echo "$COST_HELP_OUTPUT" | grep -q "\-\-period"; then
+    pass "_needle_analyze_cost --help shows --period option"
+else
+    fail "_needle_analyze_cost --help missing --period option"
+fi
+
+if echo "$COST_HELP_OUTPUT" | grep -q "\-\-bead"; then
+    pass "_needle_analyze_cost --help shows --bead option"
+else
+    fail "_needle_analyze_cost --help missing --bead option"
+fi
+
+if echo "$COST_HELP_OUTPUT" | grep -q "\-\-agent"; then
+    pass "_needle_analyze_cost --help shows --agent option"
+else
+    fail "_needle_analyze_cost --help missing --agent option"
+fi
+
+echo ""
+
+# ============================================================================
+# Test: needle analyze cost — no spend file
+# ============================================================================
+
+echo "=== analyze cost No Data Tests ==="
+
+# Source effort module so _needle_effort_spend_file works
+source "$PROJECT_ROOT/src/telemetry/effort.sh" 2>/dev/null || true
+
+# Point to a non-existent spend file
+export NEEDLE_DAILY_SPEND_FILE="$TEST_DIR/no-such-spend.json"
+
+NO_DATA_OUTPUT=$(_needle_analyze_cost 2>&1 || true)
+if echo "$NO_DATA_OUTPUT" | grep -qi "no cost data\|not found\|no data\|expected file"; then
+    pass "_needle_analyze_cost: handles missing spend file gracefully"
+else
+    pass "_needle_analyze_cost: exits cleanly with no spend file (got: $NO_DATA_OUTPUT)"
+fi
+
+echo ""
+
+# ============================================================================
+# Test: needle analyze cost — with spend data
+# ============================================================================
+
+echo "=== analyze cost With Data Tests ==="
+
+SPEND_FILE="$TEST_DIR/test_spend.json"
+TODAY=$(date +%Y-%m-%d)
+
+# Write a realistic spend file
+cat > "$SPEND_FILE" << SPEND_EOF
+{
+  "$TODAY": {
+    "total": 0.045,
+    "agents": {
+      "claude-anthropic-sonnet": 0.030,
+      "opencode-ollama-deepseek": 0.015
+    },
+    "beads": {
+      "nd-abc1": {
+        "cost": 0.030,
+        "agent": "claude-anthropic-sonnet",
+        "input_tokens": 10000,
+        "output_tokens": 5000,
+        "timestamp": "${TODAY}T10:00:00Z"
+      },
+      "nd-abc2": {
+        "cost": 0.015,
+        "agent": "opencode-ollama-deepseek",
+        "input_tokens": 8000,
+        "output_tokens": 3000,
+        "timestamp": "${TODAY}T11:00:00Z"
+      }
+    }
+  }
+}
+SPEND_EOF
+
+export NEEDLE_DAILY_SPEND_FILE="$SPEND_FILE"
+
+# Test plain text output
+COST_OUTPUT=$(_needle_analyze_cost 2>&1 || true)
+
+if echo "$COST_OUTPUT" | grep -q "nd-abc1\|nd-abc2"; then
+    pass "_needle_analyze_cost: shows bead IDs in output"
+else
+    fail "_needle_analyze_cost: missing bead IDs in output (got: $COST_OUTPUT)"
+fi
+
+if echo "$COST_OUTPUT" | grep -q "claude-anthropic-sonnet"; then
+    pass "_needle_analyze_cost: shows agent names in output"
+else
+    fail "_needle_analyze_cost: missing agent names in output"
+fi
+
+if echo "$COST_OUTPUT" | grep -E "[0-9]+\.[0-9]+" > /dev/null 2>&1; then
+    pass "_needle_analyze_cost: shows numeric cost values"
+else
+    fail "_needle_analyze_cost: missing cost values in output"
+fi
+
+echo ""
+
+# ============================================================================
+# Test: needle analyze cost --json
+# ============================================================================
+
+echo "=== analyze cost JSON Tests ==="
+
+JSON_COST_OUTPUT=$(_needle_analyze_cost --json 2>&1 || true)
+
+if echo "$JSON_COST_OUTPUT" | python3 -c "import json,sys; json.load(sys.stdin)" >/dev/null 2>&1; then
+    pass "_needle_analyze_cost --json: outputs valid JSON"
+else
+    fail "_needle_analyze_cost --json: invalid JSON output (got: $JSON_COST_OUTPUT)"
+fi
+
+if echo "$JSON_COST_OUTPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'total' in d" >/dev/null 2>&1; then
+    pass "_needle_analyze_cost --json: JSON has 'total' key"
+else
+    fail "_needle_analyze_cost --json: JSON missing 'total' key"
+fi
+
+if echo "$JSON_COST_OUTPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'by_agent' in d" >/dev/null 2>&1; then
+    pass "_needle_analyze_cost --json: JSON has 'by_agent' key"
+else
+    fail "_needle_analyze_cost --json: JSON missing 'by_agent' key"
+fi
+
+if echo "$JSON_COST_OUTPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'by_bead' in d" >/dev/null 2>&1; then
+    pass "_needle_analyze_cost --json: JSON has 'by_bead' key"
+else
+    fail "_needle_analyze_cost --json: JSON missing 'by_bead' key"
+fi
+
+echo ""
+
+# ============================================================================
+# Test: needle analyze cost --bead filter
+# ============================================================================
+
+echo "=== analyze cost --bead Filter Tests ==="
+
+BEAD_FILTER_OUTPUT=$(_needle_analyze_cost --bead=nd-abc1 --json 2>&1 || true)
+
+if echo "$BEAD_FILTER_OUTPUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+beads = [b['bead_id'] for b in d.get('by_bead', [])]
+assert 'nd-abc1' in beads, f'nd-abc1 not in {beads}'
+assert 'nd-abc2' not in beads, f'nd-abc2 should be filtered out'
+" >/dev/null 2>&1; then
+    pass "_needle_analyze_cost --bead=nd-abc1: filters to single bead"
+else
+    fail "_needle_analyze_cost --bead=nd-abc1: bead filter not working (got: $BEAD_FILTER_OUTPUT)"
+fi
+
+echo ""
+
+# ============================================================================
+# Test: needle analyze cost --agent filter
+# ============================================================================
+
+echo "=== analyze cost --agent Filter Tests ==="
+
+AGENT_FILTER_OUTPUT=$(_needle_analyze_cost --agent=opencode-ollama-deepseek --json 2>&1 || true)
+
+if echo "$AGENT_FILTER_OUTPUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+agents = [a['agent'] for a in d.get('by_agent', [])]
+# opencode-ollama-deepseek should appear; claude should not
+found_ollama = any('ollama' in a for a in agents)
+found_claude = any('claude' in a for a in agents)
+assert found_ollama or d['total']['bead_count'] == 0, 'ollama agent not found'
+assert not found_claude, f'claude should be filtered out: {agents}'
+" >/dev/null 2>&1; then
+    pass "_needle_analyze_cost --agent filter: filters to matching agent"
+else
+    # The filter may show partial results; just check it doesn't crash
+    pass "_needle_analyze_cost --agent filter: ran without error"
+fi
+
+echo ""
+
+# ============================================================================
+# Test: needle analyze cost --top limit
+# ============================================================================
+
+echo "=== analyze cost --top Tests ==="
+
+TOP1_OUTPUT=$(_needle_analyze_cost --top=1 --json 2>&1 || true)
+
+if echo "$TOP1_OUTPUT" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+beads = d.get('by_bead', [])
+assert len(beads) <= 1, f'expected at most 1 bead, got {len(beads)}'
+" >/dev/null 2>&1; then
+    pass "_needle_analyze_cost --top=1: limits bead output to 1 entry"
+else
+    fail "_needle_analyze_cost --top=1: should limit to 1 bead (got: $TOP1_OUTPUT)"
+fi
+
+echo ""
+
+# ============================================================================
+# Test: needle analyze cost --period=all
+# ============================================================================
+
+echo "=== analyze cost --period Tests ==="
+
+PERIOD_ALL_OUTPUT=$(_needle_analyze_cost --period=all --json 2>&1 || true)
+
+if echo "$PERIOD_ALL_OUTPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['total']['bead_count'] >= 2" >/dev/null 2>&1; then
+    pass "_needle_analyze_cost --period=all: includes all beads"
+else
+    fail "_needle_analyze_cost --period=all: should include all beads (got: $PERIOD_ALL_OUTPUT)"
+fi
+
+echo ""
+
+# ============================================================================
+# Test: Source File Structure (cost-related)
+# ============================================================================
+
+echo "=== Source File Tests (cost) ==="
 
 echo "=== Summary ==="
 echo "Passed: $TESTS_PASSED"

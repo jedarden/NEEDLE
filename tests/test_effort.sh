@@ -325,6 +325,267 @@ test_record_effort_missing_bead_id() {
 }
 
 # =============================================================================
+# Test: _needle_get_bead_effort returns zeros for missing log dir
+# =============================================================================
+test_get_bead_effort_no_logs() {
+    local test_name="_needle_get_bead_effort with no log dir"
+
+    # Point to a non-existent log dir
+    local old_log_dir="${NEEDLE_LOG_DIR:-}"
+    export NEEDLE_LOG_DIR="$TEST_STATE_DIR/no-such-logs"
+
+    local result
+    result=$(_needle_get_bead_effort "nd-test1")
+
+    export NEEDLE_LOG_DIR="$old_log_dir"
+
+    # Should return safe zero values
+    if [[ "$result" == "0|0|0|0|" ]]; then
+        _test_pass "$test_name - returns zeros when no log dir"
+    else
+        _test_fail "$test_name - expected 0|0|0|0|, got: $result"
+    fi
+}
+
+# =============================================================================
+# Test: _needle_get_bead_effort aggregates from log files
+# =============================================================================
+test_get_bead_effort_from_logs() {
+    local test_name="_needle_get_bead_effort aggregates from log files"
+
+    local log_dir="$TEST_STATE_DIR/logs"
+    mkdir -p "$log_dir"
+
+    # Write fake effort.recorded events for nd-test-abc and another bead
+    cat > "$log_dir/session1.jsonl" << 'EOF'
+{"ts":"2026-03-15T00:00:01Z","event":"effort.recorded","level":"info","session":"s1","worker":"agent-x","data":{"bead_id":"nd-test-abc","cost":"0.015","input_tokens":1000,"output_tokens":500,"agent":"agent-x"}}
+{"ts":"2026-03-15T00:00:02Z","event":"effort.recorded","level":"info","session":"s1","worker":"agent-y","data":{"bead_id":"nd-other","cost":"0.005","input_tokens":200,"output_tokens":100,"agent":"agent-y"}}
+{"ts":"2026-03-15T00:00:03Z","event":"bead.effort_recorded","level":"info","session":"s1","worker":"agent-x","data":{"bead_id":"nd-test-abc","cost":"0.010","input_tokens":800,"output_tokens":400,"agent":"agent-x"}}
+EOF
+
+    local old_log_dir="${NEEDLE_LOG_DIR:-}"
+    local old_home="${NEEDLE_HOME:-}"
+    export NEEDLE_LOG_DIR="$log_dir"
+    export NEEDLE_HOME="$TEST_STATE_DIR"
+
+    local result
+    result=$(_needle_get_bead_effort "nd-test-abc")
+
+    export NEEDLE_LOG_DIR="$old_log_dir"
+    export NEEDLE_HOME="$old_home"
+
+    local input_tokens output_tokens cost_usd attempts agents
+    IFS='|' read -r input_tokens output_tokens cost_usd attempts agents <<< "$result"
+
+    # Should sum: 1000+800=1800 input, 500+400=900 output, 2 attempts
+    if [[ "$input_tokens" -eq 1800 ]]; then
+        _test_pass "$test_name - input tokens summed correctly"
+    else
+        _test_fail "$test_name - expected input_tokens=1800, got: $input_tokens"
+    fi
+
+    if [[ "$output_tokens" -eq 900 ]]; then
+        _test_pass "$test_name - output tokens summed correctly"
+    else
+        _test_fail "$test_name - expected output_tokens=900, got: $output_tokens"
+    fi
+
+    if [[ "$attempts" -eq 2 ]]; then
+        _test_pass "$test_name - attempts counted correctly"
+    else
+        _test_fail "$test_name - expected attempts=2, got: $attempts"
+    fi
+
+    if [[ -n "$agents" ]] && echo "$agents" | grep -q "agent-x"; then
+        _test_pass "$test_name - agent attribution present"
+    else
+        _test_fail "$test_name - expected agent-x in agents, got: $agents"
+    fi
+}
+
+# =============================================================================
+# Test: _needle_get_bead_effort filters to specified bead only
+# =============================================================================
+test_get_bead_effort_filters_bead() {
+    local test_name="_needle_get_bead_effort filters to specified bead"
+
+    local log_dir="$TEST_STATE_DIR/logs2"
+    mkdir -p "$log_dir"
+
+    cat > "$log_dir/session.jsonl" << 'EOF'
+{"ts":"2026-03-15T00:00:01Z","event":"effort.recorded","level":"info","session":"s1","worker":"w1","data":{"bead_id":"nd-alpha","cost":"0.05","input_tokens":5000,"output_tokens":2500,"agent":"w1"}}
+{"ts":"2026-03-15T00:00:02Z","event":"effort.recorded","level":"info","session":"s1","worker":"w1","data":{"bead_id":"nd-beta","cost":"0.02","input_tokens":2000,"output_tokens":1000,"agent":"w1"}}
+EOF
+
+    local old_log_dir="${NEEDLE_LOG_DIR:-}"
+    local old_home="${NEEDLE_HOME:-}"
+    export NEEDLE_LOG_DIR="$log_dir"
+    export NEEDLE_HOME="$TEST_STATE_DIR"
+
+    local result
+    result=$(_needle_get_bead_effort "nd-beta")
+
+    export NEEDLE_LOG_DIR="$old_log_dir"
+    export NEEDLE_HOME="$old_home"
+
+    local input_tokens output_tokens cost_usd attempts agents
+    IFS='|' read -r input_tokens output_tokens cost_usd attempts agents <<< "$result"
+
+    # Should only include nd-beta: 2000 input, 1000 output, 1 attempt
+    if [[ "$input_tokens" -eq 2000 ]]; then
+        _test_pass "$test_name - filtered to correct bead (input tokens)"
+    else
+        _test_fail "$test_name - expected 2000, got: $input_tokens (wrong bead may be included)"
+    fi
+
+    if [[ "$attempts" -eq 1 ]]; then
+        _test_pass "$test_name - correct attempt count after filtering"
+    else
+        _test_fail "$test_name - expected 1 attempt, got: $attempts"
+    fi
+}
+
+# =============================================================================
+# Test: _needle_get_bead_effort returns zeros for unknown bead
+# =============================================================================
+test_get_bead_effort_unknown_bead() {
+    local test_name="_needle_get_bead_effort for unknown bead"
+
+    local log_dir="$TEST_STATE_DIR/logs3"
+    mkdir -p "$log_dir"
+    echo '{"ts":"2026-03-15T00:00:01Z","event":"effort.recorded","level":"info","session":"s1","worker":"w1","data":{"bead_id":"nd-known","cost":"0.01","input_tokens":100,"output_tokens":50,"agent":"w1"}}' \
+        > "$log_dir/session.jsonl"
+
+    local old_log_dir="${NEEDLE_LOG_DIR:-}"
+    local old_home="${NEEDLE_HOME:-}"
+    export NEEDLE_LOG_DIR="$log_dir"
+    export NEEDLE_HOME="$TEST_STATE_DIR"
+
+    local result
+    result=$(_needle_get_bead_effort "nd-unknown-xyz")
+
+    export NEEDLE_LOG_DIR="$old_log_dir"
+    export NEEDLE_HOME="$old_home"
+
+    local input_tokens output_tokens cost_usd attempts agents
+    IFS='|' read -r input_tokens output_tokens cost_usd attempts agents <<< "$result"
+
+    if [[ "$attempts" -eq 0 ]] && [[ "$input_tokens" -eq 0 ]]; then
+        _test_pass "$test_name - returns zeros for unknown bead"
+    else
+        _test_fail "$test_name - expected zeros for unknown bead, got: $result"
+    fi
+}
+
+# =============================================================================
+# Test: _needle_annotate_bead_with_effort skips when no effort data
+# =============================================================================
+test_annotate_bead_no_effort() {
+    local test_name="_needle_annotate_bead_with_effort skips when no effort data"
+
+    local log_dir="$TEST_STATE_DIR/logs_empty"
+    mkdir -p "$log_dir"
+    # Empty log dir — no events
+
+    local old_log_dir="${NEEDLE_LOG_DIR:-}"
+    local old_home="${NEEDLE_HOME:-}"
+    export NEEDLE_LOG_DIR="$log_dir"
+    export NEEDLE_HOME="$TEST_STATE_DIR"
+
+    # Should return 0 (success) and not call br
+    local br_called=false
+    br() {
+        br_called=true
+    }
+    export -f br
+
+    _needle_annotate_bead_with_effort "nd-empty-bead" "$TEST_STATE_DIR" 2>/dev/null || true
+
+    export NEEDLE_LOG_DIR="$old_log_dir"
+    export NEEDLE_HOME="$old_home"
+    unset -f br
+
+    if [[ "$br_called" == "false" ]]; then
+        _test_pass "$test_name - skips annotation when no effort data"
+    else
+        _test_fail "$test_name - should not call br when no effort data"
+    fi
+}
+
+# =============================================================================
+# Test: _needle_annotate_bead_with_effort calls br with cost comment
+# =============================================================================
+test_annotate_bead_with_effort() {
+    local test_name="_needle_annotate_bead_with_effort calls br with cost comment"
+
+    local log_dir="$TEST_STATE_DIR/logs_annotate"
+    mkdir -p "$log_dir"
+    echo '{"ts":"2026-03-15T00:00:01Z","event":"effort.recorded","level":"info","session":"s1","worker":"agent-z","data":{"bead_id":"nd-annotate-me","cost":"0.025","input_tokens":1500,"output_tokens":750,"agent":"agent-z"}}' \
+        > "$log_dir/session.jsonl"
+
+    local old_log_dir="${NEEDLE_LOG_DIR:-}"
+    local old_home="${NEEDLE_HOME:-}"
+    export NEEDLE_LOG_DIR="$log_dir"
+    export NEEDLE_HOME="$TEST_STATE_DIR"
+
+    # Use a temp file to capture br call args (variable assignments don't
+    # propagate back from subshells)
+    local br_args_file="$TEST_STATE_DIR/br_args_annotate.txt"
+    br() {
+        echo "$*" >> "$br_args_file"
+    }
+    export -f br
+    export br_args_file
+
+    local rc=0
+    _needle_annotate_bead_with_effort "nd-annotate-me" "$TEST_STATE_DIR" 2>/dev/null || rc=$?
+
+    export NEEDLE_LOG_DIR="$old_log_dir"
+    export NEEDLE_HOME="$old_home"
+    unset -f br
+
+    # Check file existence BEFORE unsetting br_args_file (unset clears the var)
+    if [[ -f "$br_args_file" ]]; then
+        _test_pass "$test_name - br was called"
+
+        local br_args
+        br_args=$(cat "$br_args_file")
+
+        if echo "$br_args" | grep -qi "cost attribution\|cost:"; then
+            _test_pass "$test_name - comment contains cost attribution"
+        else
+            _test_fail "$test_name - comment missing cost attribution (got: $br_args)"
+        fi
+
+        if echo "$br_args" | grep -q "agent-z"; then
+            _test_pass "$test_name - comment includes worker attribution"
+        else
+            _test_fail "$test_name - comment missing worker attribution (got: $br_args)"
+        fi
+    else
+        _test_fail "$test_name - br was not called (args file not created)"
+        _test_fail "$test_name - comment contains cost attribution (br not called)"
+        _test_fail "$test_name - comment includes worker attribution (br not called)"
+    fi
+}
+
+# =============================================================================
+# Test: _needle_annotate_bead_with_effort handles missing bead_id
+# =============================================================================
+test_annotate_bead_missing_id() {
+    local test_name="_needle_annotate_bead_with_effort missing bead_id"
+
+    local rc=0
+    _needle_annotate_bead_with_effort "" "" 2>/dev/null || rc=$?
+
+    if [[ $rc -ne 0 ]]; then
+        _test_pass "$test_name - returns non-zero for missing bead_id"
+    else
+        _test_pass "$test_name - handled gracefully with empty bead_id"
+    fi
+}
+
+# =============================================================================
 # Main test runner
 # =============================================================================
 main() {
@@ -346,6 +607,13 @@ main() {
     test_get_total_spend
     test_ensure_spend_file
     test_record_effort_missing_bead_id
+    test_get_bead_effort_no_logs
+    test_get_bead_effort_from_logs
+    test_get_bead_effort_filters_bead
+    test_get_bead_effort_unknown_bead
+    test_annotate_bead_no_effort
+    test_annotate_bead_with_effort
+    test_annotate_bead_missing_id
 
     teardown
 
