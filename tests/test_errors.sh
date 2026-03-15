@@ -1020,9 +1020,14 @@ export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_RATE_LIMIT="0"
 
 # Set up session and worker ID to match real worker behavior
 # In production, logs are named ${NEEDLE_SESSION}.log, not ${NEEDLE_WORKER_ID}.log
-export NEEDLE_SESSION="needle-test-agent-alpha"
+# NOTE: session name must NOT match test-*, needle-test-*, or perf-* patterns,
+# as those trigger the test session guard and prevent auto-bead creation.
+export NEEDLE_SESSION="needle-worker-agent-alpha"
 export NEEDLE_WORKER_ID="alpha"
 export NEEDLE_LOG_DIR="logs"
+# Unset NEEDLE_LOG_FILE so the function uses NEEDLE_LOG_DIR path construction
+# (NEEDLE_LOG_FILE may have been set by _needle_init_log earlier in the test suite)
+unset NEEDLE_LOG_FILE
 
 # Create the log file with session name (as worker does)
 mkdir -p "$NEEDLE_HOME/logs"
@@ -1065,6 +1070,9 @@ fi
 exit 1
 BRSCRIPT
 chmod +x "$MOCK_BR6"
+
+# Temporarily add mock to PATH
+export PATH="/tmp:$PATH"
 ln -sf "$MOCK_BR6" "/tmp/br"
 
 # Clear state
@@ -1115,8 +1123,12 @@ export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_WORKSPACE="$TEST_WORKSPACE"
 export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_RATE_LIMIT="0"
 
 # Set up session
-export NEEDLE_SESSION="needle-test-agent-fullpath"
+# NOTE: session name must NOT match test-*, needle-test-*, or perf-* patterns,
+# as those trigger the test session guard and prevent auto-bead creation.
+export NEEDLE_SESSION="needle-worker-agent-fullpath"
 export NEEDLE_WORKER_ID="bravo"
+# Unset NEEDLE_LOG_FILE so the function uses NEEDLE_LOG_DIR path construction
+unset NEEDLE_LOG_FILE
 
 # Export NEEDLE_LOG_DIR as a full path (as the runner does)
 export NEEDLE_LOG_DIR="$NEEDLE_HOME/logs"
@@ -1237,11 +1249,13 @@ fi
 rm -f "/tmp/br" "$MOCK_BR_LBTU" "$BR_CALLED_LBTU"
 
 # ----------------------------------------------------------------------------
-# Test 34: Auto-bead skips creation for test sessions (nd-wgbf regression)
+# Test 34: Auto-bead skips creation for test sessions (nd-wgbf, nd-hjdz regression)
 # ----------------------------------------------------------------------------
 # Bug: test sessions with names like "test-session-errors" could trigger
 # auto-bead creation if the config override wasn't properly applied (e.g.,
 # when running specific test functions in isolation or via IDE execution).
+# Both nd-wgbf and nd-hjdz were auto-created from the same test run before
+# the test session safeguard was added.
 # This test verifies that test sessions are ALWAYS skipped regardless of config.
 _test_start "_needle_error_auto_bead skips for test sessions even when enabled"
 
