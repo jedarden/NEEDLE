@@ -397,10 +397,23 @@ _needle_error_auto_bead() {
         local check_type="$1"
         local types="$auto_types_raw"
 
-        # If yq is available and types looks like a YAML array, use yq to check
+        # If types is a JSON array string (starts with [), parse with jq or yq
+        if [[ "$types" == \[* ]]; then
+            if command -v jq &>/dev/null; then
+                # Use jq to parse JSON array
+                echo "$types" | jq -r '.[]' 2>/dev/null | grep -qx "$check_type"
+                return $?
+            elif command -v yq &>/dev/null; then
+                # Use yq to parse JSON array (input as JSON string)
+                echo "$types" | yq '.[]' 2>/dev/null | grep -qx "$check_type"
+                return $?
+            fi
+        fi
+
+        # If yq is available and types looks like a YAML array with dashes, use yq
         if command -v yq &>/dev/null && [[ "$types" == *"-"* ]]; then
             # Parse as YAML array using yq
-            echo "$types" | yq '.[]' 2>/dev/null | grep -q "^${check_type}$"
+            echo "$types" | yq '.[]' 2>/dev/null | grep -qx "$check_type"
             return $?
         fi
 

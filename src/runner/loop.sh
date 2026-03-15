@@ -916,7 +916,7 @@ _needle_worker_loop() {
         _needle_heartbeat_keepalive
 
         # Check for priority bump signals from waiting beads
-        if declare -f _needle_check_priority_bumps &>/dev/null; then
+        if declare -f _needle_check_priority_bumps &>/dev/null && [[ -n "${NEEDLE_BEAD_ID:-}" ]]; then
             local bump_signals
             bump_signals=$(_needle_check_priority_bumps "$NEEDLE_BEAD_ID" 2>/dev/null || echo "[]")
             local bump_count
