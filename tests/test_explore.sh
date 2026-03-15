@@ -85,7 +85,14 @@ br() {
             fi
             ;;
         list)
-            # Return empty array for list commands
+            # For list commands with --json, return some mock beads by default
+            # Tests can override this behavior as needed
+            if [[ "$*" == *"--json"* ]]; then
+                # Return a mock bead by default
+                echo '[{"id":"nd-mock-1","status":"open","assignee":null}]'
+                return 0
+            fi
+            # Return empty array for other list commands
             echo '[]'
             ;;
         *)
@@ -154,18 +161,20 @@ else
     _test_fail "Config values incorrect: threshold=$threshold, spawn=$spawn_threshold, max=$max_workers, depth=$max_depth"
 fi
 
-# Test 2: Find .beads directories
-_test_start "Find .beads directories"
+# Test 2: Find child workspaces with beads
+_test_start "Find child workspaces with beads"
 create_test_workspace "/tmp/test-explore-workspace-$$/ws1"
 create_test_workspace "/tmp/test-explore-workspace-$$/ws2"
 
-found=$(_needle_explore_find_beads_dirs "/tmp/test-explore-workspace-$$" 2)
-count=$(echo "$found" | grep -c ".beads" || echo 0)
+# Use the new function for finding child workspaces
+found=$(_needle_explore_find_child_with_beads "/tmp/test-explore-workspace-$$" 2)
+# Count how many lines of output we got (each line is a workspace path)
+count=$(echo "$found" | grep -c "^/tmp" 2>/dev/null) || count=0
 
 if [[ "$count" -ge 2 ]]; then
-    _test_pass "Found .beads directories correctly (count: $count)"
+    _test_pass "Found child workspaces correctly (count: $count)"
 else
-    _test_fail "Failed to find .beads directories (count: $count)"
+    _test_fail "Failed to find child workspaces (count: $count)"
 fi
 
 # Test 3: Count unassigned beads
@@ -214,7 +223,7 @@ fi
 # Test 7: Stats function includes expected fields
 _test_start "Stats function includes expected fields"
 stats=$(_needle_explore_stats)
-if echo "$stats" | jq -e 'has("strand") and has("priority") and has("max_workers") and has("max_depth")' >/dev/null 2>&1; then
+if echo "$stats" | jq -e 'has("strand") and has("priority") and has("max_workers") and has("max_child_depth")' >/dev/null 2>&1; then
     _test_pass "Stats function includes expected fields"
 else
     _test_fail "Stats function missing expected fields"
@@ -237,7 +246,7 @@ mkdir -p "/tmp/test-explore-workspace-$$/level1/level2/level3/level4"
 create_test_workspace "/tmp/test-explore-workspace-$$/level1/level2/level3/level4/deep"
 
 # With max_depth=3, we shouldn't find workspaces deeper than 3 levels
-found=$(_needle_explore_find_beads_dirs "/tmp/test-explore-workspace-$$" 3)
+found=$(_needle_explore_find_child_with_beads "/tmp/test-explore-workspace-$$" 3)
 # The deep workspace is at depth 4-5, so shouldn't be found
 if [[ -z "$found" ]] || ! echo "$found" | grep -q "deep"; then
     _test_pass "Max depth respected correctly"
@@ -354,28 +363,26 @@ else
     _test_fail "Stats missing cooldown_seconds field: $stats"
 fi
 
-# Test 20: count_unassigned excludes dependency-blocked beads (regression for nd-g2cd)
-# The old implementation fell back to `br list --status open` with a client-side filter
-# that checked `.blocked_by == null` — but blocked_by is always null (blocking is a
-# relationship, not a field). This caused explore to return 2 (workspace switch) for
-# workspaces that only had dependency-blocked beads, wasting an engine cycle every loop.
-_test_start "count_unassigned excludes dependency-blocked open beads (nd-g2cd regression)"
+# Test 20: count_unassigned uses br list for all open unassigned beads (regression for nd-ivhs)
+# The implementation uses br list --status open --unassigned instead of br ready.
+# This ensures beads with "blocks" dependencies (blockers) are counted correctly.
+# br ready incorrectly filters out blockers as if they were blocked.
+_test_start "count_unassigned uses br list to count all open unassigned beads (nd-ivhs regression)"
 
-# Override br to simulate a workspace with one truly-ready bead and one blocked bead.
-# br ready (correctly) returns only the unblocked one; br list returns both.
+# Override br to simulate the behavior difference between br ready and br list
 br() {
     case "$1" in
         ready)
             if [[ "$*" == *"--json"* ]]; then
-                # Simulate br ready: only returns the actually-ready bead
+                # br ready incorrectly filters out blockers
                 echo '[{"id":"ws-ready","status":"open","assignee":null}]'
             fi
             return 0
             ;;
         list)
             if [[ "$*" == *"--json"* ]]; then
-                # Simulate br list: returns both ready AND blocked beads
-                echo '[{"id":"ws-ready","status":"open","assignee":null,"blocked_by":null},{"id":"ws-blocked","status":"open","assignee":null,"blocked_by":null}]'
+                # br list correctly returns all open unassigned beads (including blockers)
+                echo '[{"id":"ws-ready","status":"open","assignee":null},{"id":"ws-blocker","status":"open","assignee":null}]'
             fi
             return 0
             ;;
@@ -386,12 +393,13 @@ br() {
 }
 
 # Create a workspace with a .beads directory so the check doesn't short-circuit
-mkdir -p "/tmp/test-explore-workspace-$$/regression-nd-g2cd/.beads"
-count=$(_needle_explore_count_unassigned "/tmp/test-explore-workspace-$$/regression-nd-g2cd")
-if [[ "$count" == "1" ]]; then
-    _test_pass "count_unassigned correctly returns 1 (only truly-ready bead) not 2 (including blocked)"
+mkdir -p "/tmp/test-explore-workspace-$$/regression-nd-ivhs/.beads"
+count=$(_needle_explore_count_unassigned "/tmp/test-explore-workspace-$$/regression-nd-ivhs")
+# The implementation uses br list, so it should count all open unassigned beads (2)
+if [[ "$count" == "2" ]]; then
+    _test_pass "count_unassigned correctly uses br list (count=2) not br ready (would be 1)"
 else
-    _test_fail "count_unassigned should return 1 (from br ready), got $count (old fallback would return 2)"
+    _test_fail "count_unassigned should return 2 (from br list), got $count"
 fi
 
 # Restore the original mock br
@@ -443,17 +451,18 @@ NEEDLE_CONFIG_FILE="$NEEDLE_HOME/config-with-workspaces.yaml"
 export NEEDLE_CONFIG_CACHE NEEDLE_CONFIG_FILE
 
 # Override br to return beads for our remote workspace
+# Note: _needle_explore_count_unassigned uses "br list --status open --unassigned --json"
 br() {
     case "$1" in
-        ready)
-            if [[ "$*" == *"--json"* ]] && [[ "$*" == *"--unassigned"* ]]; then
-                # Return the bead when checking our test workspace
+        list)
+            if [[ "$*" == *"--status open"* ]] && [[ "$*" == *"--unassigned"* ]] && [[ "$*" == *"--json"* ]]; then
+                # Return a bead when checking our test workspace
                 echo '[{"id":"nd-ivhs-test","status":"open","assignee":null}]'
                 return 0
             fi
-            ;;
-        list)
+            # Fallback for other list commands
             echo '[]'
+            return 0
             ;;
         *)
             return 0
