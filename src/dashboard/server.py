@@ -299,11 +299,12 @@ def get_summary() -> dict:
                 usage = data.get("usage", {})
                 workers[worker]["tokens_in"] += usage.get("input_tokens", 0)
                 workers[worker]["tokens_out"] += usage.get("output_tokens", 0)
-                cost = data.get("cost", 0)
+                # Support both wrapped {"data":{"cost":...}} and direct stream-json {"cost_usd":...}
+                cost = data.get("cost", data.get("cost_usd", 0))
                 if isinstance(cost, str):
                     cost = float(cost.replace("$", ""))
-                workers[worker]["cost"] = workers[worker].get("cost", 0.0) + cost
-                total_cost += cost
+                workers[worker]["cost"] = workers[worker].get("cost", 0.0) + float(cost)
+                total_cost += float(cost)
 
             # Strand tracking
             if "strand" in event_type:

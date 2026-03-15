@@ -379,8 +379,20 @@ _needle_claim_bead() {
                 # Expose verification_cmd from the already-fetched bead JSON.
                 # This avoids an extra `br show` round-trip in verify.sh.
                 # Callers can read NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD directly.
+                #
+                # Check two locations in priority order:
+                #   1. metadata.verification_cmd  (preferred; set by Weave strand)
+                #   2. label "verification_cmd:<cmd>"  (set by mitosis for children)
                 local _claimed_verification_cmd
                 _claimed_verification_cmd=$(echo "$bead_json" | jq -r '.metadata.verification_cmd // empty' 2>/dev/null)
+
+                if [[ -z "$_claimed_verification_cmd" ]]; then
+                    # Fall back to label-based storage used by mitosis children
+                    _claimed_verification_cmd=$(echo "$bead_json" | \
+                        jq -r '.labels[]? // empty' 2>/dev/null | \
+                        grep -m1 '^verification_cmd:' | sed 's/^verification_cmd://')
+                fi
+
                 export NEEDLE_CLAIMED_BEAD_ID="$bead_id"
                 export NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD="${_claimed_verification_cmd:-}"
 

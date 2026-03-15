@@ -1199,6 +1199,58 @@ else
 fi
 
 # ============================================================================
+# Test verification_cmd Export from Claim
+# ============================================================================
+
+echo ""
+echo "--- Verification CMD Export Tests ---"
+
+test_case "claim exports verification_cmd from metadata"
+mock_br '[{"id":"bd-vcmd-meta","priority":2,"metadata":{"verification_cmd":"pytest tests/"}}]' "true"
+unset NEEDLE_CLAIMED_BEAD_ID NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD
+_needle_claim_bead --actor "worker-vcmd" >/dev/null 2>/dev/null
+if [[ "${NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD:-}" == "pytest tests/" ]]; then
+    test_pass
+else
+    test_fail "Expected 'pytest tests/', got '${NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD:-<empty>}'"
+fi
+unset NEEDLE_CLAIMED_BEAD_ID NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD
+
+test_case "claim exports verification_cmd from label (mitosis children)"
+mock_br '[{"id":"bd-vcmd-label","priority":2,"labels":["mitosis-child","verification_cmd:make test"]}]' "true"
+unset NEEDLE_CLAIMED_BEAD_ID NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD
+_needle_claim_bead --actor "worker-vcmd-label" >/dev/null 2>/dev/null
+if [[ "${NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD:-}" == "make test" ]]; then
+    test_pass
+else
+    test_fail "Expected 'make test', got '${NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD:-<empty>}'"
+fi
+unset NEEDLE_CLAIMED_BEAD_ID NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD
+
+test_case "claim exports empty verification_cmd when neither metadata nor label present"
+mock_br '[{"id":"bd-vcmd-none","priority":2}]' "true"
+unset NEEDLE_CLAIMED_BEAD_ID NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD
+_needle_claim_bead --actor "worker-vcmd-none" >/dev/null 2>/dev/null
+if [[ "${NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD+x}" == "x" ]] && \
+   [[ -z "${NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD}" ]]; then
+    test_pass
+else
+    test_fail "Expected empty NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD, got '${NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD:-<unset>}'"
+fi
+unset NEEDLE_CLAIMED_BEAD_ID NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD
+
+test_case "metadata verification_cmd takes priority over label"
+mock_br '[{"id":"bd-vcmd-both","priority":2,"metadata":{"verification_cmd":"npm test"},"labels":["verification_cmd:make test"]}]' "true"
+unset NEEDLE_CLAIMED_BEAD_ID NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD
+_needle_claim_bead --actor "worker-vcmd-both" >/dev/null 2>/dev/null
+if [[ "${NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD:-}" == "npm test" ]]; then
+    test_pass
+else
+    test_fail "Expected metadata value 'npm test', got '${NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD:-<empty>}'"
+fi
+unset NEEDLE_CLAIMED_BEAD_ID NEEDLE_CLAIMED_BEAD_VERIFICATION_CMD
+
+# ============================================================================
 # Test No Flaky Behavior
 # ============================================================================
 

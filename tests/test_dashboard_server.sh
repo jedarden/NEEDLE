@@ -375,6 +375,30 @@ else
 fi
 echo ""
 
+# Test 20: result event with top-level cost_usd (real stream-json format) is tracked
+echo "Test 20: result event with cost_usd top-level field is tracked in worker cost"
+# Real Claude Code stream-json emits cost_usd at the top level, not inside a data wrapper
+curl -sf --max-time 5 -X POST "http://localhost:$TEST_PORT/ingest" \
+    -H "Content-Type: application/json" \
+    -d "{\"type\":\"result\",\"ts\":\"$NOW_TS\",\"worker\":\"stream-worker\",\"cost_usd\":0.0777,\"usage\":{\"input_tokens\":500,\"output_tokens\":200},\"duration_ms\":5000}" \
+    &>/dev/null || true
+sleep 0.2
+summary_cost=$(curl -sf --max-time 5 "http://localhost:$TEST_PORT/api/summary" 2>/dev/null || echo "")
+if echo "$summary_cost" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+workers = d.get('workers_all', {})
+sw = workers.get('stream-worker', {})
+assert sw.get('cost', 0) > 0, f'expected cost > 0 for stream-worker, got {sw}'
+assert sw.get('tokens_in', 0) == 500, f'expected tokens_in=500, got {sw.get(\"tokens_in\")}'
+assert sw.get('tokens_out', 0) == 200, f'expected tokens_out=200, got {sw.get(\"tokens_out\")}'
+" 2>/dev/null; then
+    _pass "result event with top-level cost_usd is tracked in worker cost"
+else
+    _fail "result event with cost_usd not tracked (got: ${summary_cost:0:400})"
+fi
+echo ""
+
 # Summary
 echo "=== Results: $pass passed, $fail failed ==="
 if [[ $fail -gt 0 ]]; then
