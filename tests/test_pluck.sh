@@ -843,7 +843,7 @@ else
     test_fail "Expected quarantined label in br update, got: $(cat $BR_QUARAN_LOG 2>/dev/null)"
 fi
 
-test_case "_needle_mark_bead_failed does not force mitosis below threshold"
+test_case "_needle_mark_bead_failed does not force mitosis below threshold-1"
 create_test_config
 # Restore _needle_mark_bead_failed — may have been overridden to a no-op
 source "$PROJECT_DIR/src/strands/pluck.sh" 2>/dev/null || true
@@ -869,8 +869,8 @@ cat > "$TEST_DIR/bin/br" << EOF
 echo "\$@" >> "$BR_BELOW_LOG"
 case "\$1" in
     show)
-        # failure-count:1 means after increment it becomes 2, below threshold=3
-        echo '[{"id":"bd-below1","title":"Below Threshold","priority":2,"labels":["failure-count:1"]}]'
+        # failure-count:0 means after increment it becomes 1, below threshold-1=2
+        echo '[{"id":"bd-below1","title":"Below Threshold","priority":2,"labels":["failure-count:0"]}]'
         ;;
     update)
         echo "Updated"
@@ -894,7 +894,7 @@ _needle_mark_bead_failed "bd-below1" "test_reason" "" "$TEST_DIR/workspace" "tes
 if [[ "$FORCE_MITOSIS_BELOW" == "false" ]]; then
     test_pass
 else
-    test_fail "Expected no force mitosis when failure count below threshold"
+    test_fail "Expected no force mitosis when failure count below threshold-1"
 fi
 
 test_case "_needle_mark_bead_failed skips force mitosis when disabled in config"
