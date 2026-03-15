@@ -393,12 +393,12 @@ test_malformed_bead_skipped() {
     mkdir -p "$NEEDLE_HOME/$NEEDLE_STATE_DIR/heartbeats"
 
     local log_before
-    log_before=$(wc -l < "$TEST_LOG_FILE" 2>/dev/null || echo 0)
+    log_before=$(if [[ -f "$TEST_LOG_FILE" ]]; then wc -l < "$TEST_LOG_FILE"; else echo 0; fi)
 
     _needle_mend_orphaned_claims "$test_workspace" 2>&1 || true
 
     local log_after
-    log_after=$(wc -l < "$TEST_LOG_FILE" 2>/dev/null || echo 0)
+    log_after=$(if [[ -f "$TEST_LOG_FILE" ]]; then wc -l < "$TEST_LOG_FILE"; else echo 0; fi)
 
     # No new events should have been emitted for the malformed bead
     if [[ "$log_after" -eq "$log_before" ]]; then
