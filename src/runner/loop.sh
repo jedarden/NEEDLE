@@ -915,6 +915,25 @@ _needle_worker_loop() {
         # Emit heartbeat keepalive
         _needle_heartbeat_keepalive
 
+        # Check for priority bump signals from waiting beads
+        if declare -f _needle_check_priority_bumps &>/dev/null; then
+            local bump_signals
+            bump_signals=$(_needle_check_priority_bumps "$NEEDLE_BEAD_ID" 2>/dev/null || echo "[]")
+            local bump_count
+            bump_count=$(echo "$bump_signals" | jq 'length' 2>/dev/null || echo "0")
+
+            if [[ "$bump_count" -gt 0 ]]; then
+                _needle_debug "Detected $bump_count priority bump signal(s)"
+
+                # Handle each priority bump signal
+                if declare -f handle_priority_bump &>/dev/null; then
+                    while IFS= read -r signal; do
+                        [[ -n "$signal" ]] && handle_priority_bump "$signal"
+                    done < <(echo "$bump_signals" | jq -c '.[]' 2>/dev/null)
+                fi
+            fi
+        fi
+
         # Check for config hot-reload (every N iterations)
         # If config reloaded (returns 0), apply workspace overrides and update local vars
         if _needle_check_config_reload; then
