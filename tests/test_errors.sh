@@ -1632,6 +1632,74 @@ export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR="false"
 # Restore test worker ID (was set by test 31, reset here for safety)
 export NEEDLE_WORKER_ID="alpha"
 
+# ----------------------------------------------------------------------------
+# Test 39: Session guard blocks auto-bead when NEEDLE_WORKER_ID="bravo" is
+# inherited from the bravo production worker (nd-1tvq regression)
+# ----------------------------------------------------------------------------
+# Bug: nd-1tvq was auto-created with Worker: `bravo` and Session: `test-session-errors`.
+# The `bravo` worker ran the test suite, setting NEEDLE_WORKER_ID="bravo" in the
+# environment. The auto-bead was created because the session safeguard had not yet
+# been applied when the multi-error sequence (claim_failed + agent_crash) ran.
+# This test verifies that the session safeguard blocks bead creation even when
+# NEEDLE_WORKER_ID="bravo" is exported from the parent worker process.
+_test_start "Session guard blocks auto-bead when NEEDLE_WORKER_ID=bravo is inherited from bravo worker (nd-1tvq regression)"
+
+# Simulate the bravo worker's environment: NEEDLE_WORKER_ID="bravo" is exported
+export NEEDLE_WORKER_ID="bravo"
+export NEEDLE_SESSION="test-session-errors"
+
+# Enable auto-bead (simulating production config with debug.auto_bead_on_error=true)
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR="true"
+
+# Create a test workspace
+TEST_WORKSPACE_1TVQ="/tmp/needle-test-ws-1tvq-$$"
+mkdir -p "$TEST_WORKSPACE_1TVQ/.beads"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_WORKSPACE="$TEST_WORKSPACE_1TVQ"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_RATE_LIMIT="0"
+
+# Mock br to detect any bead creation
+BR_CALLED_1TVQ="/tmp/needle-br-called-1tvq-$$"
+MOCK_BR_1TVQ="/tmp/needle-mock-br-1tvq-$$"
+rm -f "$BR_CALLED_1TVQ"
+cat > "$MOCK_BR_1TVQ" <<EOF
+#!/usr/bin/env bash
+echo "called" > "$BR_CALLED_1TVQ"
+echo "nd-should-not-exist-1tvq"
+exit 0
+EOF
+chmod +x "$MOCK_BR_1TVQ"
+ln -sf "$MOCK_BR_1TVQ" "/tmp/br"
+export PATH="/tmp:$PATH"
+
+# Replicate the exact multi-error sequence from the nd-1tvq worker log
+action_1tvq_1=$(_needle_error_handle "error.claim_failed" 1 "bead_id=bead-1" 2>/dev/null)
+action_1tvq_2=$(_needle_error_handle "error.agent_crash" 137 "bead_id=bead-2" 2>/dev/null)
+
+# Escalations must still be correct
+if [[ "$action_1tvq_1" == "retry" ]] && [[ "$action_1tvq_2" == "quarantine" ]]; then
+    _test_pass "Escalation actions correct: claim_failed=retry, agent_crash=quarantine (nd-1tvq regression)"
+else
+    _test_fail "Unexpected escalations: claim_failed=$action_1tvq_1, agent_crash=$action_1tvq_2"
+fi
+
+# No bead must be created despite auto-bead being enabled and NEEDLE_WORKER_ID="bravo" being set
+if [[ -f "$BR_CALLED_1TVQ" ]]; then
+    _test_fail "br was called for test session 'test-session-errors' with NEEDLE_WORKER_ID=bravo — session safeguard failed (nd-1tvq regression)"
+else
+    _test_pass "No bead created for test session 'test-session-errors' even with NEEDLE_WORKER_ID='bravo' (nd-1tvq regression)"
+fi
+
+# Cleanup
+rm -f "/tmp/br" "$MOCK_BR_1TVQ" "$BR_CALLED_1TVQ"
+rm -rf "$TEST_WORKSPACE_1TVQ"
+unset NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_WORKSPACE
+unset NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_RATE_LIMIT
+
+# Reset state
+export NEEDLE_SESSION="test-session-errors"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR="false"
+export NEEDLE_WORKER_ID="alpha"
+
 # ============================================================================
 # Summary
 # ============================================================================
