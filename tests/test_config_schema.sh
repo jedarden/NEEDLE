@@ -246,6 +246,13 @@ EOF
 _assert_fail "updates.auto_upgrade=enabled is rejected" \
     validate_config_schema "$NEEDLE_CONFIG_FILE"
 
+_write_config <<'EOF'
+file_locks:
+  ld_preload: enabled
+EOF
+_assert_fail "file_locks.ld_preload=enabled is rejected" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
 # ============================================================================
 # Tests: Invalid integer values
 # ============================================================================
@@ -631,6 +638,28 @@ file_locks:
   stale_action: ignore
 EOF
 _assert_ok "file_locks.stale_action=ignore is valid" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+_write_config <<'EOF'
+file_locks:
+  ld_preload: true
+EOF
+_assert_ok "file_locks.ld_preload=true is valid" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+_write_config <<'EOF'
+file_locks:
+  ld_preload: false
+EOF
+_assert_ok "file_locks.ld_preload=false is valid" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+_write_config <<'EOF'
+file_locks:
+  ld_preload: true
+  ld_preload_lib: /usr/local/lib/libcheckout.so
+EOF
+_assert_ok "file_locks.ld_preload with ld_preload_lib path is valid" \
     validate_config_schema "$NEEDLE_CONFIG_FILE"
 
 _write_config <<'EOF'
