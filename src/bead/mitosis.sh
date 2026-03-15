@@ -615,23 +615,79 @@ _needle_heuristic_mitosis_analysis() {
 
     # Determine if mitosis should occur
     if [[ $split_indicators -ge 2 ]]; then
-        # Build simple children based on split indicators
-        # This is a simplified heuristic - real mitosis should use agent analysis
         local max_children
         max_children=$(_needle_mitosis_config "max_children" "$NEEDLE_MITOSIS_MAX_CHILDREN" "$workspace")
 
-        # Limit children to max
-        local child_count=$((split_indicators > max_children ? max_children : split_indicators))
+        # Attempt to extract meaningful child titles from description structure
+        local -a extracted_titles=()
 
-        children="["
-        for ((i=1; i<=child_count; i++)); do
-            if [[ $i -gt 1 ]]; then
-                children+=","
-            fi
-            children+="{\"title\":\"Task part $i\",\"description\":\"Part $i of the original task\",\"blocked_by\":[]}"
-        done
-        children+="]"
+        # Priority 1: Extract items from a numbered list (e.g. "1. Add auth\n2. Add sessions")
+        if echo "$description" | grep -qE '^[0-9]+\.'; then
+            while IFS= read -r line; do
+                local item
+                item=$(echo "$line" | sed 's/^[0-9]\+\.\s*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                [[ -n "$item" ]] && extracted_titles+=("$item")
+            done < <(echo "$description" | grep -E '^[0-9]+\.')
+        fi
 
+        # Priority 2: Extract items from bullet points when fewer than 2 extracted so far
+        if [[ ${#extracted_titles[@]} -lt 2 ]] && [[ $bullet_count -ge 3 ]]; then
+            extracted_titles=()
+            while IFS= read -r line; do
+                local item
+                item=$(echo "$line" | sed 's/^\s*[-*]\s*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                [[ -n "$item" ]] && extracted_titles+=("$item")
+            done < <(echo "$description" | grep -E '^\s*[-*]')
+        fi
+
+        # Limit extracted titles to max_children
+        local use_count=${#extracted_titles[@]}
+        if [[ $use_count -gt $max_children ]]; then
+            use_count=$max_children
+        fi
+
+        if [[ $use_count -ge 2 ]]; then
+            # Build children from extracted structure — titles are meaningful, description provides context
+            children="["
+            local first=true
+            local i=0
+            for item_title in "${extracted_titles[@]}"; do
+                [[ $i -ge $max_children ]] && break
+                [[ "$first" == "true" ]] || children+=","
+                first=false
+                ((i++))
+                local child_json
+                child_json=$(jq -n \
+                    --arg t "$item_title" \
+                    --arg d "$description" \
+                    '{title: $t, description: $d, blocked_by: []}')
+                children+="$child_json"
+            done
+            children+="]"
+        else
+            # Fallback: numbered children with parent title and description preserved for context
+            local child_count=$((split_indicators > max_children ? max_children : split_indicators))
+            [[ $child_count -lt 2 ]] && child_count=2
+
+            children="["
+            for ((i=1; i<=child_count; i++)); do
+                if [[ $i -gt 1 ]]; then
+                    children+=","
+                fi
+                local child_json
+                child_json=$(jq -n \
+                    --arg t "$title (part $i of $child_count)" \
+                    --arg d "$description" \
+                    --argjson part "$i" \
+                    --argjson total "$child_count" \
+                    '{title: $t, description: ("Part \($part) of \($total):\n\n" + $d), blocked_by: []}')
+                children+="$child_json"
+            done
+            children+="]"
+        fi
+
+        local child_count
+        child_count=$(echo "$children" | jq 'length')
         cat <<HEURISTIC_RESULT
 {
   "mitosis": true,

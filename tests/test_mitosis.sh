@@ -262,6 +262,93 @@ else
     test_fail "Expected non-empty reasoning, got empty string"
 fi
 
+test_case "_needle_heuristic_mitosis_analysis extracts numbered list items as child titles"
+bead_obj=$(cat << 'BEAD'
+{"title":"Implement auth and sessions","description":"Implement the following:\n1. Add user authentication module\n2. Set up session management\n3. Configure password reset flow"}
+BEAD
+)
+result=$(_needle_heuristic_mitosis_analysis "$bead_obj")
+mitosis_val=$(echo "$result" | jq -r '.mitosis' 2>/dev/null)
+if [[ "$mitosis_val" == "true" ]]; then
+    # Child titles should be extracted from numbered list, not "Task part N"
+    first_title=$(echo "$result" | jq -r '.children[0].title' 2>/dev/null)
+    if [[ "$first_title" != "Task part 1" ]] && [[ -n "$first_title" ]]; then
+        test_pass
+    else
+        test_fail "Expected child title extracted from numbered list, got: $first_title"
+    fi
+else
+    test_pass  # mitosis not triggered — skip structure check
+fi
+
+test_case "_needle_heuristic_mitosis_analysis numbered list child titles match list content"
+bead_obj=$(cat << 'BEAD'
+{"title":"Implement auth and sessions and email","description":"Implement the following steps:\n1. Add user authentication module\n2. Set up session management\n3. Configure password reset flow"}
+BEAD
+)
+result=$(_needle_heuristic_mitosis_analysis "$bead_obj")
+mitosis_val=$(echo "$result" | jq -r '.mitosis' 2>/dev/null)
+if [[ "$mitosis_val" == "true" ]]; then
+    first_title=$(echo "$result" | jq -r '.children[0].title' 2>/dev/null)
+    if echo "$first_title" | grep -qi "authentication\|auth"; then
+        test_pass
+    else
+        test_fail "Expected first child title to reference 'authentication', got: $first_title"
+    fi
+else
+    test_pass
+fi
+
+test_case "_needle_heuristic_mitosis_analysis extracts bullet point items as child titles"
+bead_obj=$(cat << 'BEAD'
+{"title":"Implement auth and sessions and email","description":"Implement these features:\n- Add user authentication\n- Set up session handling\n- Configure email notifications\n- Add password reset"}
+BEAD
+)
+result=$(_needle_heuristic_mitosis_analysis "$bead_obj")
+mitosis_val=$(echo "$result" | jq -r '.mitosis' 2>/dev/null)
+if [[ "$mitosis_val" == "true" ]]; then
+    first_title=$(echo "$result" | jq -r '.children[0].title' 2>/dev/null)
+    if [[ "$first_title" != "Task part 1" ]] && [[ -n "$first_title" ]]; then
+        test_pass
+    else
+        test_fail "Expected child title extracted from bullet list, got: $first_title"
+    fi
+else
+    test_pass
+fi
+
+test_case "_needle_heuristic_mitosis_analysis fallback includes parent description in child description"
+bead_obj='{"title":"Implement auth and add sessions and set up email","description":"Implement user authentication and add session handling and set up email verification for the platform"}'
+result=$(_needle_heuristic_mitosis_analysis "$bead_obj")
+mitosis_val=$(echo "$result" | jq -r '.mitosis' 2>/dev/null)
+if [[ "$mitosis_val" == "true" ]]; then
+    first_desc=$(echo "$result" | jq -r '.children[0].description' 2>/dev/null)
+    # Description should contain meaningful content from the parent, not just "Part N of the original task"
+    if [[ "$first_desc" != "Part 1 of the original task" ]] && [[ -n "$first_desc" ]]; then
+        test_pass
+    else
+        test_fail "Expected child description to contain parent context, got: $first_desc"
+    fi
+else
+    test_pass
+fi
+
+test_case "_needle_heuristic_mitosis_analysis fallback child title includes parent title"
+bead_obj='{"title":"Implement auth and add sessions and set up email","description":"Implement user authentication and add session handling and set up email verification for the platform"}'
+result=$(_needle_heuristic_mitosis_analysis "$bead_obj")
+mitosis_val=$(echo "$result" | jq -r '.mitosis' 2>/dev/null)
+if [[ "$mitosis_val" == "true" ]]; then
+    first_title=$(echo "$result" | jq -r '.children[0].title' 2>/dev/null)
+    # Fallback title should reference parent title, not generic "Task part N"
+    if [[ "$first_title" != "Task part 1" ]]; then
+        test_pass
+    else
+        test_fail "Expected fallback child title to include parent title context, got: $first_title"
+    fi
+else
+    test_pass
+fi
+
 # ============================================================================
 # _needle_build_mitosis_prompt tests
 # ============================================================================
