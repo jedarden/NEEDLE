@@ -484,16 +484,6 @@ with open(sys.argv[1], 'w') as f:
     json.dump(data, f)
 PYEOF
     fi
-    elif python3 -c "import json" 2>/dev/null; then
-        python3 - "$signatures_file" "$signature" "$now" 2>/dev/null <<'PYEOF'
-import json, sys
-with open(sys.argv[1]) as f:
-    data = json.load(f)
-data[sys.argv[2]] = int(sys.argv[3])
-with open(sys.argv[1], 'w') as f:
-    json.dump(data, f)
-PYEOF
-    fi
 
     # Build bead title and body
     local title="[AUTO] ${event_type}: Unexpected error in $(basename "$workspace")"
