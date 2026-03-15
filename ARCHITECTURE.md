@@ -693,6 +693,9 @@ Called when a bead enters quarantine state (either from explicit quarantine acti
 | `on_failure` exits `3` | Bead retried (skip treated as success) |
 | `on_failure` times out + `fail_action=abort` | Bead quarantined |
 | `on_failure` times out + `fail_action=warn` | Bead retried |
+| Bead fails N times (force_threshold) | **Forced mitosis attempted** before quarantine |
+| Forced mitosis succeeds | Bead split into children, parent released as blocked-by-children |
+| Forced mitosis fails (atomic) | Bead quarantined |
 | Worker consecutive failures ≥ 7 | Worker exits (see Section 6) |
 
 ### Hook Invocation Guarantees
@@ -976,6 +979,8 @@ Score ≥ 2 triggers mitosis. Child titles are extracted from the description st
 | `mitosis.min_children` | `2` | Minimum children required (else aborted) |
 | `mitosis.min_complexity` | `3` | Minimum description lines to consider mitosis |
 | `mitosis.timeout` | `60` | Agent analysis timeout in seconds |
+| `mitosis.force_on_failure` | `true` | Enable forced mitosis on repeated failure |
+| `mitosis.force_failure_threshold` | `3` | Failures before forced mitosis triggers |
 
 All keys support workspace-level overrides via `.needle.yaml`.
 
@@ -988,3 +993,97 @@ All keys support workspace-level overrides via `.needle.yaml`.
 | `bead.mitosis.child_created` | Each individual child bead created |
 | `bead.mitosis.complete` | All children created, parent mutated |
 | `bead.mitosis.failed` | No children were successfully created |
+| `bead.forced_mitosis_attempt` | Forced mitosis triggered for a repeatedly failing bead |
+| `bead.forced_mitosis_success` | Forced mitosis succeeded (children created) |
+| `bead.forced_mitosis_failed` | Forced mitosis failed (bead is atomic, will quarantine) |
+
+### Forced Mitosis on Repeated Failure
+
+**Source:** `src/runner/loop.sh` (per-bead failure tracking and forced mitosis functions)
+
+When a bead fails repeatedly, the forced mitosis system treats persistent failure as evidence that the task is too coarse-grained. Instead of quarantining the bead (a dead end), forced mitosis attempts decomposition before giving up.
+
+#### Failure Count Tracking
+
+Each bead maintains a per-session failure count in `~/.needle/state/bead_failures.json`:
+
+```json
+{
+  "nd-abc123": 2,
+  "nd-def456": 1
+}
+```
+
+The count is incremented on each bead failure and reset when:
+- Mitosis succeeds (children created)
+- The bead completes successfully
+
+#### Triggering Forced Mitosis
+
+Forced mitosis is triggered when a bead's failure count reaches `force_failure_threshold - 1` (default: after 2 failures, since threshold is 3). The check happens during worker loop failure handling:
+
+```bash
+# In _needle_process_bead failure handling
+if _needle_check_forced_mitosis "$bead_id" "$workspace"; then
+    if _needle_handle_forced_mitosis "$bead_id" "$workspace" "$agent"; then
+        # Mitosis succeeded - parent released as blocked-by-children
+        return 0
+    else
+        # Mitosis failed - bead is atomic, fall through to quarantine
+        _needle_quarantine_bead "$bead_id" "force_mitosis_exhausted"
+    fi
+fi
+```
+
+#### Force Parameter to `_needle_check_mitosis`
+
+When forced mitosis is triggered, `_needle_check_mitosis` is called with `force=true`:
+
+```bash
+_needle_check_mitosis "$bead_id" "$workspace" "$agent" "true" "$failure_count"
+```
+
+The `force=true` parameter has two effects:
+
+1. **Bypasses `min_complexity` check** — Even short descriptions are analyzed for decomposition
+2. **Appends forced decomposition notice** to the mitosis prompt:
+
+   ```
+   **Forced Decomposition Notice**
+   This task has failed 2 times without success. Even if it appears atomic,
+   find a way to decompose it into smaller verifiable steps. If decomposition
+   is truly impossible, return mitosis: false.
+   ```
+
+#### Mitosis Outcome Paths
+
+| Outcome | Action |
+|---------|--------|
+| Mitosis succeeds (children created) | Parent released as blocked-by-children, failure count reset |
+| Mitosis fails (atomic or undecomposable) | Bead quarantined with reason `force_mitosis_exhausted` |
+| Mitosis timeout or error | Bead quarantined with reason `force_mitosis_failed` |
+
+#### Configuration
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `mitosis.force_on_failure` | `true` | Enable forced mitosis on repeated failure |
+| `mitosis.force_failure_threshold` | `3` | Number of failures before forced mitosis is triggered |
+
+Both settings support workspace-level overrides via `.needle.yaml`.
+
+#### Telemetry Events
+
+| Event | When emitted |
+|-------|-------------|
+| `bead.forced_mitosis_attempt` | Forced mitosis triggered for a failing bead |
+| `bead.forced_mitosis_success` | Forced mitosis succeeded (children created) |
+| `bead.forced_mitosis_failed` | Forced mitosis failed (bead is atomic) |
+
+#### Design Rationale
+
+Quarantine is a dead end — quarantined beads are abandoned and require manual intervention. Forced mitosis transforms persistent failures into diagnostic signals for decomposition, preserving the original intent in child beads that workers can continue making progress on.
+
+The principle is: **agent failure = bead too coarse**. If a task fails repeatedly, it's evidence that the task description is too broad or complex for single-shot completion. Decomposition creates smaller, verifiable steps that workers can succeed at.
+
+----
