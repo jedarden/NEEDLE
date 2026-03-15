@@ -412,6 +412,172 @@ br() {
     esac
 }
 
+# Test 21: Phase 0 checks configured workspaces (regression for nd-ivhs)
+# Before the fix, explore only discovered workspaces by filesystem walking.
+# Workspaces listed in config.yaml but not filesystem neighbors were never found.
+_test_start "Phase 0 checks configured workspaces from config.yaml (nd-ivhs regression)"
+
+# Create a workspace that is NOT a filesystem neighbor of the primary workspace
+mkdir -p "/tmp/test-remote-workspace-$$/.beads"
+# Create a mock issues.jsonl file
+echo '{"id":"nd-ivhs-test","status":"open","title":"Test remote workspace bead"}' > "/tmp/test-remote-workspace-$$/.beads/issues.jsonl"
+
+# Create a config with workspaces list that includes the remote workspace
+cat > "$NEEDLE_HOME/config-with-workspaces.yaml" << 'EOFCFG'
+strands:
+  pluck: true
+  explore: true
+
+workspaces:
+  - "/tmp/test-remote-workspace-NONEXISTENT"
+  - "/tmp/test-remote-workspace-WS"
+  - "/tmp/test-remote-workspace-ANOTHER"
+EOFCFG
+
+# Substitute the actual workspace path into the config
+sed -i "s|/tmp/test-remote-workspace-WS|/tmp/test-remote-workspace-$$|g" "$NEEDLE_HOME/config-with-workspaces.yaml"
+
+# Clear the config cache and override the config file path
+NEEDLE_CONFIG_CACHE=""
+NEEDLE_CONFIG_FILE="$NEEDLE_HOME/config-with-workspaces.yaml"
+export NEEDLE_CONFIG_CACHE NEEDLE_CONFIG_FILE
+
+# Override br to return beads for our remote workspace
+br() {
+    case "$1" in
+        ready)
+            if [[ "$*" == *"--json"* ]] && [[ "$*" == *"--unassigned"* ]]; then
+                # Return the bead when checking our test workspace
+                echo '[{"id":"nd-ivhs-test","status":"open","assignee":null}]'
+                return 0
+            fi
+            ;;
+        list)
+            echo '[]'
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+# Test the configured workspaces discovery function directly
+# Use a non-neighbor workspace as the "current" one
+found_ws=$(_needle_explore_find_configured_workspace_with_beads "/tmp/test-primary-workspace-$$")
+
+if [[ "$found_ws" == "/tmp/test-remote-workspace-$$" ]]; then
+    _test_pass "Phase 0 correctly discovered configured workspace even though not a filesystem neighbor"
+else
+    _test_fail "Phase 0 failed to find configured workspace (found: '$found_ws', expected: '/tmp/test-remote-workspace-$$')"
+fi
+
+# Test 22: Configured workspaces phase skips current workspace
+_test_start "Phase 0 skips the current workspace when checking configured list"
+
+# Use the same workspace as both current and in the config
+# It should be skipped and not returned
+cat > "$NEEDLE_HOME/config-skip-current.yaml" << 'EOFCFG'
+workspaces:
+  - "/tmp/test-skip-current-WS"
+EOFCFG
+sed -i "s|/tmp/test-skip-current-WS|/tmp/test-skip-current-$$|g" "$NEEDLE_HOME/config-skip-current.yaml"
+
+# Clear cache and update config file path
+NEEDLE_CONFIG_CACHE=""
+NEEDLE_CONFIG_FILE="$NEEDLE_HOME/config-skip-current.yaml"
+export NEEDLE_CONFIG_CACHE NEEDLE_CONFIG_FILE
+
+# Create the workspace
+mkdir -p "/tmp/test-skip-current-$$/.beads"
+echo '{"id":"nd-skip-test","status":"open","title":"Test"}' > "/tmp/test-skip-current-$$/.beads/issues.jsonl"
+
+# When the current workspace is the same as the configured one, it should be skipped
+found_ws=$(_needle_explore_find_configured_workspace_with_beads "/tmp/test-skip-current-$$")
+
+if [[ -z "$found_ws" ]]; then
+    _test_pass "Phase 0 correctly skipped the current workspace"
+else
+    _test_fail "Phase 0 should skip current workspace but returned: '$found_ws'"
+fi
+
+# Clean up test remote workspace
+rm -rf "/tmp/test-remote-workspace-$$"
+rm -rf "/tmp/test-skip-current-$$"
+
+# Reset config environment
+NEEDLE_CONFIG_CACHE=""
+NEEDLE_CONFIG_FILE="$NEEDLE_HOME/config.yaml"
+export NEEDLE_CONFIG_CACHE NEEDLE_CONFIG_FILE
+
+# Test 23: count_unassigned uses br list not br ready for blockers (regression for nd-ivhs)
+# br ready incorrectly filters out beads with "blocks" dependencies (the blockers)
+# even though those beads are NOT blocked - they are workable.
+# br list correctly identifies all open, unassigned beads regardless of dependencies.
+_test_start "count_unassigned uses br list not br ready for beads with blocks deps (nd-ivhs regression)"
+
+# Create a test workspace with .beads directory
+mkdir -p "/tmp/test-blockers-workspace-$$/.beads"
+
+# Override br to simulate the bug:
+# - br ready returns only 1 (incorrectly filters out blockers)
+# - br list returns all open, unassigned beads (including blockers)
+br() {
+    case "$1" in
+        ready)
+            if [[ "$*" == *"--json"* ]] && [[ "$*" == *"--unassigned"* ]]; then
+                # br ready bug: returns only the genesis bead, filters out child beads with "blocks" deps
+                echo '[{"id":"vista-5zr","status":"open","assignee":null}]'
+                return 0
+            fi
+            ;;
+        list)
+            if [[ "$*" == *"--status open"* ]] && [[ "$*" == *"--unassigned"* ]] && [[ "$*" == *"--json"* ]]; then
+                # br list correctly returns ALL open, unassigned beads including blockers
+                echo '[{"id":"vista-5zr","status":"open","assignee":null},{"id":"vista-677","status":"open","assignee":null},{"id":"vista-c7o","status":"open","assignee":null},{"id":"vista-lnu","status":"open","assignee":null}]'
+                return 0
+            fi
+            # Fallback for other list commands
+            echo '[]'
+            return 0
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+# Test that _needle_explore_count_unassigned uses br list, not br ready
+count=$(_needle_explore_count_unassigned "/tmp/test-blockers-workspace-$$")
+
+# With the fix, count should be 4 (all open, unassigned beads from br list)
+# Without the fix (using br ready), count would be 1
+if [[ "$count" == "4" ]]; then
+    _test_pass "count_unassigned correctly uses br list (count=4) not br ready (would be 1)"
+else
+    _test_fail "count_unassigned should use br list (expected 4), got $count - may still be using br ready"
+fi
+
+# Clean up
+rm -rf "/tmp/test-blockers-workspace-$$"
+
+# Restore the original mock br
+br() {
+    case "$1" in
+        ready)
+            if [[ "$*" == *"--count"* ]]; then
+                echo "5"
+                return 0
+            fi
+            ;;
+        list)
+            echo '[]'
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
 # Summary
 echo ""
 echo "=========================================="

@@ -406,12 +406,9 @@ _needle_explore_find_configured_workspace_with_beads() {
 
     _needle_debug "explore: checking configured workspaces from config"
 
-    # Load config and extract workspaces list
-    local config
-    config=$(load_config 2>/dev/null)
-
-    if [[ -z "$config" ]]; then
-        _needle_debug "explore: no config loaded, skipping configured workspaces check"
+    # Check if config file exists
+    if [[ ! -f "$NEEDLE_CONFIG_FILE" ]]; then
+        _needle_debug "explore: no config file found at $NEEDLE_CONFIG_FILE, skipping configured workspaces check"
         return 1
     fi
 
@@ -422,13 +419,21 @@ _needle_explore_find_configured_workspace_with_beads() {
     while IFS= read -r ws; do
         [[ -z "$ws" ]] && continue
         ((ws_count++))
-    done < <(echo "$config" | jq -r '.workspaces[]? // empty' 2>/dev/null)
+    done < <(yq -r '.workspaces[]' "$NEEDLE_CONFIG_FILE" 2>/dev/null)
+
+    if [[ "$ws_count" -eq 0 ]]; then
+        _needle_debug "explore: no workspaces configured in config.yaml"
+        return 1
+    fi
 
     _needle_debug "explore: found $ws_count configured workspace(s) to check"
 
     # Check each configured workspace for claimable beads
     while IFS= read -r ws; do
         [[ -z "$ws" ]] && continue
+
+        # Expand tilde if present
+        ws="${ws/#\~/$HOME}"
 
         # Skip the current workspace (we're already here, pluck would have found work)
         [[ "$ws" == "$current_workspace" ]] && continue
@@ -463,7 +468,7 @@ _needle_explore_find_configured_workspace_with_beads() {
                 return 0
             fi
         fi
-    done < <(echo "$config" | jq -r '.workspaces[]? // empty' 2>/dev/null)
+    done < <(yq -r '.workspaces[]' "$NEEDLE_CONFIG_FILE" 2>/dev/null)
 
     _needle_debug "explore: checked $checked_count configured workspace(s), found no work"
     return 1
