@@ -371,6 +371,20 @@ _needle_error_auto_bead() {
         return 0
     fi
 
+    # Defense-in-depth: Never create auto-beads for test sessions
+    # This prevents test errors from contaminating production workspaces
+    # even if the config override is not properly applied (e.g., when running
+    # specific test functions in isolation or via IDE execution).
+    # Session patterns: test-*, needle-test-*, perf-*
+    if [[ -n "${NEEDLE_SESSION:-}" ]]; then
+        case "$NEEDLE_SESSION" in
+            test-*|needle-test-*|perf-*)
+                _needle_debug "auto_bead: skipping for test session: $NEEDLE_SESSION"
+                return 0
+                ;;
+        esac
+    fi
+
     # Get configured workspace
     local workspace
     workspace=$(get_config "debug.auto_bead_workspace" "" 2>/dev/null)
@@ -545,13 +559,20 @@ Session: \`${session_name}\`
 "
 
     # Worker logs are named ${NEEDLE_SESSION}.log, not ${NEEDLE_WORKER_ID}.log
-    # Try both .log (worker log) and .jsonl (telemetry log) formats
+    # Try NEEDLE_LOG_FILE first (set by runner), then construct from NEEDLE_LOG_DIR
     local log_file=""
     local log_content=""
 
-    # Try worker log first (${session}.log)
-    # Note: NEEDLE_LOG_DIR may be a full path (from runner export) or relative name
-    if [[ -n "$NEEDLE_LOG_DIR" ]] && [[ "$session_name" != "unknown" ]]; then
+    # Try NEEDLE_LOG_FILE first if set (this is the actual log file path used by the worker)
+    # Regression fix for nd-w5bz: auto-bead was showing "(log file not found)" because
+    # it was constructing the path from NEEDLE_LOG_DIR instead of using NEEDLE_LOG_FILE
+    if [[ -n "${NEEDLE_LOG_FILE:-}" ]] && [[ -f "$NEEDLE_LOG_FILE" ]]; then
+        log_content=$(tail -20 "$NEEDLE_LOG_FILE" 2>/dev/null)
+        log_file="$NEEDLE_LOG_FILE"
+    fi
+
+    # Try worker log (${session}.log) constructed from NEEDLE_LOG_DIR
+    if [[ -z "$log_content" ]] && [[ -n "$NEEDLE_LOG_DIR" ]] && [[ "$session_name" != "unknown" ]]; then
         local worker_log
         if [[ "$NEEDLE_LOG_DIR" = /* ]]; then
             # NEEDLE_LOG_DIR is already a full path

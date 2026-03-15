@@ -1236,6 +1236,77 @@ fi
 # Cleanup
 rm -f "/tmp/br" "$MOCK_BR_LBTU" "$BR_CALLED_LBTU"
 
+# ----------------------------------------------------------------------------
+# Test 34: Auto-bead skips creation for test sessions (nd-wgbf regression)
+# ----------------------------------------------------------------------------
+# Bug: test sessions with names like "test-session-errors" could trigger
+# auto-bead creation if the config override wasn't properly applied (e.g.,
+# when running specific test functions in isolation or via IDE execution).
+# This test verifies that test sessions are ALWAYS skipped regardless of config.
+_test_start "_needle_error_auto_bead skips for test sessions even when enabled"
+
+# Temporarily enable auto-bead (simulating production config)
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR="true"
+
+# Create test workspace
+TEST_WORKSPACE_WGBF="/tmp/needle-test-ws-wgbf-$$"
+mkdir -p "$TEST_WORKSPACE_WGBF/.beads"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_WORKSPACE="$TEST_WORKSPACE_WGBF"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_RATE_LIMIT="0"
+
+# Create a mock br that records if it was called
+BR_CALLED_WGBF="/tmp/needle-br-called-wgbf-$$"
+MOCK_BR_WGBF="/tmp/needle-mock-br-wgbf-$$"
+rm -f "$BR_CALLED_WGBF"
+cat > "$MOCK_BR_WGBF" <<EOF
+#!/usr/bin/env bash
+echo "called" > "$BR_CALLED_WGBF"
+echo "nd-should-not-exist-wgbf"
+exit 0
+EOF
+chmod +x "$MOCK_BR_WGBF"
+ln -sf "$MOCK_BR_WGBF" "/tmp/br"
+export PATH="/tmp:$PATH"
+
+# Test with various test session patterns
+for test_session in "test-session-errors" "test-foo" "needle-test-alpha" "perf-benchmark"; do
+    export NEEDLE_SESSION="$test_session"
+
+    # Clear any previous call marker
+    rm -f "$BR_CALLED_WGBF"
+
+    # Call auto_bead with quarantine escalation
+    _needle_error_auto_bead "error.agent_crash" "quarantine" "bead_id=test-wgbf" 2>/dev/null
+
+    if [[ -f "$BR_CALLED_WGBF" ]]; then
+        _test_fail "br was called for test session '$test_session' - test session safeguard failed"
+        break
+    fi
+done
+
+# Only pass if none of the test sessions triggered bead creation
+if [[ ! -f "$BR_CALLED_WGBF" ]]; then
+    _test_pass "Auto-bead skipped for all test session patterns (nd-wgbf regression)"
+fi
+
+# Verify that production sessions still work
+export NEEDLE_SESSION="needle-worker-prod"
+rm -f "$BR_CALLED_WGBF"
+_needle_error_auto_bead "error.agent_crash" "quarantine" "bead_id=test-prod" 2>/dev/null
+
+if [[ -f "$BR_CALLED_WGBF" ]]; then
+    _test_pass "Auto-bead works for production sessions"
+else
+    _test_fail "Auto-bead should work for production sessions"
+fi
+
+# Cleanup
+rm -f "/tmp/br" "$MOCK_BR_WGBF" "$BR_CALLED_WGBF"
+rm -rf "$TEST_WORKSPACE_WGBF"
+
+# Reset to disabled for remaining tests
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR="false"
+
 # ============================================================================
 # Summary
 # ============================================================================
