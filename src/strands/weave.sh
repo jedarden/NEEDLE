@@ -588,7 +588,7 @@ _needle_weave_create_beads() {
 
     local created=0
     local max_beads
-    max_beads=$(get_config "weave.max_beads_per_run" "0" 2>/dev/null || echo "0")
+    max_beads=$(get_config "strands.weave.max_beads_per_run" "0" 2>/dev/null || echo "0")
 
     while IFS= read -r gap; do
         [[ -z "$gap" ]] && continue
