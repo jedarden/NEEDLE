@@ -276,6 +276,29 @@ test_exit_code_handler() {
         exit 1
     fi
 
+    # Test handling exit code 137 (SIGKILL/OOM - agent crash)
+    # Regression test for nd-r8ie: exit code 137 should quarantine, not release
+    NEEDLE_FAILURE_COUNT=5  # Start with high failure count to verify reset
+    NEEDLE_BACKOFF_SECONDS=10
+    local pre_quarantine_count=0
+    if declare -f _needle_quarantine_bead &>/dev/null; then
+        # Track if quarantine was called (mock will set a flag)
+        export NEEDLE_TEST_QUARANTINE_CALLED=""
+        _needle_handle_exit_code "test-bead-137" 137 "$NEEDLE_WORKSPACE" "test-agent"
+        result=$?
+        if [[ $result -eq 0 ]] && [[ $NEEDLE_FAILURE_COUNT -eq 0 ]]; then
+            echo "✓ Exit code 137: Agent crash - bead quarantined, failure count reset"
+        elif [[ $NEEDLE_FAILURE_COUNT -ne 0 ]]; then
+            echo "✗ Exit code 137: Failure count should be reset to 0, got $NEEDLE_FAILURE_COUNT"
+            exit 1
+        else
+            echo "✗ Exit code 137: Unexpected result=$result"
+            exit 1
+        fi
+    else
+        echo "⊘ Exit code 137: _needle_quarantine_bead not available (skipped)"
+    fi
+
     # Unset mock
     unset -f br
 

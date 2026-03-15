@@ -568,6 +568,27 @@ _needle_handle_exit_code() {
             fi
             ;;
 
+        137)
+            # SIGKILL / OOM - Agent was forcibly killed
+            # This is unrecoverable; quarantine the bead per errors.sh escalation policy
+            _needle_error "Exit code 137: Agent crash (SIGKILL/OOM) - quarantining bead"
+
+            # Emit error.agent_crash event (triggers auto-bug bead if configured)
+            _needle_event_error_agent_crash \
+                "bead_id=$bead_id" \
+                "exit_code=$exit_code" \
+                "session=$NEEDLE_SESSION"
+
+            # Quarantine the bead instead of releasing
+            _needle_quarantine_bead "$bead_id" "agent_crash_sigkill"
+
+            # Reset failure count - quarantine is a different path than crash loop
+            # We don't want one OOM to trigger crash loop exit
+            NEEDLE_FAILURE_COUNT=0
+
+            return 0
+            ;;
+
         *)
             # Unknown error - release
             _needle_warn "Exit code $exit_code: Unknown error - releasing bead"
