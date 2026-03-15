@@ -544,27 +544,17 @@ _needle_mark_bead_failed() {
         # This matches the behavior in loop.sh and gives mitosis a chance to decompose
         if [[ "$bead_failure_count" -ge $((force_threshold - 1)) ]]; then
             _needle_warn "Bead $bead_id has failed $bead_failure_count time(s) — attempting forced mitosis (threshold=$force_threshold)"
-            _needle_telemetry_emit "bead.force_mitosis.attempt" "warn" \
-                "bead_id=$bead_id" \
-                "failure_count=$bead_failure_count" \
-                "threshold=$force_threshold" \
-                "session=${NEEDLE_SESSION:-unknown}"
+            _needle_event_bead_force_mitosis_attempt "$bead_id" "$bead_failure_count" "threshold=$force_threshold"
 
             if _needle_check_mitosis "$bead_id" "$workspace" "$agent" "true" "$bead_failure_count"; then
                 # Mitosis succeeded — parent is now blocked by children
                 _needle_info "Forced mitosis succeeded for $bead_id — parent blocked by children"
-                _needle_telemetry_emit "bead.force_mitosis.success" "info" \
-                    "bead_id=$bead_id" \
-                    "failure_count=$bead_failure_count" \
-                    "session=${NEEDLE_SESSION:-unknown}"
+                _needle_event_bead_force_mitosis_success "$bead_id" "$bead_failure_count"
                 return 0
             else
                 # Mitosis cannot decompose — quarantine as truly atomic but consistently failing
                 _needle_warn "Forced mitosis failed for $bead_id — quarantining (atomic bead, $bead_failure_count failures)"
-                _needle_telemetry_emit "bead.force_mitosis.quarantine" "error" \
-                    "bead_id=$bead_id" \
-                    "failure_count=$bead_failure_count" \
-                    "session=${NEEDLE_SESSION:-unknown}"
+                _needle_event_bead_force_mitosis_quarantine "$bead_id" "$bead_failure_count"
                 _needle_quarantine_bead_pluck "$bead_id" "force_mitosis_exhausted" "$workspace"
                 return 0
             fi

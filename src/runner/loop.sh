@@ -391,10 +391,7 @@ _needle_handle_forced_mitosis() {
     _needle_warn "Attempting forced mitosis for bead $bead_id (failures: $failure_count)"
 
     # Emit forced mitosis attempt event
-    _needle_telemetry_emit "bead.forced_mitosis_attempt" "warn" \
-        "bead_id=$bead_id" \
-        "failure_count=$failure_count" \
-        "session=$NEEDLE_SESSION"
+    _needle_event_bead_force_mitosis_attempt "$bead_id" "$failure_count"
 
     # Source mitosis module if not already loaded
     if [[ -z "${_NEEDLE_MITOSIS_LOADED:-}" ]]; then
@@ -406,10 +403,7 @@ _needle_handle_forced_mitosis() {
         _needle_info "Forced mitosis succeeded for bead $bead_id - releasing as blocked-by-children"
 
         # Emit success event
-        _needle_telemetry_emit "bead.forced_mitosis_success" "info" \
-            "bead_id=$bead_id" \
-            "failure_count=$failure_count" \
-            "session=$NEEDLE_SESSION"
+        _needle_event_bead_force_mitosis_success "$bead_id" "$failure_count"
 
         # Reset the bead failure count after successful mitosis
         _needle_reset_bead_failure_count "$bead_id"
@@ -418,11 +412,8 @@ _needle_handle_forced_mitosis() {
     else
         _needle_warn "Forced mitosis failed for bead $bead_id - task is atomic or cannot be decomposed"
 
-        # Emit failure event
-        _needle_telemetry_emit "bead.forced_mitosis_failed" "warn" \
-            "bead_id=$bead_id" \
-            "failure_count=$failure_count" \
-            "session=$NEEDLE_SESSION"
+        # Emit quarantine event (cannot decompose — will be quarantined by caller)
+        _needle_event_bead_force_mitosis_quarantine "$bead_id" "$failure_count"
 
         # Reset the bead failure count - we've tried mitosis and it didn't work
         # so we should return to normal failure handling (quarantine or release)

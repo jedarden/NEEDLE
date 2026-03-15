@@ -636,6 +636,49 @@ _needle_event_bead_mitosis_skipped() {
 }
 
 # ============================================================================
+# Forced Mitosis Events (Mitosis triggered by repeated failure)
+# ============================================================================
+
+# Emit bead.force_mitosis.attempt event
+# Usage: _needle_event_bead_force_mitosis_attempt <bead_id> <failure_count> [key=value ...]
+_needle_event_bead_force_mitosis_attempt() {
+    local bead_id="$1"
+    local failure_count="$2"
+    shift 2
+    _needle_telemetry_emit "bead.force_mitosis.attempt" "warn" \
+        "bead_id=$bead_id" \
+        "failure_count=$failure_count" \
+        "session=${NEEDLE_SESSION:-unknown}" \
+        "$@"
+}
+
+# Emit bead.force_mitosis.success event
+# Usage: _needle_event_bead_force_mitosis_success <bead_id> <failure_count> [key=value ...]
+_needle_event_bead_force_mitosis_success() {
+    local bead_id="$1"
+    local failure_count="$2"
+    shift 2
+    _needle_telemetry_emit "bead.force_mitosis.success" "info" \
+        "bead_id=$bead_id" \
+        "failure_count=$failure_count" \
+        "session=${NEEDLE_SESSION:-unknown}" \
+        "$@"
+}
+
+# Emit bead.force_mitosis.quarantine event (forced mitosis could not decompose — bead quarantined)
+# Usage: _needle_event_bead_force_mitosis_quarantine <bead_id> <failure_count> [key=value ...]
+_needle_event_bead_force_mitosis_quarantine() {
+    local bead_id="$1"
+    local failure_count="$2"
+    shift 2
+    _needle_telemetry_emit "bead.force_mitosis.quarantine" "error" \
+        "bead_id=$bead_id" \
+        "failure_count=$failure_count" \
+        "session=${NEEDLE_SESSION:-unknown}" \
+        "$@"
+}
+
+# ============================================================================
 # Error Events
 # ============================================================================
 
