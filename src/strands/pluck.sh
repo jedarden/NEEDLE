@@ -224,9 +224,8 @@ _needle_pluck_process_bead() {
 
     if [[ $dispatch_exit -ne 0 ]] || [[ -z "$dispatch_result" ]]; then
         _needle_error "Agent dispatch failed: $agent"
-        _needle_event_error_agent_crash \
+        _needle_event_error_dispatch_failed "$bead_id" \
             "agent=$agent" \
-            "bead_id=$bead_id" \
             "error=dispatch_failed"
         _needle_mark_bead_failed "$bead_id" "agent_dispatch_failed" "" "$workspace"
         return 1

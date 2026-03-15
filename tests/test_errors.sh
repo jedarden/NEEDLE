@@ -661,6 +661,71 @@ fi
 
 $multi_ok && _test_pass "Multiple error types handled independently and correctly"
 
+# ----------------------------------------------------------------------------
+# Test 22a: error.dispatch_failed event function exists and works correctly
+# ----------------------------------------------------------------------------
+_test_start "_needle_event_error_dispatch_failed function is defined and works"
+: > "$NEEDLE_LOG_FILE"
+
+# Check function exists
+if declare -f _needle_event_error_dispatch_failed &>/dev/null; then
+    _test_pass "_needle_event_error_dispatch_failed function is defined"
+else
+    _test_fail "_needle_event_error_dispatch_failed function not found"
+fi
+
+# Test the function emits correct event
+_needle_event_error_dispatch_failed "test-bead-123" \
+    "agent=test-agent" \
+    "error=could_not_start"
+
+if grep -q '"event":"error.dispatch_failed"' "$NEEDLE_LOG_FILE" 2>/dev/null; then
+    _test_pass "error.dispatch_failed event was written to log"
+else
+    _test_fail "error.dispatch_failed event was not written to log"
+fi
+
+# Verify it's NOT emitting error.agent_crash
+if grep -q '"event":"error.agent_crash"' "$NEEDLE_LOG_FILE" 2>/dev/null; then
+    _test_fail "dispatch_failed should NOT emit error.agent_crash event"
+else
+    _test_pass "dispatch_failed correctly does NOT emit error.agent_crash"
+fi
+
+# ----------------------------------------------------------------------------
+# Test 22b: error.dispatch_failed is registered with correct escalation
+# ----------------------------------------------------------------------------
+_test_start "error.dispatch_failed has correct registry entry"
+if _needle_error_is_registered "error.dispatch_failed"; then
+    exit_code=$(_needle_error_get_exit_code "error.dispatch_failed")
+    escalation=$(_needle_error_get_escalation "error.dispatch_failed")
+
+    if [[ "$exit_code" == "4" ]] && [[ "$escalation" == "retry" ]]; then
+        _test_pass "error.dispatch_failed: exit_code=4, escalation=retry"
+    else
+        _test_fail "error.dispatch_failed: expected exit_code=4, escalation=retry, got exit_code=$exit_code, escalation=$escalation"
+    fi
+else
+    _test_fail "error.dispatch_failed not found in error registry"
+fi
+
+# ----------------------------------------------------------------------------
+# Test 22c: error.agent_crash is specifically for exit code 137 (SIGKILL)
+# ----------------------------------------------------------------------------
+_test_start "error.agent_crash registry entry is specific to exit code 137"
+if _needle_error_is_registered "error.agent_crash"; then
+    exit_code=$(_needle_error_get_exit_code "error.agent_crash")
+    escalation=$(_needle_error_get_escalation "error.agent_crash")
+
+    if [[ "$exit_code" == "137" ]] && [[ "$escalation" == "quarantine" ]]; then
+        _test_pass "error.agent_crash: exit_code=137, escalation=quarantine"
+    else
+        _test_fail "error.agent_crash: expected exit_code=137, escalation=quarantine, got exit_code=$exit_code, escalation=$escalation"
+    fi
+else
+    _test_fail "error.agent_crash not found in error registry"
+fi
+
 # ============================================================================
 # Auto Bug Bead Creation Tests
 # ============================================================================
@@ -938,6 +1003,98 @@ fi
 rm -f "/tmp/br" "$MOCK_BR5"
 rm -rf "$TEST_WORKSPACE"
 rm -f "$STATE_DIR/auto_bead_signatures.json"
+
+# ----------------------------------------------------------------------------
+# Test 31: Auto bead log file lookup uses correct path (NEEDLE_SESSION)
+# ----------------------------------------------------------------------------
+_test_start "_needle_error_auto_bead uses NEEDLE_SESSION for log file lookup"
+TEST_WORKSPACE="/tmp/needle-test-ws6-$$"
+mkdir -p "$TEST_WORKSPACE/.beads"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR="true"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_WORKSPACE="$TEST_WORKSPACE"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_RATE_LIMIT="0"
+
+# Set up session and worker ID to match real worker behavior
+# In production, logs are named ${NEEDLE_SESSION}.log, not ${NEEDLE_WORKER_ID}.log
+export NEEDLE_SESSION="needle-test-agent-alpha"
+export NEEDLE_WORKER_ID="alpha"
+export NEEDLE_LOG_DIR="logs"
+
+# Create the log file with session name (as worker does)
+mkdir -p "$NEEDLE_HOME/logs"
+echo "Test log line 1" > "$NEEDLE_HOME/logs/${NEEDLE_SESSION}.log"
+echo "Test log line 2" >> "$NEEDLE_HOME/logs/${NEEDLE_SESSION}.log"
+echo "Test log line 3" >> "$NEEDLE_HOME/logs/${NEEDLE_SESSION}.log"
+
+# Create mock br that captures the description
+MOCK_BR6="/tmp/needle-mock-br6-$$"
+DESC_FILE="/tmp/needle-test-desc-$$"
+cat > "$MOCK_BR6" <<BRSCRIPT
+#!/usr/bin/env bash
+# Export the PID so the subshell can find the temp file
+export TEST_DESC_PID="\$\$"
+
+if [[ "\$1" == "create" ]]; then
+    # Capture all arguments to reconstruct the description
+    # br create uses --description with multi-line content
+    desc_capture=""
+    in_desc=false
+
+    for arg in "\$@"; do
+        if [[ "\$arg" == "--description" ]]; then
+            in_desc=true
+            continue
+        fi
+        if [[ "\$arg" == --* ]] && [[ "\$in_desc" == "true" ]]; then
+            in_desc=false
+        fi
+        if [[ "\$in_desc" == "true" ]]; then
+            desc_capture+="\$arg"\n
+        fi
+    done
+
+    # Write captured description to temp file
+    printf '%s' "\$desc_capture" > "$DESC_FILE" 2>/dev/null
+    echo "nd-log-test-\$(date +%s)"
+    exit 0
+fi
+exit 1
+BRSCRIPT
+chmod +x "$MOCK_BR6"
+ln -sf "$MOCK_BR6" "/tmp/br"
+
+# Clear state
+rm -f "$STATE_DIR/auto_bead_signatures.json" 2>/dev/null
+rm -f "$DESC_FILE"
+
+# Call auto bead with quarantine escalation
+if _needle_error_auto_bead "error.test_log_lookup" "quarantine" "bead_id=test-log-lookup" 2>/dev/null; then
+    _test_pass "Auto bead function returns success"
+
+    # Verify the log content was included (check description file)
+    if [[ -f "$DESC_FILE" ]]; then
+        if grep -q "Test log line" "$DESC_FILE" 2>/dev/null; then
+            _test_pass "Log file content found in auto bead description using NEEDLE_SESSION"
+        else
+            _test_fail "Log content not found in auto bead description"
+        fi
+
+        # Verify it's NOT using worker_id.log path
+        if grep -q "alpha.log" "$DESC_FILE" 2>/dev/null; then
+            _test_fail "Description incorrectly references worker_id.log path"
+        else
+            _test_pass "Description does not incorrectly reference worker_id.log"
+        fi
+    else
+        _test_fail "Description file not created by mock br"
+    fi
+else
+    _test_fail "Auto bead should return 0 for quarantine error"
+fi
+
+# Cleanup
+rm -f "/tmp/br" "$MOCK_BR6" "$DESC_FILE" "$NEEDLE_HOME/logs/${NEEDLE_SESSION}.log"
+rm -rf "$TEST_WORKSPACE"
 
 # ============================================================================
 # Summary

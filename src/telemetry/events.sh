@@ -653,6 +653,14 @@ _needle_event_error_agent_crash() {
     _needle_telemetry_emit "error.agent_crash" "error" "pid=$$" "$@"
 }
 
+# Emit error.dispatch_failed event
+# Usage: _needle_event_error_dispatch_failed <bead_id> [agent=...] [reason=...] [key=value ...]
+_needle_event_error_dispatch_failed() {
+    local bead_id="$1"
+    shift
+    _needle_telemetry_emit "error.dispatch_failed" "error" "bead_id=$bead_id" "$@"
+}
+
 # Emit error.timeout event
 # Usage: _needle_event_error_timeout <operation> [duration_seconds=...] [key=value ...]
 _needle_event_error_timeout() {
