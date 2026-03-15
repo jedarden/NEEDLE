@@ -223,6 +223,119 @@ else
     _test_fail "Reset failed" "before=$count_before, after=$count_after"
 fi
 
+# ----------------------------------------------------------------------------
+# Test 11: _needle_check_forced_mitosis returns false when force disabled
+# ----------------------------------------------------------------------------
+_test_start "_needle_check_forced_mitosis returns false when force_on_failure disabled"
+test_bead="nd-test-$$-fm1"
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_NEEDLE_MITOSIS_LOADED=1
+_needle_mitosis_force_enabled() { return 1; }
+_needle_mitosis_force_threshold() { echo "3"; }
+if ! _needle_check_forced_mitosis "$test_bead" "$NEEDLE_WORKSPACE" 2>/dev/null; then
+    _test_pass "Returns false when force_on_failure is disabled (even with count >= threshold-1)"
+else
+    _test_fail "Expected false when force disabled, got true"
+fi
+unset -f _needle_mitosis_force_enabled _needle_mitosis_force_threshold
+unset _NEEDLE_MITOSIS_LOADED
+
+# ----------------------------------------------------------------------------
+# Test 12: _needle_check_forced_mitosis returns false when below threshold
+# ----------------------------------------------------------------------------
+_test_start "_needle_check_forced_mitosis returns false when below threshold"
+test_bead="nd-test-$$-fm2"
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_NEEDLE_MITOSIS_LOADED=1
+_needle_mitosis_force_enabled() { return 0; }
+_needle_mitosis_force_threshold() { echo "3"; }
+if ! _needle_check_forced_mitosis "$test_bead" "$NEEDLE_WORKSPACE" 2>/dev/null; then
+    _test_pass "Returns false when below threshold (1 failure, threshold 3)"
+else
+    _test_fail "Expected false below threshold, got true"
+fi
+unset -f _needle_mitosis_force_enabled _needle_mitosis_force_threshold
+unset _NEEDLE_MITOSIS_LOADED
+
+# ----------------------------------------------------------------------------
+# Test 13: _needle_check_forced_mitosis returns true at threshold-1
+# ----------------------------------------------------------------------------
+_test_start "_needle_check_forced_mitosis returns true at threshold-1 failures"
+test_bead="nd-test-$$-fm3"
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_NEEDLE_MITOSIS_LOADED=1
+_needle_mitosis_force_enabled() { return 0; }
+_needle_mitosis_force_threshold() { echo "3"; }
+if _needle_check_forced_mitosis "$test_bead" "$NEEDLE_WORKSPACE" 2>/dev/null; then
+    _test_pass "Returns true when failure count reaches threshold-1 (2 failures, threshold 3)"
+else
+    _test_fail "Expected true at threshold-1, got false"
+fi
+unset -f _needle_mitosis_force_enabled _needle_mitosis_force_threshold
+unset _NEEDLE_MITOSIS_LOADED
+
+# ----------------------------------------------------------------------------
+# Test 14: _needle_handle_forced_mitosis calls _needle_check_mitosis with force=true
+# ----------------------------------------------------------------------------
+_test_start "_needle_handle_forced_mitosis calls _needle_check_mitosis with force=true"
+test_bead="nd-test-$$-fm4"
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_NEEDLE_MITOSIS_LOADED=1
+_fm4_force_arg=""
+_needle_check_mitosis() {
+    _fm4_force_arg="${4:-false}"
+    return 0
+}
+_needle_handle_forced_mitosis "$test_bead" "$NEEDLE_WORKSPACE" "test-agent" >/dev/null 2>&1
+if [[ "$_fm4_force_arg" == "true" ]]; then
+    _test_pass "_needle_check_mitosis called with force=true"
+else
+    _test_fail "Expected force=true, got: $_fm4_force_arg"
+fi
+unset -f _needle_check_mitosis
+unset _NEEDLE_MITOSIS_LOADED _fm4_force_arg
+
+# ----------------------------------------------------------------------------
+# Test 15: _needle_handle_forced_mitosis resets failure count on success
+# ----------------------------------------------------------------------------
+_test_start "_needle_handle_forced_mitosis resets failure count on mitosis success"
+test_bead="nd-test-$$-fm5"
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_NEEDLE_MITOSIS_LOADED=1
+_needle_check_mitosis() { return 0; }
+_needle_handle_forced_mitosis "$test_bead" "$NEEDLE_WORKSPACE" "test-agent" >/dev/null 2>&1
+count_after=$(_needle_get_bead_failure_count "$test_bead")
+if [[ "$count_after" -eq 0 ]]; then
+    _test_pass "Failure count reset to 0 after successful mitosis"
+else
+    _test_fail "Expected 0 after successful mitosis, got: $count_after"
+fi
+unset -f _needle_check_mitosis
+unset _NEEDLE_MITOSIS_LOADED
+
+# ----------------------------------------------------------------------------
+# Test 16: _needle_handle_forced_mitosis resets failure count when mitosis fails
+# ----------------------------------------------------------------------------
+_test_start "_needle_handle_forced_mitosis resets failure count when mitosis cannot decompose"
+test_bead="nd-test-$$-fm6"
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_needle_increment_bead_failure_count "$test_bead" >/dev/null
+_NEEDLE_MITOSIS_LOADED=1
+_needle_check_mitosis() { return 1; }
+_needle_handle_forced_mitosis "$test_bead" "$NEEDLE_WORKSPACE" "test-agent" >/dev/null 2>&1
+count_after=$(_needle_get_bead_failure_count "$test_bead")
+if [[ "$count_after" -eq 0 ]]; then
+    _test_pass "Failure count reset to 0 when mitosis cannot decompose (atomic bead)"
+else
+    _test_fail "Expected 0 when mitosis fails, got: $count_after"
+fi
+unset -f _needle_check_mitosis
+unset _NEEDLE_MITOSIS_LOADED
+
 # ============================================================================
 # Summary
 # ============================================================================
