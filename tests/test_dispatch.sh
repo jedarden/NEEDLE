@@ -539,6 +539,150 @@ fi
 
 popd >/dev/null
 
+# ============ LD_PRELOAD Wiring Tests ============
+# Tests that verify LD_PRELOAD is set correctly for non-Claude agents
+# when file_locks.ld_preload is enabled in config.
+
+# Source config module for get_config access in LD_PRELOAD tests
+source "$PROJECT_DIR/src/lib/config.sh" 2>/dev/null || true
+
+# Create a non-Claude test agent that reports its LD_PRELOAD environment
+mkdir -p "$TEST_DIR/.needle/agents"
+cat > "$TEST_DIR/.needle/agents/test-opencode.yaml" << 'EOF'
+name: test-opencode
+description: Non-Claude test agent for LD_PRELOAD testing
+version: "1.0"
+runner: opencode
+provider: test
+model: echo
+
+invoke: |
+  echo "LD_PRELOAD=${LD_PRELOAD:-UNSET}"
+  echo "NEEDLE_BEAD_ID=${NEEDLE_BEAD_ID:-UNSET}"
+
+input:
+  method: heredoc
+
+output:
+  format: text
+  success_codes: [0]
+
+limits:
+  requests_per_minute: 60
+  max_concurrent: 5
+EOF
+
+# Create a fake libcheckout.so for testing (just needs to exist)
+LD_PRELOAD_LIB_DIR="$TEST_DIR/.needle/lib"
+LD_PRELOAD_LIB="$LD_PRELOAD_LIB_DIR/libcheckout.so"
+mkdir -p "$LD_PRELOAD_LIB_DIR"
+touch "$LD_PRELOAD_LIB"
+
+pushd "$TEST_DIR" >/dev/null
+
+# Test: LD_PRELOAD NOT set when config is false (default)
+# Agent output is embedded in the result string (dispatch tee's stdout)
+test_case "LD_PRELOAD not set for non-Claude agent when config is false"
+# Write config with ld_preload: false
+mkdir -p "$NEEDLE_HOME"
+cat > "$NEEDLE_CONFIG_FILE" << 'EOF'
+file_locks:
+  ld_preload: false
+EOF
+result=$(_needle_dispatch_agent "test-opencode" "$TEST_DIR" "test" "nd-ldtest1" "Title" 0 2>/dev/null)
+# Agent output is embedded in result string; check it directly
+if echo "$result" | grep -q "LD_PRELOAD=UNSET"; then
+    test_pass
+else
+    test_fail "Expected LD_PRELOAD=UNSET in result, got: $(echo "$result" | grep LD_PRELOAD)"
+fi
+
+# Test: LD_PRELOAD set for non-Claude agent when config is true and lib exists
+test_case "LD_PRELOAD set for non-Claude agent when config is true"
+cat > "$NEEDLE_CONFIG_FILE" << EOF
+file_locks:
+  ld_preload: true
+  ld_preload_lib: $LD_PRELOAD_LIB
+EOF
+result=$(_needle_dispatch_agent "test-opencode" "$TEST_DIR" "test" "nd-ldtest2" "Title" 0 2>/dev/null)
+# Agent output is embedded in result string
+if echo "$result" | grep -q "LD_PRELOAD=" && ! echo "$result" | grep -q "LD_PRELOAD=UNSET"; then
+    test_pass
+else
+    test_fail "Expected LD_PRELOAD to be set in result, got: $(echo "$result" | grep LD_PRELOAD)"
+fi
+
+# Test: NEEDLE_BEAD_ID set alongside LD_PRELOAD
+test_case "NEEDLE_BEAD_ID set when LD_PRELOAD is enabled"
+cat > "$NEEDLE_CONFIG_FILE" << EOF
+file_locks:
+  ld_preload: true
+  ld_preload_lib: $LD_PRELOAD_LIB
+EOF
+result=$(_needle_dispatch_agent "test-opencode" "$TEST_DIR" "test" "nd-ldtest3" "Title" 0 2>/dev/null)
+if echo "$result" | grep -q "NEEDLE_BEAD_ID=nd-ldtest3"; then
+    test_pass
+else
+    test_fail "Expected NEEDLE_BEAD_ID=nd-ldtest3 in result, got: $(echo "$result" | grep NEEDLE_BEAD_ID)"
+fi
+
+# Test: LD_PRELOAD NOT set for Claude agents even when config is true
+mkdir -p "$TEST_DIR/.needle/agents"
+cat > "$TEST_DIR/.needle/agents/test-claude.yaml" << 'EOF'
+name: test-claude
+description: Claude agent for LD_PRELOAD exclusion testing
+version: "1.0"
+runner: claude
+provider: anthropic
+model: claude-sonnet-4-6
+
+invoke: |
+  echo "LD_PRELOAD=${LD_PRELOAD:-UNSET}"
+
+input:
+  method: heredoc
+
+output:
+  format: text
+  success_codes: [0]
+
+limits:
+  requests_per_minute: 60
+  max_concurrent: 5
+EOF
+
+test_case "LD_PRELOAD NOT set for Claude agent even when config is true"
+cat > "$NEEDLE_CONFIG_FILE" << EOF
+file_locks:
+  ld_preload: true
+  ld_preload_lib: $LD_PRELOAD_LIB
+EOF
+result=$(_needle_dispatch_agent "test-claude" "$TEST_DIR" "test" "nd-ldtest4" "Title" 0 2>/dev/null)
+if echo "$result" | grep -q "LD_PRELOAD=UNSET"; then
+    test_pass
+else
+    test_fail "Expected LD_PRELOAD=UNSET for Claude agent, got: $(echo "$result" | grep LD_PRELOAD)"
+fi
+
+# Test: LD_PRELOAD uses default lib path when ld_preload_lib not specified
+test_case "LD_PRELOAD uses default lib path when not configured"
+# The fake lib is already in DEFAULT_LIB_DIR ($NEEDLE_HOME/lib)
+cat > "$NEEDLE_CONFIG_FILE" << 'EOF'
+file_locks:
+  ld_preload: true
+EOF
+result=$(_needle_dispatch_agent "test-opencode" "$TEST_DIR" "test" "nd-ldtest5" "Title" 0 2>/dev/null)
+if echo "$result" | grep -q "LD_PRELOAD=" && ! echo "$result" | grep -q "LD_PRELOAD=UNSET"; then
+    test_pass
+else
+    test_fail "Expected LD_PRELOAD set via default path, got: $(echo "$result" | grep LD_PRELOAD)"
+fi
+
+# Clean up config file
+rm -f "$NEEDLE_CONFIG_FILE"
+
+popd >/dev/null
+
 # ============ Summary ============
 echo ""
 echo "================================"
