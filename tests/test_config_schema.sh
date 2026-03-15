@@ -701,6 +701,82 @@ _assert_ok "mitosis.min_complexity=0 is valid (min boundary)" \
     validate_config_schema "$NEEDLE_CONFIG_FILE"
 
 # ============================================================================
+# Tests: Force mitosis config validation
+# ============================================================================
+
+echo ""
+echo "========================================"
+echo "Force mitosis config validation tests"
+echo "========================================"
+
+# mitosis.force_on_failure accepts valid booleans
+_write_config <<'EOF'
+mitosis:
+  force_on_failure: true
+EOF
+_assert_ok "mitosis.force_on_failure=true is valid" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+_write_config <<'EOF'
+mitosis:
+  force_on_failure: false
+EOF
+_assert_ok "mitosis.force_on_failure=false is valid" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+_write_config <<'EOF'
+mitosis:
+  force_on_failure: maybe
+EOF
+_assert_fail "mitosis.force_on_failure=maybe is rejected (not boolean)" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+# mitosis.force_failure_threshold accepts valid integers >= 1
+_write_config <<'EOF'
+mitosis:
+  force_failure_threshold: 3
+EOF
+_assert_ok "mitosis.force_failure_threshold=3 is valid" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+_write_config <<'EOF'
+mitosis:
+  force_failure_threshold: 1
+EOF
+_assert_ok "mitosis.force_failure_threshold=1 is valid (min boundary)" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+_write_config <<'EOF'
+mitosis:
+  force_failure_threshold: 0
+EOF
+_assert_fail "mitosis.force_failure_threshold=0 is rejected (min=1)" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+_write_config <<'EOF'
+mitosis:
+  force_failure_threshold: -1
+EOF
+_assert_fail "mitosis.force_failure_threshold=-1 is rejected (min=1)" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+_write_config <<'EOF'
+mitosis:
+  force_failure_threshold: many
+EOF
+_assert_fail "mitosis.force_failure_threshold=many is rejected (not integer)" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+# Both force settings together
+_write_config <<'EOF'
+mitosis:
+  force_on_failure: true
+  force_failure_threshold: 3
+EOF
+_assert_ok "mitosis force_on_failure + force_failure_threshold together is valid" \
+    validate_config_schema "$NEEDLE_CONFIG_FILE"
+
+# ============================================================================
 # Tests: Scaling config validation
 # ============================================================================
 
