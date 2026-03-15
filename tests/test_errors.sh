@@ -1700,6 +1700,124 @@ export NEEDLE_SESSION="test-session-errors"
 export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR="false"
 export NEEDLE_WORKER_ID="alpha"
 
+# ----------------------------------------------------------------------------
+# Test 40: Auto-bead uses NEEDLE_LOG_FILE when already set (nd-w5bz regression)
+# ----------------------------------------------------------------------------
+# Bug: nd-w5bz showed "(log file not found)" in the Worker Log section because
+# the auto-bead function was not using NEEDLE_LOG_FILE when it was already set
+# by the runner. Instead, it was trying to construct the log path from
+# NEEDLE_LOG_DIR and NEEDLE_SESSION, which failed if the log file didn't exist
+# at the constructed path.
+#
+# The fix ensures that NEEDLE_LOG_FILE (set by run.sh or writer.sh) is used
+# FIRST before trying any path construction. This is the primary code path
+# for real workers where NEEDLE_LOG_FILE is always set.
+_test_start "Auto-bead uses NEEDLE_LOG_FILE when already set (nd-w5bz regression)"
+
+TEST_WORKSPACE_W5BZ="/tmp/needle-test-ws-w5bz-$$"
+mkdir -p "$TEST_WORKSPACE_W5BZ/.beads"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR="true"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_WORKSPACE="$TEST_WORKSPACE_W5BZ"
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_RATE_LIMIT="0"
+
+# Set up session and worker
+# NOTE: session name must NOT match test-*, needle-test-*, or perf-* patterns
+export NEEDLE_SESSION="needle-worker-w5bz"
+export NEEDLE_WORKER_ID="charlie"
+
+# Create a log file at a specific path (as run.sh or writer.sh would)
+LOG_FILE_W5BZ="/tmp/needle-log-w5bz-$$.log"
+echo "Worker log line 1" > "$LOG_FILE_W5BZ"
+echo "Worker log line 2" >> "$LOG_FILE_W5BZ"
+echo "Worker log line 3" >> "$LOG_FILE_W5BZ"
+
+# Set NEEDLE_LOG_FILE to this path (as the runner does)
+export NEEDLE_LOG_FILE="$LOG_FILE_W5BZ"
+
+# Also set NEEDLE_LOG_DIR to a DIFFERENT path (to verify NEEDLE_LOG_FILE is used first)
+export NEEDLE_LOG_DIR="/tmp/needle-different-logs-$$"
+mkdir -p "$NEEDLE_LOG_DIR"
+# Create a different log file at NEEDLE_LOG_DIR to verify it's NOT used
+echo "This should NOT appear in the bead" > "$NEEDLE_LOG_DIR/${NEEDLE_SESSION}.log"
+
+# Create mock br that captures the description
+MOCK_BR_W5BZ="/tmp/needle-mock-br-w5bz-$$"
+DESC_FILE_W5BZ="/tmp/needle-desc-w5bz-$$"
+cat > "$MOCK_BR_W5BZ" <<BRSCRIPT
+#!/usr/bin/env bash
+if [[ "\$1" == "create" ]]; then
+    desc_capture=""
+    in_desc=false
+    for arg in "\$@"; do
+        if [[ "\$arg" == "--description" ]]; then
+            in_desc=true
+            continue
+        fi
+        if [[ "\$arg" == --* ]] && [[ "\$in_desc" == "true" ]]; then
+            in_desc=false
+        fi
+        if [[ "\$in_desc" == "true" ]]; then
+            desc_capture+="\$arg"\n
+        fi
+    done
+    printf '%s' "\$desc_capture" > "$DESC_FILE_W5BZ" 2>/dev/null
+    echo "nd-w5bz-test-\$(date +%s)"
+    exit 0
+fi
+exit 1
+BRSCRIPT
+chmod +x "$MOCK_BR_W5BZ"
+
+# Temporarily add mock to PATH
+export PATH="/tmp:$PATH"
+ln -sf "$MOCK_BR_W5BZ" "/tmp/br"
+
+# Clear state
+rm -f "$STATE_DIR/auto_bead_signatures.json" 2>/dev/null
+rm -f "$DESC_FILE_W5BZ"
+
+# Call auto bead with quarantine escalation
+if _needle_error_auto_bead "error.test_log_file_set" "quarantine" "bead_id=test-w5bz" 2>/dev/null; then
+    _test_pass "Auto bead function returns success when NEEDLE_LOG_FILE is set"
+
+    # Verify the log content from NEEDLE_LOG_FILE was included
+    if [[ -f "$DESC_FILE_W5BZ" ]]; then
+        if grep -q "Worker log line 1" "$DESC_FILE_W5BZ" 2>/dev/null; then
+            _test_pass "Log content from NEEDLE_LOG_FILE found in auto bead description (nd-w5bz regression)"
+        else
+            _test_fail "Log content from NEEDLE_LOG_FILE not found - may be using wrong path"
+        fi
+
+        # Verify it's NOT using the content from NEEDLE_LOG_DIR path
+        if grep -q "This should NOT appear" "$DESC_FILE_W5BZ" 2>/dev/null; then
+            _test_fail "Description incorrectly used NEEDLE_LOG_DIR path instead of NEEDLE_LOG_FILE"
+        else
+            _test_pass "Description correctly uses NEEDLE_LOG_FILE, not NEEDLE_LOG_DIR path"
+        fi
+
+        # Verify it's NOT showing "(log file not found)"
+        if grep -q "(log file not found)" "$DESC_FILE_W5BZ" 2>/dev/null; then
+            _test_fail "Description shows '(log file not found)' despite NEEDLE_LOG_FILE being set (nd-w5bz regression)"
+        else
+            _test_pass "Description does not show '(log file not found)' (nd-w5bz regression)"
+        fi
+    else
+        _test_fail "Description file not created by mock br"
+    fi
+else
+    _test_fail "Auto bead should return 0 for quarantine error"
+fi
+
+# Cleanup
+rm -f "/tmp/br" "$MOCK_BR_W5BZ" "$DESC_FILE_W5BZ" "$LOG_FILE_W5BZ"
+rm -rf "$TEST_WORKSPACE_W5BZ" "$NEEDLE_LOG_DIR"
+unset NEEDLE_LOG_FILE
+unset NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_WORKSPACE
+unset NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_RATE_LIMIT
+
+# Reset to disabled for remaining tests
+export NEEDLE_CONFIG_OVERRIDE_DEBUG_AUTO_BEAD_ON_ERROR="false"
+
 # ============================================================================
 # Summary
 # ============================================================================
