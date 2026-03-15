@@ -76,6 +76,11 @@ if [[ -z "${_NEEDLE_EFFORT_LOADED:-}" ]]; then
     source "$(dirname "${BASH_SOURCE[0]}")/../telemetry/effort.sh"
 fi
 
+# Source error handling module for standardized error events (e.g., error.agent_crash)
+if [[ -z "${_NEEDLE_ERRORS_LOADED:-}" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/../lib/errors.sh"
+fi
+
 # Source tokens module for per-bead token extraction
 source "$(dirname "${BASH_SOURCE[0]}")/../telemetry/tokens.sh"
 
@@ -446,6 +451,16 @@ ${failure_context}"
             "bead_id=$bead_id" \
             "workspace=$workspace"
         _needle_release_bead "$bead_id" --reason "verification_failed_after_correction"
+        return 1
+    elif [[ "$exit_code" -eq 137 ]]; then
+        # Exit code 137 = SIGKILL (OOM or forceful kill) — quarantine, not retry
+        _needle_error "Exit code 137: Agent crash (SIGKILL/OOM) - quarantining bead: $bead_id"
+        _needle_error_handle "error.agent_crash" "$exit_code" \
+            "bead_id=$bead_id" \
+            "workspace=$workspace" \
+            "session=${NEEDLE_SESSION:-unknown}" \
+            "worker=${NEEDLE_WORKER_ID:-unknown}" 2>/dev/null || true
+        _needle_quarantine_bead_pluck "$bead_id" "agent_crash_sigkill" "$workspace"
         return 1
     else
         # Failure - mark bead as blocked/failed

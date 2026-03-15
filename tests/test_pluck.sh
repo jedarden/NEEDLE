@@ -951,6 +951,77 @@ else
 fi
 
 # ============================================================================
+# Test Exit Code 137 (Agent Crash) Quarantine (nd-3abo regression)
+# ============================================================================
+# When the agent exits with code 137 (SIGKILL/OOM), the pluck strand must
+# quarantine the bead — not mark it as blocked/retryable. This mirrors the
+# behavior of loop.sh which calls _needle_quarantine_bead for exit 137.
+
+test_case "_needle_pluck_process_bead quarantines bead on exit code 137 (agent crash)"
+create_test_config
+mock_br '[{"id":"bd-crash137","title":"Agent Crash Test","priority":2}]'
+
+# Track whether quarantine was called vs mark_bead_failed
+BEAD_QUARANTINED_137=false
+BEAD_FAILED_137=false
+
+_needle_check_mitosis()  { return 1; }
+_needle_build_prompt()   { echo "test prompt"; return 0; }
+_needle_verify_bead()    { echo '{"passed":true,"skipped":true}'; return 2; }
+_needle_mark_bead_failed()    { BEAD_FAILED_137=true; return 0; }
+_needle_quarantine_bead_pluck() { BEAD_QUARANTINED_137=true; return 0; }
+_needle_error_handle()        { echo "quarantine"; return 0; }
+
+_needle_dispatch_agent() {
+    local out_file="$TEST_DIR/crash_out.log"
+    touch "$out_file"
+    echo "137|1000|${out_file}"
+    return 0
+}
+_needle_extract_tokens()          { echo "0|0"; return 0; }
+calculate_cost()                  { echo "0.00"; return 0; }
+record_effort()                   { return 0; }
+_needle_annotate_bead_with_effort() { return 0; }
+
+_needle_pluck_process_bead "bd-crash137" "$TEST_DIR/workspace" "test-agent" 2>/dev/null
+exit_code=$?
+
+if [[ "$BEAD_QUARANTINED_137" == "true" ]] && [[ "$BEAD_FAILED_137" == "false" ]]; then
+    test_pass
+else
+    test_fail "Expected quarantine for exit 137, got: quarantined=$BEAD_QUARANTINED_137 failed=$BEAD_FAILED_137 exit=$exit_code"
+fi
+
+test_case "_needle_pluck_process_bead does NOT quarantine on generic non-zero exit code"
+create_test_config
+mock_br '[{"id":"bd-fail42","title":"Generic Failure","priority":2}]'
+
+BEAD_QUARANTINED_GENERIC=false
+BEAD_FAILED_GENERIC=false
+
+_needle_check_mitosis()  { return 1; }
+_needle_build_prompt()   { echo "test prompt"; return 0; }
+_needle_verify_bead()    { echo '{"passed":true,"skipped":true}'; return 2; }
+_needle_mark_bead_failed()    { BEAD_FAILED_GENERIC=true; return 0; }
+_needle_quarantine_bead_pluck() { BEAD_QUARANTINED_GENERIC=true; return 0; }
+_needle_error_handle()        { echo "fail"; return 0; }
+
+_needle_dispatch_agent() {
+    local out_file="$TEST_DIR/fail42_out.log"
+    touch "$out_file"
+    echo "42|1000|${out_file}"
+    return 0
+}
+
+_needle_pluck_process_bead "bd-fail42" "$TEST_DIR/workspace" "test-agent" 2>/dev/null
+
+if [[ "$BEAD_FAILED_GENERIC" == "true" ]] && [[ "$BEAD_QUARANTINED_GENERIC" == "false" ]]; then
+    test_pass
+else
+    test_fail "Expected mark_bead_failed for exit 42, got: quarantined=$BEAD_QUARANTINED_GENERIC failed=$BEAD_FAILED_GENERIC"
+fi
+
+# ============================================================================
 # Test Direct Execution Support
 # ============================================================================
 
