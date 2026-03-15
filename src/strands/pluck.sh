@@ -56,6 +56,11 @@ if [[ -z "${_NEEDLE_PROMPT_LOADED:-}" ]]; then
     source "$(dirname "${BASH_SOURCE[0]}")/../bead/prompt.sh"
 fi
 
+# Source verification module
+if [[ -z "${_NEEDLE_VERIFY_LOADED:-}" ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/../bead/verify.sh"
+fi
+
 # Source agent modules
 if [[ -z "${_NEEDLE_DISPATCH_LOADED:-}" ]]; then
     source "$(dirname "${BASH_SOURCE[0]}")/../agent/dispatch.sh"
@@ -205,9 +210,65 @@ _needle_pluck_process_bead() {
 
     # Step 5: Check exit code and mark bead appropriately
     if [[ "$exit_code" -eq 0 ]]; then
-        # Success - mark bead as closed
-        _needle_mark_bead_completed "$bead_id" "$output_file" "$duration" "$workspace"
-        return 0
+        # Step 5a: Run verification if verification_cmd is defined in the bead
+        local verify_result verify_exit
+        verify_result=$(_needle_verify_bead "$bead_id" "$workspace")
+        verify_exit=$?
+
+        if [[ $verify_exit -eq 0 ]] || [[ $verify_exit -eq 2 ]]; then
+            # Passed verification (or no verification_cmd) — close the bead
+            _needle_mark_bead_completed "$bead_id" "$output_file" "$duration" "$workspace"
+            return 0
+        fi
+
+        # Verification failed — attempt one self-correction re-dispatch
+        _needle_warn "Verification failed for $bead_id — attempting self-correction"
+        _needle_telemetry_emit "bead.verify_self_correct" "warn" \
+            "bead_id=$bead_id" \
+            "workspace=$workspace"
+
+        local failure_context
+        failure_context=$(_needle_format_verification_failure_context "$verify_result")
+
+        local correction_prompt
+        correction_prompt="${prompt}
+
+${failure_context}"
+
+        local correction_result correction_dispatch_exit
+        correction_result=$(_needle_dispatch_agent "$agent" "$workspace" "$correction_prompt" "$bead_id" "$bead_title")
+        correction_dispatch_exit=$?
+
+        if [[ $correction_dispatch_exit -eq 0 ]] && [[ -n "$correction_result" ]]; then
+            local correction_last_line
+            correction_last_line=$(tail -n 1 <<< "$correction_result")
+            local corr_exit_code corr_duration corr_file
+            IFS='|' read -r corr_exit_code corr_duration corr_file <<< "$correction_last_line"
+
+            if [[ "$corr_exit_code" -eq 0 ]]; then
+                # Self-correction agent exited cleanly — re-verify
+                local reverify_result reverify_exit
+                reverify_result=$(_needle_verify_bead "$bead_id" "$workspace")
+                reverify_exit=$?
+
+                if [[ $reverify_exit -eq 0 ]] || [[ $reverify_exit -eq 2 ]]; then
+                    # Self-correction succeeded — close the bead
+                    _needle_info "Self-correction verified for $bead_id"
+                    _needle_telemetry_emit "bead.verify_self_correct_passed" "info" \
+                        "bead_id=$bead_id"
+                    _needle_mark_bead_completed "$bead_id" "$corr_file" "$corr_duration" "$workspace"
+                    return 0
+                fi
+            fi
+        fi
+
+        # Self-correction failed — release bead to queue for retry/mitosis path
+        _needle_warn "Self-correction failed for $bead_id — releasing to queue"
+        _needle_telemetry_emit "bead.verify_self_correct_failed" "error" \
+            "bead_id=$bead_id" \
+            "workspace=$workspace"
+        _needle_release_bead "$bead_id" --reason "verification_failed_after_correction"
+        return 1
     else
         # Failure - mark bead as blocked/failed
         _needle_mark_bead_failed "$bead_id" "exit_code_$exit_code" "$output_file" "$workspace"

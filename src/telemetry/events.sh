@@ -345,6 +345,14 @@ _needle_event_bead_released() {
     _needle_telemetry_emit "bead.released" "info" "bead_id=$bead_id" "$@"
 }
 
+# Emit bead.verified event
+# Usage: _needle_event_bead_verified <bead_id> [attempts=...] [flaky=...] [key=value ...]
+_needle_event_bead_verified() {
+    local bead_id="$1"
+    shift
+    _needle_telemetry_emit "bead.verified" "info" "bead_id=$bead_id" "$@"
+}
+
 # ============================================================================
 # Strand Events
 # ============================================================================
@@ -761,6 +769,7 @@ bead.agent_completed
 bead.completed
 bead.failed
 bead.released
+bead.verified
 strand.started
 strand.fallthrough
 strand.completed
