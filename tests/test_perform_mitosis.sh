@@ -480,6 +480,74 @@ else
 fi
 
 # ============================================================================
+# Tests: parent verification_cmd propagation
+# ============================================================================
+
+test_case "_needle_perform_mitosis propagates parent verification_cmd to child without cmd"
+PARENT_BEAD_JSON='{"id":"nd-parent","priority":2,"labels":[],"verification_cmd":"pytest tests/test_auth.py -q"}'
+# Child has no verification_cmd, should inherit from parent
+analysis=$(make_analysis "Task" "desc" "Task2" "desc2" "" "")
+_needle_perform_mitosis "nd-parent" "/tmp" "$analysis" &>/dev/null
+if log_has "$CREATE_LOG" "pytest tests/test_auth.py -q"; then
+    test_pass
+else
+    test_fail "Expected parent verification_cmd to be propagated to child"
+fi
+
+test_case "_needle_perform_mitosis extracts parent verification_cmd from label format"
+PARENT_BEAD_JSON='{"id":"nd-parent","priority":2,"labels":["verification_cmd:pytest tests/test_auth.py -q"]}'
+# Parent has verification_cmd in label format
+analysis=$(make_analysis "Task" "desc" "Task2" "desc2" "" "")
+_needle_perform_mitosis "nd-parent" "/tmp" "$analysis" &>/dev/null
+if log_has "$CREATE_LOG" "pytest tests/test_auth.py -q"; then
+    test_pass
+else
+    test_fail "Expected verification_cmd extracted from parent label"
+fi
+
+test_case "_needle_perform_mitosis adapts parent pytest cmd to child test file"
+PARENT_BEAD_JSON='{"id":"nd-parent","priority":2,"labels":[],"verification_cmd":"pytest"}'
+# Child has affected_files with a test file
+analysis=$(make_analysis "Task" "desc" "Task2" "desc2" \
+    "tests/test_specific_feature.py" "")
+_needle_perform_mitosis "nd-parent" "/tmp" "$analysis" &>/dev/null
+if log_has "$CREATE_LOG" "pytest tests/test_specific_feature.py"; then
+    test_pass
+else
+    test_fail "Expected pytest cmd adapted to specific test file"
+fi
+
+test_case "_needle_perform_mitosis child verification_cmd overrides parent"
+PARENT_BEAD_JSON='{"id":"nd-parent","priority":2,"labels":[],"verification_cmd":"pytest tests/test_auth.py -q"}'
+# Both children have their own verification_cmd; parent's cmd should not appear
+both_with_cmds=$(jq -n '{
+    "mitosis": true,
+    "reasoning": "test",
+    "children": [
+        {"title":"Task","description":"desc","affected_files":[],"verification_cmd":"npm test -- specific.test.js","labels":[],"blocked_by":[]},
+        {"title":"Task2","description":"desc2","affected_files":[],"verification_cmd":"npm test -- other.test.js","labels":[],"blocked_by":[]}
+    ]
+}')
+_needle_perform_mitosis "nd-parent" "/tmp" "$both_with_cmds" &>/dev/null
+# Children use their own cmds; parent's pytest cmd should not appear
+if log_has "$CREATE_LOG" "npm test -- specific.test.js" && ! log_has "$CREATE_LOG" "pytest tests/test_auth.py -q"; then
+    test_pass
+else
+    test_fail "Expected child verification_cmd to override parent"
+fi
+
+test_case "_needle_perform_mitosis uses parent cmd when no affected_files for adaptation"
+PARENT_BEAD_JSON='{"id":"nd-parent","priority":2,"labels":[],"verification_cmd":"pytest tests/test_auth.py -q"}'
+# Child has no affected_files and no verification_cmd
+analysis=$(make_analysis "Task" "desc" "Task2" "desc2" "" "")
+_needle_perform_mitosis "nd-parent" "/tmp" "$analysis" &>/dev/null
+if log_has "$CREATE_LOG" "pytest tests/test_auth.py -q"; then
+    test_pass
+else
+    test_fail "Expected parent verification_cmd used as-is when no adaptation possible"
+fi
+
+# ============================================================================
 # Summary
 # ============================================================================
 

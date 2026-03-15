@@ -714,6 +714,18 @@ _needle_perform_mitosis() {
         '.labels // [] | map(select(. != "mitosis-child" and (startswith("parent-") | not))) | .[]' \
         2>/dev/null)
 
+    # Extract parent's verification_cmd for potential propagation
+    # Check both direct field and label format (verification_cmd:<command>)
+    local parent_verification_cmd
+    parent_verification_cmd=$(echo "$parent_obj" | jq -r '.verification_cmd // ""' 2>/dev/null)
+
+    # If not in direct field, check labels for verification_cmd label
+    if [[ -z "$parent_verification_cmd" ]]; then
+        local parent_labels_json
+        parent_labels_json=$(echo "$parent_obj" | jq -r '.labels // []' 2>/dev/null)
+        parent_verification_cmd=$(echo "$parent_labels_json" | jq -r 'map(select(startswith("verification_cmd:"))) | .[]' | sed 's/^verification_cmd://' | head -1)
+    fi
+
     # Emit mitosis started event
     _needle_emit_event "bead.mitosis.started" \
         "Starting mitosis for bead $parent_id" \
@@ -744,6 +756,46 @@ _needle_perform_mitosis() {
         local affected_files verification_cmd child_labels
         affected_files=$(echo "$child" | jq -r '.affected_files // [] | join(", ")' 2>/dev/null)
         verification_cmd=$(echo "$child" | jq -r '.verification_cmd // ""' 2>/dev/null)
+
+        # If child doesn't specify verification_cmd, try to adapt from parent
+        if [[ -z "$verification_cmd" ]] && [[ -n "$parent_verification_cmd" ]]; then
+            # Try to make parent verification_cmd more specific to this child
+            # If child has affected_files, try to match tests to those files
+            if [[ -n "$affected_files" ]]; then
+                # Extract first file from affected_files as hint
+                local first_file
+                first_file=$(echo "$affected_files" | cut -d',' -f1 | xargs)
+
+                # If parent cmd is a general pytest/npm test, try to narrow it
+                if [[ "$parent_verification_cmd" =~ ^(pytest|npm test|npm run test) ]]; then
+                    # Check if we can extract a test file name from affected_files
+                    local test_file
+                    test_file=$(echo "$affected_files" | grep -oE '[a-zA-Z0-9_/-]+test[_-]?[a-zA-Z0-9_-]*\.(py|js|ts|sh)' | head -1)
+
+                    if [[ -n "$test_file" ]]; then
+                        # Build more specific verification command
+                        if [[ "$parent_verification_cmd" == pytest* ]]; then
+                            verification_cmd="pytest $test_file -q"
+                        else
+                            # For npm, keep the parent cmd but mention the test file
+                            verification_cmd="$parent_verification_cmd -- $test_file"
+                        fi
+                    else
+                        # No specific test file found, use parent's cmd
+                        verification_cmd="$parent_verification_cmd"
+                    fi
+                else
+                    # Parent cmd is specific, use it as-is
+                    verification_cmd="$parent_verification_cmd"
+                fi
+            else
+                # No affected_files to guide adaptation, use parent's cmd as-is
+                verification_cmd="$parent_verification_cmd"
+            fi
+
+            _needle_debug "Adapted parent verification_cmd for child: $verification_cmd"
+        fi
+
         child_labels=$(echo "$child" | jq -r \
             '.labels // [] | map(select(. != "mitosis-child" and (startswith("parent-") | not))) | .[]' \
             2>/dev/null)
