@@ -1293,6 +1293,245 @@ test_exit_code_timeout_path() {
 }
 
 # ============================================================================
+# Forced Mitosis Tracking Tests (Per-Bead Failure Count in loop.sh)
+# ============================================================================
+
+test_bead_failure_count_zero_when_no_file() {
+    test_start "Per-bead failure count returns 0 with no state file"
+
+    setup_mock_environment
+    mkdir -p "$NEEDLE_STATE_DIR"
+
+    # No state file exists yet
+    local count
+    count=$(_needle_get_bead_failure_count "nd-test-bead")
+
+    if [[ "$count" -eq 0 ]]; then
+        test_pass
+    else
+        test_fail "Expected 0, got: $count"
+    fi
+
+    cleanup_mock_environment
+}
+
+test_bead_failure_count_increment_from_zero() {
+    test_start "Per-bead failure count increments from 0 to 1"
+
+    setup_mock_environment
+    mkdir -p "$NEEDLE_STATE_DIR"
+
+    local new_count
+    new_count=$(_needle_increment_bead_failure_count "nd-abc")
+
+    if [[ "$new_count" -eq 1 ]]; then
+        test_pass
+    else
+        test_fail "Expected 1, got: $new_count"
+    fi
+
+    cleanup_mock_environment
+}
+
+test_bead_failure_count_increment_idempotent() {
+    test_start "Per-bead failure count increments correctly across calls"
+
+    setup_mock_environment
+    mkdir -p "$NEEDLE_STATE_DIR"
+
+    _needle_increment_bead_failure_count "nd-xyz" >/dev/null
+    local second
+    second=$(_needle_increment_bead_failure_count "nd-xyz")
+
+    if [[ "$second" -eq 2 ]]; then
+        test_pass
+    else
+        test_fail "Expected 2 on second increment, got: $second"
+    fi
+
+    cleanup_mock_environment
+}
+
+test_bead_failure_count_reset() {
+    test_start "Per-bead failure count reset removes entry"
+
+    setup_mock_environment
+    mkdir -p "$NEEDLE_STATE_DIR"
+
+    _needle_increment_bead_failure_count "nd-rst" >/dev/null
+    _needle_reset_bead_failure_count "nd-rst"
+
+    local count
+    count=$(_needle_get_bead_failure_count "nd-rst")
+
+    if [[ "$count" -eq 0 ]]; then
+        test_pass
+    else
+        test_fail "Expected 0 after reset, got: $count"
+    fi
+
+    cleanup_mock_environment
+}
+
+test_check_forced_mitosis_disabled() {
+    test_start "_needle_check_forced_mitosis returns 1 when force_on_failure disabled"
+
+    setup_mock_environment
+    mkdir -p "$NEEDLE_STATE_DIR"
+
+    # Prevent re-sourcing of mitosis.sh so mocks persist
+    _NEEDLE_MITOSIS_LOADED=1
+    _needle_mitosis_force_enabled() { return 1; }
+    _needle_mitosis_force_threshold() { echo "3"; }
+    # Even with count at threshold, disabled flag takes precedence
+    echo '{"nd-chk": 2}' > "$(_needle_bead_failure_state_file)"
+
+    if ! _needle_check_forced_mitosis "nd-chk" "$NEEDLE_WORKSPACE"; then
+        test_pass
+    else
+        test_fail "Expected non-zero (disabled), got zero"
+    fi
+
+    unset -f _needle_mitosis_force_enabled _needle_mitosis_force_threshold
+    unset _NEEDLE_MITOSIS_LOADED
+
+    cleanup_mock_environment
+}
+
+test_check_forced_mitosis_below_threshold() {
+    test_start "_needle_check_forced_mitosis returns 1 when below threshold"
+
+    setup_mock_environment
+    mkdir -p "$NEEDLE_STATE_DIR"
+
+    # Prevent re-sourcing of mitosis.sh so mocks persist
+    _NEEDLE_MITOSIS_LOADED=1
+    # Enable force mitosis with threshold 3, but bead has only 1 failure
+    _needle_mitosis_force_enabled() { return 0; }
+    _needle_mitosis_force_threshold() { echo "3"; }
+    echo '{"nd-below": 1}' > "$(_needle_bead_failure_state_file)"
+
+    if ! _needle_check_forced_mitosis "nd-below" "$NEEDLE_WORKSPACE"; then
+        test_pass
+    else
+        test_fail "Expected non-zero (below threshold), got zero"
+    fi
+
+    unset -f _needle_mitosis_force_enabled _needle_mitosis_force_threshold
+    unset _NEEDLE_MITOSIS_LOADED
+
+    cleanup_mock_environment
+}
+
+test_check_forced_mitosis_at_threshold() {
+    test_start "_needle_check_forced_mitosis returns 0 when threshold reached"
+
+    setup_mock_environment
+    mkdir -p "$NEEDLE_STATE_DIR"
+
+    # Prevent re-sourcing of mitosis.sh so mocks persist
+    _NEEDLE_MITOSIS_LOADED=1
+    # Threshold=3, bead has 2 failures (threshold - 1 triggers it)
+    _needle_mitosis_force_enabled() { return 0; }
+    _needle_mitosis_force_threshold() { echo "3"; }
+    echo '{"nd-thresh": 2}' > "$(_needle_bead_failure_state_file)"
+
+    if _needle_check_forced_mitosis "nd-thresh" "$NEEDLE_WORKSPACE"; then
+        test_pass
+    else
+        test_fail "Expected zero (at threshold-1), got non-zero"
+    fi
+
+    unset -f _needle_mitosis_force_enabled _needle_mitosis_force_threshold
+    unset _NEEDLE_MITOSIS_LOADED
+
+    cleanup_mock_environment
+}
+
+test_handle_forced_mitosis_calls_check_mitosis_with_force_true() {
+    test_start "_needle_handle_forced_mitosis calls _needle_check_mitosis with force=true"
+
+    setup_mock_environment
+    mkdir -p "$NEEDLE_STATE_DIR"
+    echo '{"nd-hfm": 2}' > "$(_needle_bead_failure_state_file)"
+
+    # Prevent re-sourcing of mitosis.sh so _needle_check_mitosis mock persists
+    _NEEDLE_MITOSIS_LOADED=1
+    local FORCE_ARG=""
+    _needle_check_mitosis() {
+        FORCE_ARG="${4:-false}"
+        return 0
+    }
+
+    _needle_handle_forced_mitosis "nd-hfm" "$NEEDLE_WORKSPACE" "test-agent" >/dev/null 2>&1
+
+    if [[ "$FORCE_ARG" == "true" ]]; then
+        test_pass
+    else
+        test_fail "Expected force=true, got: $FORCE_ARG"
+    fi
+
+    unset -f _needle_check_mitosis
+    unset _NEEDLE_MITOSIS_LOADED
+
+    cleanup_mock_environment
+}
+
+test_handle_forced_mitosis_resets_failure_count_on_success() {
+    test_start "_needle_handle_forced_mitosis resets failure count on mitosis success"
+
+    setup_mock_environment
+    mkdir -p "$NEEDLE_STATE_DIR"
+    echo '{"nd-succ": 2}' > "$(_needle_bead_failure_state_file)"
+
+    _NEEDLE_MITOSIS_LOADED=1
+    _needle_check_mitosis() { return 0; }
+
+    _needle_handle_forced_mitosis "nd-succ" "$NEEDLE_WORKSPACE" "test-agent" >/dev/null 2>&1
+
+    local remaining
+    remaining=$(_needle_get_bead_failure_count "nd-succ")
+
+    if [[ "$remaining" -eq 0 ]]; then
+        test_pass
+    else
+        test_fail "Expected failure count reset to 0, got: $remaining"
+    fi
+
+    unset -f _needle_check_mitosis
+    unset _NEEDLE_MITOSIS_LOADED
+
+    cleanup_mock_environment
+}
+
+test_handle_forced_mitosis_resets_failure_count_on_failure() {
+    test_start "_needle_handle_forced_mitosis resets failure count when mitosis cannot decompose"
+
+    setup_mock_environment
+    mkdir -p "$NEEDLE_STATE_DIR"
+    echo '{"nd-fail": 2}' > "$(_needle_bead_failure_state_file)"
+
+    _NEEDLE_MITOSIS_LOADED=1
+    _needle_check_mitosis() { return 1; }
+
+    _needle_handle_forced_mitosis "nd-fail" "$NEEDLE_WORKSPACE" "test-agent" >/dev/null 2>&1
+
+    local remaining
+    remaining=$(_needle_get_bead_failure_count "nd-fail")
+
+    if [[ "$remaining" -eq 0 ]]; then
+        test_pass
+    else
+        test_fail "Expected failure count reset to 0, got: $remaining"
+    fi
+
+    unset -f _needle_check_mitosis
+    unset _NEEDLE_MITOSIS_LOADED
+
+    cleanup_mock_environment
+}
+
+# ============================================================================
 # Run All Tests
 # ============================================================================
 
@@ -1399,6 +1638,20 @@ test_exit_code_handler_exists
 test_exit_code_success_path
 test_exit_code_failure_path
 test_exit_code_timeout_path
+
+# Forced Mitosis Tracking Tests
+echo ""
+echo "--- Forced Mitosis Tracking Tests ---"
+test_bead_failure_count_zero_when_no_file
+test_bead_failure_count_increment_from_zero
+test_bead_failure_count_increment_idempotent
+test_bead_failure_count_reset
+test_check_forced_mitosis_disabled
+test_check_forced_mitosis_below_threshold
+test_check_forced_mitosis_at_threshold
+test_handle_forced_mitosis_calls_check_mitosis_with_force_true
+test_handle_forced_mitosis_resets_failure_count_on_success
+test_handle_forced_mitosis_resets_failure_count_on_failure
 
 # ============================================================================
 # Summary

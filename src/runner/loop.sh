@@ -236,7 +236,15 @@ _needle_apply_backoff() {
 # Usage: _needle_bead_failure_state_file
 # Returns: Path to the failure count state file
 _needle_bead_failure_state_file() {
-    local state_dir="${NEEDLE_STATE_DIR:-${NEEDLE_HOME:-$HOME/.needle}/state}"
+    local sd="${NEEDLE_STATE_DIR:-state}"
+    local state_dir
+    if [[ "$sd" = /* ]]; then
+        # Absolute path (e.g., set directly in tests)
+        state_dir="$sd"
+    else
+        # Relative directory name (e.g., "state" from constants.sh)
+        state_dir="${NEEDLE_HOME:-$HOME/.needle}/$sd"
+    fi
     echo "$state_dir/bead_failures.json"
 }
 
