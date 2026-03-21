@@ -420,7 +420,7 @@ pub struct LimitsConfig {
 /// Prompt construction configuration.
 ///
 /// Loaded from the `prompt` section of workspace config (`.needle.yaml`).
-/// Phase 1 uses these fields directly; Phase 3 adds per-strand template overrides.
+/// Templates can be overridden per-workspace or globally.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PromptConfig {
     /// Paths to context files read from the workspace and included in prompts.
@@ -430,6 +430,12 @@ pub struct PromptConfig {
     /// Free-form instructions appended to every prompt.
     #[serde(default)]
     pub instructions: Option<String>,
+
+    /// Named template overrides. Keys are template names (e.g., `"pluck"`,
+    /// `"mitosis"`, `"weave"`, `"unravel"`, `"pulse"`). Only the templates
+    /// specified here are overridden; others use built-in defaults.
+    #[serde(default)]
+    pub templates: std::collections::BTreeMap<String, String>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

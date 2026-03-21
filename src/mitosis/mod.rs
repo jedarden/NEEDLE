@@ -130,9 +130,21 @@ impl MitosisEvaluator {
             }
         };
 
+        // Gather existing children for the prompt (so the agent avoids duplicates).
+        let existing_children = self.get_existing_children(store, &bead.id).await?;
+        let existing_children_text = if existing_children.is_empty() {
+            "(no existing children)".to_string()
+        } else {
+            existing_children
+                .iter()
+                .map(|t| format!("- {t}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
         // Build mitosis prompt.
         let prompt = prompt_builder
-            .build(bead, workspace, "mitosis", "mitosis")
+            .build_mitosis(bead, workspace, "mitosis", &existing_children_text)
             .context("failed to build mitosis prompt")?;
 
         // Acquire workspace flock for atomicity.
