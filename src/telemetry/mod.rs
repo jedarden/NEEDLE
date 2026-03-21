@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::config::{ColorMode, StdoutFormat, StdoutSinkConfig};
+use crate::config::{ColorMode, HookConfig, StdoutFormat, StdoutSinkConfig};
 use crate::types::{BeadId, WorkerId, WorkerState};
 
 // ─── TelemetryEvent ──────────────────────────────────────────────────────────
@@ -1059,6 +1059,132 @@ pub fn generate_session_id() -> String {
     format!("{:08x}", hash & 0xffff_ffff)
 }
 
+// ─── HookSink ─────────────────────────────────────────────────────────────────
+
+/// A compiled hook: a pre-compiled regex filter + the shell command to run.
+struct CompiledHook {
+    filter: regex::Regex,
+    command: String,
+}
+
+/// Dispatches matching telemetry events to external commands via stdin.
+///
+/// Each hook has a glob pattern matched against `event_type`. When an event
+/// matches, the event JSON is piped to the command's stdin. Execution is
+/// fire-and-forget — failed hooks emit `SinkError` to the file sink but
+/// never block the worker or recurse into other hooks.
+pub struct HookSink {
+    hooks: Vec<CompiledHook>,
+}
+
+impl HookSink {
+    /// Compile hook configs into a `HookSink`.
+    ///
+    /// Returns an error if any `event_filter` is an invalid glob pattern.
+    pub fn new(configs: &[crate::config::HookConfig]) -> Result<Self> {
+        let mut hooks = Vec::with_capacity(configs.len());
+        for cfg in configs {
+            let filter = glob_to_regex(&cfg.event_filter)
+                .with_context(|| format!("invalid hook filter: {}", cfg.event_filter))?;
+            hooks.push(CompiledHook {
+                filter,
+                command: cfg.command.clone(),
+            });
+        }
+        Ok(HookSink { hooks })
+    }
+
+    /// Check whether any hooks are configured.
+    pub fn is_empty(&self) -> bool {
+        self.hooks.is_empty()
+    }
+
+    /// Dispatch an event to all matching hooks (fire-and-forget).
+    ///
+    /// Returns a list of `SinkError` events for hooks that failed, so the
+    /// caller can write them to the file sink without recursion.
+    pub fn dispatch(&self, event: &TelemetryEvent) -> Vec<TelemetryEvent> {
+        // Never dispatch SinkError events to hooks — prevents recursion.
+        if event.event_type == "telemetry.sink_error" {
+            return Vec::new();
+        }
+
+        let json = match serde_json::to_string(event) {
+            Ok(j) => j,
+            Err(_) => return Vec::new(),
+        };
+
+        let mut failures = Vec::new();
+        for hook in &self.hooks {
+            if !hook.filter.is_match(&event.event_type) {
+                continue;
+            }
+
+            match Self::run_hook(&hook.command, &json) {
+                Ok(()) => {}
+                Err(e) => {
+                    let fail_event = TelemetryEvent {
+                        timestamp: Utc::now(),
+                        event_type: "telemetry.sink_error".to_string(),
+                        worker_id: event.worker_id.clone(),
+                        session_id: event.session_id.clone(),
+                        sequence: 0, // sequence is set by the emitter, not here
+                        bead_id: None,
+                        workspace: None,
+                        data: serde_json::json!({
+                            "hook_command": hook.command,
+                            "event_filter": hook.filter.as_str(),
+                            "original_event_type": event.event_type,
+                            "error": e.to_string(),
+                        }),
+                        duration_ms: None,
+                    };
+                    failures.push(fail_event);
+                }
+            }
+        }
+        failures
+    }
+
+    /// Execute a single hook command, piping JSON to its stdin.
+    ///
+    /// Spawns `sh -c <command>` with the event JSON on stdin, waits for
+    /// completion, and returns an error if the command exits non-zero.
+    /// This runs inside the background writer task so blocking is acceptable.
+    fn run_hook(command: &str, json: &str) -> Result<()> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to spawn hook: {command}"))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            // Best-effort write; ignore broken pipe if child exits early.
+            let _ = stdin.write_all(json.as_bytes());
+        }
+
+        // Wait for the child and check exit status.
+        let status = child
+            .wait()
+            .with_context(|| format!("failed to wait for hook: {command}"))?;
+
+        if !status.success() {
+            anyhow::bail!(
+                "hook exited with status {}: {command}",
+                status.code().unwrap_or(-1)
+            );
+        }
+
+        Ok(())
+    }
+}
+
 // ─── Telemetry emitter ───────────────────────────────────────────────────────
 
 /// Non-blocking telemetry emitter.
@@ -1089,7 +1215,7 @@ impl Telemetry {
             .ok();
 
         let sequence = Arc::new(AtomicU64::new(0));
-        Self::spawn_writer(receiver, sink, None);
+        Self::spawn_writer(receiver, sink, None, None);
 
         Telemetry {
             worker_id,
@@ -1117,7 +1243,7 @@ impl Telemetry {
         };
 
         let sequence = Arc::new(AtomicU64::new(0));
-        Self::spawn_writer(receiver, file_sink, stdout_sink);
+        Self::spawn_writer(receiver, file_sink, stdout_sink, None);
 
         Telemetry {
             worker_id,
@@ -1125,6 +1251,44 @@ impl Telemetry {
             sequence,
             sender,
         }
+    }
+
+    /// Create a telemetry emitter with file, stdout, and hook sinks.
+    pub fn with_hooks(
+        worker_id: WorkerId,
+        stdout_config: &StdoutSinkConfig,
+        hook_configs: &[HookConfig],
+    ) -> Result<Self> {
+        let session_id = generate_session_id();
+        let (sender, receiver) = mpsc::unbounded_channel();
+
+        let file_sink: Option<FileSink> = FileSink::new(&worker_id, &session_id)
+            .map_err(|e| {
+                tracing::warn!(error = %e, "failed to create telemetry file sink");
+            })
+            .ok();
+
+        let stdout_sink = if stdout_config.enabled {
+            Some(StdoutSink::new(stdout_config))
+        } else {
+            None
+        };
+
+        let hook_sink = if hook_configs.is_empty() {
+            None
+        } else {
+            Some(HookSink::new(hook_configs)?)
+        };
+
+        let sequence = Arc::new(AtomicU64::new(0));
+        Self::spawn_writer(receiver, file_sink, stdout_sink, hook_sink);
+
+        Ok(Telemetry {
+            worker_id,
+            session_id,
+            sequence,
+            sender,
+        })
     }
 
     /// Create a telemetry emitter with a custom sink (for testing).
@@ -1196,7 +1360,7 @@ impl Telemetry {
             .ok();
 
         let sequence = Arc::new(AtomicU64::new(0));
-        Self::spawn_writer(receiver, sink, None);
+        Self::spawn_writer(receiver, sink, None, None);
 
         Telemetry {
             worker_id,
@@ -1211,6 +1375,7 @@ impl Telemetry {
         mut receiver: mpsc::UnboundedReceiver<TelemetryEvent>,
         file_sink: Option<FileSink>,
         stdout_sink: Option<StdoutSink>,
+        hook_sink: Option<HookSink>,
     ) {
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
@@ -1222,6 +1387,19 @@ impl Telemetry {
                 if let Some(ref s) = stdout_sink {
                     if let Err(e) = s.write(&event) {
                         tracing::warn!(error = %e, "telemetry stdout sink write failed");
+                    }
+                }
+                // Hook dispatch: matching events piped to external commands.
+                // Failures produce SinkError events written to file sink only
+                // (never recursed back to hooks).
+                if let Some(ref h) = hook_sink {
+                    let failures = h.dispatch(&event);
+                    for fail_event in failures {
+                        if let Some(ref s) = file_sink {
+                            if let Err(e) = s.write(&fail_event) {
+                                tracing::warn!(error = %e, "failed to log hook failure");
+                            }
+                        }
                     }
                 }
             }
@@ -2222,5 +2400,165 @@ mod tests {
         assert_eq!(StdoutSink::short_type("effort.recorded"), "EFFORT");
         assert_eq!(StdoutSink::short_type("bead.mitosis.split"), "MITOSIS");
         assert_eq!(StdoutSink::short_type("unknown.event"), "unknown.event");
+    }
+
+    // ── HookSink tests ──
+
+    fn make_test_event(event_type: &str) -> TelemetryEvent {
+        TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: event_type.to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "test0000".to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({"test": true}),
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn hook_sink_new_compiles_valid_filters() {
+        let configs = vec![
+            HookConfig {
+                event_filter: "outcome.*".to_string(),
+                command: "cat".to_string(),
+            },
+            HookConfig {
+                event_filter: "worker.errored".to_string(),
+                command: "cat".to_string(),
+            },
+        ];
+        let sink = HookSink::new(&configs);
+        assert!(sink.is_ok());
+        assert!(!sink.unwrap().is_empty());
+    }
+
+    #[test]
+    fn hook_sink_empty_when_no_configs() {
+        let sink = HookSink::new(&[]).unwrap();
+        assert!(sink.is_empty());
+    }
+
+    #[test]
+    fn hook_sink_invalid_filter_returns_error() {
+        let configs = vec![HookConfig {
+            event_filter: "[invalid".to_string(),
+            command: "cat".to_string(),
+        }];
+        assert!(HookSink::new(&configs).is_err());
+    }
+
+    #[test]
+    fn hook_sink_dispatch_matches_filter() {
+        let configs = vec![HookConfig {
+            event_filter: "outcome.*".to_string(),
+            command: "true".to_string(), // always succeeds
+        }];
+        let sink = HookSink::new(&configs).unwrap();
+
+        // Matching event — should dispatch (no failures expected)
+        let event = make_test_event("outcome.handled");
+        let failures = sink.dispatch(&event);
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn hook_sink_dispatch_skips_non_matching() {
+        let configs = vec![HookConfig {
+            event_filter: "outcome.*".to_string(),
+            command: "false".to_string(), // would fail if dispatched
+        }];
+        let sink = HookSink::new(&configs).unwrap();
+
+        // Non-matching event — should NOT dispatch
+        let event = make_test_event("worker.started");
+        let failures = sink.dispatch(&event);
+        // No failures because the hook was never called
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn hook_sink_dispatch_prevents_recursion_on_sink_error() {
+        let configs = vec![HookConfig {
+            event_filter: "telemetry.*".to_string(),
+            command: "true".to_string(),
+        }];
+        let sink = HookSink::new(&configs).unwrap();
+
+        // SinkError events must never be dispatched to hooks
+        let event = make_test_event("telemetry.sink_error");
+        let failures = sink.dispatch(&event);
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn hook_sink_dispatch_captures_failure() {
+        let configs = vec![HookConfig {
+            event_filter: "bead.*".to_string(),
+            command: "/nonexistent/command/that/does/not/exist".to_string(),
+        }];
+        let sink = HookSink::new(&configs).unwrap();
+
+        let event = make_test_event("bead.completed");
+        let failures = sink.dispatch(&event);
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].event_type, "telemetry.sink_error");
+        assert!(failures[0].data["hook_command"]
+            .as_str()
+            .unwrap()
+            .contains("nonexistent"));
+    }
+
+    #[test]
+    fn hook_sink_multiple_hooks_matching_same_event() {
+        let configs = vec![
+            HookConfig {
+                event_filter: "outcome.*".to_string(),
+                command: "true".to_string(),
+            },
+            HookConfig {
+                event_filter: "outcome.handled".to_string(),
+                command: "true".to_string(),
+            },
+        ];
+        let sink = HookSink::new(&configs).unwrap();
+
+        let event = make_test_event("outcome.handled");
+        let failures = sink.dispatch(&event);
+        // Both hooks match, both succeed — no failures
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn hook_sink_dispatches_json_to_stdin() {
+        let tmp = std::env::temp_dir().join("needle-hook-test-stdin");
+        let _ = std::fs::remove_file(&tmp);
+
+        let cmd = format!("cat > {}", tmp.display());
+        let configs = vec![HookConfig {
+            event_filter: "worker.*".to_string(),
+            command: cmd,
+        }];
+        let sink = HookSink::new(&configs).unwrap();
+
+        let event = make_test_event("worker.started");
+        let failures = sink.dispatch(&event);
+        assert!(failures.is_empty());
+
+        // Give the child process a moment to write
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let content = std::fs::read_to_string(&tmp).unwrap_or_default();
+        assert!(
+            !content.is_empty(),
+            "hook should have received JSON on stdin"
+        );
+        // Verify it's valid JSON containing the event type
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["event_type"], "worker.started");
+
+        let _ = std::fs::remove_file(&tmp);
     }
 }

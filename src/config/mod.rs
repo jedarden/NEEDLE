@@ -459,6 +459,20 @@ impl Default for StdoutSinkConfig {
     }
 }
 
+/// A single hook definition: an event filter glob and a shell command.
+///
+/// Events whose `event_type` matches the glob are piped as JSON to the
+/// command's stdin. Hooks are fire-and-forget — failures are logged but
+/// never block the worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HookConfig {
+    /// Glob pattern matched against `event_type` (e.g. `"outcome.*"`).
+    pub event_filter: String,
+
+    /// Shell command to execute. The event JSON is written to stdin.
+    pub command: String,
+}
+
 /// Telemetry configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TelemetryConfig {
@@ -466,6 +480,9 @@ pub struct TelemetryConfig {
     pub file_sink: FileSinkConfig,
     #[serde(default)]
     pub stdout_sink: StdoutSinkConfig,
+    /// Optional hook sinks — dispatch matching events to external commands.
+    #[serde(default)]
+    pub hooks: Vec<HookConfig>,
 }
 
 /// Health monitoring configuration (heartbeat, peer detection).
