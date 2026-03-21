@@ -160,10 +160,20 @@ Adding a new agent requires **only a YAML configuration file** — no code chang
 ```
 NEEDLE/
 ├── README.md
+├── plan/                           # Implementation plan
+│   ├── plan.md                     #   Master plan: principles, decisions, component map
+│   ├── state-machine.md            #   Core FSM: states, transitions, invariants
+│   ├── architecture.md             #   Module boundaries, data flow, binary structure
+│   ├── strands.md                  #   Strand waterfall: 7 strands, entry/exit conditions
+│   ├── concurrency.md              #   Multi-worker coordination, claiming, heartbeats
+│   ├── telemetry.md                #   Structured events, sinks, cost tracking
+│   ├── self-healing.md             #   Failure taxonomy, recovery procedures
+│   ├── configuration.md            #   Config hierarchy, workspace overrides
+│   ├── agent-adapters.md           #   Agent abstraction, adapter YAML interface
+│   └── implementation-phases.md    #   Phased delivery, success criteria, test strategy
 └── docs/
-    ├── plan/           # Implementation plans and phase definitions
-    ├── research/       # Technical research and analysis
-    └── notes/          # Design notes and working documents
+    ├── research/                   # Beads ecosystem research (14 files)
+    └── notes/                      # NEEDLE v1 post-mortem learnings (9 files)
 ```
 
 ---
