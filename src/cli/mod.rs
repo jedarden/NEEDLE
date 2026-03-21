@@ -1006,24 +1006,40 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
                 if entry.path().extension().is_some_and(|e| e == "json") {
                     total_heartbeats += 1;
                     if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                        if let Ok(hb) = serde_json::from_str::<HeartbeatData>(&content) {
+                        let is_stale = if let Ok(hb) =
+                            serde_json::from_str::<HeartbeatData>(&content)
+                        {
+                            // New-format heartbeat: check age against TTL.
                             let age = Utc::now()
                                 .signed_duration_since(hb.last_heartbeat)
                                 .num_seconds();
-                            if age > config.health.heartbeat_ttl_secs as i64 {
-                                stale_heartbeats += 1;
-                                if repair {
-                                    if let Err(e) = std::fs::remove_file(entry.path()) {
-                                        println!(
-                                            "\n  Failed to remove stale heartbeat {}: {e}",
-                                            entry.path().display()
-                                        );
-                                    } else {
-                                        println!(
-                                            "\n  Removed stale heartbeat: {}",
-                                            entry.path().display()
-                                        );
-                                    }
+                            age > config.health.heartbeat_ttl_secs as i64
+                        } else if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content)
+                        {
+                            // Old-format heartbeat (pre-Rust worker): extract PID
+                            // and check if the process is still alive.
+                            raw.get("pid")
+                                .and_then(|v| v.as_u64())
+                                .map(|pid| !is_pid_alive(pid as u32))
+                                .unwrap_or(true)
+                        } else {
+                            // Unparseable file — treat as stale.
+                            true
+                        };
+
+                        if is_stale {
+                            stale_heartbeats += 1;
+                            if repair {
+                                if let Err(e) = std::fs::remove_file(entry.path()) {
+                                    println!(
+                                        "\n  Failed to remove stale heartbeat {}: {e}",
+                                        entry.path().display()
+                                    );
+                                } else {
+                                    println!(
+                                        "\n  Removed stale heartbeat: {}",
+                                        entry.path().display()
+                                    );
                                 }
                             }
                         }
