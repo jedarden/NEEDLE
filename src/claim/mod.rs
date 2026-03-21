@@ -41,15 +41,14 @@ impl Claimer {
                 })?;
 
             match store.claim(bead_id, &self.worker_name).await {
-                Ok(true) => {
+                Ok(ClaimResult::Claimed(bead)) => {
                     self.telemetry
                         .emit(crate::telemetry::EventKind::ClaimSuccess {
                             bead_id: bead_id.clone(),
                         })?;
-                    let bead = store.get(bead_id).await?;
                     return Ok(ClaimResult::Claimed(bead));
                 }
-                Ok(false) => {
+                Ok(ClaimResult::RaceLost { claimed_by }) => {
                     self.telemetry
                         .emit(crate::telemetry::EventKind::ClaimRaceLost {
                             bead_id: bead_id.clone(),
@@ -60,10 +59,11 @@ impl Claimer {
                         ))
                         .await;
                     } else {
-                        return Ok(ClaimResult::RaceLost {
-                            claimed_by: "(unknown)".to_string(),
-                        });
+                        return Ok(ClaimResult::RaceLost { claimed_by });
                     }
+                }
+                Ok(ClaimResult::NotClaimable { reason }) => {
+                    return Ok(ClaimResult::NotClaimable { reason });
                 }
                 Err(e) => {
                     tracing::warn!(bead_id = %bead_id, error = %e, "claim error");

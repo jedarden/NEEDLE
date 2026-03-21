@@ -10,7 +10,7 @@ use anyhow::Result;
 use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::telemetry::Telemetry;
-use crate::types::{AgentOutcome, BeadId, BeadStatus, Outcome};
+use crate::types::{AgentOutcome, BeadId, Outcome};
 
 /// Routes agent outcomes to their explicit handlers.
 pub struct OutcomeHandler {
@@ -48,13 +48,13 @@ impl OutcomeHandler {
             }
             Outcome::Failure => {
                 // Reset to open so another worker can retry.
-                store.set_status(bead_id, BeadStatus::Open).await?;
+                store.release(bead_id).await?;
                 tracing::warn!(bead_id = %bead_id, "agent failure — bead reset to open");
                 Ok(())
             }
             Outcome::Timeout => {
                 // Treat timeout as a transient failure; reset to open.
-                store.set_status(bead_id, BeadStatus::Open).await?;
+                store.release(bead_id).await?;
                 tracing::warn!(bead_id = %bead_id, "agent timed out — bead reset to open");
                 Ok(())
             }
@@ -71,7 +71,7 @@ impl OutcomeHandler {
             }
             Outcome::Interrupted => {
                 // Reset to open so work isn't lost.
-                store.set_status(bead_id, BeadStatus::Open).await?;
+                store.release(bead_id).await?;
                 tracing::info!(bead_id = %bead_id, "agent interrupted — bead reset to open");
                 Ok(())
             }
@@ -82,7 +82,7 @@ impl OutcomeHandler {
                     code,
                     "agent crashed — bead reset to open for retry"
                 );
-                store.set_status(bead_id, BeadStatus::Open).await?;
+                store.release(bead_id).await?;
                 Ok(())
             }
         }
