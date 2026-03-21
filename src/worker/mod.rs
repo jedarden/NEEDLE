@@ -47,7 +47,19 @@ impl Worker {
             Telemetry::new(worker_name.clone()),
         );
         let prompt_builder = PromptBuilder::new(&config.prompt);
-        let dispatcher = Dispatcher::new(config.clone(), Telemetry::new(worker_name.clone()));
+        let dispatcher = Dispatcher::new(&config, Telemetry::new(worker_name.clone()))
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to load adapters, using built-in defaults");
+                let builtins = crate::dispatch::builtin_adapters()
+                    .into_iter()
+                    .map(|a| (a.name.clone(), a))
+                    .collect();
+                Dispatcher::with_adapters(
+                    builtins,
+                    Telemetry::new(worker_name.clone()),
+                    config.agent.timeout,
+                )
+            });
         let outcome_handler =
             OutcomeHandler::new(config.clone(), Telemetry::new(worker_name.clone()));
         let health = HealthMonitor::new(
@@ -121,7 +133,27 @@ impl Worker {
 
             self.transition(WorkerState::Dispatching, WorkerState::Executing)
                 .await?;
-            let output = self.dispatcher.dispatch(&bead.id, &prompt.content).await?;
+            let adapter_name = &self.config.agent.default;
+            let adapter = self
+                .dispatcher
+                .adapter(adapter_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    // Fall back to first available adapter.
+                    self.dispatcher
+                        .adapter("claude-sonnet")
+                        .cloned()
+                        .unwrap_or_else(|| crate::dispatch::builtin_adapters().into_iter().next().unwrap())
+                });
+            let exec_result = self
+                .dispatcher
+                .dispatch(&bead.id, &prompt, &adapter, &self.config.workspace.default)
+                .await?;
+            let output = crate::types::AgentOutcome {
+                exit_code: exec_result.exit_code,
+                stdout: exec_result.stdout,
+                stderr: exec_result.stderr,
+            };
 
             self.transition(WorkerState::Executing, WorkerState::Handling)
                 .await?;
