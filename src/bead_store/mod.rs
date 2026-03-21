@@ -15,6 +15,38 @@ use async_trait::async_trait;
 
 use crate::types::{Bead, BeadId, ClaimResult};
 
+// ─── Corruption detection ────────────────────────────────────────────────────
+
+/// Known error strings that indicate SQLite database corruption.
+const CORRUPTION_MARKERS: &[&str] = &[
+    "database disk image is malformed",
+    "database is locked",
+    "database or disk is full",
+    "attempt to write a readonly database",
+    "file is not a database",
+];
+
+/// Check if an error message indicates SQLite database corruption.
+///
+/// Returns `true` if the message contains any known corruption marker.
+pub fn is_corruption_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    CORRUPTION_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+/// Outcome of a database recovery attempt.
+#[derive(Debug)]
+pub enum RecoveryOutcome {
+    /// `br doctor --repair` fixed the issue.
+    Repaired(RepairReport),
+    /// Full rebuild (rm db + br sync --import) succeeded.
+    Rebuilt,
+    /// Recovery failed — JSONL itself may be corrupt or missing.
+    Failed(anyhow::Error),
+}
+
 // ─── Filters ─────────────────────────────────────────────────────────────────
 
 /// Filters applied when listing ready beads.
@@ -80,6 +112,20 @@ pub trait BeadStore: Send + Sync {
 
     /// Run `br doctor --repair` and return the report.
     async fn doctor_repair(&self) -> Result<RepairReport>;
+
+    /// Run `br doctor` (without `--repair`) to check database health.
+    ///
+    /// Returns warnings if any issues are detected, without attempting to fix them.
+    async fn doctor_check(&self) -> Result<RepairReport>;
+
+    /// Full database rebuild: remove SQLite DB and reimport from JSONL.
+    ///
+    /// 1. rm .beads/beads.db
+    /// 2. br sync --import
+    /// 3. Verify: br doctor
+    ///
+    /// Returns `Err` if rebuild or verification fails (JSONL itself may be corrupt).
+    async fn full_rebuild(&self) -> Result<()>;
 }
 
 // ─── BrCliBeadStore ──────────────────────────────────────────────────────────
@@ -324,7 +370,60 @@ impl BeadStore for BrCliBeadStore {
             .run_br(&["doctor", "--repair"])
             .await
             .context("br doctor --repair failed")?;
-        // Parse the output into warnings and fixed items.
+        Ok(Self::parse_doctor_output(&stdout))
+    }
+
+    async fn doctor_check(&self) -> Result<RepairReport> {
+        let stdout = self.run_br(&["doctor"]).await.context("br doctor failed")?;
+        Ok(Self::parse_doctor_output(&stdout))
+    }
+
+    async fn full_rebuild(&self) -> Result<()> {
+        let db_path = self.workspace.join(".beads/beads.db");
+
+        // Step 1: Remove the corrupt SQLite database.
+        if db_path.exists() {
+            tokio::fs::remove_file(&db_path)
+                .await
+                .with_context(|| format!("failed to remove {}", db_path.display()))?;
+            tracing::info!(path = %db_path.display(), "removed corrupt database file");
+        }
+
+        // Also remove WAL and SHM files if present.
+        for suffix in &["-wal", "-shm"] {
+            let wal_path = self.workspace.join(format!(".beads/beads.db{suffix}"));
+            if wal_path.exists() {
+                let _ = tokio::fs::remove_file(&wal_path).await;
+            }
+        }
+
+        // Step 2: Reimport from JSONL.
+        self.run_br(&["sync", "--import"])
+            .await
+            .context("br sync --import failed during full rebuild")?;
+
+        // Step 3: Verify with br doctor.
+        let verify = self
+            .run_br(&["doctor"])
+            .await
+            .context("br doctor verification failed after rebuild")?;
+        let report = Self::parse_doctor_output(&verify);
+
+        if !report.warnings.is_empty() {
+            bail!(
+                "database still has issues after rebuild: {:?}",
+                report.warnings
+            );
+        }
+
+        tracing::info!("database fully rebuilt from JSONL — verified clean");
+        Ok(())
+    }
+}
+
+impl BrCliBeadStore {
+    /// Parse `br doctor` output into a `RepairReport`.
+    fn parse_doctor_output(stdout: &str) -> RepairReport {
         let mut report = RepairReport::default();
         for line in stdout.lines() {
             if let Some(rest) = line.strip_prefix("WARN ") {
@@ -333,7 +432,38 @@ impl BeadStore for BrCliBeadStore {
                 report.fixed.push(rest.to_string());
             }
         }
-        Ok(report)
+        report
+    }
+
+    /// Attempt database recovery: try repair first, then full rebuild.
+    ///
+    /// Returns the outcome of the recovery attempt. This is the primary
+    /// entry point for auto-recovery from SQLite corruption.
+    pub async fn recover_db(&self) -> RecoveryOutcome {
+        // Step 1: Try br doctor --repair.
+        tracing::warn!("attempting database recovery via br doctor --repair");
+        match self.doctor_repair().await {
+            Ok(report) => {
+                tracing::info!(
+                    warnings = report.warnings.len(),
+                    fixed = report.fixed.len(),
+                    "br doctor --repair completed"
+                );
+                return RecoveryOutcome::Repaired(report);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "br doctor --repair failed, attempting full rebuild");
+            }
+        }
+
+        // Step 2: Full rebuild — rm db + br sync --import + verify.
+        match self.full_rebuild().await {
+            Ok(()) => RecoveryOutcome::Rebuilt,
+            Err(e) => {
+                tracing::error!(error = %e, "full database rebuild failed — JSONL may be corrupt");
+                RecoveryOutcome::Failed(e)
+            }
+        }
     }
 }
 
@@ -378,16 +508,67 @@ mod tests {
 
     #[test]
     fn repair_report_parses_warn_and_fixed_lines() {
-        let stdout = "WARN some-warning\nFIXED repaired-item\nOK normal-line\n";
-        let mut report = RepairReport::default();
-        for line in stdout.lines() {
-            if let Some(rest) = line.strip_prefix("WARN ") {
-                report.warnings.push(rest.to_string());
-            } else if let Some(rest) = line.strip_prefix("FIXED ") {
-                report.fixed.push(rest.to_string());
-            }
-        }
+        let report = BrCliBeadStore::parse_doctor_output(
+            "WARN some-warning\nFIXED repaired-item\nOK normal-line\n",
+        );
         assert_eq!(report.warnings, vec!["some-warning"]);
         assert_eq!(report.fixed, vec!["repaired-item"]);
+    }
+
+    // ── Corruption detection tests ──────────────────────────────────────────
+
+    #[test]
+    fn detects_malformed_db_error() {
+        assert!(is_corruption_error(
+            "Error: database disk image is malformed"
+        ));
+    }
+
+    #[test]
+    fn detects_locked_db_error() {
+        assert!(is_corruption_error("database is locked"));
+    }
+
+    #[test]
+    fn detects_not_a_database_error() {
+        assert!(is_corruption_error("file is not a database"));
+    }
+
+    #[test]
+    fn detects_case_insensitive() {
+        assert!(is_corruption_error(
+            "ERROR: Database Disk Image Is Malformed"
+        ));
+    }
+
+    #[test]
+    fn non_corruption_error_returns_false() {
+        assert!(!is_corruption_error("bead not found"));
+        assert!(!is_corruption_error("connection refused"));
+        assert!(!is_corruption_error(""));
+    }
+
+    #[test]
+    fn corruption_in_longer_message() {
+        let msg = "br [\"list\"] exited with code 1\nstderr: Error: database disk image is malformed\nstdout: ";
+        assert!(is_corruption_error(msg));
+    }
+
+    // ── parse_doctor_output tests ───────────────────────────────────────────
+
+    #[test]
+    fn parse_doctor_output_empty() {
+        let report = BrCliBeadStore::parse_doctor_output("");
+        assert!(report.warnings.is_empty());
+        assert!(report.fixed.is_empty());
+    }
+
+    #[test]
+    fn parse_doctor_output_multiple_entries() {
+        let report = BrCliBeadStore::parse_doctor_output(
+            "WARN index missing\nWARN stale ref\nFIXED rebuilt index\nOK\n",
+        );
+        assert_eq!(report.warnings.len(), 2);
+        assert_eq!(report.fixed.len(), 1);
     }
 }

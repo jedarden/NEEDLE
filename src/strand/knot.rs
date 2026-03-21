@@ -309,6 +309,12 @@ mod tests {
         async fn doctor_repair(&self) -> Result<RepairReport> {
             Ok(RepairReport::default())
         }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Failing store for error-path tests.
@@ -344,6 +350,12 @@ mod tests {
             anyhow::bail!("store connection failed")
         }
         async fn doctor_repair(&self) -> Result<RepairReport> {
+            anyhow::bail!("store connection failed")
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            anyhow::bail!("store connection failed")
+        }
+        async fn full_rebuild(&self) -> Result<()> {
             anyhow::bail!("store connection failed")
         }
     }

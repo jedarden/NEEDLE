@@ -27,6 +27,7 @@ struct MendSummary {
     locks_removed: u32,
     deps_cleaned: u32,
     db_repaired: bool,
+    db_rebuilt: bool,
 }
 
 impl MendSummary {
@@ -36,6 +37,7 @@ impl MendSummary {
             || self.locks_removed > 0
             || self.deps_cleaned > 0
             || self.db_repaired
+            || self.db_rebuilt
     }
 }
 
@@ -245,31 +247,86 @@ impl MendStrand {
         Ok(())
     }
 
-    // ── Step 4: Database health check ────────────────────────────────────────
+    // ── Step 4: Database health check with auto-recovery ────────────────────
 
-    /// Run `br doctor` and escalate to `--repair` if warnings are found.
+    /// Run `br doctor` to check database health. If issues are found,
+    /// escalate through the recovery pipeline:
+    ///
+    /// 1. `br doctor` (check only) → if warnings found:
+    /// 2. `br doctor --repair` → if fails:
+    /// 3. Full rebuild (rm .beads/beads.db + br sync --import + verify)
+    ///
+    /// If the full rebuild also fails, the JSONL itself may be corrupt.
     async fn check_db_health(
         &self,
         store: &dyn BeadStore,
         summary: &mut MendSummary,
     ) -> Result<()> {
-        let report = store.doctor_repair().await?;
+        // Step 1: Probe with `br doctor` (no repair).
+        let check_result = store.doctor_check().await;
 
-        let has_issues = !report.warnings.is_empty() || !report.fixed.is_empty();
-        if has_issues {
-            let warnings = report.warnings.len() as u32;
-            let fixed = report.fixed.len() as u32;
+        let needs_repair = match check_result {
+            Ok(report) => {
+                // Doctor succeeded. If there are warnings, escalate to repair.
+                !report.warnings.is_empty()
+            }
+            Err(e) => {
+                let msg = format!("{e:#}");
+                if crate::bead_store::is_corruption_error(&msg) {
+                    tracing::warn!(error = %e, "br doctor detected corruption");
+                    true
+                } else {
+                    // Non-corruption error (e.g., br not found). Propagate.
+                    return Err(e);
+                }
+            }
+        };
 
-            tracing::info!(warnings, fixed, "br doctor found issues");
-
-            let _ = self
-                .telemetry
-                .emit(EventKind::MendDbRepaired { warnings, fixed });
-
-            summary.db_repaired = true;
+        if !needs_repair {
+            return Ok(());
         }
 
-        Ok(())
+        // Step 2: Try `br doctor --repair`.
+        tracing::info!("database health check found issues, attempting repair");
+        match store.doctor_repair().await {
+            Ok(report) => {
+                let warnings = report.warnings.len() as u32;
+                let fixed = report.fixed.len() as u32;
+                tracing::info!(warnings, fixed, "br doctor --repair completed");
+
+                let _ = self
+                    .telemetry
+                    .emit(EventKind::MendDbRepaired { warnings, fixed });
+
+                summary.db_repaired = true;
+                return Ok(());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "br doctor --repair failed, attempting full rebuild"
+                );
+            }
+        }
+
+        // Step 3: Full rebuild — rm db + br sync --import + verify.
+        match store.full_rebuild().await {
+            Ok(()) => {
+                tracing::info!("database fully rebuilt from JSONL");
+
+                let _ = self.telemetry.emit(EventKind::MendDbRebuilt);
+
+                summary.db_rebuilt = true;
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "full database rebuild failed — JSONL may be corrupt"
+                );
+                Err(e)
+            }
+        }
     }
 }
 
@@ -312,6 +369,7 @@ impl super::Strand for MendStrand {
             locks_removed: summary.locks_removed,
             deps_cleaned: summary.deps_cleaned,
             db_repaired: summary.db_repaired,
+            db_rebuilt: summary.db_rebuilt,
         });
 
         if summary.did_work() {
@@ -320,6 +378,7 @@ impl super::Strand for MendStrand {
                 locks_removed = summary.locks_removed,
                 deps_cleaned = summary.deps_cleaned,
                 db_repaired = summary.db_repaired,
+                db_rebuilt = summary.db_rebuilt,
                 "mend performed cleanup — restarting waterfall"
             );
             StrandResult::WorkCreated
@@ -380,7 +439,12 @@ mod tests {
     struct MockBeadStore {
         all_beads: Vec<Bead>,
         release_count: Arc<AtomicU32>,
-        doctor_report: RepairReport,
+        /// Warnings returned by doctor_check (probe-only).
+        check_warnings: Vec<String>,
+        /// If Some, doctor_repair succeeds with this report. If None, it fails.
+        repair_report: Option<RepairReport>,
+        /// Whether full_rebuild() should fail.
+        rebuild_fails: bool,
     }
 
     impl MockBeadStore {
@@ -390,14 +454,34 @@ mod tests {
                 MockBeadStore {
                     all_beads: beads,
                     release_count: release_count.clone(),
-                    doctor_report: RepairReport::default(),
+                    check_warnings: vec![],
+                    repair_report: Some(RepairReport::default()),
+                    rebuild_fails: false,
                 },
                 release_count,
             )
         }
 
+        /// doctor_check returns warnings → escalates to repair (which succeeds).
         fn with_doctor_report(mut self, report: RepairReport) -> Self {
-            self.doctor_report = report;
+            self.check_warnings = report.warnings.clone();
+            self.repair_report = Some(report);
+            self
+        }
+
+        /// doctor_check returns warnings, doctor_repair fails → full rebuild.
+        fn with_repair_failure(mut self) -> Self {
+            self.check_warnings = vec!["corruption detected".to_string()];
+            self.repair_report = None;
+            self.rebuild_fails = false;
+            self
+        }
+
+        /// Everything fails → persistent corruption (ERRORED state).
+        fn with_all_recovery_failure(mut self) -> Self {
+            self.check_warnings = vec!["corruption detected".to_string()];
+            self.repair_report = None;
+            self.rebuild_fails = true;
             self
         }
     }
@@ -433,10 +517,26 @@ mod tests {
             Ok(BeadId::from("mock-bead"))
         }
         async fn doctor_repair(&self) -> Result<RepairReport> {
+            match &self.repair_report {
+                Some(r) => Ok(RepairReport {
+                    warnings: r.warnings.clone(),
+                    fixed: r.fixed.clone(),
+                }),
+                None => anyhow::bail!("database disk image is malformed"),
+            }
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
             Ok(RepairReport {
-                warnings: self.doctor_report.warnings.clone(),
-                fixed: self.doctor_report.fixed.clone(),
+                warnings: self.check_warnings.clone(),
+                fixed: vec![],
             })
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            if self.rebuild_fails {
+                anyhow::bail!("full rebuild failed: JSONL corrupt")
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -473,6 +573,12 @@ mod tests {
             anyhow::bail!("store error")
         }
         async fn doctor_repair(&self) -> Result<RepairReport> {
+            anyhow::bail!("store error")
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            anyhow::bail!("store error")
+        }
+        async fn full_rebuild(&self) -> Result<()> {
             anyhow::bail!("store error")
         }
     }
@@ -852,5 +958,83 @@ mod tests {
     fn try_acquire_flock_nonexistent_file_errors() {
         let result = try_acquire_flock(Path::new("/nonexistent/dir/test.lock"));
         assert!(result.is_err());
+    }
+
+    // ── Database recovery pipeline tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn db_check_warnings_escalate_to_repair() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // doctor_check returns warnings, doctor_repair succeeds.
+        let report = RepairReport {
+            warnings: vec!["index corruption".to_string()],
+            fixed: vec!["rebuilt index".to_string()],
+        };
+        let (store, _) = MockBeadStore::new(vec![]);
+        let store = store.with_doctor_report(report);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after repair, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn db_repair_failure_triggers_full_rebuild() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // doctor_check warns, doctor_repair fails, full_rebuild succeeds.
+        let (store, _) = MockBeadStore::new(vec![]);
+        let store = store.with_repair_failure();
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after full rebuild, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_corruption_is_non_fatal() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Everything fails — doctor_check warns, repair fails, rebuild fails.
+        let (store, _) = MockBeadStore::new(vec![]);
+        let store = store.with_all_recovery_failure();
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        // DB check failure is non-fatal — continues with NoWork.
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when recovery fails (non-fatal), got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_db_check_no_repair() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // doctor_check returns no warnings — no repair needed.
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when db is clean, got: {result:?}"
+        );
     }
 }

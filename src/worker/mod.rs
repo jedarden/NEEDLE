@@ -734,6 +734,12 @@ mod tests {
         async fn doctor_repair(&self) -> Result<RepairReport> {
             Ok(RepairReport::default())
         }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
     }
 
     fn make_test_bead(id: &str) -> Bead {

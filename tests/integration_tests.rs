@@ -139,6 +139,12 @@ impl BeadStore for IntegrationMockStore {
     async fn doctor_repair(&self) -> Result<RepairReport> {
         Ok(RepairReport::default())
     }
+    async fn doctor_check(&self) -> Result<RepairReport> {
+        Ok(RepairReport::default())
+    }
+    async fn full_rebuild(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 fn make_bead_with_id(id: &str) -> Bead {

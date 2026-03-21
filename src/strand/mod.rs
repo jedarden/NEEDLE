@@ -232,6 +232,12 @@ mod tests {
         async fn doctor_repair(&self) -> Result<crate::bead_store::RepairReport> {
             Ok(crate::bead_store::RepairReport::default())
         }
+        async fn doctor_check(&self) -> Result<crate::bead_store::RepairReport> {
+            Ok(crate::bead_store::RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
