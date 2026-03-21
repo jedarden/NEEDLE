@@ -230,6 +230,15 @@ mod tests {
                 result: std::sync::Mutex::new(Some(StrandResult::WorkCreated)),
             }
         }
+
+        fn error(name: &'static str, msg: &str) -> Self {
+            StubStrand {
+                name,
+                result: std::sync::Mutex::new(Some(StrandResult::Error(
+                    crate::types::StrandError::ConfigError(msg.to_string()),
+                ))),
+            }
+        }
     }
 
     #[async_trait::async_trait]
@@ -374,6 +383,75 @@ mod tests {
             Box::new(StubStrand::no_work("beta")),
         ]);
         assert_eq!(runner.strand_names(), vec!["alpha", "beta"]);
+    }
+
+    /// A strand that always returns WorkCreated (never consumed).
+    struct AlwaysWorkCreated;
+
+    #[async_trait::async_trait]
+    impl Strand for AlwaysWorkCreated {
+        fn name(&self) -> &str {
+            "always-creates"
+        }
+        async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
+            StrandResult::WorkCreated
+        }
+    }
+
+    #[tokio::test]
+    async fn error_strand_continues_to_next() {
+        let bead = make_test_bead("after-error");
+        let runner = StrandRunner::new(vec![
+            Box::new(StubStrand::error("broken", "something went wrong")),
+            Box::new(StubStrand::beads("finder", vec![bead])),
+        ]);
+        let store = EmptyStore;
+        let result = runner.select(&store).await.unwrap();
+        assert_eq!(
+            result.map(|b| b.id),
+            Some(BeadId::from("after-error".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_cap_prevents_infinite_loop() {
+        // AlwaysWorkCreated triggers restarts every pass.
+        // After MAX_RESTARTS (3), the waterfall should return None.
+        let runner = StrandRunner::new(vec![Box::new(AlwaysWorkCreated)]);
+        let store = EmptyStore;
+        let result = runner.select(&store).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn empty_bead_found_continues_to_next() {
+        let bead = make_test_bead("real-bead");
+        let runner = StrandRunner::new(vec![
+            Box::new(StubStrand::beads("empty-finder", vec![])),
+            Box::new(StubStrand::beads("real-finder", vec![bead])),
+        ]);
+        let store = EmptyStore;
+        let result = runner.select(&store).await.unwrap();
+        assert_eq!(
+            result.map(|b| b.id),
+            Some(BeadId::from("real-bead".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_beads_returns_first() {
+        let bead1 = make_test_bead("first");
+        let bead2 = make_test_bead("second");
+        let runner = StrandRunner::new(vec![Box::new(StubStrand::beads(
+            "multi",
+            vec![bead1, bead2],
+        ))]);
+        let store = EmptyStore;
+        let result = runner.select(&store).await.unwrap();
+        assert_eq!(
+            result.map(|b| b.id),
+            Some(BeadId::from("first".to_string()))
+        );
     }
 
     #[tokio::test]
