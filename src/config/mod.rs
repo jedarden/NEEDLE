@@ -277,6 +277,36 @@ pub struct TelemetryConfig {
     pub file_sink: FileSinkConfig,
 }
 
+/// Health monitoring configuration (heartbeat, peer detection).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HealthConfig {
+    /// How often to emit a heartbeat file (seconds).
+    #[serde(default = "HealthConfig::default_heartbeat_interval_secs")]
+    pub heartbeat_interval_secs: u64,
+
+    /// Time after which a heartbeat is considered stale (seconds).
+    #[serde(default = "HealthConfig::default_heartbeat_ttl_secs")]
+    pub heartbeat_ttl_secs: u64,
+}
+
+impl Default for HealthConfig {
+    fn default() -> Self {
+        HealthConfig {
+            heartbeat_interval_secs: Self::default_heartbeat_interval_secs(),
+            heartbeat_ttl_secs: Self::default_heartbeat_ttl_secs(),
+        }
+    }
+}
+
+impl HealthConfig {
+    fn default_heartbeat_interval_secs() -> u64 {
+        30
+    }
+    fn default_heartbeat_ttl_secs() -> u64 {
+        300
+    }
+}
+
 /// Prompt construction configuration.
 ///
 /// Loaded from the `prompt` section of workspace config (`.needle.yaml`).
@@ -313,6 +343,8 @@ pub struct Config {
     pub telemetry: TelemetryConfig,
     #[serde(default)]
     pub prompt: PromptConfig,
+    #[serde(default)]
+    pub health: HealthConfig,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -425,6 +457,16 @@ impl ConfigLoader {
             errors.push(ConfigError {
                 field: "worker.cpu_load_warn".to_string(),
                 message: "must be in range (0.0, 1.0]".to_string(),
+            });
+        }
+
+        if config.health.heartbeat_ttl_secs < 3 * config.health.heartbeat_interval_secs {
+            errors.push(ConfigError {
+                field: "health.heartbeat_ttl_secs".to_string(),
+                message: format!(
+                    "should be >= 3 * heartbeat_interval_secs ({}); detection may be unreliable",
+                    3 * config.health.heartbeat_interval_secs
+                ),
             });
         }
 

@@ -192,6 +192,8 @@ impl Worker {
                         error_message: msg.clone(),
                         beads_processed: self.beads_processed,
                     })?;
+                    // Best-effort stop heartbeat on error.
+                    self.health.stop();
                     // Best-effort deregister on error.
                     if let Err(e) = self.registry.deregister(&self.worker_name) {
                         tracing::warn!(error = %e, "failed to deregister from worker registry on error");
@@ -240,6 +242,11 @@ impl Worker {
         };
         if let Err(e) = self.registry.register(entry) {
             tracing::warn!(error = %e, "failed to register in worker registry");
+        }
+
+        // Start heartbeat emitter (background thread).
+        if let Err(e) = self.health.start_emitter() {
+            tracing::warn!(error = %e, "failed to start heartbeat emitter");
         }
 
         self.set_state(WorkerState::Selecting)?;
@@ -298,7 +305,7 @@ impl Worker {
         self.retry_count = 0;
         self.current_bead = None;
 
-        self.health.update_heartbeat(None).await?;
+        self.health.update_state(&WorkerState::Selecting, None);
 
         let candidate_id = self.strands.select(self.store.as_ref()).await?;
 
@@ -414,7 +421,8 @@ impl Worker {
             }
         };
 
-        self.health.update_heartbeat(Some(&bead.id)).await?;
+        self.health
+            .update_state(&WorkerState::Dispatching, Some(&bead.id));
         self.set_state(WorkerState::Executing)?;
         Ok(())
     }
@@ -505,6 +513,9 @@ impl Worker {
         self.beads_processed += 1;
         self.current_bead = None;
 
+        // Update heartbeat with new bead count.
+        self.health.update_beads_processed(self.beads_processed);
+
         // Update registry with current beads_processed count (best-effort).
         if let Err(e) = self
             .registry
@@ -562,6 +573,9 @@ impl Worker {
             uptime_secs: uptime,
         })?;
 
+        // Stop heartbeat emitter and remove heartbeat file.
+        self.health.stop();
+
         // Deregister from worker state registry (best-effort).
         if let Err(e) = self.registry.deregister(&self.worker_name) {
             tracing::warn!(error = %e, "failed to deregister from worker registry");
@@ -579,7 +593,7 @@ impl Worker {
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
-    /// Transition to a new state, emitting telemetry.
+    /// Transition to a new state, emitting telemetry and updating heartbeat.
     fn set_state(&mut self, to: WorkerState) -> Result<()> {
         let from = self.state.clone();
         tracing::debug!(from = %from, to = %to, "state transition");
@@ -587,6 +601,9 @@ impl Worker {
             from,
             to: to.clone(),
         })?;
+        // Update heartbeat shared state with the new worker state.
+        let current_bead_id = self.current_bead.as_ref().map(|b| &b.id);
+        self.health.update_state(&to, current_bead_id);
         self.state = to;
         Ok(())
     }
