@@ -768,11 +768,11 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
   Strand 1: PLUCK ──── primary work from assigned workspace
        │ no work
        ▼
-  Strand 2: EXPLORE ── look for work in other configured workspaces
-       │ no work
-       ▼
-  Strand 3: MEND ───── cleanup: stale claims, orphaned locks, health
+  Strand 2: MEND ───── cleanup: stale claims, orphaned locks, health
        │ nothing to clean
+       ▼
+  Strand 3: EXPLORE ── look for work in other configured workspaces
+       │ no work
        ▼
   Strand 4: WEAVE ──── create beads from documentation gaps (opt-in)
        │ no gaps or disabled
@@ -813,13 +813,37 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
 
 **Determinism guarantee:** The sort key `(priority, created_at)` produces the same ordering for all workers viewing the same queue state. Workers will compete for the same top-priority bead, and the claim mechanism resolves contention.
 
-## Strand 2: Explore
+## Strand 2: Mend
 
-**Purpose:** Discover work in other configured workspaces when the home workspace is empty.
+**Purpose:** Maintenance and cleanup operations that keep the bead store healthy. Runs before Explore because cleaning up stale claims or broken dependencies in the home workspace may unblock beads here — no need to roam if local work is just stuck.
+
+**Invokes agent:** No.
+
+**Entry condition:** Strand 1 returned no work.
+
+**Algorithm:**
+1. **Stale claim cleanup:** Find beads with status `in_progress` where the assigned worker has no active heartbeat (TTL expired). Release them.
+2. **Orphaned lock cleanup:** Find workspace lock files older than TTL. Remove them.
+3. **Dependency cleanup:** Find closed beads that are still listed as blockers on open beads. Remove the stale dependency links.
+4. **Database health:** Run `br doctor` (not `--repair` unless errors found).
+
+**Exit conditions:**
+| Result | Action |
+|--------|--------|
+| Cleanup performed | Return `WorkCreated` → restart from Strand 1 (released beads may now be claimable) |
+| Nothing to clean | Return `NoWork` → fall through to Strand 3 |
+
+**Design notes (from `docs/notes/bead-lifecycle-bugs.md`):**
+- Stale dependency links caused permanent blocking in NEEDLE-deprecated. Mend must clean these.
+- Distinguish "did work" from "found nothing" — v1 had an infinite loop where mend returned success on failed releases.
+
+## Strand 3: Explore
+
+**Purpose:** Discover work in other configured workspaces when the home workspace is empty and clean.
 
 **Invokes agent:** No. Explore only finds candidates — execution happens back through the standard CLAIMING → DISPATCHING flow.
 
-**Entry condition:** Strand 1 returned no work. Explore is enabled in config. At least one additional workspace is configured.
+**Entry condition:** Strands 1-2 returned no work. Explore is enabled in config. At least one additional workspace is configured.
 
 **Algorithm:**
 1. Read configured workspace list from config (explicit paths, no filesystem scanning)
@@ -833,7 +857,7 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
 | Result | Action |
 |--------|--------|
 | Candidates found in another workspace | Return `BeadFound(candidates)` with workspace override |
-| No candidates in any workspace | Return `NoWork` → fall through to Strand 3 |
+| No candidates in any workspace | Return `NoWork` → fall through to Strand 4 |
 
 **Design notes (from `docs/notes/explore-strand-bugs.md`):**
 - **No filesystem scanning.** NEEDLE-deprecated's `find`-based discovery caused 35+ CPU load with 40 workers. Workspaces must be explicitly configured.
@@ -841,37 +865,13 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
 - **Workspace list is static** for the duration of a session. It is read from config at boot and not re-evaluated.
 - **Workers do not permanently relocate.** If a worker finds work in another workspace, it processes that bead and returns to its home workspace for the next cycle.
 
-## Strand 3: Mend
-
-**Purpose:** Maintenance and cleanup operations that keep the bead store healthy.
-
-**Invokes agent:** No.
-
-**Entry condition:** Strands 1-2 returned no work.
-
-**Algorithm:**
-1. **Stale claim cleanup:** Find beads with status `in_progress` where the assigned worker has no active heartbeat (TTL expired). Release them.
-2. **Orphaned lock cleanup:** Find workspace lock files older than TTL. Remove them.
-3. **Dependency cleanup:** Find closed beads that are still listed as blockers on open beads. Remove the stale dependency links.
-4. **Database health:** Run `br doctor` (not `--repair` unless errors found).
-
-**Exit conditions:**
-| Result | Action |
-|--------|--------|
-| Cleanup performed | Return `WorkCreated` → restart from Strand 1 (released beads may now be claimable) |
-| Nothing to clean | Return `NoWork` → fall through to Strand 4 |
-
-**Design notes (from `docs/notes/bead-lifecycle-bugs.md`):**
-- Stale dependency links caused permanent blocking in NEEDLE-deprecated. Mend must clean these.
-- Distinguish "did work" from "found nothing" — v1 had an infinite loop where mend returned success on failed releases.
-
 ## Strand 4: Weave (opt-in)
 
 **Purpose:** Analyze workspace documentation for gaps and create new beads to address them.
 
 **Invokes agent:** Yes — uses the agent to analyze documentation and propose beads.
 
-**Entry condition:** Strands 1-3 returned no work. Weave is explicitly enabled in workspace config (`strands.weave.enabled: true`).
+**Entry condition:** Strands 1-3 (Pluck, Mend, Explore) returned no work. Weave is explicitly enabled in workspace config (`strands.weave.enabled: true`).
 
 **Algorithm:**
 1. Identify documentation files (README, AGENTS.md, docs/, etc.)
@@ -1214,7 +1214,7 @@ A stale heartbeat means the worker has stopped updating — it has crashed, hung
 
 ### Peer Monitoring
 
-The Mend strand (Strand 3) checks peer heartbeats:
+The Mend strand (Strand 2) checks peer heartbeats:
 
 1. Read all heartbeat files in `~/.needle/state/heartbeats/`
 2. For each stale heartbeat:
@@ -2336,8 +2336,8 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 | **Workspace flock** | Per-workspace claim serialization |
 | **Heartbeat** | File-based heartbeat emission and monitoring |
 | **Peer monitoring** | Stale/crashed worker detection |
-| **Strand 2 (Explore)** | Roam configured workspaces for work |
-| **Strand 3 (Mend)** | Stale claim cleanup, orphaned locks, dependency repair, db health |
+| **Strand 2 (Mend)** | Stale claim cleanup, orphaned locks, dependency repair, db health |
+| **Strand 3 (Explore)** | Roam configured workspaces for work |
 | **Worker state registry** | Shared fleet state file |
 | **Concurrency limits** | Provider/model max_concurrent, RPM limiting |
 | **Workspace config** | `.needle.yaml` per-workspace overrides |
