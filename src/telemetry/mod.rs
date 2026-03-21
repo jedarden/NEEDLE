@@ -211,6 +211,17 @@ pub enum EventKind {
         threshold: f64,
     },
 
+    // ── Rate limiting ──
+    RateLimitWait {
+        provider: String,
+        model: Option<String>,
+        reason: String,
+    },
+    RateLimitAllowed {
+        provider: String,
+        model: Option<String>,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -253,6 +264,8 @@ impl EventKind {
             EventKind::EffortRecorded { .. } => "effort.recorded",
             EventKind::BudgetWarning { .. } => "budget.warning",
             EventKind::BudgetStop { .. } => "budget.stop",
+            EventKind::RateLimitWait { .. } => "rate_limit.wait",
+            EventKind::RateLimitAllowed { .. } => "rate_limit.allowed",
             EventKind::SinkError { .. } => "telemetry.sink_error",
         }
     }
@@ -292,6 +305,8 @@ impl EventKind {
             | EventKind::MendCycleSummary { .. }
             | EventKind::BudgetWarning { .. }
             | EventKind::BudgetStop { .. }
+            | EventKind::RateLimitWait { .. }
+            | EventKind::RateLimitAllowed { .. }
             | EventKind::SinkError { .. } => None,
         }
     }
@@ -525,6 +540,23 @@ impl EventKind {
                     "threshold": threshold,
                 })
             }
+            EventKind::RateLimitWait {
+                provider,
+                model,
+                reason,
+            } => {
+                serde_json::json!({
+                    "provider": provider,
+                    "model": model,
+                    "reason": reason,
+                })
+            }
+            EventKind::RateLimitAllowed { provider, model } => {
+                serde_json::json!({
+                    "provider": provider,
+                    "model": model,
+                })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
         }
     }
@@ -567,6 +599,8 @@ impl EventKind {
             | EventKind::MendCycleSummary { .. }
             | EventKind::BudgetWarning { .. }
             | EventKind::BudgetStop { .. }
+            | EventKind::RateLimitWait { .. }
+            | EventKind::RateLimitAllowed { .. }
             | EventKind::SinkError { .. } => None,
         }
     }

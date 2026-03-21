@@ -355,6 +355,36 @@ impl HealthConfig {
     }
 }
 
+/// Per-provider concurrency and rate limits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProviderLimits {
+    /// Maximum concurrent workers dispatching to this provider.
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
+    /// Maximum requests per minute (token bucket capacity).
+    #[serde(default)]
+    pub requests_per_minute: Option<u32>,
+}
+
+/// Per-model concurrency limits (overrides provider-level).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ModelLimits {
+    /// Maximum concurrent workers dispatching to this model.
+    #[serde(default)]
+    pub max_concurrent: Option<u32>,
+}
+
+/// Provider/model concurrency and rate limiting configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LimitsConfig {
+    /// Per-provider limits keyed by provider name (e.g., `anthropic`, `openai`).
+    #[serde(default)]
+    pub providers: BTreeMap<String, ProviderLimits>,
+    /// Per-model limits keyed by model name (e.g., `claude-opus`).
+    #[serde(default)]
+    pub models: BTreeMap<String, ModelLimits>,
+}
+
 /// Prompt construction configuration.
 ///
 /// Loaded from the `prompt` section of workspace config (`.needle.yaml`).
@@ -473,6 +503,9 @@ pub struct Config {
     pub prompt: PromptConfig,
     #[serde(default)]
     pub health: HealthConfig,
+    /// Provider/model concurrency and rate limits.
+    #[serde(default)]
+    pub limits: LimitsConfig,
     /// Per-model token pricing (USD per million tokens).
     #[serde(default = "crate::cost::default_pricing")]
     pub pricing: PricingConfig,

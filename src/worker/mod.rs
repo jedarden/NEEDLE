@@ -25,6 +25,7 @@ use crate::dispatch::{self, Dispatcher};
 use crate::health::HealthMonitor;
 use crate::outcome::OutcomeHandler;
 use crate::prompt::{BuiltPrompt, PromptBuilder};
+use crate::rate_limit::RateLimiter;
 use crate::registry::{Registry, WorkerEntry};
 use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
@@ -43,6 +44,7 @@ pub struct Worker {
     outcome_handler: OutcomeHandler,
     health: HealthMonitor,
     registry: Registry,
+    rate_limiter: RateLimiter,
 
     // State machine fields
     state: WorkerState,
@@ -103,6 +105,8 @@ impl Worker {
             Telemetry::new(worker_name.clone()),
         );
         let registry = Registry::default_location(&config.workspace.home);
+        let rate_limiter =
+            RateLimiter::new(config.limits.clone(), &config.workspace.home.join("state"));
 
         Worker {
             config,
@@ -116,6 +120,7 @@ impl Worker {
             outcome_handler,
             health,
             registry,
+            rate_limiter,
             state: WorkerState::Booting,
             current_bead: None,
             exclusion_set: HashSet::new(),
@@ -247,6 +252,7 @@ impl Worker {
             workspace: self.config.workspace.default.clone(),
             agent: self.config.agent.default.clone(),
             model: None,
+            provider: self.resolve_provider(),
             started_at: chrono::Utc::now(),
             beads_processed: 0,
         };
@@ -430,7 +436,7 @@ impl Worker {
         Ok(())
     }
 
-    /// DISPATCHING: resolve adapter and prepare for execution.
+    /// DISPATCHING: check rate limits, resolve adapter, and prepare for execution.
     async fn do_dispatch(&mut self) -> Result<()> {
         let bead = match self.current_bead {
             Some(ref b) => b,
@@ -441,6 +447,44 @@ impl Worker {
 
         self.health
             .update_state(&WorkerState::Dispatching, Some(&bead.id));
+
+        // Check rate limits before dispatching.
+        let adapter = self.resolve_adapter()?;
+        let provider = adapter.provider.as_deref();
+        let model = adapter.model.as_deref();
+
+        let decision = self.rate_limiter.check(provider, model, &self.registry)?;
+
+        if !decision.is_allowed() {
+            let reason = format!("{decision}");
+            tracing::info!(
+                reason = %reason,
+                "rate limited, waiting before retry"
+            );
+            self.telemetry.emit(EventKind::RateLimitWait {
+                provider: provider.unwrap_or("unknown").to_string(),
+                model: model.map(|s| s.to_string()),
+                reason: reason.clone(),
+            })?;
+
+            // Wait before retrying (5 seconds).
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            // Stay in Dispatching state to retry the rate limit check.
+            return Ok(());
+        }
+
+        self.telemetry.emit(EventKind::RateLimitAllowed {
+            provider: provider.unwrap_or("unknown").to_string(),
+            model: model.map(|s| s.to_string()),
+        })?;
+
+        // Check system resources (CPU and memory warnings).
+        crate::rate_limit::RateLimiter::check_system_resources(
+            self.config.worker.cpu_load_warn,
+            self.config.worker.memory_free_warn_mb,
+        );
+
         self.set_state(WorkerState::Executing)?;
         Ok(())
     }
@@ -753,6 +797,14 @@ impl Worker {
         }
 
         Ok(())
+    }
+
+    /// Resolve the provider name from the configured adapter.
+    fn resolve_provider(&self) -> Option<String> {
+        let adapter_name = &self.config.agent.default;
+        self.dispatcher
+            .adapter(adapter_name)
+            .and_then(|a| a.provider.clone())
     }
 
     /// Return the current worker state (for testing/inspection).

@@ -13,6 +13,7 @@ pub mod health;
 pub mod outcome;
 pub mod peer;
 pub mod prompt;
+pub mod rate_limit;
 pub mod registry;
 pub mod strand;
 pub mod telemetry;

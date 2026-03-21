@@ -536,6 +536,7 @@ mod tests {
                 workspace: PathBuf::from("/tmp"),
                 agent: "test".to_string(),
                 model: None,
+                provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
             })

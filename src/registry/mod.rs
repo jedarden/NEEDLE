@@ -33,6 +33,8 @@ pub struct WorkerEntry {
     pub agent: String,
     /// Model name (if known).
     pub model: Option<String>,
+    /// Provider name (e.g., `anthropic`, `openai`).
+    pub provider: Option<String>,
     /// When the worker started.
     pub started_at: DateTime<Utc>,
     /// Number of beads processed so far.
@@ -224,6 +226,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/test-workspace"),
             agent: "claude".to_string(),
             model: Some("sonnet".to_string()),
+            provider: Some("anthropic".to_string()),
             started_at: Utc::now(),
             beads_processed: 0,
         }
