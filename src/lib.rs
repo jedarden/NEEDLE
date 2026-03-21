@@ -10,6 +10,7 @@ pub mod config;
 pub mod dispatch;
 pub mod health;
 pub mod outcome;
+pub mod peer;
 pub mod prompt;
 pub mod registry;
 pub mod strand;
