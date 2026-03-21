@@ -207,13 +207,11 @@ impl Outcome {
             127 => Outcome::AgentNotFound,
             // Failure range: 2-123
             2..=123 => Outcome::Failure,
-            // Failure: 125-126 (125 is timeout's exit status, 126 is command not executable)
-            125..=126 => Outcome::Failure,
+            // Failure: 125-128 (not >128 per spec, so 128 is not Crash)
+            125..=128 => Outcome::Failure,
             // Signal exits: >128 (128 + signal number)
             // These are all crashes per the spec.
             129..=i32::MAX => Outcome::Crash(exit_code),
-            // Exit code 128 is technically "exit from shell" but treat as crash
-            128 => Outcome::Crash(128),
             // Negative exit codes (abnormal termination)
             i32::MIN..=-1 => Outcome::Crash(exit_code),
         }
@@ -537,6 +535,7 @@ mod tests {
         assert_eq!(Outcome::classify(125, false), Outcome::Failure);
         assert_eq!(Outcome::classify(126, false), Outcome::Failure);
         // >128 -> Crash (signal exits)
+        assert_eq!(Outcome::classify(128, false), Outcome::Failure); // 128 is NOT >128 per spec
         assert_eq!(Outcome::classify(129, false), Outcome::Crash(129));
         assert_eq!(Outcome::classify(130, false), Outcome::Crash(130)); // SIGINT -> Crash
         assert_eq!(Outcome::classify(137, false), Outcome::Crash(137)); // SIGKILL
@@ -671,6 +670,17 @@ pub enum BeadAction {
     None,
 }
 
+impl fmt::Display for BeadAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BeadAction::Released => write!(f, "released"),
+            BeadAction::Deferred => write!(f, "deferred"),
+            BeadAction::Alerted => write!(f, "alerted"),
+            BeadAction::None => write!(f, "none"),
+        }
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // HandlerResult
 // ──────────────────────────────────────────────────────────────────────────────
@@ -701,4 +711,37 @@ pub enum IdentifierScheme {
     Sequential,
     /// Use a UUID v4.
     Uuid,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ExhaustionDiagnosis
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Diagnosis from the Knot strand when all work-finding strategies are exhausted.
+///
+/// This three-state model prevents false-positive starvation alerts by
+/// distinguishing between "queue genuinely empty" vs "all work claimed by
+/// other workers" vs "beads exist but are invisible due to configuration."
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExhaustionDiagnosis {
+    /// No beads exist in the workspace at all — queue is genuinely empty.
+    /// This is normal idle, not an alert condition.
+    NoBeadsExist,
+    /// All beads are claimed by other workers — wait for them to finish.
+    /// This is normal congestion, not an alert condition.
+    AllClaimed,
+    /// Open beads exist but Pluck found none — indicates a config error.
+    /// This is an alert condition: beads may be invisible due to label filters.
+    Invisible,
+}
+
+impl fmt::Display for ExhaustionDiagnosis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ExhaustionDiagnosis::NoBeadsExist => write!(f, "no_beads_exist"),
+            ExhaustionDiagnosis::AllClaimed => write!(f, "all_claimed"),
+            ExhaustionDiagnosis::Invisible => write!(f, "invisible"),
+        }
+    }
 }

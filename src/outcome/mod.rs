@@ -5,56 +5,18 @@
 //!
 //! Depends on: `types`, `config`, `bead_store`, `telemetry`.
 
-use anyhow::Result;
+use std::fmt;
+
+use anyhow::{Context, Result};
+use chrono::Utc;
 
 use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{AgentOutcome, BeadId, BeadStatus, Outcome};
+use crate::types::{AgentOutcome, Bead, BeadAction, BeadStatus, HandlerResult, Outcome};
 
 // ──────────────────────────────────────────────────────────────────────────────
-// BeadAction
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// What happened to the bead after outcome handling.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BeadAction {
-    /// Bead was released back to open status.
-    Released,
-    /// Bead was released and marked as deferred.
-    Deferred,
-    /// Bead was released and an alert was created.
-    Alerted,
-    /// No bead state change (agent owns closure).
-    None,
-}
-
-impl std::fmt::Display for BeadAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BeadAction::Released => write!(f, "released"),
-            BeadAction::Deferred => write!(f, "deferred"),
-            BeadAction::Alerted => write!(f, "alerted"),
-            BeadAction::None => write!(f, "none"),
-        }
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// HandlerResult
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// The result of outcome handling — describes what happened and what was emitted.
-#[derive(Debug)]
-pub struct HandlerResult {
-    /// The classified outcome.
-    pub outcome: Outcome,
-    /// What happened to the bead.
-    pub bead_action: BeadAction,
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// Re-export classify for convenience
+// classify (convenience re-export)
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Classify an agent exit code into an `Outcome`, with shutdown signal support.
@@ -87,213 +49,264 @@ impl OutcomeHandler {
     pub async fn handle(
         &self,
         store: &dyn BeadStore,
-        bead_id: &BeadId,
-        output: AgentOutcome,
+        bead: &Bead,
+        output: &AgentOutcome,
         was_interrupted: bool,
     ) -> Result<HandlerResult> {
         let outcome = classify(output.exit_code, was_interrupted);
 
-        let outcome_name = outcome_to_string(&outcome);
+        tracing::info!(
+            bead_id = %bead.id,
+            exit_code = output.exit_code,
+            outcome = %outcome,
+            "handling agent outcome"
+        );
+
         self.telemetry.emit(EventKind::OutcomeClassified {
-            bead_id: bead_id.clone(),
-            outcome: outcome_name.clone(),
+            bead_id: bead.id.clone(),
+            outcome: outcome.as_str().to_string(),
             exit_code: output.exit_code,
         })?;
 
-        let bead_action = match outcome {
-            Outcome::Success => self.handle_success(store, bead_id).await?,
-            Outcome::Failure => self.handle_failure(store, bead_id).await?,
-            Outcome::Timeout => self.handle_timeout(store, bead_id).await?,
-            Outcome::AgentNotFound => self.handle_agent_not_found(store, bead_id).await?,
-            Outcome::Interrupted => self.handle_interrupted(store, bead_id).await?,
-            Outcome::Crash(code) => self.handle_crash(store, bead_id, code).await?,
+        let (bead_action, telemetry_events) = match outcome.clone() {
+            Outcome::Success => self.handle_success(store, bead).await?,
+            Outcome::Failure => self.handle_failure(store, bead).await?,
+            Outcome::Timeout => self.handle_timeout(store, bead).await?,
+            Outcome::AgentNotFound => self.handle_agent_not_found(store, bead).await?,
+            Outcome::Interrupted => self.handle_interrupted(store, bead).await?,
+            Outcome::Crash(code) => self.handle_crash(store, bead, code).await?,
         };
 
         self.telemetry.emit(EventKind::OutcomeHandled {
-            bead_id: bead_id.clone(),
-            outcome: outcome_name,
+            bead_id: bead.id.clone(),
+            outcome: outcome.as_str().to_string(),
             action: bead_action.to_string(),
         })?;
 
         Ok(HandlerResult {
             outcome,
             bead_action,
+            telemetry_events,
         })
     }
 
     /// Success: verify bead was closed by agent. If still open, emit orphaned warning.
     /// NEEDLE does NOT auto-close — the agent owns closure via `br close`.
-    async fn handle_success(&self, store: &dyn BeadStore, bead_id: &BeadId) -> Result<BeadAction> {
-        tracing::info!(bead_id = %bead_id, "agent completed successfully");
+    async fn handle_success(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
+        tracing::info!(bead_id = %bead.id, "agent completed successfully");
 
-        // Check if the agent closed the bead.
-        match store.show(bead_id).await {
-            Ok(bead) => {
-                match bead.status {
-                    BeadStatus::Done => {
-                        tracing::info!(bead_id = %bead_id, "bead confirmed closed by agent");
-                    }
-                    BeadStatus::Open | BeadStatus::InProgress | BeadStatus::Blocked => {
-                        // Agent exited 0 but didn't close the bead — orphaned.
-                        tracing::warn!(
-                            bead_id = %bead_id,
-                            status = %bead.status,
-                            "agent exited successfully but bead is still open (orphaned)"
-                        );
-                        self.telemetry.emit(EventKind::BeadOrphaned {
-                            bead_id: bead_id.clone(),
-                        })?;
-                    }
+        let mut events = Vec::new();
+
+        match store.show(&bead.id).await {
+            Ok(current) => match current.status {
+                BeadStatus::Done => {
+                    tracing::info!(bead_id = %bead.id, "bead confirmed closed by agent");
+                    events.push(EventKind::BeadCompleted {
+                        bead_id: bead.id.clone(),
+                        duration_ms: 0,
+                    });
                 }
-            }
+                BeadStatus::Open | BeadStatus::InProgress | BeadStatus::Blocked => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        status = %current.status,
+                        "agent exited successfully but bead is still open (orphaned)"
+                    );
+                    self.telemetry.emit(EventKind::BeadOrphaned {
+                        bead_id: bead.id.clone(),
+                    })?;
+                    events.push(EventKind::BeadOrphaned {
+                        bead_id: bead.id.clone(),
+                    });
+                }
+            },
             Err(e) => {
-                // Can't verify — log warning but don't fail.
                 tracing::warn!(
-                    bead_id = %bead_id,
+                    bead_id = %bead.id,
                     error = %e,
                     "could not verify bead closure status"
                 );
             }
         }
 
-        Ok(BeadAction::None)
+        Ok((BeadAction::None, events))
     }
 
     /// Failure: evaluate for mitosis (Phase 2 stub). If not splittable, release
     /// and increment failure count label.
-    async fn handle_failure(&self, store: &dyn BeadStore, bead_id: &BeadId) -> Result<BeadAction> {
-        tracing::warn!(bead_id = %bead_id, "agent failure — releasing bead");
+    async fn handle_failure(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
+        tracing::warn!(bead_id = %bead.id, "agent failure — releasing bead");
 
         // Phase 1 stub: mitosis always returns "not splittable".
-        let splittable = false;
+        let _splittable = false;
 
-        if splittable {
-            // Phase 2: split bead into children, block parent.
-            unreachable!("mitosis not implemented in Phase 1");
-        }
+        store.release(&bead.id).await?;
+        self.increment_failure_count(store, bead).await?;
 
-        // Release bead back to open.
-        store.release(bead_id).await?;
-
-        // Increment failure count label.
-        self.increment_failure_count(store, bead_id).await?;
-
-        self.telemetry.emit(EventKind::BeadReleased {
-            bead_id: bead_id.clone(),
+        let event = EventKind::BeadReleased {
+            bead_id: bead.id.clone(),
             reason: "failure".to_string(),
-        })?;
+        };
+        self.telemetry.emit(event.clone())?;
 
-        Ok(BeadAction::Released)
+        Ok((BeadAction::Released, vec![event]))
     }
 
     /// Timeout: release bead and add `deferred` label.
-    async fn handle_timeout(&self, store: &dyn BeadStore, bead_id: &BeadId) -> Result<BeadAction> {
-        tracing::warn!(bead_id = %bead_id, "agent timed out — releasing bead as deferred");
+    async fn handle_timeout(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
+        tracing::warn!(bead_id = %bead.id, "agent timed out — releasing bead as deferred");
 
-        store.release(bead_id).await?;
+        store.release(&bead.id).await?;
 
-        // Add deferred label so we can track timeout patterns.
-        if let Err(e) = store.add_label(bead_id, "deferred").await {
-            tracing::warn!(bead_id = %bead_id, error = %e, "failed to add deferred label");
+        if let Err(e) = store.add_label(&bead.id, "deferred").await {
+            tracing::warn!(bead_id = %bead.id, error = %e, "failed to add deferred label");
         }
 
-        self.telemetry.emit(EventKind::BeadReleased {
-            bead_id: bead_id.clone(),
+        let event = EventKind::BeadReleased {
+            bead_id: bead.id.clone(),
             reason: "timeout".to_string(),
-        })?;
+        };
+        self.telemetry.emit(event.clone())?;
 
-        Ok(BeadAction::Deferred)
+        Ok((BeadAction::Deferred, vec![event]))
     }
 
-    /// Crash: release bead and create alert with diagnostic info.
+    /// Crash: release bead and create alert bead with diagnostic info.
     async fn handle_crash(
         &self,
         store: &dyn BeadStore,
-        bead_id: &BeadId,
+        bead: &Bead,
         signal_code: i32,
-    ) -> Result<BeadAction> {
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::error!(
-            bead_id = %bead_id,
+            bead_id = %bead.id,
             signal_code,
             agent = %self.config.agent.default,
             "agent crashed — releasing bead and creating alert"
         );
 
-        store.release(bead_id).await?;
+        store.release(&bead.id).await?;
 
-        // Add crash label for tracking.
-        if let Err(e) = store.add_label(bead_id, "crash").await {
-            tracing::warn!(bead_id = %bead_id, error = %e, "failed to add crash label");
-        }
-
-        self.telemetry.emit(EventKind::BeadReleased {
-            bead_id: bead_id.clone(),
-            reason: format!("crash (signal {})", signal_code),
-        })?;
-
-        // Phase 1: log the alert details. Phase 2 will create an actual alert bead
-        // via BeadStore::create when that method is available.
-        tracing::error!(
-            bead_id = %bead_id,
-            agent = %self.config.agent.default,
+        // Create alert bead with diagnostic info.
+        let signal_num = if signal_code > 128 {
+            signal_code - 128
+        } else {
+            signal_code
+        };
+        let timestamp = Utc::now().to_rfc3339();
+        let alert_title = format!("ALERT: Agent crash on bead {}", bead.id);
+        let alert_body = format!(
+            "## Agent Crash Report\n\
+             \n\
+             - **Bead ID**: {}\n\
+             - **Agent**: {}\n\
+             - **Exit code**: {} (signal {})\n\
+             - **Workspace**: {}\n\
+             - **Timestamp**: {}\n\
+             \n\
+             The agent process was killed. This bead has been released for retry.",
+            bead.id,
+            self.config.agent.default,
             signal_code,
-            workspace = %self.config.workspace.default.display(),
-            "ALERT: Agent crash — manual investigation required"
+            signal_num,
+            bead.workspace.display(),
+            timestamp,
         );
 
-        Ok(BeadAction::Alerted)
+        let alert_labels = ["alert", "crash", &format!("signal-{}", signal_num)];
+        match store
+            .create_bead(&alert_title, &alert_body, &alert_labels)
+            .await
+        {
+            Ok(alert_id) => {
+                tracing::info!(
+                    bead_id = %bead.id,
+                    %alert_id,
+                    "crash alert bead created"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to create crash alert bead"
+                );
+            }
+        }
+
+        let event = EventKind::BeadReleased {
+            bead_id: bead.id.clone(),
+            reason: format!("crash_signal_{}", signal_code),
+        };
+        self.telemetry.emit(event.clone())?;
+
+        Ok((BeadAction::Alerted, vec![event]))
     }
 
     /// AgentNotFound: release bead, emit error. No retry — this is a config issue.
     async fn handle_agent_not_found(
         &self,
         store: &dyn BeadStore,
-        bead_id: &BeadId,
-    ) -> Result<BeadAction> {
+        bead: &Bead,
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::error!(
-            bead_id = %bead_id,
+            bead_id = %bead.id,
             agent = %self.config.agent.default,
             "agent binary not found — releasing bead (config issue, no retry)"
         );
 
-        store.release(bead_id).await?;
+        store.release(&bead.id).await?;
 
-        self.telemetry.emit(EventKind::BeadReleased {
-            bead_id: bead_id.clone(),
+        let event = EventKind::BeadReleased {
+            bead_id: bead.id.clone(),
             reason: "agent_not_found".to_string(),
-        })?;
+        };
+        self.telemetry.emit(event.clone())?;
 
-        Ok(BeadAction::Released)
+        Ok((BeadAction::Released, vec![event]))
     }
 
     /// Interrupted: release bead for graceful shutdown.
     async fn handle_interrupted(
         &self,
         store: &dyn BeadStore,
-        bead_id: &BeadId,
-    ) -> Result<BeadAction> {
-        tracing::info!(bead_id = %bead_id, "agent interrupted — releasing bead for clean shutdown");
+        bead: &Bead,
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
+        tracing::info!(bead_id = %bead.id, "agent interrupted — releasing bead for clean shutdown");
 
-        store.release(bead_id).await?;
+        store.release(&bead.id).await?;
 
-        self.telemetry.emit(EventKind::BeadReleased {
-            bead_id: bead_id.clone(),
+        let event = EventKind::BeadReleased {
+            bead_id: bead.id.clone(),
             reason: "interrupted".to_string(),
-        })?;
+        };
+        self.telemetry.emit(event.clone())?;
 
-        Ok(BeadAction::Released)
+        Ok((BeadAction::Released, vec![event]))
     }
 
     /// Increment the failure count label on a bead.
     ///
-    /// Labels follow the pattern `failure:N`. If `failure:2` exists, we add
-    /// `failure:3`. If no failure label exists, we add `failure:1`.
-    async fn increment_failure_count(&self, store: &dyn BeadStore, bead_id: &BeadId) -> Result<()> {
-        let labels = match store.labels(bead_id).await {
+    /// Labels follow the pattern `failure-count:N`. If `failure-count:2` exists,
+    /// the old label is removed and `failure-count:3` is added.
+    async fn increment_failure_count(&self, store: &dyn BeadStore, bead: &Bead) -> Result<()> {
+        let labels = match store.labels(&bead.id).await {
             Ok(l) => l,
             Err(e) => {
                 tracing::warn!(
-                    bead_id = %bead_id,
+                    bead_id = %bead.id,
                     error = %e,
                     "could not read labels to increment failure count"
                 );
@@ -303,38 +316,57 @@ impl OutcomeHandler {
 
         let current_count = labels
             .iter()
-            .filter_map(|l| l.strip_prefix("failure:"))
+            .filter_map(|l| l.strip_prefix("failure-count:"))
             .filter_map(|n| n.parse::<u32>().ok())
             .max()
             .unwrap_or(0);
 
-        let new_label = format!("failure:{}", current_count + 1);
-        if let Err(e) = store.add_label(bead_id, &new_label).await {
-            tracing::warn!(
-                bead_id = %bead_id,
-                label = %new_label,
-                error = %e,
-                "failed to add failure count label"
-            );
+        let new_count = current_count + 1;
+        let new_label = format!("failure-count:{}", new_count);
+
+        // Remove old failure-count labels before adding the new one.
+        for label in &labels {
+            if label.starts_with("failure-count:") {
+                if let Err(e) = store.remove_label(&bead.id, label).await {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        label,
+                        error = %e,
+                        "failed to remove old failure-count label"
+                    );
+                }
+            }
         }
+
+        store
+            .add_label(&bead.id, &new_label)
+            .await
+            .with_context(|| format!("failed to add label {} to bead {}", new_label, bead.id))?;
+
+        tracing::debug!(
+            bead_id = %bead.id,
+            count = new_count,
+            "failure count incremented"
+        );
 
         Ok(())
     }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Outcome Display
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Convert an `Outcome` to its string representation for telemetry.
-fn outcome_to_string(outcome: &Outcome) -> String {
-    match outcome {
-        Outcome::Success => "success".to_string(),
-        Outcome::Failure => "failure".to_string(),
-        Outcome::Timeout => "timeout".to_string(),
-        Outcome::AgentNotFound => "agent_not_found".to_string(),
-        Outcome::Interrupted => "interrupted".to_string(),
-        Outcome::Crash(code) => format!("crash({})", code),
+impl fmt::Display for Outcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Outcome::Success => write!(f, "Success"),
+            Outcome::Failure => write!(f, "Failure"),
+            Outcome::Timeout => write!(f, "Timeout"),
+            Outcome::AgentNotFound => write!(f, "AgentNotFound"),
+            Outcome::Interrupted => write!(f, "Interrupted"),
+            Outcome::Crash(code) => write!(f, "Crash({})", code),
+        }
     }
 }
 
@@ -346,34 +378,34 @@ fn outcome_to_string(outcome: &Outcome) -> String {
 mod tests {
     use super::*;
     use crate::bead_store::Filters;
-    use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
+    use crate::telemetry::TelemetrySink;
+    use crate::types::{BeadId, ClaimResult};
     use async_trait::async_trait;
     use chrono::Utc;
     use std::path::PathBuf;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     // ── Mock BeadStore ──
 
-    /// Actions recorded by the mock store.
     #[derive(Debug, Clone)]
     enum StoreAction {
         Release(String),
         AddLabel(String, String),
+        RemoveLabel(String, String),
         Show(String),
+        CreateBead(String, String),
     }
 
     struct MockBeadStore {
-        actions: Arc<Mutex<Vec<StoreAction>>>,
-        /// What status to return for show() calls.
+        actions: Mutex<Vec<StoreAction>>,
         show_status: BeadStatus,
-        /// Labels to return for labels() calls.
         labels: Vec<String>,
     }
 
     impl MockBeadStore {
         fn new(show_status: BeadStatus) -> Self {
             MockBeadStore {
-                actions: Arc::new(Mutex::new(Vec::new())),
+                actions: Mutex::new(Vec::new()),
                 show_status,
                 labels: Vec::new(),
             }
@@ -442,21 +474,48 @@ mod tests {
                 .push(StoreAction::AddLabel(id.to_string(), label.to_string()));
             Ok(())
         }
-        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+        async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            self.actions
+                .lock()
+                .unwrap()
+                .push(StoreAction::RemoveLabel(id.to_string(), label.to_string()));
             Ok(())
         }
-        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
-            Ok(BeadId::from("new-bead".to_string()))
+        async fn create_bead(&self, title: &str, body: &str, _labels: &[&str]) -> Result<BeadId> {
+            self.actions
+                .lock()
+                .unwrap()
+                .push(StoreAction::CreateBead(title.to_string(), body.to_string()));
+            Ok(BeadId::from("alert-001"))
         }
         async fn doctor_repair(&self) -> Result<crate::bead_store::RepairReport> {
             Ok(crate::bead_store::RepairReport::default())
         }
     }
 
+    struct NopSink;
+
+    impl TelemetrySink for NopSink {
+        fn write(&self, _event: &crate::telemetry::TelemetryEvent) -> Result<()> {
+            Ok(())
+        }
+        fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
     fn test_handler() -> OutcomeHandler {
         let config = Config::default();
-        let telemetry = Telemetry::new("test-worker".to_string());
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), NopSink);
         OutcomeHandler::new(config, telemetry)
+    }
+
+    fn test_output(exit_code: i32) -> AgentOutcome {
+        AgentOutcome {
+            exit_code,
+            stdout: String::new(),
+            stderr: String::new(),
+        }
     }
 
     // ── classify tests ──
@@ -474,29 +533,23 @@ mod tests {
         assert_eq!(classify(1, false), Outcome::Failure);
         assert_eq!(classify(124, false), Outcome::Timeout);
         assert_eq!(classify(127, false), Outcome::AgentNotFound);
-        // 130 is >128, so it's a crash (signal exit), not Interrupted.
-        // Interrupted only comes from the was_interrupted flag.
-        assert_eq!(classify(130, false), Outcome::Crash(130));
+        assert_eq!(classify(129, false), Outcome::Crash(129));
     }
 
     #[test]
-    fn classify_no_wildcard_arms_on_outcome() {
-        // Verify all exit code ranges produce explicit outcomes, matching
-        // the actual Outcome::classify mapping in types.
+    fn classify_no_wildcard_arms() {
+        // Verify key exit codes map correctly per spec.
         assert_eq!(classify(0, false), Outcome::Success);
         assert_eq!(classify(1, false), Outcome::Failure);
         assert_eq!(classify(2, false), Outcome::Failure);
         assert_eq!(classify(99, false), Outcome::Failure);
-        assert_eq!(classify(100, false), Outcome::Failure); // 2..=123 range
+        assert_eq!(classify(100, false), Outcome::Failure);
         assert_eq!(classify(124, false), Outcome::Timeout);
-        assert_eq!(classify(125, false), Outcome::Failure); // 125-126 are failure
-        assert_eq!(classify(126, false), Outcome::Failure);
-        assert_eq!(classify(127, false), Outcome::AgentNotFound);
-        assert_eq!(classify(128, false), Outcome::Crash(128));
-        assert_eq!(classify(130, false), Outcome::Crash(130)); // signal exits
-        assert_eq!(classify(143, false), Outcome::Crash(143)); // SIGTERM
+        assert_eq!(classify(125, false), Outcome::Failure);
+        assert_eq!(classify(128, false), Outcome::Failure); // not >128 per spec
+        assert_eq!(classify(129, false), Outcome::Crash(129));
+        assert_eq!(classify(137, false), Outcome::Crash(137));
         assert_eq!(classify(-9, false), Outcome::Crash(-9));
-        assert_eq!(classify(200, false), Outcome::Crash(200)); // >128
     }
 
     // ── handle tests ──
@@ -505,21 +558,16 @@ mod tests {
     async fn handle_success_bead_closed_by_agent() {
         let handler = test_handler();
         let store = MockBeadStore::new(BeadStatus::Done);
-        let bead_id = BeadId::from("needle-test");
-        let output = AgentOutcome {
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
+        let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
-            .handle(&store, &bead_id, output, false)
+            .handle(&store, &bead, &test_output(0), false)
             .await
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Success);
         assert_eq!(result.bead_action, BeadAction::None);
-        // No release should happen — agent closed the bead.
+        assert!(!result.telemetry_events.is_empty());
         let actions = store.actions();
         assert!(
             !actions.iter().any(|a| matches!(a, StoreAction::Release(_))),
@@ -531,46 +579,40 @@ mod tests {
     async fn handle_success_bead_still_open_emits_orphaned() {
         let handler = test_handler();
         let store = MockBeadStore::new(BeadStatus::InProgress);
-        let bead_id = BeadId::from("needle-test");
-        let output = AgentOutcome {
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
+        let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
-            .handle(&store, &bead_id, output, false)
+            .handle(&store, &bead, &test_output(0), false)
             .await
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Success);
         assert_eq!(result.bead_action, BeadAction::None);
-        // Show was called to check status.
         let actions = store.actions();
         assert!(
             actions.iter().any(|a| matches!(a, StoreAction::Show(_))),
             "success should check bead status"
         );
+        assert!(result
+            .telemetry_events
+            .iter()
+            .any(|e| matches!(e, EventKind::BeadOrphaned { .. })));
     }
 
     #[tokio::test]
     async fn handle_failure_releases_and_increments_count() {
         let handler = test_handler();
         let store = MockBeadStore::new(BeadStatus::InProgress);
-        let bead_id = BeadId::from("needle-test");
-        let output = AgentOutcome {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
+        let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
-            .handle(&store, &bead_id, output, false)
+            .handle(&store, &bead, &test_output(1), false)
             .await
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
         assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(!result.telemetry_events.is_empty());
 
         let actions = store.actions();
         assert!(
@@ -580,37 +622,38 @@ mod tests {
             "failure must release bead"
         );
         assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure:1")),
-            "failure must increment failure count"
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:1")
+            ),
+            "failure must add failure-count:1"
         );
     }
 
     #[tokio::test]
     async fn handle_failure_increments_existing_count() {
         let handler = test_handler();
-        let store =
-            MockBeadStore::new(BeadStatus::InProgress).with_labels(vec!["failure:2".to_string()]);
-        let bead_id = BeadId::from("needle-test");
-        let output = AgentOutcome {
-            exit_code: 1,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:2".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
-            .handle(&store, &bead_id, output, false)
+            .handle(&store, &bead, &test_output(1), false)
             .await
             .unwrap();
 
         assert_eq!(result.bead_action, BeadAction::Released);
         let actions = store.actions();
         assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure:3")),
-            "should increment to failure:3"
+            actions.iter().any(
+                |a| matches!(a, StoreAction::RemoveLabel(_, label) if label == "failure-count:2")
+            ),
+            "should remove old failure-count label"
+        );
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:3")
+            ),
+            "should add failure-count:3"
         );
     }
 
@@ -618,15 +661,10 @@ mod tests {
     async fn handle_timeout_releases_and_adds_deferred() {
         let handler = test_handler();
         let store = MockBeadStore::new(BeadStatus::InProgress);
-        let bead_id = BeadId::from("needle-test");
-        let output = AgentOutcome {
-            exit_code: 124,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
+        let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
-            .handle(&store, &bead_id, output, false)
+            .handle(&store, &bead, &test_output(124), false)
             .await
             .unwrap();
 
@@ -649,22 +687,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_crash_releases_and_alerts() {
+    async fn handle_crash_releases_and_creates_alert_bead() {
         let handler = test_handler();
         let store = MockBeadStore::new(BeadStatus::InProgress);
-        let bead_id = BeadId::from("needle-test");
-        let output = AgentOutcome {
-            exit_code: -9,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
+        let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
-            .handle(&store, &bead_id, output, false)
+            .handle(&store, &bead, &test_output(137), false)
             .await
             .unwrap();
 
-        assert_eq!(result.outcome, Outcome::Crash(-9));
+        assert_eq!(result.outcome, Outcome::Crash(137));
         assert_eq!(result.bead_action, BeadAction::Alerted);
 
         let actions = store.actions();
@@ -675,26 +708,36 @@ mod tests {
             "crash must release bead"
         );
         assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "crash")),
-            "crash must add crash label"
+            actions.iter().any(
+                |a| matches!(a, StoreAction::CreateBead(title, _) if title.contains("needle-test"))
+            ),
+            "crash must create alert bead referencing the original bead"
         );
+    }
+
+    #[tokio::test]
+    async fn handle_crash_negative_exit_code() {
+        let handler = test_handler();
+        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(-1), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Crash(-1));
+        assert_eq!(result.bead_action, BeadAction::Alerted);
     }
 
     #[tokio::test]
     async fn handle_agent_not_found_releases() {
         let handler = test_handler();
         let store = MockBeadStore::new(BeadStatus::InProgress);
-        let bead_id = BeadId::from("needle-test");
-        let output = AgentOutcome {
-            exit_code: 127,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
+        let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
-            .handle(&store, &bead_id, output, false)
+            .handle(&store, &bead, &test_output(127), false)
             .await
             .unwrap();
 
@@ -714,16 +757,10 @@ mod tests {
     async fn handle_interrupted_releases() {
         let handler = test_handler();
         let store = MockBeadStore::new(BeadStatus::InProgress);
-        let bead_id = BeadId::from("needle-test");
-        let output = AgentOutcome {
-            exit_code: 0,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
+        let bead = test_bead(BeadStatus::InProgress);
 
-        // was_interrupted = true overrides exit code.
         let result = handler
-            .handle(&store, &bead_id, output, true)
+            .handle(&store, &bead, &test_output(0), true)
             .await
             .unwrap();
 
@@ -739,35 +776,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn outcome_to_string_covers_all_variants() {
-        // Verify all variants produce reasonable strings.
-        assert_eq!(outcome_to_string(&Outcome::Success), "success");
-        assert_eq!(outcome_to_string(&Outcome::Failure), "failure");
-        assert_eq!(outcome_to_string(&Outcome::Timeout), "timeout");
-        assert_eq!(
-            outcome_to_string(&Outcome::AgentNotFound),
-            "agent_not_found"
+    #[tokio::test]
+    async fn handle_failure_emits_telemetry_events() {
+        let handler = test_handler();
+        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(2), false)
+            .await
+            .unwrap();
+
+        assert!(
+            result
+                .telemetry_events
+                .iter()
+                .any(|e| matches!(e, EventKind::BeadReleased { .. })),
+            "failure should emit BeadReleased event"
         );
-        assert_eq!(outcome_to_string(&Outcome::Interrupted), "interrupted");
-        assert_eq!(outcome_to_string(&Outcome::Crash(-9)), "crash(-9)");
     }
 
     #[test]
-    fn bead_action_display() {
-        assert_eq!(BeadAction::Released.to_string(), "released");
-        assert_eq!(BeadAction::Deferred.to_string(), "deferred");
-        assert_eq!(BeadAction::Alerted.to_string(), "alerted");
-        assert_eq!(BeadAction::None.to_string(), "none");
-    }
-
-    #[test]
-    fn handler_result_contains_both_fields() {
-        let result = HandlerResult {
-            outcome: Outcome::Success,
-            bead_action: BeadAction::None,
-        };
-        assert_eq!(result.outcome, Outcome::Success);
-        assert_eq!(result.bead_action, BeadAction::None);
+    fn outcome_display_covers_all_variants() {
+        assert_eq!(format!("{}", Outcome::Success), "Success");
+        assert_eq!(format!("{}", Outcome::Failure), "Failure");
+        assert_eq!(format!("{}", Outcome::Timeout), "Timeout");
+        assert_eq!(format!("{}", Outcome::AgentNotFound), "AgentNotFound");
+        assert_eq!(format!("{}", Outcome::Interrupted), "Interrupted");
+        assert_eq!(format!("{}", Outcome::Crash(-9)), "Crash(-9)");
     }
 }

@@ -28,35 +28,40 @@ impl HealthMonitor {
     }
 
     /// Start the heartbeat emitter (runs in background task).
+    ///
+    /// Phase 2 stub: logs intent, does not emit heartbeat files yet.
     pub async fn start_heartbeat(&self, current_bead: Option<BeadId>) -> Result<()> {
-        // TODO(needle-nva): implement file-based heartbeat with TTL
         let _ = (
             current_bead,
             &self.config,
             &self.telemetry,
             &self.worker_name,
         );
-        todo!("HealthMonitor::start_heartbeat")
+        tracing::debug!(worker = %self.worker_name, "heartbeat not yet implemented (Phase 2)");
+        Ok(())
     }
 
     /// Update the heartbeat with the currently-claimed bead.
+    ///
+    /// Phase 2 stub: no-op in Phase 1.
     pub async fn update_heartbeat(&self, bead_id: Option<&BeadId>) -> Result<()> {
-        // TODO(needle-nva): write heartbeat file
         let _ = bead_id;
-        todo!("HealthMonitor::update_heartbeat")
+        Ok(())
     }
 
     /// Scan for peer workers with stale heartbeats.
+    ///
+    /// Phase 2 stub: returns empty list.
     pub async fn detect_stuck_peers(&self) -> Result<Vec<StuckPeer>> {
-        // TODO(needle-nva): scan heartbeat files, compare timestamps
-        todo!("HealthMonitor::detect_stuck_peers")
+        Ok(vec![])
     }
 
     /// Attempt recovery for a stuck peer's claimed bead.
+    ///
+    /// Phase 2 stub: no-op.
     pub async fn recover_stuck_bead(&self, bead_id: &BeadId) -> Result<()> {
-        // TODO(needle-nva): reset bead to open if peer is gone
         let _ = bead_id;
-        todo!("HealthMonitor::recover_stuck_bead")
+        Ok(())
     }
 }
 
