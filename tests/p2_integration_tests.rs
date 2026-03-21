@@ -9,6 +9,12 @@
 //! 6. Mitosis dedup — duplicate split creates zero new children
 //! 7. Concurrent claiming — flock serializes multiple claimers
 //! 8. Registry concurrent access — no corruption
+//! 9. Heartbeat liveness — emitter writes and stop cleans up
+//! 10. Strand waterfall ordering with Mend
+//! 11. Explore discovers work in other workspaces (real br)
+//! 12. Mitosis splits multi-task bead, creates children
+//! 13. Duplicate mitosis on same parent: zero new children
+//! 14. Two workers mitosis on same parent: flock serializes
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -22,16 +28,19 @@ use chrono::Utc;
 
 use needle::bead_store::{BeadStore, Filters, RepairReport};
 use needle::claim::Claimer;
-use needle::config::{LimitsConfig, MendConfig, MitosisConfig, ModelLimits, ProviderLimits};
+use needle::config::{
+    ExploreConfig, LimitsConfig, MendConfig, MitosisConfig, ModelLimits, ProviderLimits,
+};
 use needle::health::{HealthMonitor, HeartbeatData};
 use needle::mitosis::{MitosisEvaluator, MitosisResult};
 use needle::peer::PeerMonitor;
 use needle::rate_limit::{RateLimitDecision, RateLimiter};
 use needle::registry::{Registry, WorkerEntry};
-use needle::strand::{MendStrand, Strand};
+use needle::strand::{ExploreStrand, MendStrand, Strand};
 use needle::telemetry::Telemetry;
 use needle::types::{
-    Bead, BeadId, BeadStatus, ClaimOutcome, ClaimResult, StrandResult, WorkerState,
+    Bead, BeadId, BeadStatus, BrDependency, ClaimOutcome, ClaimResult, InputMethod, StrandResult,
+    WorkerState,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1142,6 +1151,261 @@ async fn strand_waterfall_pluck_mend_explore_knot() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// Test 11: Explore discovers work in other workspaces (real br)
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn explore_discovers_work_in_other_workspace() {
+    // Create a real workspace with beads using the br CLI.
+    let ws = tempfile::tempdir().unwrap();
+    let br = br_path();
+
+    // Initialize the workspace.
+    let status = std::process::Command::new(&br)
+        .current_dir(ws.path())
+        .arg("init")
+        .status()
+        .expect("br init failed — is br installed at ~/.local/bin/br?");
+    assert!(status.success(), "br init should succeed");
+
+    // Create a ready bead in this workspace.
+    let status = std::process::Command::new(&br)
+        .current_dir(ws.path())
+        .args([
+            "create",
+            "--title",
+            "Explore integration test bead",
+            "--body",
+            "Ready to work",
+        ])
+        .status()
+        .expect("br create failed");
+    assert!(status.success(), "br create should succeed");
+
+    // Home workspace is a separate dir (no beads there).
+    let home_ws = tempfile::tempdir().unwrap();
+
+    let config = ExploreConfig {
+        enabled: true,
+        workspaces: vec![ws.path().to_path_buf()],
+    };
+    let strand = ExploreStrand::new(config, home_ws.path().to_path_buf());
+
+    // ExploreStrand ignores the passed store; use a minimal empty mock.
+    let dummy_store = ConcurrentMockStore::new(vec![]);
+    let result = strand.evaluate(&dummy_store).await;
+
+    assert!(
+        matches!(result, StrandResult::BeadFound(_)),
+        "explore should discover beads in other workspace; got: {:?}",
+        result
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 12: Mitosis splits multi-task bead, creates children
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn mitosis_splits_multitask_bead_creates_children() {
+    // A bash adapter that echoes a JSON response proposing 2 children.
+    let json = r#"{"splittable": true, "children": [{"title": "Task A", "body": "Do task A"}, {"title": "Task B", "body": "Do task B"}]}"#;
+    let dispatcher = create_mitosis_dispatcher(json);
+
+    let config = MitosisConfig {
+        enabled: true,
+        first_failure_only: false, // skip failure-count check for simplicity
+    };
+    let lock_dir = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let telemetry = Telemetry::new("test".to_string());
+    let evaluator = MitosisEvaluator::new(config, telemetry, lock_dir.path().to_path_buf());
+
+    let parent = make_bead("parent-split-001", 1);
+    let store = Arc::new(ConcurrentMockStore::new(vec![parent.clone()]));
+    let prompt_builder =
+        needle::prompt::PromptBuilder::new(&needle::config::PromptConfig::default());
+
+    let result = evaluator
+        .evaluate(
+            store.as_ref(),
+            &parent,
+            ws.path(),
+            &dispatcher,
+            &prompt_builder,
+            "mitosis-bash",
+        )
+        .await
+        .unwrap();
+
+    match &result {
+        MitosisResult::Split { children } => {
+            assert_eq!(
+                children.len(),
+                2,
+                "should create 2 children; got: {:?}",
+                children
+            );
+        }
+        other => panic!("expected Split, got: {:?}", other),
+    }
+
+    let created = store.created_beads.lock().unwrap();
+    assert_eq!(created.len(), 2, "store should have 2 created beads");
+    let deps = store.deps_added.lock().unwrap();
+    assert_eq!(deps.len(), 2, "store should have 2 dependencies linked");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 13: Duplicate mitosis on same parent — zero new children
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn mitosis_duplicate_split_creates_zero_new_children() {
+    let json = r#"{"splittable": true, "children": [{"title": "Task A", "body": "Do task A"}, {"title": "Task B", "body": "Do task B"}]}"#;
+
+    let config = MitosisConfig {
+        enabled: true,
+        first_failure_only: false,
+    };
+    let lock_dir = tempfile::tempdir().unwrap();
+    let ws = tempfile::tempdir().unwrap();
+    let prompt_builder =
+        needle::prompt::PromptBuilder::new(&needle::config::PromptConfig::default());
+
+    // Use a store that reflects created children in show() for dedup.
+    let store = Arc::new(MitosisDedupeStore::new("parent-dedup-001", vec![]));
+    let parent = store.show(&BeadId::from("parent-dedup-001")).await.unwrap();
+
+    // First split: creates 2 children.
+    let dispatcher = create_mitosis_dispatcher(json);
+    let evaluator1 = MitosisEvaluator::new(
+        config.clone(),
+        Telemetry::new("test1".to_string()),
+        lock_dir.path().to_path_buf(),
+    );
+    let result1 = evaluator1
+        .evaluate(
+            store.as_ref(),
+            &parent,
+            ws.path(),
+            &dispatcher,
+            &prompt_builder,
+            "mitosis-bash",
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(result1, MitosisResult::Split { ref children } if children.len() == 2),
+        "first split should create 2 children; got: {:?}",
+        result1
+    );
+    assert_eq!(store.created_count(), 2);
+
+    // Second split: all children already exist → Skipped.
+    let dispatcher2 = create_mitosis_dispatcher(json);
+    let evaluator2 = MitosisEvaluator::new(
+        config,
+        Telemetry::new("test2".to_string()),
+        lock_dir.path().to_path_buf(),
+    );
+    let result2 = evaluator2
+        .evaluate(
+            store.as_ref(),
+            &parent,
+            ws.path(),
+            &dispatcher2,
+            &prompt_builder,
+            "mitosis-bash",
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(result2, MitosisResult::Skipped { ref reason } if reason.contains("already exist")),
+        "second split should be skipped (all children exist); got: {:?}",
+        result2
+    );
+    assert_eq!(
+        store.created_count(),
+        2,
+        "exactly 2 children total — no duplicates created"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 14: Two workers mitosis on same parent — flock serializes
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn mitosis_concurrent_workers_flock_serializes() {
+    let json = r#"{"splittable": true, "children": [{"title": "Task X", "body": "Do X"}, {"title": "Task Y", "body": "Do Y"}]}"#;
+
+    let config = MitosisConfig {
+        enabled: true,
+        first_failure_only: false,
+    };
+    let lock_dir = tempfile::tempdir().unwrap();
+    let lock_dir_path = lock_dir.path().to_path_buf();
+    let ws = tempfile::tempdir().unwrap();
+    let ws_path = ws.path().to_path_buf();
+
+    let store = Arc::new(MitosisDedupeStore::new("parent-flock-001", vec![]));
+    let parent = store.show(&BeadId::from("parent-flock-001")).await.unwrap();
+
+    // Launch two concurrent mitosis evaluations on the same parent bead.
+    let mut handles = Vec::new();
+    for i in 0..2u32 {
+        let store = store.clone();
+        let parent = parent.clone();
+        let lock_dir = lock_dir_path.clone();
+        let ws = ws_path.clone();
+        let config = config.clone();
+
+        let handle = tokio::spawn(async move {
+            let dispatcher = create_mitosis_dispatcher(json);
+            let prompt_builder =
+                needle::prompt::PromptBuilder::new(&needle::config::PromptConfig::default());
+            let telemetry = Telemetry::new(format!("worker-{i}"));
+            let evaluator = MitosisEvaluator::new(config, telemetry, lock_dir);
+            evaluator
+                .evaluate(
+                    store.as_ref(),
+                    &parent,
+                    &ws,
+                    &dispatcher,
+                    &prompt_builder,
+                    "mitosis-bash",
+                )
+                .await
+                .unwrap()
+        });
+        handles.push(handle);
+    }
+
+    let mut split_count = 0u32;
+    let mut skipped_count = 0u32;
+    for handle in handles {
+        match handle.await.unwrap() {
+            MitosisResult::Split { .. } => split_count += 1,
+            MitosisResult::Skipped { .. } => skipped_count += 1,
+            other => panic!("unexpected mitosis result: {:?}", other),
+        }
+    }
+
+    // Flock serializes: exactly one worker creates children, the other skips.
+    assert_eq!(split_count, 1, "exactly one worker should create children");
+    assert_eq!(
+        skipped_count, 1,
+        "the other worker should skip (all children exist)"
+    );
+    assert_eq!(
+        store.created_count(),
+        2,
+        "exactly 2 children total — flock prevented duplicate creation"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
@@ -1149,4 +1413,155 @@ fn create_test_dispatcher() -> needle::dispatch::Dispatcher {
     let adapters: HashMap<String, needle::dispatch::AgentAdapter> = HashMap::new();
     let telemetry = Telemetry::new("test".to_string());
     needle::dispatch::Dispatcher::with_adapters(adapters, telemetry, 60)
+}
+
+/// Create a dispatcher with a bash adapter that echoes a fixed JSON response.
+///
+/// Used for mitosis tests that need a controllable agent output.
+fn create_mitosis_dispatcher(json_response: &str) -> needle::dispatch::Dispatcher {
+    let mut adapters = HashMap::new();
+    let adapter = needle::dispatch::AgentAdapter {
+        name: "mitosis-bash".to_string(),
+        description: None,
+        agent_cli: "bash".to_string(),
+        version_command: None,
+        input_method: InputMethod::Stdin,
+        invoke_template: format!("echo '{json_response}'"),
+        environment: HashMap::new(),
+        timeout_secs: 10,
+        provider: None,
+        model: None,
+        token_extraction: needle::dispatch::TokenExtraction::None,
+    };
+    adapters.insert("mitosis-bash".to_string(), adapter);
+    let telemetry = Telemetry::new("mitosis-test".to_string());
+    needle::dispatch::Dispatcher::with_adapters(adapters, telemetry, 10)
+}
+
+/// Returns the path to the br CLI binary.
+fn br_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let local = PathBuf::from(&home).join(".local/bin/br");
+    if local.exists() {
+        local
+    } else {
+        PathBuf::from("br")
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// MitosisDedupeStore
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Mock bead store for mitosis dedup and flock tests.
+///
+/// When children are created via `create_bead`, they are immediately reflected
+/// in subsequent `show()` calls as dependencies of the parent. This allows
+/// dedup checks inside the flock to see children created by a concurrent worker.
+struct MitosisDedupeStore {
+    parent_id: BeadId,
+    labels: Vec<String>,
+    /// Map from child_id → child_title, updated atomically via create_bead.
+    created_children: Mutex<HashMap<String, String>>,
+}
+
+impl MitosisDedupeStore {
+    fn new(parent_id: &str, labels: Vec<String>) -> Self {
+        MitosisDedupeStore {
+            parent_id: BeadId::from(parent_id),
+            labels,
+            created_children: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn created_count(&self) -> usize {
+        self.created_children.lock().unwrap().len()
+    }
+}
+
+#[async_trait]
+impl BeadStore for MitosisDedupeStore {
+    async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+        Ok(vec![])
+    }
+
+    async fn list_all(&self) -> Result<Vec<Bead>> {
+        Ok(vec![])
+    }
+
+    async fn show(&self, _id: &BeadId) -> Result<Bead> {
+        // Build the parent bead with current children as blocking dependencies.
+        let children = self.created_children.lock().unwrap();
+        let deps: Vec<BrDependency> = children
+            .iter()
+            .map(|(id, title)| BrDependency {
+                id: BeadId::from(id.clone()),
+                title: title.clone(),
+                status: "open".to_string(),
+                priority: 1,
+                dependency_type: "blocks".to_string(),
+            })
+            .collect();
+        Ok(Bead {
+            id: self.parent_id.clone(),
+            title: format!("Parent {}", self.parent_id),
+            body: Some("Multi-task bead for dedup testing".to_string()),
+            priority: 1,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: self.labels.clone(),
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: deps,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+    }
+
+    async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+        Ok(ClaimResult::NotClaimable {
+            reason: "mock".to_string(),
+        })
+    }
+
+    async fn release(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+        Ok(self.labels.clone())
+    }
+
+    async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+        Ok(())
+    }
+
+    async fn create_bead(&self, title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+        let mut children = self.created_children.lock().unwrap();
+        let count = children.len() + 1;
+        let id = format!("mitosis-child-{count:03}");
+        children.insert(id.clone(), title.to_string());
+        Ok(BeadId::from(id))
+    }
+
+    async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+        // The child was already registered in created_children via create_bead;
+        // reflecting it in show() is handled there.
+        Ok(())
+    }
+
+    async fn doctor_repair(&self) -> Result<RepairReport> {
+        Ok(RepairReport::default())
+    }
+
+    async fn doctor_check(&self) -> Result<RepairReport> {
+        Ok(RepairReport::default())
+    }
+
+    async fn full_rebuild(&self) -> Result<()> {
+        Ok(())
+    }
 }
