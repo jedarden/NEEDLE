@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::bead_store::BrCliBeadStore;
 use crate::config::{CliOverrides, Config, ConfigLoader};
+use crate::dispatch;
 use crate::worker::Worker;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -90,6 +91,12 @@ pub enum CliCommand {
 
     /// Show version information.
     Version,
+
+    /// Validate an agent adapter.
+    TestAgent {
+        /// Name of the adapter to test.
+        name: String,
+    },
 }
 
 /// Output format for the list command.
@@ -122,6 +129,7 @@ pub fn run() -> Result<()> {
             cmd_version();
             Ok(())
         }
+        CliCommand::TestAgent { name } => cmd_test_agent(&name),
     }
 }
 
@@ -433,6 +441,19 @@ fn cmd_version() {
     println!("needle {version} (rust, {os} {arch})");
 }
 
+/// `needle test-agent <name>` — validate an agent adapter.
+fn cmd_test_agent(name: &str) -> Result<()> {
+    let config = ConfigLoader::load_global()?;
+    let result = dispatch::test_agent(name, &config)?;
+    dispatch::print_test_result(&result);
+
+    if result.status == dispatch::AgentTestStatus::Error {
+        bail!("agent adapter '{}' is not ready", name);
+    }
+
+    Ok(())
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // tmux session discovery
 // ──────────────────────────────────────────────────────────────────────────────
@@ -710,5 +731,23 @@ mod tests {
     fn cli_rejects_unknown_subcommand() {
         let cli = Cli::try_parse_from(["needle", "dance"]);
         assert!(cli.is_err(), "unknown subcommand should be rejected");
+    }
+
+    #[test]
+    fn cli_parses_test_agent() {
+        let cli = Cli::try_parse_from(["needle", "test-agent", "claude-sonnet"]);
+        assert!(cli.is_ok(), "needle test-agent <name> should parse");
+        if let Ok(Cli {
+            command: CliCommand::TestAgent { name },
+        }) = cli
+        {
+            assert_eq!(name, "claude-sonnet");
+        }
+    }
+
+    #[test]
+    fn cli_test_agent_requires_name() {
+        let cli = Cli::try_parse_from(["needle", "test-agent"]);
+        assert!(cli.is_err(), "test-agent should require a name argument");
     }
 }

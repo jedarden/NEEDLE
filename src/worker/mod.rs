@@ -884,6 +884,7 @@ mod tests {
             timeout_secs: 5,
             provider: None,
             model: None,
+            token_extraction: crate::dispatch::TokenExtraction::None,
         };
         let mut adapters = HashMap::new();
         adapters.insert("echo-test".to_string(), echo_adapter);

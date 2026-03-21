@@ -49,6 +49,9 @@ fs2 = "0.4"
 # Hashing (prompt content hash for telemetry)
 sha2 = "0.10"
 
+# Regex (agent token extraction)
+regex = "1"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"

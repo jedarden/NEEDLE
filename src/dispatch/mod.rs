@@ -8,9 +8,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncReadExt;
 
@@ -36,6 +38,123 @@ pub struct ExecutionResult {
     pub elapsed: Duration,
     /// OS process ID.
     pub pid: u32,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Token extraction
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// How to extract token usage from agent output.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "method", rename_all = "snake_case")]
+pub enum TokenExtraction {
+    /// Extract from JSON fields in stdout (e.g., Claude Code --output-format json).
+    JsonField {
+        /// JSON path for input tokens (e.g., `result.usage.input_tokens`).
+        input_path: String,
+        /// JSON path for output tokens (e.g., `result.usage.output_tokens`).
+        output_path: String,
+    },
+    /// Extract from stdout/stderr using a regex with capture groups.
+    Regex {
+        /// Regex pattern with capture groups for token counts.
+        pattern: String,
+        /// 1-based capture group index for input tokens.
+        input_group: usize,
+        /// 1-based capture group index for output tokens.
+        output_group: usize,
+    },
+    /// No token extraction.
+    #[default]
+    None,
+}
+
+/// Extracted token usage from agent output.
+#[derive(Debug, Clone, Default)]
+pub struct TokenUsage {
+    /// Input tokens consumed (None if extraction failed or not configured).
+    pub input_tokens: Option<u64>,
+    /// Output tokens produced (None if extraction failed or not configured).
+    pub output_tokens: Option<u64>,
+}
+
+/// Extract token usage from agent output using the configured method.
+pub fn extract_tokens(extraction: &TokenExtraction, stdout: &str, stderr: &str) -> TokenUsage {
+    match extraction {
+        TokenExtraction::None => TokenUsage::default(),
+        TokenExtraction::JsonField {
+            input_path,
+            output_path,
+        } => extract_tokens_json(stdout, input_path, output_path),
+        TokenExtraction::Regex {
+            pattern,
+            input_group,
+            output_group,
+        } => {
+            // Search both stdout and stderr for the pattern.
+            let combined = format!("{stdout}\n{stderr}");
+            extract_tokens_regex(&combined, pattern, *input_group, *output_group)
+        }
+    }
+}
+
+/// Extract tokens from JSON output using dot-separated path notation.
+fn extract_tokens_json(stdout: &str, input_path: &str, output_path: &str) -> TokenUsage {
+    let parsed: serde_json::Value = match serde_json::from_str(stdout) {
+        Ok(v) => v,
+        Err(_) => return TokenUsage::default(),
+    };
+
+    let input_tokens = resolve_json_path(&parsed, input_path).and_then(|v| v.as_u64());
+    let output_tokens = resolve_json_path(&parsed, output_path).and_then(|v| v.as_u64());
+
+    TokenUsage {
+        input_tokens,
+        output_tokens,
+    }
+}
+
+/// Resolve a dot-separated path in a JSON value (e.g., `result.usage.input_tokens`).
+fn resolve_json_path<'a>(
+    value: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for key in path.split('.') {
+        current = current.get(key)?;
+    }
+    Some(current)
+}
+
+/// Extract tokens from text using a regex with numbered capture groups.
+fn extract_tokens_regex(
+    text: &str,
+    pattern: &str,
+    input_group: usize,
+    output_group: usize,
+) -> TokenUsage {
+    let re = match Regex::new(pattern) {
+        Ok(r) => r,
+        Err(_) => return TokenUsage::default(),
+    };
+
+    let caps = match re.captures(text) {
+        Some(c) => c,
+        None => return TokenUsage::default(),
+    };
+
+    let parse_group = |group: usize| -> Option<u64> {
+        caps.get(group)?
+            .as_str()
+            .replace(',', "")
+            .parse::<u64>()
+            .ok()
+    };
+
+    TokenUsage {
+        input_tokens: parse_group(input_group),
+        output_tokens: parse_group(output_group),
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -74,6 +193,9 @@ pub struct AgentAdapter {
     /// Model identifier (substituted as `{model}` in the template).
     #[serde(default)]
     pub model: Option<String>,
+    /// How to extract token usage from agent output.
+    #[serde(default)]
+    pub token_extraction: TokenExtraction,
 }
 
 fn default_input_method() -> InputMethod {
@@ -117,6 +239,105 @@ fn builtin_claude_sonnet() -> AgentAdapter {
         timeout_secs: 3600,
         provider: Some("anthropic".to_string()),
         model: Some("claude-sonnet-4-6".to_string()),
+        token_extraction: TokenExtraction::JsonField {
+            input_path: "result.usage.input_tokens".to_string(),
+            output_path: "result.usage.output_tokens".to_string(),
+        },
+    }
+}
+
+/// Claude Code (Opus) built-in adapter.
+fn builtin_claude_opus() -> AgentAdapter {
+    AgentAdapter {
+        name: "claude-opus".to_string(),
+        description: Some("Claude Code (Opus) with JSON output".to_string()),
+        agent_cli: "claude".to_string(),
+        version_command: Some("claude --version".to_string()),
+        input_method: InputMethod::Stdin,
+        invoke_template: concat!(
+            "cd {workspace} && claude --print --model claude-opus-4-6",
+            " --max-turns 50 --output-format json --verbose < {prompt_file}",
+        )
+        .to_string(),
+        environment: HashMap::new(),
+        timeout_secs: 7200,
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-opus-4-6".to_string()),
+        token_extraction: TokenExtraction::JsonField {
+            input_path: "result.usage.input_tokens".to_string(),
+            output_path: "result.usage.output_tokens".to_string(),
+        },
+    }
+}
+
+/// OpenCode built-in adapter.
+fn builtin_opencode() -> AgentAdapter {
+    AgentAdapter {
+        name: "opencode".to_string(),
+        description: Some("OpenCode with file-based prompt input".to_string()),
+        agent_cli: "opencode".to_string(),
+        version_command: Some("opencode --version".to_string()),
+        input_method: InputMethod::File {
+            path_template: "{prompt_file}".to_string(),
+        },
+        invoke_template:
+            "cd {workspace} && opencode run --prompt-file {prompt_file} --non-interactive"
+                .to_string(),
+        environment: HashMap::new(),
+        timeout_secs: 3600,
+        provider: None,
+        model: None,
+        token_extraction: TokenExtraction::None,
+    }
+}
+
+/// Codex CLI built-in adapter.
+fn builtin_codex() -> AgentAdapter {
+    AgentAdapter {
+        name: "codex".to_string(),
+        description: Some("OpenAI Codex CLI with full-auto approval".to_string()),
+        agent_cli: "codex".to_string(),
+        version_command: Some("codex --version".to_string()),
+        input_method: InputMethod::Args {
+            flag: "--".to_string(),
+        },
+        invoke_template: concat!(
+            "cd {workspace} && codex --model {model}",
+            " --approval-mode full-auto \"$(cat {prompt_file})\"",
+        )
+        .to_string(),
+        environment: HashMap::new(),
+        timeout_secs: 3600,
+        provider: Some("openai".to_string()),
+        model: Some("gpt-4".to_string()),
+        token_extraction: TokenExtraction::None,
+    }
+}
+
+/// Aider built-in adapter.
+fn builtin_aider() -> AgentAdapter {
+    AgentAdapter {
+        name: "aider".to_string(),
+        description: Some("Aider with Claude Sonnet, message-based input".to_string()),
+        agent_cli: "aider".to_string(),
+        version_command: Some("aider --version".to_string()),
+        input_method: InputMethod::Args {
+            flag: "--message".to_string(),
+        },
+        invoke_template: concat!(
+            "cd {workspace} && aider --model {model}",
+            " --yes --message \"$(cat {prompt_file})\"",
+        )
+        .to_string(),
+        environment: HashMap::new(),
+        timeout_secs: 3600,
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-sonnet-4-6".to_string()),
+        token_extraction: TokenExtraction::Regex {
+            pattern: r"Tokens:\s+([\d,]+)\s+sent,\s+([\d,]+)\s+received".to_string(),
+            input_group: 1,
+            output_group: 2,
+        },
     }
 }
 
@@ -133,12 +354,20 @@ fn builtin_generic() -> AgentAdapter {
         timeout_secs: 0,
         provider: None,
         model: None,
+        token_extraction: TokenExtraction::None,
     }
 }
 
 /// Returns all built-in adapters.
 pub fn builtin_adapters() -> Vec<AgentAdapter> {
-    vec![builtin_claude_sonnet(), builtin_generic()]
+    vec![
+        builtin_claude_sonnet(),
+        builtin_claude_opus(),
+        builtin_opencode(),
+        builtin_codex(),
+        builtin_aider(),
+        builtin_generic(),
+    ]
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -419,6 +648,232 @@ fn write_prompt_to_temp(bead_id: &BeadId, content: &str) -> Result<PathBuf> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// test-agent validation
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Result of validating an agent adapter.
+#[derive(Debug)]
+pub struct AgentTestResult {
+    pub adapter_name: String,
+    pub cli_path: Option<String>,
+    pub version: Option<String>,
+    pub input_method: String,
+    pub probe_result: Option<ProbeResult>,
+    pub token_extraction_ok: Option<bool>,
+    pub status: AgentTestStatus,
+    pub errors: Vec<String>,
+}
+
+/// Probe execution result.
+#[derive(Debug)]
+pub struct ProbeResult {
+    pub exit_code: i32,
+    pub elapsed_ms: u64,
+}
+
+/// Overall test-agent status.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AgentTestStatus {
+    Ready,
+    Warning,
+    Error,
+}
+
+impl std::fmt::Display for AgentTestStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentTestStatus::Ready => write!(f, "READY"),
+            AgentTestStatus::Warning => write!(f, "WARNING"),
+            AgentTestStatus::Error => write!(f, "ERROR"),
+        }
+    }
+}
+
+/// Validate an agent adapter: check CLI availability, version, and probe.
+pub fn test_agent(adapter_name: &str, config: &Config) -> Result<AgentTestResult> {
+    let adapters = load_adapters(&config.agent.adapters_dir, &builtin_adapters())?;
+
+    let adapter = adapters
+        .get(adapter_name)
+        .with_context(|| format!("unknown adapter: {adapter_name}"))?;
+
+    let mut errors = Vec::new();
+
+    // 1. Find the CLI binary on PATH.
+    let cli_path = match which::which(&adapter.agent_cli) {
+        Ok(path) => Some(path.display().to_string()),
+        Err(_) => {
+            errors.push(format!("CLI '{}' not found on PATH", adapter.agent_cli));
+            None
+        }
+    };
+
+    // 2. Run version command if configured.
+    let version = if let Some(ref version_cmd) = adapter.version_command {
+        if cli_path.is_some() {
+            match run_shell_command(version_cmd) {
+                Ok(output) => Some(output.trim().to_string()),
+                Err(e) => {
+                    errors.push(format!("version command failed: {e}"));
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // 3. Input method description.
+    let input_method = match &adapter.input_method {
+        InputMethod::Stdin => "stdin".to_string(),
+        InputMethod::File { .. } => "file".to_string(),
+        InputMethod::Args { flag } => format!("args ({flag})"),
+    };
+
+    // 4. Run probe (echo hello) if CLI is available.
+    let probe_result = if cli_path.is_some() {
+        match run_probe(&adapter.agent_cli) {
+            Ok(pr) => Some(pr),
+            Err(e) => {
+                errors.push(format!("probe failed: {e}"));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 5. Test token extraction with sample data.
+    let token_extraction_ok = match &adapter.token_extraction {
+        TokenExtraction::None => None,
+        TokenExtraction::JsonField {
+            input_path,
+            output_path,
+        } => {
+            let sample = build_sample_json(input_path, output_path);
+            let usage = extract_tokens_json(&sample, input_path, output_path);
+            Some(usage.input_tokens.is_some() && usage.output_tokens.is_some())
+        }
+        TokenExtraction::Regex {
+            pattern,
+            input_group,
+            output_group,
+        } => {
+            let sample = "Tokens: 1,234 sent, 567 received";
+            let usage = extract_tokens_regex(sample, pattern, *input_group, *output_group);
+            Some(usage.input_tokens.is_some() && usage.output_tokens.is_some())
+        }
+    };
+
+    if let Some(false) = token_extraction_ok {
+        errors.push("token extraction failed with sample data".to_string());
+    }
+
+    // 6. Determine overall status.
+    let status = if cli_path.is_none() {
+        AgentTestStatus::Error
+    } else if !errors.is_empty() {
+        AgentTestStatus::Warning
+    } else {
+        AgentTestStatus::Ready
+    };
+
+    Ok(AgentTestResult {
+        adapter_name: adapter.name.clone(),
+        cli_path,
+        version,
+        input_method,
+        probe_result,
+        token_extraction_ok,
+        status,
+        errors,
+    })
+}
+
+/// Run a shell command and capture its stdout.
+fn run_shell_command(cmd: &str) -> Result<String> {
+    let output = ProcessCommand::new("bash")
+        .args(["-c", cmd])
+        .output()
+        .with_context(|| format!("failed to run: {cmd}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("command exited with {}: {}", output.status, stderr.trim());
+    }
+}
+
+/// Run a trivial probe: ask the agent CLI to do nothing meaningful.
+fn run_probe(agent_cli: &str) -> Result<ProbeResult> {
+    let start = Instant::now();
+    let output = ProcessCommand::new(agent_cli)
+        .arg("--help")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .with_context(|| format!("failed to probe {agent_cli}"))?;
+
+    Ok(ProbeResult {
+        exit_code: output.code().unwrap_or(-1),
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+/// Build a sample JSON string for testing JSON field extraction.
+fn build_sample_json(input_path: &str, output_path: &str) -> String {
+    fn set_path(val: &mut serde_json::Value, path: &str, num: u64) {
+        let parts: Vec<&str> = path.split('.').collect();
+        let mut current = val;
+        for (i, part) in parts.iter().enumerate() {
+            if i == parts.len() - 1 {
+                current[part] = serde_json::json!(num);
+            } else {
+                if current.get(part).is_none() || !current[part].is_object() {
+                    current[part] = serde_json::json!({});
+                }
+                current = &mut current[part];
+            }
+        }
+    }
+
+    let mut root = serde_json::json!({});
+    set_path(&mut root, input_path, 100);
+    set_path(&mut root, output_path, 50);
+    root.to_string()
+}
+
+/// Print a formatted test-agent report to stdout.
+pub fn print_test_result(result: &AgentTestResult) {
+    println!("Adapter: {}", result.adapter_name);
+    match &result.cli_path {
+        Some(path) => println!("CLI:     {} (found at {path})", result.adapter_name),
+        None => println!("CLI:     NOT FOUND"),
+    }
+    match &result.version {
+        Some(v) => println!("Version: {v}"),
+        None => println!("Version: unknown"),
+    }
+    println!("Input:   {}", result.input_method);
+    match &result.probe_result {
+        Some(pr) => println!("Probe:   exit {} ({}ms)", pr.exit_code, pr.elapsed_ms),
+        None => println!("Probe:   skipped"),
+    }
+    match result.token_extraction_ok {
+        Some(true) => println!("Tokens:  extraction working"),
+        Some(false) => println!("Tokens:  extraction FAILED"),
+        None => println!("Tokens:  none configured"),
+    }
+    println!("Status:  {}", result.status);
+    for err in &result.errors {
+        println!("  !! {err}");
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -438,6 +893,7 @@ mod tests {
             timeout_secs: 10,
             provider: None,
             model: None,
+            token_extraction: TokenExtraction::None,
         }
     }
 
@@ -598,7 +1054,63 @@ input_method:
     fn builtin_adapters_are_present() {
         let adapters = builtin_adapters();
         assert!(adapters.iter().any(|a| a.name == "claude-sonnet"));
+        assert!(adapters.iter().any(|a| a.name == "claude-opus"));
+        assert!(adapters.iter().any(|a| a.name == "opencode"));
+        assert!(adapters.iter().any(|a| a.name == "codex"));
+        assert!(adapters.iter().any(|a| a.name == "aider"));
         assert!(adapters.iter().any(|a| a.name == "generic"));
+    }
+
+    #[test]
+    fn builtin_claude_opus_config() {
+        let adapter = builtin_claude_opus();
+        assert_eq!(adapter.name, "claude-opus");
+        assert_eq!(adapter.agent_cli, "claude");
+        assert_eq!(adapter.model, Some("claude-opus-4-6".to_string()));
+        assert_eq!(adapter.provider, Some("anthropic".to_string()));
+        assert!(adapter.invoke_template.contains("claude-opus-4-6"));
+        assert!(adapter.invoke_template.contains("--max-turns 50"));
+        assert_eq!(adapter.timeout_secs, 7200);
+        assert!(matches!(
+            adapter.token_extraction,
+            TokenExtraction::JsonField { .. }
+        ));
+    }
+
+    #[test]
+    fn builtin_opencode_config() {
+        let adapter = builtin_opencode();
+        assert_eq!(adapter.name, "opencode");
+        assert_eq!(adapter.agent_cli, "opencode");
+        assert!(matches!(adapter.input_method, InputMethod::File { .. }));
+        assert!(adapter.invoke_template.contains("--prompt-file"));
+        assert_eq!(adapter.token_extraction, TokenExtraction::None);
+    }
+
+    #[test]
+    fn builtin_codex_config() {
+        let adapter = builtin_codex();
+        assert_eq!(adapter.name, "codex");
+        assert_eq!(adapter.agent_cli, "codex");
+        assert!(matches!(adapter.input_method, InputMethod::Args { .. }));
+        assert!(adapter
+            .invoke_template
+            .contains("--approval-mode full-auto"));
+        assert_eq!(adapter.model, Some("gpt-4".to_string()));
+        assert_eq!(adapter.provider, Some("openai".to_string()));
+    }
+
+    #[test]
+    fn builtin_aider_config() {
+        let adapter = builtin_aider();
+        assert_eq!(adapter.name, "aider");
+        assert_eq!(adapter.agent_cli, "aider");
+        assert!(adapter.invoke_template.contains("--yes --message"));
+        assert_eq!(adapter.provider, Some("anthropic".to_string()));
+        assert!(matches!(
+            adapter.token_extraction,
+            TokenExtraction::Regex { .. }
+        ));
     }
 
     // ── Adapter loading ──
@@ -875,5 +1387,155 @@ input_method:
 
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stderr.trim(), "error-output");
+    }
+
+    // ── Token extraction ──
+
+    #[test]
+    fn extract_tokens_json_field() {
+        let json = r#"{"result":{"usage":{"input_tokens":1234,"output_tokens":567}}}"#;
+        let usage = extract_tokens_json(
+            json,
+            "result.usage.input_tokens",
+            "result.usage.output_tokens",
+        );
+        assert_eq!(usage.input_tokens, Some(1234));
+        assert_eq!(usage.output_tokens, Some(567));
+    }
+
+    #[test]
+    fn extract_tokens_json_missing_path() {
+        let json = r#"{"result":{}}"#;
+        let usage = extract_tokens_json(
+            json,
+            "result.usage.input_tokens",
+            "result.usage.output_tokens",
+        );
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+    }
+
+    #[test]
+    fn extract_tokens_json_invalid() {
+        let usage = extract_tokens_json(
+            "not json",
+            "result.usage.input_tokens",
+            "result.usage.output_tokens",
+        );
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+    }
+
+    #[test]
+    fn extract_tokens_regex_aider_format() {
+        let text = "Tokens: 1,234 sent, 567 received";
+        let usage = extract_tokens_regex(
+            text,
+            r"Tokens:\s+([\d,]+)\s+sent,\s+([\d,]+)\s+received",
+            1,
+            2,
+        );
+        assert_eq!(usage.input_tokens, Some(1234));
+        assert_eq!(usage.output_tokens, Some(567));
+    }
+
+    #[test]
+    fn extract_tokens_regex_no_match() {
+        let usage = extract_tokens_regex("no tokens here", r"Tokens: (\d+)", 1, 2);
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+    }
+
+    #[test]
+    fn extract_tokens_regex_invalid_pattern() {
+        let usage = extract_tokens_regex("text", r"[invalid", 1, 2);
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+    }
+
+    #[test]
+    fn extract_tokens_none_returns_default() {
+        let usage = extract_tokens(&TokenExtraction::None, "stdout", "stderr");
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+    }
+
+    #[test]
+    fn extract_tokens_dispatches_to_json() {
+        let json = r#"{"usage":{"in":100,"out":50}}"#;
+        let extraction = TokenExtraction::JsonField {
+            input_path: "usage.in".to_string(),
+            output_path: "usage.out".to_string(),
+        };
+        let usage = extract_tokens(&extraction, json, "");
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(50));
+    }
+
+    #[test]
+    fn extract_tokens_regex_searches_stderr_too() {
+        let extraction = TokenExtraction::Regex {
+            pattern: r"Tokens:\s+([\d,]+)\s+sent,\s+([\d,]+)\s+received".to_string(),
+            input_group: 1,
+            output_group: 2,
+        };
+        let usage = extract_tokens(&extraction, "", "Tokens: 100 sent, 50 received");
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(50));
+    }
+
+    #[test]
+    fn token_extraction_yaml_roundtrip() {
+        let adapter = builtin_claude_sonnet();
+        let yaml = serde_yaml::to_string(&adapter).unwrap();
+        let parsed: AgentAdapter = serde_yaml::from_str(&yaml).unwrap();
+        assert!(matches!(
+            parsed.token_extraction,
+            TokenExtraction::JsonField { .. }
+        ));
+    }
+
+    #[test]
+    fn token_extraction_regex_yaml_roundtrip() {
+        let adapter = builtin_aider();
+        let yaml = serde_yaml::to_string(&adapter).unwrap();
+        let parsed: AgentAdapter = serde_yaml::from_str(&yaml).unwrap();
+        assert!(matches!(
+            parsed.token_extraction,
+            TokenExtraction::Regex { .. }
+        ));
+    }
+
+    #[test]
+    fn token_extraction_none_yaml_roundtrip() {
+        let adapter = builtin_generic();
+        let yaml = serde_yaml::to_string(&adapter).unwrap();
+        let parsed: AgentAdapter = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(parsed.token_extraction, TokenExtraction::None);
+    }
+
+    #[test]
+    fn build_sample_json_creates_valid_structure() {
+        let sample = build_sample_json("result.usage.input_tokens", "result.usage.output_tokens");
+        let usage = extract_tokens_json(
+            &sample,
+            "result.usage.input_tokens",
+            "result.usage.output_tokens",
+        );
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(50));
+    }
+
+    #[test]
+    fn all_builtin_adapters_load() {
+        let adapters =
+            load_adapters(Path::new("/nonexistent/adapters"), &builtin_adapters()).unwrap();
+        assert!(adapters.contains_key("claude-sonnet"));
+        assert!(adapters.contains_key("claude-opus"));
+        assert!(adapters.contains_key("opencode"));
+        assert!(adapters.contains_key("codex"));
+        assert!(adapters.contains_key("aider"));
+        assert!(adapters.contains_key("generic"));
+        assert_eq!(adapters.len(), 6);
     }
 }

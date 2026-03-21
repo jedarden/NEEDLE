@@ -181,6 +181,7 @@ fn test_adapter(name: &str, template: &str, timeout_secs: u64) -> AgentAdapter {
         timeout_secs,
         provider: None,
         model: None,
+        token_extraction: needle::dispatch::TokenExtraction::None,
     }
 }
 
