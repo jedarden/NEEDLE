@@ -46,8 +46,9 @@ async-trait = "0.1"
 # Cross-platform file locking (flock)
 fs2 = "0.4"
 
-# Hashing (prompt content hash for telemetry)
+# Hashing (prompt content hash, binary fingerprinting for hot-reload)
 sha2 = "0.10"
+hex = "0.4"
 
 # Regex (agent token extraction)
 regex = "1"

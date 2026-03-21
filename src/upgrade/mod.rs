@@ -1,15 +1,17 @@
 //! Self-update functionality for needle.
 //!
 //! Provides the `needle upgrade` command that checks GitHub releases for
-//! newer versions and downloads/replaces the binary.
+//! newer versions and downloads/replaces the binary. Also provides hot-reload
+//! support: detecting a new `:stable` binary and re-exec'ing into it.
 
 use std::env;
 use std::fs;
 use std::io::{self, Cursor, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 /// Current version of the needle binary.
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -228,6 +230,110 @@ fn get_current_binary_path() -> Result<PathBuf> {
     env::current_exe().context("failed to determine current binary path")
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Hot-reload support
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Compute the SHA-256 hash of a file, returned as a hex string.
+pub fn file_hash(path: &Path) -> Result<String> {
+    let content = fs::read(path)
+        .with_context(|| format!("failed to read file for hashing: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&content);
+    let result = hasher.finalize();
+    Ok(hex::encode(result))
+}
+
+/// Result of checking for a new :stable binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HotReloadCheck {
+    /// No change detected — current binary matches :stable.
+    NoChange,
+    /// New :stable binary detected with different hash.
+    NewBinaryDetected {
+        /// Hash of the currently running binary.
+        old_hash: String,
+        /// Hash of the new :stable binary.
+        new_hash: String,
+        /// Path to the new :stable binary.
+        stable_path: PathBuf,
+    },
+    /// Hot-reload is disabled or :stable binary not found.
+    Skipped { reason: String },
+}
+
+/// Check whether the `:stable` binary differs from the currently running binary.
+///
+/// This is called between LOGGING and SELECTING in the worker loop.
+pub fn check_hot_reload(needle_home: &Path) -> Result<HotReloadCheck> {
+    let stable_path = needle_home.join("bin/needle-stable");
+
+    if !stable_path.exists() {
+        return Ok(HotReloadCheck::Skipped {
+            reason: "no :stable binary found".to_string(),
+        });
+    }
+
+    let current_path = get_current_binary_path()?;
+    let current_hash = file_hash(&current_path)?;
+    let stable_hash = file_hash(&stable_path)?;
+
+    if current_hash == stable_hash {
+        Ok(HotReloadCheck::NoChange)
+    } else {
+        Ok(HotReloadCheck::NewBinaryDetected {
+            old_hash: current_hash,
+            new_hash: stable_hash,
+            stable_path,
+        })
+    }
+}
+
+/// Re-exec into the new `:stable` binary with `--resume` to preserve worker identity.
+///
+/// This function does not return on success — it replaces the current process.
+/// On failure, it returns an error so the worker can continue on the current binary.
+#[cfg(unix)]
+pub fn re_exec_stable(
+    stable_path: &Path,
+    worker_name: &str,
+    workspace: Option<&Path>,
+    agent: Option<&str>,
+    timeout: Option<u64>,
+) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let mut cmd = std::process::Command::new(stable_path);
+    cmd.arg("run").arg("--resume");
+    cmd.arg("--identifier").arg(worker_name);
+    cmd.arg("--count").arg("1");
+
+    if let Some(ws) = workspace {
+        cmd.arg("--workspace").arg(ws);
+    }
+    if let Some(a) = agent {
+        cmd.arg("--agent").arg(a);
+    }
+    if let Some(t) = timeout {
+        cmd.arg("--timeout").arg(t.to_string());
+    }
+
+    // exec() replaces the current process — does not return on success.
+    let err = cmd.exec();
+    Err(anyhow::anyhow!("re-exec failed: {}", err))
+}
+
+#[cfg(not(unix))]
+pub fn re_exec_stable(
+    _stable_path: &Path,
+    _worker_name: &str,
+    _workspace: Option<&Path>,
+    _agent: Option<&str>,
+    _timeout: Option<u64>,
+) -> Result<()> {
+    bail!("hot-reload re-exec is only supported on Unix platforms")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -290,5 +396,114 @@ mod tests {
         assert!(url.contains("github.com"));
         assert!(url.contains(GITHUB_REPO));
         assert!(url.contains("needle-test"));
+    }
+
+    // ── Hot-reload tests ──
+
+    #[test]
+    fn file_hash_produces_hex_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("test-binary");
+        fs::write(&file_path, b"hello world").unwrap();
+        let hash = file_hash(&file_path).unwrap();
+        // SHA-256 hex string is 64 characters.
+        assert_eq!(hash.len(), 64);
+        // Known SHA-256 of "hello world".
+        assert_eq!(
+            hash,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[test]
+    fn file_hash_different_content_different_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a");
+        let file_b = dir.path().join("b");
+        fs::write(&file_a, b"content A").unwrap();
+        fs::write(&file_b, b"content B").unwrap();
+        let hash_a = file_hash(&file_a).unwrap();
+        let hash_b = file_hash(&file_b).unwrap();
+        assert_ne!(hash_a, hash_b);
+    }
+
+    #[test]
+    fn file_hash_same_content_same_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_a = dir.path().join("a");
+        let file_b = dir.path().join("b");
+        fs::write(&file_a, b"identical").unwrap();
+        fs::write(&file_b, b"identical").unwrap();
+        assert_eq!(file_hash(&file_a).unwrap(), file_hash(&file_b).unwrap());
+    }
+
+    #[test]
+    fn file_hash_missing_file_returns_error() {
+        let result = file_hash(Path::new("/nonexistent/binary"));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn check_hot_reload_no_stable_binary_returns_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create bin/ dir but no needle-stable file.
+        fs::create_dir_all(dir.path().join("bin")).unwrap();
+        let result = check_hot_reload(dir.path()).unwrap();
+        assert!(matches!(result, HotReloadCheck::Skipped { .. }));
+    }
+
+    #[test]
+    fn check_hot_reload_same_binary_returns_no_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        // Point :stable at the current test binary (same as current_exe).
+        let current_exe = env::current_exe().unwrap();
+        let stable_path = bin_dir.join("needle-stable");
+        fs::copy(&current_exe, &stable_path).unwrap();
+
+        let result = check_hot_reload(dir.path()).unwrap();
+        assert_eq!(result, HotReloadCheck::NoChange);
+    }
+
+    #[test]
+    fn check_hot_reload_different_binary_returns_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        // Write a different file as :stable.
+        let stable_path = bin_dir.join("needle-stable");
+        fs::write(&stable_path, b"this is a completely different binary").unwrap();
+
+        let result = check_hot_reload(dir.path()).unwrap();
+        match result {
+            HotReloadCheck::NewBinaryDetected {
+                old_hash,
+                new_hash,
+                stable_path: detected_path,
+            } => {
+                assert_ne!(old_hash, new_hash);
+                assert_eq!(detected_path, stable_path);
+            }
+            other => panic!("expected NewBinaryDetected, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn hot_reload_check_enum_variants_are_distinct() {
+        let no_change = HotReloadCheck::NoChange;
+        let skipped = HotReloadCheck::Skipped {
+            reason: "test".to_string(),
+        };
+        let detected = HotReloadCheck::NewBinaryDetected {
+            old_hash: "aaa".to_string(),
+            new_hash: "bbb".to_string(),
+            stable_path: PathBuf::from("/tmp/test"),
+        };
+        assert_ne!(no_change, skipped);
+        assert_ne!(no_change, detected);
+        assert_ne!(skipped, detected);
     }
 }

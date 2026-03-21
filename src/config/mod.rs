@@ -723,6 +723,12 @@ pub struct SelfModificationConfig {
     /// Maximum time (seconds) to run canary tests before considering it a timeout.
     #[serde(default = "SelfModificationConfig::default_canary_timeout")]
     pub canary_timeout: u64,
+
+    /// Fleet hot-reloads from :stable between beads (default: true).
+    /// When enabled, workers check for a new :stable binary after each bead
+    /// cycle and re-exec if a different binary is detected.
+    #[serde(default = "SelfModificationConfig::default_hot_reload")]
+    pub hot_reload: bool,
 }
 
 impl Default for SelfModificationConfig {
@@ -732,6 +738,7 @@ impl Default for SelfModificationConfig {
             canary_workspace: Self::default_canary_workspace(),
             auto_promote: false,
             canary_timeout: Self::default_canary_timeout(),
+            hot_reload: Self::default_hot_reload(),
         }
     }
 }
@@ -743,6 +750,10 @@ impl SelfModificationConfig {
 
     fn default_canary_timeout() -> u64 {
         300 // 5 minutes
+    }
+
+    fn default_hot_reload() -> bool {
+        true
     }
 }
 

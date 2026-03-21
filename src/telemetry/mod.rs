@@ -283,6 +283,19 @@ pub enum EventKind {
         reason: String,
     },
 
+    // ── Hot-reload ──
+    UpgradeDetected {
+        old_hash: String,
+        new_hash: String,
+    },
+    UpgradeCompleted {
+        new_hash: String,
+    },
+    RollbackCompleted {
+        rolled_back_hash: String,
+        restored_hash: String,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -339,6 +352,9 @@ impl EventKind {
             EventKind::PulseScannerFailed { .. } => "pulse.scanner_failed",
             EventKind::PulseBeadCreated { .. } => "pulse.bead_created",
             EventKind::PulseSkipped { .. } => "pulse.skipped",
+            EventKind::UpgradeDetected { .. } => "worker.upgrade.detected",
+            EventKind::UpgradeCompleted { .. } => "worker.upgrade.completed",
+            EventKind::RollbackCompleted { .. } => "rollback.completed",
             EventKind::SinkError { .. } => "telemetry.sink_error",
         }
     }
@@ -391,6 +407,9 @@ impl EventKind {
             | EventKind::PulseScannerCompleted { .. }
             | EventKind::PulseScannerFailed { .. }
             | EventKind::PulseSkipped { .. }
+            | EventKind::UpgradeDetected { .. }
+            | EventKind::UpgradeCompleted { .. }
+            | EventKind::RollbackCompleted { .. }
             | EventKind::SinkError { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
@@ -745,6 +764,21 @@ impl EventKind {
             EventKind::PulseSkipped { reason } => {
                 serde_json::json!({ "reason": reason })
             }
+            EventKind::UpgradeDetected { old_hash, new_hash } => {
+                serde_json::json!({ "old_hash": old_hash, "new_hash": new_hash })
+            }
+            EventKind::UpgradeCompleted { new_hash } => {
+                serde_json::json!({ "new_hash": new_hash })
+            }
+            EventKind::RollbackCompleted {
+                rolled_back_hash,
+                restored_hash,
+            } => {
+                serde_json::json!({
+                    "rolled_back_hash": rolled_back_hash,
+                    "restored_hash": restored_hash,
+                })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
         }
     }
@@ -801,6 +835,9 @@ impl EventKind {
             | EventKind::PulseScannerFailed { .. }
             | EventKind::PulseBeadCreated { .. }
             | EventKind::PulseSkipped { .. }
+            | EventKind::UpgradeDetected { .. }
+            | EventKind::UpgradeCompleted { .. }
+            | EventKind::RollbackCompleted { .. }
             | EventKind::SinkError { .. } => None,
         }
     }

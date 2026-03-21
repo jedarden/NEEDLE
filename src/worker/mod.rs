@@ -31,6 +31,7 @@ use crate::registry::{Registry, WorkerEntry};
 use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{AgentOutcome, Bead, BeadId, ClaimResult, IdleAction, Outcome, WorkerState};
+use crate::upgrade::{self, HotReloadCheck};
 
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
@@ -686,8 +687,77 @@ impl Worker {
             tracing::warn!(error = %e, "failed to update registry beads_processed");
         }
 
+        // Hot-reload check: detect new :stable binary between cycles.
+        if self.config.self_modification.hot_reload {
+            self.check_hot_reload()?;
+        }
+
         self.set_state(WorkerState::Selecting)?;
         Ok(())
+    }
+
+    /// Check for a new :stable binary and re-exec if detected.
+    ///
+    /// Called between LOGGING and SELECTING. If a new binary is found:
+    /// 1. Emit `worker.upgrade.detected` telemetry
+    /// 2. Re-exec with `--resume` to preserve worker identity
+    ///
+    /// On re-exec failure, log the error and continue with the current binary.
+    fn check_hot_reload(&mut self) -> Result<()> {
+        let needle_home = &self.config.workspace.home;
+        match upgrade::check_hot_reload(needle_home) {
+            Ok(HotReloadCheck::NewBinaryDetected {
+                old_hash,
+                new_hash,
+                stable_path,
+            }) => {
+                tracing::info!(
+                    old_hash = %&old_hash[..12],
+                    new_hash = %&new_hash[..12],
+                    "new :stable binary detected — preparing hot-reload"
+                );
+
+                self.telemetry.emit(EventKind::UpgradeDetected {
+                    old_hash: old_hash.clone(),
+                    new_hash: new_hash.clone(),
+                })?;
+
+                // Attempt re-exec. This call does not return on success.
+                let workspace = Some(self.config.workspace.default.as_path());
+                let agent = Some(self.config.agent.default.as_str());
+                let timeout = Some(self.config.agent.timeout);
+
+                match upgrade::re_exec_stable(
+                    &stable_path,
+                    &self.worker_name,
+                    workspace,
+                    agent,
+                    timeout,
+                ) {
+                    Ok(()) => {
+                        // Unreachable on Unix — exec replaces the process.
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // Re-exec failed — continue on current binary.
+                        tracing::warn!(
+                            error = %e,
+                            "hot-reload re-exec failed, continuing on current binary"
+                        );
+                        Ok(())
+                    }
+                }
+            }
+            Ok(HotReloadCheck::NoChange) => Ok(()),
+            Ok(HotReloadCheck::Skipped { reason }) => {
+                tracing::debug!(reason = %reason, "hot-reload check skipped");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "hot-reload check failed, continuing");
+                Ok(())
+            }
+        }
     }
 
     // ── Terminal state handlers ─────────────────────────────────────────────
@@ -982,7 +1052,9 @@ mod tests {
     }
 
     fn make_worker(store: Arc<dyn BeadStore>) -> Worker {
-        let config = Config::default();
+        let mut config = Config::default();
+        // Disable hot-reload in tests — it would re-exec into a different binary.
+        config.self_modification.hot_reload = false;
         Worker::new(config, "test-worker".to_string(), store)
     }
 
@@ -1017,6 +1089,7 @@ mod tests {
         let store = Arc::new(MockStore::empty());
         let mut config = Config::default();
         config.worker.idle_action = IdleAction::Exit;
+        config.self_modification.hot_reload = false;
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
         let result = worker.run().await.unwrap();
@@ -1059,6 +1132,7 @@ mod tests {
         let store = Arc::new(MockStore::empty());
         let mut config = Config::default();
         config.worker.idle_action = IdleAction::Exit;
+        config.self_modification.hot_reload = false;
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
         // Set shutdown before run.
@@ -1089,6 +1163,8 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![bead]));
         let mut config = Config::default();
         config.worker.idle_action = IdleAction::Exit;
+        // Disable hot-reload in tests — it would re-exec into a different binary.
+        config.self_modification.hot_reload = false;
         // Use a simple echo adapter so the test finishes quickly.
         config.agent.default = "echo-test".to_string();
         config.agent.timeout = 5;

@@ -268,7 +268,7 @@ fn cmd_run(
     count: u32,
     identifier: Option<String>,
     timeout: Option<u64>,
-    _resume: bool,
+    resume: bool,
 ) -> Result<()> {
     // Load and configure.
     let mut config = ConfigLoader::load_global()?;
@@ -283,6 +283,33 @@ fn cmd_run(
 
     if let Some(t) = timeout {
         config.agent.timeout = t;
+    }
+
+    if resume {
+        // Hot-reload resume: inherit worker identity from --identifier,
+        // continue from SELECTING with the new binary.
+        let worker_id = identifier
+            .clone()
+            .unwrap_or_else(|| NATO_ALPHABET[0].to_string());
+
+        // Emit upgrade.completed telemetry.
+        let current_hash = crate::upgrade::file_hash(
+            &std::env::current_exe().context("failed to locate own binary")?,
+        )
+        .unwrap_or_else(|_| "unknown".to_string());
+
+        tracing::info!(
+            worker = %worker_id,
+            binary_hash = %&current_hash[..current_hash.len().min(12)],
+            "resuming worker after hot-reload"
+        );
+
+        let tel = crate::telemetry::Telemetry::new(worker_id.clone());
+        tel.emit(crate::telemetry::EventKind::UpgradeCompleted {
+            new_hash: current_hash,
+        })?;
+
+        return run_worker(config, worker_id);
     }
 
     if is_inside_tmux() {
@@ -1537,8 +1564,25 @@ fn cmd_rollback() -> Result<()> {
         bail!("no previous :stable binary to rollback to");
     }
 
+    // Capture hashes before rollback.
+    let stable_hash = if status.stable_exists {
+        crate::upgrade::file_hash(&status.stable_path).unwrap_or_else(|_| "unknown".to_string())
+    } else {
+        "none".to_string()
+    };
+    let prev_hash =
+        crate::upgrade::file_hash(&status.prev_path).unwrap_or_else(|_| "unknown".to_string());
+
     println!("Rolling back to previous :stable...");
     runner.rollback()?;
+
+    // Emit rollback telemetry.
+    let tel = crate::telemetry::Telemetry::new("rollback".to_string());
+    tel.emit(crate::telemetry::EventKind::RollbackCompleted {
+        rolled_back_hash: stable_hash,
+        restored_hash: prev_hash,
+    })?;
+
     println!("Rollback complete. Fleet will hot-reload on next cycle.");
     Ok(())
 }
