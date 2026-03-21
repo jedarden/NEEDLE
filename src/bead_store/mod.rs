@@ -211,6 +211,21 @@ impl BrCliBeadStore {
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
 
+            // FrankenSQLite crash recovery: if br was killed by a signal
+            // (code() returns None) but stdout shows the operation completed
+            // and stderr is empty, treat as success. This commonly happens
+            // when br's SQLite layer crashes during post-commit cleanup while
+            // the mutation was already persisted to the append-only JSONL file.
+            if output.status.code().is_none() && stderr.is_empty() && !stdout.is_empty() {
+                tracing::warn!(
+                    args = ?args,
+                    stdout = %stdout.trim(),
+                    "br was killed by signal but stdout indicates success — \
+                     treating as successful (FrankenSQLite crash recovery)"
+                );
+                return Ok(stdout);
+            }
+
             // Auto-recover from SYNC_CONFLICT: run `br sync` then retry once.
             if is_sync_conflict(&stderr) {
                 tracing::warn!(
