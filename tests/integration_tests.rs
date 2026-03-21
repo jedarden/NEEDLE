@@ -195,7 +195,7 @@ fn test_adapter(name: &str, template: &str, timeout_secs: u64) -> AgentAdapter {
     }
 }
 
-fn test_config(adapter_name: &str) -> Config {
+fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Exit;
     config.agent.default = adapter_name.to_string();
@@ -204,16 +204,20 @@ fn test_config(adapter_name: &str) -> Config {
     // Match the test bead workspace so the remote-store-switch logic
     // doesn't fire (it would try to create a BrCliBeadStore).
     config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
+    // Isolate workspace home so the registry doesn't leak between tests.
+    config.workspace.home = workspace_home.to_path_buf();
     config
 }
 
+/// Returns `(Worker, TempDir)` — the TempDir must be kept alive for the test duration.
 fn make_worker_with_adapter(
     store: Arc<dyn BeadStore>,
     adapter_name: &str,
     template: &str,
     timeout_secs: u64,
-) -> Worker {
-    let config = test_config(adapter_name);
+) -> (Worker, tempfile::TempDir) {
+    let home_dir = tempfile::tempdir().expect("failed to create temp dir for test workspace home");
+    let config = test_config(adapter_name, home_dir.path());
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
     let adapter = test_adapter(adapter_name, template, timeout_secs);
@@ -225,7 +229,7 @@ fn make_worker_with_adapter(
         10,
     ));
 
-    worker
+    (worker, home_dir)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -241,7 +245,7 @@ async fn end_to_end_single_bead_success() {
     let bead = make_bead("needle-e2e-001", 1);
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
 
-    let mut worker =
+    let (mut worker, _home_dir) =
         make_worker_with_adapter(store.clone(), "echo-test", "echo 'agent completed'", 10);
 
     let result = worker.run().await.unwrap();
@@ -265,7 +269,8 @@ async fn end_to_end_worker_loops_to_next_bead() {
     let beads = vec![make_bead("needle-e2e-a", 1), make_bead("needle-e2e-b", 1)];
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(beads));
 
-    let mut worker = make_worker_with_adapter(store.clone(), "echo-test", "echo 'done'", 10);
+    let (mut worker, _home_dir) =
+        make_worker_with_adapter(store.clone(), "echo-test", "echo 'done'", 10);
 
     let result = worker.run().await.unwrap();
 
@@ -290,7 +295,8 @@ async fn outcome_path_success_exit_0() {
     let bead = make_bead("needle-out-success", 1);
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
 
-    let mut worker = make_worker_with_adapter(store.clone(), "success-agent", "exit 0", 10);
+    let (mut worker, _home_dir) =
+        make_worker_with_adapter(store.clone(), "success-agent", "exit 0", 10);
 
     let result = worker.run().await.unwrap();
     assert!(
@@ -306,7 +312,8 @@ async fn outcome_path_failure_exit_1() {
     let bead = make_bead("needle-out-fail", 1);
     let store = Arc::new(IntegrationMockStore::new(vec![bead]));
 
-    let mut worker = make_worker_with_adapter(store.clone(), "fail-agent", "exit 1", 10);
+    let (mut worker, _home_dir) =
+        make_worker_with_adapter(store.clone(), "fail-agent", "exit 1", 10);
 
     let result = worker.run().await.unwrap();
     assert!(
@@ -336,7 +343,8 @@ async fn outcome_path_timeout_exit_124() {
     let store = Arc::new(IntegrationMockStore::new(vec![bead]));
 
     // Use a very short timeout (1 second) with a long-running command.
-    let mut worker = make_worker_with_adapter(store.clone(), "timeout-agent", "sleep 100", 1);
+    let (mut worker, _home_dir) =
+        make_worker_with_adapter(store.clone(), "timeout-agent", "sleep 100", 1);
 
     let result = worker.run().await.unwrap();
     assert!(
@@ -365,7 +373,7 @@ async fn outcome_path_agent_not_found_exit_127() {
     let bead = make_bead("needle-out-notfound", 1);
     let store = Arc::new(IntegrationMockStore::new(vec![bead]));
 
-    let mut worker = make_worker_with_adapter(
+    let (mut worker, _home_dir) = make_worker_with_adapter(
         store.clone(),
         "missing-agent",
         "nonexistent-binary-xyz-999",
@@ -392,7 +400,8 @@ async fn outcome_path_crash_exit_137() {
     let bead = make_bead("needle-out-crash", 1);
     let store = Arc::new(IntegrationMockStore::new(vec![bead]));
 
-    let mut worker = make_worker_with_adapter(store.clone(), "crash-agent", "exit 137", 10);
+    let (mut worker, _home_dir) =
+        make_worker_with_adapter(store.clone(), "crash-agent", "exit 137", 10);
 
     let result = worker.run().await.unwrap();
     assert!(
@@ -419,7 +428,8 @@ async fn outcome_path_interrupted_via_shutdown_flag() {
     let bead = make_bead("needle-out-interrupt", 1);
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
 
-    let config = test_config("slow-agent");
+    let _home_dir = tempfile::tempdir().unwrap();
+    let config = test_config("slow-agent", _home_dir.path());
     let mut worker = Worker::new(config, "test-worker".to_string(), store.clone());
 
     // Use a slow adapter so we have time to set shutdown.
@@ -451,7 +461,8 @@ async fn outcome_path_interrupted_via_shutdown_flag() {
 async fn exhaustion_empty_workspace() {
     // Empty store → Pluck returns NoWork → Knot fires → EXHAUSTED → Exit.
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
-    let config = test_config("echo-test");
+    let _home_dir = tempfile::tempdir().unwrap();
+    let config = test_config("echo-test", _home_dir.path());
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
     let adapter = test_adapter("echo-test", "echo done", 10);
@@ -475,9 +486,11 @@ async fn exhaustion_empty_workspace() {
 #[tokio::test]
 async fn exhaustion_with_idle_action_exit() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+    let _home_dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Exit;
     config.agent.default = "echo-test".to_string();
+    config.workspace.home = _home_dir.path().to_path_buf();
 
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -505,7 +518,8 @@ async fn exhaustion_with_idle_action_exit() {
 #[tokio::test]
 async fn shutdown_during_selecting_exits_cleanly() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
-    let config = test_config("echo-test");
+    let _home_dir = tempfile::tempdir().unwrap();
+    let config = test_config("echo-test", _home_dir.path());
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
     let adapter = test_adapter("echo-test", "echo done", 10);
@@ -529,7 +543,8 @@ async fn shutdown_flag_preempts_execution() {
     // Even with beads available, shutdown should cause clean exit.
     let bead = make_bead("needle-shutdown", 1);
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
-    let config = test_config("echo-test");
+    let _home_dir = tempfile::tempdir().unwrap();
+    let config = test_config("echo-test", _home_dir.path());
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
     let adapter = test_adapter("echo-test", "echo done", 10);
@@ -734,8 +749,10 @@ fn outcome_classify_covers_all_exit_code_ranges() {
 #[tokio::test]
 async fn worker_boot_rejects_invalid_config() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+    let _home_dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.agent.default = String::new(); // Invalid: empty agent name
+    config.workspace.home = _home_dir.path().to_path_buf();
 
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
     let result = worker.run().await;
@@ -760,7 +777,7 @@ async fn full_cycle_produces_telemetry_state_transitions() {
     let bead = make_bead("needle-telem", 1);
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
 
-    let mut worker = make_worker_with_adapter(store, "echo-test", "echo done", 10);
+    let (mut worker, _home_dir) = make_worker_with_adapter(store, "echo-test", "echo done", 10);
 
     let result = worker.run().await.unwrap();
 
@@ -853,7 +870,8 @@ async fn worker_processes_high_priority_beads_first() {
 
     let store = Arc::new(IntegrationMockStore::new(vec![low, high]));
 
-    let mut worker = make_worker_with_adapter(store.clone(), "echo-test", "echo done", 10);
+    let (mut worker, _home_dir) =
+        make_worker_with_adapter(store.clone(), "echo-test", "echo done", 10);
 
     let result = worker.run().await.unwrap();
     assert!(result == WorkerState::Stopped || result == WorkerState::Exhausted);
