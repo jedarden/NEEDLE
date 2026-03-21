@@ -725,8 +725,8 @@ async fn real_br_strand_waterfall_ordering() {
 
     assert_eq!(
         runner.strand_names(),
-        vec!["pluck", "mend", "explore", "knot"],
-        "waterfall should be pluck → mend → explore → knot"
+        vec!["pluck", "mend", "explore", "weave", "unravel", "knot"],
+        "waterfall should be pluck → mend → explore → weave → unravel → knot"
     );
 }
 
