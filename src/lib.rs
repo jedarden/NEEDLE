@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod bead_store;
+pub mod canary;
 pub mod claim;
 pub mod cli;
 pub mod config;
@@ -19,5 +20,6 @@ pub mod registry;
 pub mod strand;
 pub mod telemetry;
 pub mod types;
+pub mod upgrade;
 pub mod validation;
 pub mod worker;

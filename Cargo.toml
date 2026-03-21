@@ -55,6 +55,9 @@ regex = "1"
 # Glob pattern matching (doc file discovery)
 glob = "0.3"
 
+# HTTP client (self-update)
+ureq = "2"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"

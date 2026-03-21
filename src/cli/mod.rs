@@ -172,6 +172,23 @@ pub enum CliCommand {
         /// Name of the adapter to test.
         name: String,
     },
+
+    /// Run canary tests against a :testing binary.
+    Canary {
+        /// Show channel status instead of running tests.
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Check for and install updates from GitHub releases.
+    Upgrade {
+        /// Check only — show available update without installing.
+        #[arg(long)]
+        check: bool,
+    },
+
+    /// Rollback to the previous :stable binary.
+    Rollback,
 }
 
 /// Output format for the list command.
@@ -231,6 +248,9 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         CliCommand::TestAgent { name } => cmd_test_agent(&name),
+        CliCommand::Canary { status } => cmd_canary(status),
+        CliCommand::Upgrade { check } => cmd_upgrade(check),
+        CliCommand::Rollback => cmd_rollback(),
     }
 }
 
@@ -1378,6 +1398,152 @@ fn shell_escape(s: &str) -> String {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// canary, upgrade, rollback
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `needle canary` — run canary tests or show channel status.
+fn cmd_canary(show_status: bool) -> Result<()> {
+    let config = ConfigLoader::load_global()?;
+
+    let runner = crate::canary::CanaryRunner::new(
+        config.workspace.home.clone(),
+        config.self_modification.canary_workspace.clone(),
+        config.self_modification.canary_timeout,
+    );
+
+    if show_status {
+        let status = runner.status()?;
+        println!("Release Channel Status");
+        println!("──────────────────────");
+        println!(
+            "  :testing  {}  {}",
+            if status.testing_exists { "✓" } else { "✗" },
+            status.testing_path.display()
+        );
+        println!(
+            "  :stable   {}  {}",
+            if status.stable_exists { "✓" } else { "✗" },
+            status.stable_path.display()
+        );
+        println!(
+            "  :prev     {}  {}",
+            if status.prev_exists { "✓" } else { "✗" },
+            status.prev_path.display()
+        );
+        if let Some(target) = &status.symlink_target {
+            println!("  symlink   → {}", target.display());
+        } else {
+            println!("  symlink   ✗ {}", status.symlink_path.display());
+        }
+        return Ok(());
+    }
+
+    if !config.self_modification.enabled {
+        bail!("self-modification is disabled — set self_modification.enabled = true in config");
+    }
+
+    println!("Running canary tests...");
+    let report = runner.run()?;
+
+    println!("\nCanary Report");
+    println!("─────────────");
+    println!("  Binary:   {}", report.testing_binary.display());
+    println!("  Tests:    {}", report.total_tests);
+    println!("  Passed:   {}", report.passed);
+    println!("  Failed:   {}", report.failed);
+    println!("  Timed out: {}", report.timed_out);
+    println!("  Errors:   {}", report.errors);
+    println!("  Duration: {}s", report.duration_secs);
+    println!();
+
+    for result in &report.results {
+        let (icon, bead_id, detail) = match result {
+            crate::canary::CanaryTestResult::Passed { bead_id, .. } => {
+                ("✓", bead_id.as_str(), String::new())
+            }
+            crate::canary::CanaryTestResult::Failed {
+                bead_id, reason, ..
+            } => ("✗", bead_id.as_str(), format!(" — {reason}")),
+            crate::canary::CanaryTestResult::TimedOut {
+                bead_id,
+                elapsed_secs,
+            } => (
+                "⏱",
+                bead_id.as_str(),
+                format!(" — timed out after {elapsed_secs}s"),
+            ),
+            crate::canary::CanaryTestResult::Error { bead_id, message } => {
+                ("!", bead_id.as_str(), format!(" — {message}"))
+            }
+        };
+        println!("  {icon} {bead_id}{detail}");
+    }
+
+    if report.can_promote() {
+        if config.self_modification.auto_promote {
+            println!("\nAll tests passed — auto-promoting :testing to :stable...");
+            runner.promote()?;
+            println!("Promotion complete. Fleet will hot-reload on next cycle.");
+        } else {
+            println!("\nAll tests passed. Run `needle canary --status` to verify, then promote manually.");
+            println!(
+                "To promote: move needle-testing → needle-stable in {:?}",
+                config.workspace.home.join("bin")
+            );
+        }
+    } else {
+        println!("\nCanary tests FAILED. :testing will NOT be promoted.");
+        runner.reject()?;
+        println!("Testing binary discarded.");
+    }
+
+    Ok(())
+}
+
+/// `needle upgrade` — check for and install updates.
+fn cmd_upgrade(check_only: bool) -> Result<()> {
+    if check_only {
+        let check = crate::upgrade::check_for_update()?;
+        if check.update_available {
+            println!(
+                "Update available: {} → {}",
+                check.current_version, check.latest_version
+            );
+            if let Some(notes) = &check.release_notes {
+                println!("\nRelease notes:\n{notes}");
+            }
+        } else {
+            println!("Already up to date (version {})", check.current_version);
+        }
+        return Ok(());
+    }
+
+    crate::upgrade::perform_upgrade()?;
+    Ok(())
+}
+
+/// `needle rollback` — restore the previous :stable binary.
+fn cmd_rollback() -> Result<()> {
+    let config = ConfigLoader::load_global()?;
+
+    let runner = crate::canary::CanaryRunner::new(
+        config.workspace.home.clone(),
+        config.self_modification.canary_workspace.clone(),
+        config.self_modification.canary_timeout,
+    );
+
+    let status = runner.status()?;
+    if !status.prev_exists {
+        bail!("no previous :stable binary to rollback to");
+    }
+
+    println!("Rolling back to previous :stable...");
+    runner.rollback()?;
+    println!("Rollback complete. Fleet will hot-reload on next cycle.");
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1878,5 +2044,47 @@ mod tests {
     fn log_format_variants() {
         let _human = LogFormat::Human;
         let _jsonl = LogFormat::Jsonl;
+    }
+
+    #[test]
+    fn cli_parses_canary() {
+        let cli = Cli::try_parse_from(["needle", "canary"]);
+        assert!(cli.is_ok(), "needle canary should parse");
+    }
+
+    #[test]
+    fn cli_parses_canary_status() {
+        let cli = Cli::try_parse_from(["needle", "canary", "--status"]);
+        assert!(cli.is_ok(), "needle canary --status should parse");
+        if let Ok(Cli {
+            command: CliCommand::Canary { status },
+        }) = cli
+        {
+            assert!(status);
+        }
+    }
+
+    #[test]
+    fn cli_parses_upgrade() {
+        let cli = Cli::try_parse_from(["needle", "upgrade"]);
+        assert!(cli.is_ok(), "needle upgrade should parse");
+    }
+
+    #[test]
+    fn cli_parses_upgrade_check() {
+        let cli = Cli::try_parse_from(["needle", "upgrade", "--check"]);
+        assert!(cli.is_ok(), "needle upgrade --check should parse");
+        if let Ok(Cli {
+            command: CliCommand::Upgrade { check },
+        }) = cli
+        {
+            assert!(check);
+        }
+    }
+
+    #[test]
+    fn cli_parses_rollback() {
+        let cli = Cli::try_parse_from(["needle", "rollback"]);
+        assert!(cli.is_ok(), "needle rollback should parse");
     }
 }
