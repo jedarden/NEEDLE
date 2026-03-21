@@ -23,6 +23,7 @@ use crate::types::{ClaimResult, WorkerState};
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
     config: Config,
+    worker_name: String,
     store: Arc<dyn BeadStore>,
     telemetry: Telemetry,
     strands: StrandRunner,
@@ -34,20 +35,28 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Construct a worker from config and a bead store implementation.
-    pub fn new(config: Config, store: Arc<dyn BeadStore>) -> Self {
-        let telemetry = Telemetry::new(config.worker_name.clone());
+    /// Construct a worker from config, a worker name, and a bead store implementation.
+    pub fn new(config: Config, worker_name: String, store: Arc<dyn BeadStore>) -> Self {
+        let telemetry = Telemetry::new(worker_name.clone());
         let strands = StrandRunner::from_config(&config);
-        let claimer = Claimer::new(config.clone(), Telemetry::new(config.worker_name.clone()));
+        let claimer = Claimer::new(
+            config.clone(),
+            worker_name.clone(),
+            Telemetry::new(worker_name.clone()),
+        );
         let prompt_builder = PromptBuilder::new(config.clone());
-        let dispatcher =
-            Dispatcher::new(config.clone(), Telemetry::new(config.worker_name.clone()));
+        let dispatcher = Dispatcher::new(config.clone(), Telemetry::new(worker_name.clone()));
         let outcome_handler =
-            OutcomeHandler::new(config.clone(), Telemetry::new(config.worker_name.clone()));
-        let health = HealthMonitor::new(config.clone(), Telemetry::new(config.worker_name.clone()));
+            OutcomeHandler::new(config.clone(), Telemetry::new(worker_name.clone()));
+        let health = HealthMonitor::new(
+            config.clone(),
+            worker_name.clone(),
+            Telemetry::new(worker_name.clone()),
+        );
 
         Worker {
             config,
+            worker_name,
             store,
             telemetry,
             strands,
@@ -61,7 +70,7 @@ impl Worker {
 
     /// Run the worker loop until exhausted, stopped, or errored.
     pub async fn run(&mut self) -> Result<WorkerState> {
-        let _ = &self.config;
+        let _ = (&self.config, &self.worker_name);
         self.transition(WorkerState::Booting, WorkerState::Selecting)
             .await?;
 

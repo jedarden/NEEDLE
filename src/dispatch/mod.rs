@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 
 use crate::config::Config;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{BeadId, ProcessOutput};
+use crate::types::{AgentOutcome, BeadId};
 
 /// Dispatches the agent CLI for a given bead.
 pub struct Dispatcher {
@@ -24,21 +24,21 @@ impl Dispatcher {
     }
 
     /// Spawn the agent, wait for it to exit, and return the raw process output.
-    pub async fn dispatch(&self, bead_id: &BeadId, prompt: &str) -> Result<ProcessOutput> {
+    pub async fn dispatch(&self, bead_id: &BeadId, prompt: &str) -> Result<AgentOutcome> {
         self.telemetry.emit(EventKind::DispatchStarted {
             bead_id: bead_id.clone(),
-            agent: self.config.agent_binary.clone(),
+            agent: self.config.agent.default.clone(),
         })?;
 
-        let output = tokio::process::Command::new(&self.config.agent_binary)
-            .args(&self.config.agent_args)
+        let output = tokio::process::Command::new(&self.config.agent.default)
+            .args(&self.config.agent.args)
             .arg(prompt)
             .output()
             .await
-            .with_context(|| format!("failed to spawn agent: {}", self.config.agent_binary))?;
+            .with_context(|| format!("failed to spawn agent: {}", self.config.agent.default))?;
 
         let exit_code = output.status.code().unwrap_or(-1);
-        let outcome = ProcessOutput {
+        let outcome = AgentOutcome {
             exit_code,
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),

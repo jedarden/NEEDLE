@@ -15,19 +15,24 @@ use crate::types::{BeadId, ClaimResult};
 /// Handles the claim protocol for a single bead.
 pub struct Claimer {
     config: Config,
+    worker_name: String,
     telemetry: Telemetry,
 }
 
 impl Claimer {
-    pub fn new(config: Config, telemetry: Telemetry) -> Self {
-        Claimer { config, telemetry }
+    pub fn new(config: Config, worker_name: String, telemetry: Telemetry) -> Self {
+        Claimer {
+            config,
+            worker_name,
+            telemetry,
+        }
     }
 
-    /// Attempt to claim a bead, with retries up to `config.max_claim_retries`.
+    /// Attempt to claim a bead, with retries up to `config.worker.max_claim_retries`.
     ///
     /// On success, fetches and returns the full bead via `store.get()`.
     pub async fn claim(&self, store: &dyn BeadStore, bead_id: &BeadId) -> Result<ClaimResult> {
-        for attempt in 1..=self.config.max_claim_retries {
+        for attempt in 1..=self.config.worker.max_claim_retries {
             tracing::debug!(bead_id = %bead_id, attempt, "attempting claim");
             self.telemetry
                 .emit(crate::telemetry::EventKind::ClaimAttempt {
@@ -35,7 +40,7 @@ impl Claimer {
                     attempt,
                 })?;
 
-            match store.claim(bead_id, &self.config.worker_name).await {
+            match store.claim(bead_id, &self.worker_name).await {
                 Ok(true) => {
                     self.telemetry
                         .emit(crate::telemetry::EventKind::ClaimSuccess {
@@ -49,7 +54,7 @@ impl Claimer {
                         .emit(crate::telemetry::EventKind::ClaimRaceLost {
                             bead_id: bead_id.clone(),
                         })?;
-                    if attempt < self.config.max_claim_retries {
+                    if attempt < self.config.worker.max_claim_retries {
                         tokio::time::sleep(std::time::Duration::from_millis(
                             100 * u64::from(attempt),
                         ))

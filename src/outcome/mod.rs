@@ -10,7 +10,7 @@ use anyhow::Result;
 use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::telemetry::Telemetry;
-use crate::types::{BeadId, BeadStatus, Outcome, ProcessOutput};
+use crate::types::{AgentOutcome, BeadId, BeadStatus, Outcome};
 
 /// Routes agent outcomes to their explicit handlers.
 pub struct OutcomeHandler {
@@ -31,13 +31,12 @@ impl OutcomeHandler {
         &self,
         store: &dyn BeadStore,
         bead_id: &BeadId,
-        output: ProcessOutput,
+        output: AgentOutcome,
     ) -> Result<()> {
-        let outcome = output.classify();
+        let outcome = Outcome::classify(output.exit_code);
         tracing::info!(
             bead_id = %bead_id,
             exit_code = output.exit_code,
-            outcome = %outcome,
             "handling agent outcome"
         );
 
@@ -61,10 +60,9 @@ impl OutcomeHandler {
             }
             Outcome::AgentNotFound => {
                 // Configuration error — worker cannot proceed.
-                let _ = &self.config;
                 tracing::error!(
                     bead_id = %bead_id,
-                    agent = %self.config.agent_binary,
+                    agent = %self.config.agent.default,
                     "agent binary not found — worker should stop"
                 );
                 // Leave bead in_progress so it doesn't get re-picked until
@@ -77,7 +75,7 @@ impl OutcomeHandler {
                 tracing::info!(bead_id = %bead_id, "agent interrupted — bead reset to open");
                 Ok(())
             }
-            Outcome::Crash { code } => {
+            Outcome::Crash(code) => {
                 let _ = &self.telemetry;
                 tracing::warn!(
                     bead_id = %bead_id,

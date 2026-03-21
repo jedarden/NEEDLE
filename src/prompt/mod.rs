@@ -29,7 +29,7 @@ impl PromptBuilder {
     pub fn build(&self, bead: &Bead) -> Result<String> {
         // TODO(needle-nva): support configurable prompt templates
         let body = bead.body.as_deref().unwrap_or("(no body)");
-        let workspace = self.config.workspace.display();
+        let workspace = self.config.workspace.default.display();
         let prompt = format!(
             "You are a NEEDLE bead worker. Work in {workspace}.\n\n\
              Bead: {id}\n\

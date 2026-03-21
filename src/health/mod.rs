@@ -19,8 +19,7 @@ pub struct HealthMonitor {
 }
 
 impl HealthMonitor {
-    pub fn new(config: Config, telemetry: Telemetry) -> Self {
-        let worker_name = config.worker_name.clone();
+    pub fn new(config: Config, worker_name: String, telemetry: Telemetry) -> Self {
         HealthMonitor {
             config,
             telemetry,
