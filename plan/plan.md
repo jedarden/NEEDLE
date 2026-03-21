@@ -58,6 +58,7 @@ NEEDLE is composed of five layers:
 | **HealthMonitor** | Heartbeat, stuck detection, peer awareness | Worker state | Recovery actions |
 | **ConfigLoader** | Hierarchical config resolution | Files, env, CLI args | Resolved config |
 | **BeadStore** | Abstract interface to bead backend | CRUD operations | Bead records |
+| **Mitosis** | Split multi-task beads into children with dedup | Failed bead, parent's existing children | Child beads or no-op |
 
 ---
 
@@ -94,7 +95,7 @@ These decisions are informed by the 14 research files in `docs/research/`:
 | Claim atomicity | `br update --claim` + workspace flock | Central coordinator (Perles) | No SPOF; works with decentralized workers |
 | Heartbeat model | File-based heartbeat with TTL (from beads-polis) | Shared memory | Survives worker crashes; observable by peers |
 | Validation gates | Pluggable gate system (inspired by bg-gate) | Hardcoded checks | Different workspaces need different validation |
-| Work decomposition | External (spec2beads or manual) | Built-in mitosis | Mitosis explosion proved in-loop decomposition is dangerous |
+| Work decomposition | Built-in mitosis with child-aware dedup | External only (spec2beads) | Mitosis is valid when the split criteria are semantic (multi-task detection) and dedup checks the parent's existing children |
 | Self-modification | Prohibited in automated mode | Gated with approval | Five incidents of cascading self-modification failures |
 | Workspace discovery | Explicit configuration | Filesystem scanning | Explore strand's unbounded find caused 35+ load |
 | Alert system | Verify-then-alert with rate limiting | Alert-on-empty | 100% false positive rate from naive alerting |
@@ -105,7 +106,7 @@ These decisions are informed by the 9 notes files in `docs/notes/`:
 
 | Learning | Design Response |
 |----------|----------------|
-| Mitosis explosion (5,741 duplicate beads) | No built-in bead decomposition. Decomposition is an external, human-gated process. |
+| Mitosis explosion (5,741 duplicate beads) | Mitosis checks parent's existing children before creating new ones. Duplicate splits are structurally impossible. Split criteria are semantic (multi-task detection), not numeric. |
 | 100% false positive starvation alerts | Three-state model: no beads exist / all claimed / invisible. Verify independently before alerting. |
 | Bundler shipped undefined functions | Compiled language eliminates this class entirely. |
 | Agent-owned closure most reliable | NEEDLE does not close beads. Agent receives `br close <id>` instruction in prompt. |
@@ -312,7 +313,7 @@ The worker loop is a finite state machine. Every state has defined entry conditi
 | Outcome | Exit Code | Handler | Bead Action |
 |---------|-----------|---------|-------------|
 | **Success** | 0 | Verify bead was closed by agent. If not, log warning (do not auto-close). | None (agent owns closure) |
-| **Failure** | 1 | Release bead (`br update --status open --unassign`). Increment bead failure count via label. | Released |
+| **Failure** | 1 | Evaluate for mitosis (see Mitosis section). If splittable, split and block parent. If not, release bead (`br update --status open --unassign`). Increment failure count via label. | Split or released |
 | **Timeout** | 124 | Release bead. Add `deferred` label. | Released + deferred |
 | **Crash** | >128 (signal) | Release bead. Create alert bead in workspace. | Released + alert |
 | **Race Lost** | 4 | (Handled at CLAIMING, should not reach here) | N/A |
@@ -1019,6 +1020,102 @@ strands:
     alert_cooldown_minutes: 60
     exhaustion_threshold: 3 # cycles before creating alert bead
 ```
+
+---
+
+# Mitosis
+
+Mitosis is NEEDLE's mechanism for splitting a bead that represents multiple tasks into smaller, focused child beads. It is triggered on failure — when a bead fails execution, NEEDLE evaluates whether it should be decomposed before retrying.
+
+## Split Criteria
+
+A bead is splittable when it describes **multiple independent tasks**. This is a semantic determination, not a numeric one. The agent analyzes the bead and answers one question: "Does this bead ask for more than one independent unit of work?"
+
+**Valid reasons to split:**
+- The bead describes multiple distinct deliverables ("add endpoint AND write migration AND update tests")
+- The deliverables have a dependency relationship (migration before endpoint)
+- Each deliverable is independently closable
+
+**Not valid reasons to split:**
+- The bead is long (a single complex task can be long and still atomic)
+- The bead failed once (failure means the task is hard, not composite)
+- The bead has many acceptance criteria (criteria validate one task, not separate tasks)
+
+If the agent determines the bead is a single task, mitosis does not apply. The bead is released for retry or deferred.
+
+## Child-Aware Deduplication
+
+Before creating any child bead, NEEDLE reads the parent's existing children. If a previous mitosis pass already created children for this parent, the proposed children are compared against them. Matching children are skipped; only novel tasks are created.
+
+```
+Bead fails
+    │
+    ▼
+Agent analyzes: "Multiple independent tasks?"
+    │
+    ├── No → Release for retry or defer
+    │
+    └── Yes → Propose N children with dependencies
+                │
+                ▼
+          Read parent's existing children
+          (br show <parent> --json → dependencies)
+                │
+          For each proposed child:
+                │
+                ├── Parent already has a child covering this? → Skip
+                │
+                └── Novel task → Create child, link as blocking parent
+
+          If any children created:
+                └── Parent remains in_progress, blocked by children
+          If all children already existed:
+                └── No-op (split already happened)
+```
+
+This makes duplicate splits structurally impossible. The parent's child list is the single source of truth. A second worker encountering the same parent sees the existing children and creates nothing new.
+
+## Concurrency Safety
+
+Mitosis uses the same per-workspace flock as the claiming protocol. The flock is held for the entire mitosis operation: read existing children → create new children → update parent dependencies. This serializes mitosis across workers within a workspace.
+
+If two workers both hold a failed bead and attempt mitosis on the same parent simultaneously, the flock ensures one completes first. The second worker enters the flock, reads the children just created by the first, and skips all proposed children as duplicates.
+
+## When Mitosis Runs
+
+Mitosis is evaluated in the HANDLING state when the outcome is **Failure** (exit code 1):
+
+1. Check if mitosis is enabled for the workspace (configurable, default: true)
+2. Check if this is the bead's **first failure** (mitosis runs once, not on every retry)
+3. Acquire workspace flock
+4. Dispatch agent with mitosis analysis prompt: bead context + "Does this describe multiple tasks?"
+5. If agent proposes children:
+   a. Read parent's existing children
+   b. Create only novel children with appropriate dependencies
+   c. Parent is blocked by children (remains claimed, status changes to blocked)
+6. Release workspace flock
+7. Emit `bead.mitosis` telemetry (children proposed, children created, children skipped)
+
+If mitosis produces children, the parent is not released — it is blocked until its children complete. When all children are closed, the parent becomes unblocked and re-enters the queue for a final pass (or the mend strand clears the stale dependency and it resolves naturally).
+
+If mitosis determines the bead is a single task, normal failure handling applies: release and increment failure count.
+
+## Mitosis Configuration
+
+```yaml
+# ~/.needle/config.yaml or .needle.yaml
+mitosis:
+  enabled: true                # enable/disable per workspace
+  first_failure_only: true     # only evaluate on first failure, not retries
+```
+
+## Telemetry
+
+| Event Type | Emitted When | Data Fields |
+|------------|-------------|-------------|
+| `bead.mitosis.evaluated` | Agent analyzed bead for splitting | `bead_id`, `splittable` (bool), `proposed_children` (count) |
+| `bead.mitosis.split` | Children created | `parent_id`, `children_created` (count), `children_skipped` (count), `child_ids` |
+| `bead.mitosis.skipped` | All proposed children already exist | `parent_id`, `existing_children` (count) |
 
 ---
 
@@ -2109,6 +2206,7 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 | **Budget enforcement** | Warn/stop at daily cost thresholds |
 | **CLI extensions** | `needle attach`, `needle status`, `needle config` |
 | **Database recovery** | Auto-detect corruption, repair from JSONL |
+| **Mitosis** | Child-aware bead splitting on first failure, with dedup and flock serialization |
 
 ### Success Criteria
 
@@ -2123,6 +2221,8 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 - [ ] Cost tracking produces accurate estimates (±20% of actual)
 - [ ] Database corruption is detected and auto-repaired
 - [ ] Workspace `.needle.yaml` overrides global config correctly
+- [ ] Mitosis splits multi-task beads into children on first failure
+- [ ] Duplicate mitosis on same parent creates no new children (child-aware dedup verified)
 
 ### Estimated Scope
 
@@ -2213,6 +2313,9 @@ NEEDLE v2 is a clean rewrite. There is no in-place upgrade path from v1.
 | **Database corruption** | Corrupt SQLite, verify auto-repair and continued operation |
 | **Timeout enforcement** | Agent that sleeps forever is killed after timeout |
 | **Strand waterfall** | Empty workspace → explore → mend → knot progression |
+| **Mitosis split** | Multi-task bead fails → agent proposes children → children created with correct dependencies |
+| **Mitosis dedup** | Same parent split twice → second pass creates zero new children |
+| **Mitosis concurrency** | Two workers attempt mitosis on same parent → flock serializes, no duplicates |
 
 ### Property Tests
 
