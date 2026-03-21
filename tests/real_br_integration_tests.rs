@@ -157,6 +157,43 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
     Ok(())
 }
 
+/// Add a dependency between two beads (issue depends on dep).
+///
+/// Retries once with `br sync --flush-only` on FrankenSQLite sync conflicts.
+fn add_dependency(workspace: &Path, issue_id: &BeadId, dep_id: &BeadId) -> Result<()> {
+    let br = br_path();
+    let do_add = || {
+        std::process::Command::new(&br)
+            .args(["dep", "add", issue_id.as_ref(), dep_id.as_ref()])
+            .current_dir(workspace)
+            .output()
+            .context("failed to run br dep add")
+    };
+
+    let mut output = do_add()?;
+
+    // Retry once on sync conflict (FrankenSQLite WAL race).
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
+            let _ = std::process::Command::new(&br)
+                .args(["sync", "--flush-only"])
+                .current_dir(workspace)
+                .output();
+            output = do_add()?;
+        }
+    }
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "br dep add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(())
+}
+
 /// Get bead store for a workspace.
 fn store_for_workspace(workspace: &Path) -> Result<BrCliBeadStore> {
     BrCliBeadStore::new(br_path(), workspace.to_path_buf())
@@ -638,20 +675,7 @@ async fn real_br_mitosis_dedup_skips_existing_children() {
     // Add dependency: parent depends on child (child blocks parent).
     // br dep add syntax: br dep add <issue> <depends_on> means issue depends on depends_on.
     // So "parent depends on child" = "child blocks parent".
-    let br = br_path();
-    let output = std::process::Command::new(&br)
-        .args(["dep", "add", parent_id.as_ref(), existing_child_id.as_ref()])
-        .current_dir(workspace.path())
-        .output()
-        .context("failed to run br dep add")
-        .unwrap();
-
-    if !output.status.success() {
-        panic!(
-            "br dep add failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    add_dependency(workspace.path(), &parent_id, &existing_child_id).unwrap();
 
     // Verify the parent has the child as a dependency.
     let parent = store.show(&parent_id).await.unwrap();

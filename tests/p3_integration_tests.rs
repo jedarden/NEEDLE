@@ -69,11 +69,27 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
 /// Create a bead in the test workspace and return its ID.
 fn create_bead(workspace: &Path, title: &str) -> Result<BeadId> {
     let br = br_path();
-    let output = std::process::Command::new(&br)
-        .args(["create", "--title", title, "--body", title, "--silent"])
-        .current_dir(workspace)
-        .output()
-        .context("failed to run br create")?;
+    let do_create = || {
+        std::process::Command::new(&br)
+            .args(["create", "--title", title, "--body", title, "--silent"])
+            .current_dir(workspace)
+            .output()
+            .context("failed to run br create")
+    };
+
+    let mut output = do_create()?;
+
+    // Retry once on sync conflict (FrankenSQLite WAL race).
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
+            let _ = std::process::Command::new(&br)
+                .args(["sync", "--flush-only"])
+                .current_dir(workspace)
+                .output();
+            output = do_create()?;
+        }
+    }
 
     if !output.status.success() {
         anyhow::bail!(
@@ -87,13 +103,31 @@ fn create_bead(workspace: &Path, title: &str) -> Result<BeadId> {
 }
 
 /// Add a label to a bead.
+///
+/// Retries once with `br sync --flush-only` on FrankenSQLite sync conflicts.
 fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
     let br = br_path();
-    let output = std::process::Command::new(&br)
-        .args(["label", "add", bead_id.as_ref(), label])
-        .current_dir(workspace)
-        .output()
-        .context("failed to run br label add")?;
+    let do_add = || {
+        std::process::Command::new(&br)
+            .args(["label", "add", bead_id.as_ref(), label])
+            .current_dir(workspace)
+            .output()
+            .context("failed to run br label add")
+    };
+
+    let mut output = do_add()?;
+
+    // Retry once on sync conflict (FrankenSQLite WAL race).
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
+            let _ = std::process::Command::new(&br)
+                .args(["sync", "--flush-only"])
+                .current_dir(workspace)
+                .output();
+            output = do_add()?;
+        }
+    }
 
     if !output.status.success() {
         anyhow::bail!(
