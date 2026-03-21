@@ -200,35 +200,31 @@ async fn real_br_all_beads_eventually_claimed() {
     let beads = store.ready(&Filters::default()).await.unwrap();
     assert_eq!(beads.len(), 3);
 
-    // Claim all 3 sequentially.
+    // Claim all 3 sequentially, passing already-claimed IDs as exclusions.
     let lock_dir = tempfile::tempdir().unwrap();
-    let claimed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut claimed: Vec<String> = Vec::new();
+    let mut already_claimed: HashSet<BeadId> = HashSet::new();
 
     for worker_idx in 0..3u32 {
-        let store = store.clone();
-        let beads = beads.clone();
-        let lock_path = lock_dir.path().to_path_buf();
-        let claimed_clone = claimed.clone();
-
         let claimer = Claimer::new(
-            store,
-            lock_path,
+            store.clone(),
+            lock_dir.path().to_path_buf(),
             5,
             10,
             Telemetry::new(format!("worker-{worker_idx}")),
         );
 
         let result = claimer
-            .claim_next(&beads, &format!("worker-{worker_idx}"), &HashSet::new())
+            .claim_next(&beads, &format!("worker-{worker_idx}"), &already_claimed)
             .await
             .unwrap();
 
         if let ClaimOutcome::Claimed(bead) = result {
-            claimed_clone.lock().unwrap().push(bead.id.to_string());
+            already_claimed.insert(bead.id.clone());
+            claimed.push(bead.id.to_string());
         }
     }
 
-    let claimed = claimed.lock().unwrap().clone();
     assert_eq!(claimed.len(), 3, "all 3 beads should be claimed");
 
     // Verify no duplicates.

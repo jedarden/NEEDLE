@@ -210,6 +210,48 @@ impl BrCliBeadStore {
 
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
+
+            // Auto-recover from SYNC_CONFLICT: run `br sync` then retry once.
+            if is_sync_conflict(&stderr) {
+                tracing::warn!(
+                    args = ?args,
+                    "br hit SYNC_CONFLICT, running br sync and retrying"
+                );
+                let sync_output = tokio::process::Command::new(&self.br_path)
+                    .args(["sync"])
+                    .current_dir(dir)
+                    .output()
+                    .await
+                    .context("failed to run br sync for SYNC_CONFLICT recovery")?;
+
+                if !sync_output.status.success() {
+                    let sync_stderr = String::from_utf8_lossy(&sync_output.stderr);
+                    tracing::warn!(stderr = %sync_stderr, "br sync failed, retrying original command anyway");
+                }
+
+                // Retry the original command once.
+                let retry = tokio::process::Command::new(&self.br_path)
+                    .args(args)
+                    .current_dir(dir)
+                    .output()
+                    .await
+                    .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
+
+                let retry_stdout = String::from_utf8(retry.stdout)
+                    .context("br retry stdout was not valid UTF-8")?;
+                let retry_stderr = String::from_utf8_lossy(&retry.stderr).into_owned();
+
+                if !retry.status.success() {
+                    let retry_code = retry.status.code().unwrap_or(-1);
+                    bail!(
+                        "br {args:?} exited with code {retry_code} after SYNC_CONFLICT recovery\n\
+                         stderr: {retry_stderr}\nstdout: {retry_stdout}"
+                    );
+                }
+
+                return Ok(retry_stdout);
+            }
+
             bail!("br {args:?} exited with code {code}\nstderr: {stderr}\nstdout: {stdout}");
         }
 
@@ -217,6 +259,9 @@ impl BrCliBeadStore {
     }
 
     /// Run br and return both exit code and stdout (for claim race detection).
+    ///
+    /// Auto-recovers from SYNC_CONFLICT (exit code 6): runs `br sync` then
+    /// retries the original command once.
     async fn run_br_with_status(&self, args: &[&str]) -> Result<(i32, String)> {
         let output = tokio::process::Command::new(&self.br_path)
             .args(args)
@@ -227,6 +272,32 @@ impl BrCliBeadStore {
 
         let code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8(output.stdout).context("br stdout was not valid UTF-8")?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Auto-recover from SYNC_CONFLICT: run `br sync` then retry once.
+        if code != 0 && is_sync_conflict(&stderr) {
+            tracing::warn!(
+                args = ?args,
+                "br hit SYNC_CONFLICT (run_br_with_status), running br sync and retrying"
+            );
+            let _ = tokio::process::Command::new(&self.br_path)
+                .args(["sync"])
+                .current_dir(&self.workspace)
+                .output()
+                .await;
+
+            let retry = tokio::process::Command::new(&self.br_path)
+                .args(args)
+                .current_dir(&self.workspace)
+                .output()
+                .await
+                .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
+
+            let retry_code = retry.status.code().unwrap_or(-1);
+            let retry_stdout =
+                String::from_utf8(retry.stdout).context("br retry stdout was not valid UTF-8")?;
+            return Ok((retry_code, retry_stdout));
+        }
 
         Ok((code, stdout))
     }

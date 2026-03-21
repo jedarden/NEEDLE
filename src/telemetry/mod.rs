@@ -252,6 +252,16 @@ pub enum EventKind {
         gates_run: u32,
     },
 
+    // ── Unravel ──
+    UnravelAnalyzed {
+        bead_id: BeadId,
+        alternatives_proposed: u32,
+    },
+    UnravelSkipped {
+        bead_id: BeadId,
+        reason: String,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -301,6 +311,8 @@ impl EventKind {
             EventKind::MitosisSkipped { .. } => "bead.mitosis.skipped",
             EventKind::VerificationFailed { .. } => "verification.failed",
             EventKind::VerificationPassed { .. } => "verification.passed",
+            EventKind::UnravelAnalyzed { .. } => "bead.unravel.analyzed",
+            EventKind::UnravelSkipped { .. } => "bead.unravel.skipped",
             EventKind::SinkError { .. } => "telemetry.sink_error",
         }
     }
@@ -325,7 +337,9 @@ impl EventKind {
             | EventKind::EffortRecorded { bead_id, .. }
             | EventKind::MitosisEvaluated { bead_id, .. }
             | EventKind::VerificationFailed { bead_id, .. }
-            | EventKind::VerificationPassed { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::VerificationPassed { bead_id, .. }
+            | EventKind::UnravelAnalyzed { bead_id, .. }
+            | EventKind::UnravelSkipped { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
@@ -650,6 +664,21 @@ impl EventKind {
                     "gates_run": gates_run,
                 })
             }
+            EventKind::UnravelAnalyzed {
+                bead_id,
+                alternatives_proposed,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "alternatives_proposed": alternatives_proposed,
+                })
+            }
+            EventKind::UnravelSkipped { bead_id, reason } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "reason": reason,
+                })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
         }
     }
@@ -699,6 +728,8 @@ impl EventKind {
             | EventKind::MitosisSkipped { .. }
             | EventKind::VerificationFailed { .. }
             | EventKind::VerificationPassed { .. }
+            | EventKind::UnravelAnalyzed { .. }
+            | EventKind::UnravelSkipped { .. }
             | EventKind::SinkError { .. } => None,
         }
     }

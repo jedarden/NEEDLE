@@ -308,6 +308,52 @@ impl MitosisConfig {
     }
 }
 
+/// Unravel strand configuration (alternative proposals for human-blocked beads).
+///
+/// Unravel proposes automated alternatives for beads labeled "human".
+/// Child beads are created as alternatives; the original is never modified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnravelConfig {
+    /// Whether the Unravel strand is enabled (opt-in, default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Maximum human-labeled beads to analyze per run (default: 5).
+    #[serde(default = "UnravelConfig::default_max_beads_per_run")]
+    pub max_beads_per_run: u32,
+
+    /// Maximum alternative children per original bead (default: 3).
+    #[serde(default = "UnravelConfig::default_max_alternatives_per_bead")]
+    pub max_alternatives_per_bead: u32,
+
+    /// Minimum hours between re-analysis of the same bead (default: 168 = 7 days).
+    #[serde(default = "UnravelConfig::default_cooldown_hours")]
+    pub cooldown_hours: u64,
+}
+
+impl Default for UnravelConfig {
+    fn default() -> Self {
+        UnravelConfig {
+            enabled: false,
+            max_beads_per_run: Self::default_max_beads_per_run(),
+            max_alternatives_per_bead: Self::default_max_alternatives_per_bead(),
+            cooldown_hours: Self::default_cooldown_hours(),
+        }
+    }
+}
+
+impl UnravelConfig {
+    fn default_max_beads_per_run() -> u32 {
+        5
+    }
+    fn default_max_alternatives_per_bead() -> u32 {
+        3
+    }
+    fn default_cooldown_hours() -> u64 {
+        168
+    }
+}
+
 /// Weave strand configuration (gap analysis and bead creation).
 ///
 /// Weave analyzes workspace documentation for gaps and creates beads to
@@ -378,6 +424,8 @@ pub struct StrandsConfig {
     pub mitosis: MitosisConfig,
     #[serde(default)]
     pub weave: WeaveConfig,
+    #[serde(default)]
+    pub unravel: UnravelConfig,
 }
 
 /// File sink configuration for telemetry.
