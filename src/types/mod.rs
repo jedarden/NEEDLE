@@ -344,7 +344,7 @@ pub struct Bead {
     /// Stored as `source_repo` in br JSON output.
     #[serde(rename = "source_repo", default)]
     pub workspace: std::path::PathBuf,
-    #[serde(default)]
+    #[serde(default, alias = "dependents")]
     pub dependencies: Vec<BrDependency>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

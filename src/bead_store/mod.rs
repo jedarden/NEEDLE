@@ -441,6 +441,11 @@ impl BrCliBeadStore {
         let mut report = RepairReport::default();
         for line in stdout.lines() {
             if let Some(rest) = line.strip_prefix("WARN ") {
+                // Filter out non-actionable warnings that cannot be repaired
+                // (e.g., sqlite3 binary not installed on the system).
+                if rest.contains("sqlite3 not available") {
+                    continue;
+                }
                 report.warnings.push(rest.to_string());
             } else if let Some(rest) = line.strip_prefix("FIXED ") {
                 report.fixed.push(rest.to_string());
