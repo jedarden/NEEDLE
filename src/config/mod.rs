@@ -288,6 +288,14 @@ pub struct MitosisConfig {
     /// Only evaluate on first failure, not retries.
     #[serde(default = "MitosisConfig::default_first_failure_only")]
     pub first_failure_only: bool,
+
+    /// Force mitosis after this many consecutive failures (0 = disabled).
+    ///
+    /// When set, mitosis triggers on the Nth failure regardless of
+    /// `first_failure_only`. This prevents infinite loops where a bead
+    /// fails repeatedly without ever splitting.
+    #[serde(default)]
+    pub force_failure_threshold: u32,
 }
 
 impl Default for MitosisConfig {
@@ -295,6 +303,7 @@ impl Default for MitosisConfig {
         MitosisConfig {
             enabled: Self::default_enabled(),
             first_failure_only: Self::default_first_failure_only(),
+            force_failure_threshold: 0,
         }
     }
 }

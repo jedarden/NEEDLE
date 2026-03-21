@@ -100,19 +100,35 @@ impl MitosisEvaluator {
             });
         }
 
-        // Check if this is first failure (failure-count:1).
-        if self.config.first_failure_only {
-            let failure_count = self.get_failure_count(store, &bead.id).await?;
-            if failure_count != 1 {
+        // Check failure count conditions.
+        let failure_count = self.get_failure_count(store, &bead.id).await?;
+
+        // force_failure_threshold: trigger only when failure_count reaches the threshold.
+        if self.config.force_failure_threshold > 0 {
+            if failure_count < self.config.force_failure_threshold {
                 tracing::debug!(
                     bead_id = %bead.id,
                     failure_count,
-                    "mitosis skipped: not first failure"
+                    threshold = self.config.force_failure_threshold,
+                    "mitosis skipped: below force_failure_threshold"
                 );
                 return Ok(MitosisResult::Skipped {
-                    reason: format!("not first failure (count={})", failure_count),
+                    reason: format!(
+                        "failure count {} below threshold {}",
+                        failure_count, self.config.force_failure_threshold
+                    ),
                 });
             }
+        } else if self.config.first_failure_only && failure_count != 1 {
+            // Check if this is first failure (failure-count:1).
+            tracing::debug!(
+                bead_id = %bead.id,
+                failure_count,
+                "mitosis skipped: not first failure"
+            );
+            return Ok(MitosisResult::Skipped {
+                reason: format!("not first failure (count={})", failure_count),
+            });
         }
 
         // Resolve the agent adapter.
@@ -681,6 +697,7 @@ End of response."#;
         let config = MitosisConfig {
             enabled: false,
             first_failure_only: true,
+            force_failure_threshold: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -712,6 +729,7 @@ End of response."#;
         let config = MitosisConfig {
             enabled: true,
             first_failure_only: true,
+            force_failure_threshold: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -738,6 +756,7 @@ End of response."#;
         let config = MitosisConfig {
             enabled: true,
             first_failure_only: true,
+            force_failure_threshold: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -787,6 +806,7 @@ End of response."#;
         let config = MitosisConfig {
             enabled: true,
             first_failure_only: true,
+            force_failure_threshold: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
