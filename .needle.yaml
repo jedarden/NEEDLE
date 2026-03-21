@@ -8,8 +8,7 @@ agent:
 strands:
   explore:
     enabled: true
-    workspaces:
-      - /tmp/needle-remote-e2e
+    workspaces: []
 
 prompt:
   context_files: []

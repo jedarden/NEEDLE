@@ -72,9 +72,11 @@ impl super::Strand for PluckStrand {
             }
         };
 
-        // 2. Filter: remove beads that are already assigned (belt-and-suspenders;
-        //    the store should already filter these, but we verify).
-        candidates.retain(|b| b.assignee.is_none());
+        // 2. Filter: remove beads that are actively in_progress (claimed by another worker).
+        //    br ready returns open/claimable beads, but an open bead may have a stale
+        //    assignee string from a previous claim that was released. We only exclude
+        //    beads whose status is in_progress — not beads with a leftover assignee field.
+        candidates.retain(|b| !matches!(b.status, crate::types::BeadStatus::InProgress));
 
         // 3. Sort: deterministic (priority, created_at, id).
         Self::sort_candidates(&mut candidates);
