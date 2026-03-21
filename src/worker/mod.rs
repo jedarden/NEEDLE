@@ -143,7 +143,12 @@ impl Worker {
                     self.dispatcher
                         .adapter("claude-sonnet")
                         .cloned()
-                        .unwrap_or_else(|| crate::dispatch::builtin_adapters().into_iter().next().unwrap())
+                        .unwrap_or_else(|| {
+                            crate::dispatch::builtin_adapters()
+                                .into_iter()
+                                .next()
+                                .unwrap()
+                        })
                 });
             let exec_result = self
                 .dispatcher
