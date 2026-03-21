@@ -13,7 +13,9 @@ use chrono::Utc;
 use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{AgentOutcome, Bead, BeadAction, BeadStatus, HandlerResult, Outcome};
+#[cfg(test)]
+use crate::types::BeadStatus;
+use crate::types::{AgentOutcome, Bead, BeadAction, HandlerResult, Outcome};
 use crate::validation::ValidationGate;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -78,6 +80,12 @@ impl OutcomeHandler {
             Outcome::Crash(code) => self.handle_crash(store, bead, code).await?,
         };
 
+        // Emit sub-handler events (e.g. BeadCompleted, BeadOrphaned) to the
+        // telemetry sink so they appear in the JSONL log.
+        for event in &telemetry_events {
+            self.telemetry.emit(event.clone())?;
+        }
+
         self.telemetry.emit(EventKind::OutcomeHandled {
             bead_id: bead.id.clone(),
             outcome: outcome.as_str().to_string(),
@@ -137,28 +145,23 @@ impl OutcomeHandler {
         let mut events = Vec::new();
 
         match store.show(&bead.id).await {
-            Ok(current) => match current.status {
-                BeadStatus::Done => {
-                    tracing::info!(bead_id = %bead.id, "bead confirmed closed by agent");
-                    events.push(EventKind::BeadCompleted {
-                        bead_id: bead.id.clone(),
-                        duration_ms: 0,
-                    });
-                }
-                BeadStatus::Open | BeadStatus::InProgress | BeadStatus::Blocked => {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        status = %current.status,
-                        "agent exited successfully but bead is still open (orphaned)"
-                    );
-                    self.telemetry.emit(EventKind::BeadOrphaned {
-                        bead_id: bead.id.clone(),
-                    })?;
-                    events.push(EventKind::BeadOrphaned {
-                        bead_id: bead.id.clone(),
-                    });
-                }
-            },
+            Ok(current) if current.status.is_done() => {
+                tracing::info!(bead_id = %bead.id, "bead confirmed closed by agent");
+                events.push(EventKind::BeadCompleted {
+                    bead_id: bead.id.clone(),
+                    duration_ms: 0,
+                });
+            }
+            Ok(current) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    status = %current.status,
+                    "agent exited successfully but bead is still open (orphaned)"
+                );
+                events.push(EventKind::BeadOrphaned {
+                    bead_id: bead.id.clone(),
+                });
+            }
             Err(e) => {
                 tracing::warn!(
                     bead_id = %bead.id,
@@ -197,7 +200,7 @@ impl OutcomeHandler {
 
         // If the agent already closed the bead, reopen it before releasing.
         match store.show(&bead.id).await {
-            Ok(current) if current.status == BeadStatus::Done => {
+            Ok(current) if current.status.is_done() => {
                 tracing::info!(
                     bead_id = %bead.id,
                     "reopening bead closed by agent (verification failed)"

@@ -97,7 +97,7 @@ impl KnotStrand {
                         }
                     }
                 }
-                BeadStatus::Done | BeadStatus::Blocked => {}
+                BeadStatus::Done | BeadStatus::Closed | BeadStatus::Blocked => {}
                 // Non-exhaustive: treat unknown statuses as neither open nor in_progress.
                 #[allow(unreachable_patterns)]
                 _ => {}

@@ -96,7 +96,17 @@ pub enum BeadStatus {
     Open,
     InProgress,
     Done,
+    /// `br show --json` emits `"closed"` for done beads. Treat as equivalent
+    /// to `Done` so deserialization succeeds.
+    Closed,
     Blocked,
+}
+
+impl BeadStatus {
+    /// Returns true if the bead is finished (either `Done` or `Closed`).
+    pub fn is_done(&self) -> bool {
+        matches!(self, BeadStatus::Done | BeadStatus::Closed)
+    }
 }
 
 impl fmt::Display for BeadStatus {
@@ -104,7 +114,7 @@ impl fmt::Display for BeadStatus {
         match self {
             BeadStatus::Open => write!(f, "open"),
             BeadStatus::InProgress => write!(f, "in_progress"),
-            BeadStatus::Done => write!(f, "done"),
+            BeadStatus::Done | BeadStatus::Closed => write!(f, "done"),
             BeadStatus::Blocked => write!(f, "blocked"),
         }
     }

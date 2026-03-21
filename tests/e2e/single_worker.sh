@@ -9,7 +9,7 @@
 # Expected telemetry event sequence:
 #   worker.started -> worker.state_transition (multiple) -> bead.claim.attempted ->
 #   bead.claim.succeeded -> agent.dispatched -> agent.completed -> outcome.classified ->
-#   outcome.handled -> effort.recorded -> worker.exhausted -> worker.stopped
+#   outcome.handled -> bead.completed -> worker.exhausted -> worker.stopped
 
 set -euo pipefail
 
@@ -190,6 +190,7 @@ else
         "agent.completed"
         "outcome.classified"
         "outcome.handled"
+        "bead.completed"
         "worker.exhausted"
     )
 
