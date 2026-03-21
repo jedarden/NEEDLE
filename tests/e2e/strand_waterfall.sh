@@ -21,6 +21,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
+# Source workspace library
+source "$SCRIPT_DIR/lib/workspace.sh"
+
 # ── Color helpers ──────────────────────────────────────────────────────────────
 
 RED='\033[0;31m'
@@ -95,32 +98,15 @@ export HOME="$FAKE_HOME_A"
 # ── Step 1: Create empty home workspace ──────────────────────────────────────
 
 echo "Step 1: Creating empty home workspace..."
-mkdir -p "$HOME_WS_A"
-(cd "$HOME_WS_A" && "$BR_BIN" init 2>&1) || {
-    echo "FATAL: br init failed for home workspace"
-    exit 1
-}
+create_home_workspace "$HOME_WS_A"
 echo "  Home workspace: $HOME_WS_A"
 
 # ── Step 2: Create remote workspace with 1 bead ─────────────────────────────
 
 echo "Step 2: Creating remote workspace with 1 bead..."
-mkdir -p "$REMOTE_WS_A"
-(cd "$REMOTE_WS_A" && "$BR_BIN" init 2>&1) || {
-    echo "FATAL: br init failed for remote workspace"
-    exit 1
-}
-
-REMOTE_BEAD_ID="$(cd "$REMOTE_WS_A" && "$BR_BIN" create \
-    --title "Remote task: create DONE file" \
-    --description "Create a file called DONE in the workspace root" \
-    --silent 2>/dev/null)" || {
-    (cd "$REMOTE_WS_A" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
-    REMOTE_BEAD_ID="$(cd "$REMOTE_WS_A" && "$BR_BIN" create \
-        --title "Remote task: create DONE file" \
-        --description "Create a file called DONE in the workspace root" \
-        --silent)"
-}
+create_remote_workspace_with_bead "$REMOTE_WS_A" REMOTE_BEAD_ID \
+    "Remote task: create DONE file" \
+    "Create a file called DONE in the workspace root"
 echo "  Remote workspace: $REMOTE_WS_A"
 echo "  Remote bead: $REMOTE_BEAD_ID"
 
