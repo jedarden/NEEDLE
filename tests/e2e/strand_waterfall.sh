@@ -277,11 +277,7 @@ export HOME="$FAKE_HOME_B"
 # ── Step 1: Create empty home workspace ──────────────────────────────────────
 
 echo "Step 1: Creating empty home workspace..."
-mkdir -p "$HOME_WS_B"
-(cd "$HOME_WS_B" && "$BR_BIN" init 2>&1) || {
-    echo "FATAL: br init failed"
-    exit 1
-}
+create_home_workspace "$HOME_WS_B"
 echo "  Home workspace: $HOME_WS_B"
 
 # ── Step 2: Configure needle with NO remote workspaces ──────────────────────
