@@ -124,15 +124,12 @@ impl BrCliBeadStore {
             .await
             .with_context(|| format!("failed to spawn br with args: {args:?}"))?;
 
-        let stdout = String::from_utf8(output.stdout)
-            .context("br stdout was not valid UTF-8")?;
+        let stdout = String::from_utf8(output.stdout).context("br stdout was not valid UTF-8")?;
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
-            bail!(
-                "br {args:?} exited with code {code}\nstderr: {stderr}\nstdout: {stdout}"
-            );
+            bail!("br {args:?} exited with code {code}\nstderr: {stderr}\nstdout: {stdout}");
         }
 
         Ok(stdout)
@@ -148,8 +145,7 @@ impl BrCliBeadStore {
             .with_context(|| format!("failed to spawn br with args: {args:?}"))?;
 
         let code = output.status.code().unwrap_or(-1);
-        let stdout = String::from_utf8(output.stdout)
-            .context("br stdout was not valid UTF-8")?;
+        let stdout = String::from_utf8(output.stdout).context("br stdout was not valid UTF-8")?;
 
         Ok((code, stdout))
     }
@@ -191,9 +187,7 @@ impl BeadStore for BrCliBeadStore {
 
         // Apply label exclusion filter (br CLI doesn't support this natively).
         if !filters.exclude_labels.is_empty() {
-            beads.retain(|b| {
-                !b.labels.iter().any(|l| filters.exclude_labels.contains(l))
-            });
+            beads.retain(|b| !b.labels.iter().any(|l| filters.exclude_labels.contains(l)));
         }
 
         Ok(beads)

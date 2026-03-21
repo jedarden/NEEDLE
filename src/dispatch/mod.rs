@@ -28,6 +28,7 @@ impl Dispatcher {
         self.telemetry.emit(EventKind::DispatchStarted {
             bead_id: bead_id.clone(),
             agent: self.config.agent.default.clone(),
+            prompt_len: prompt.len(),
         })?;
 
         let output = tokio::process::Command::new(&self.config.agent.default)
@@ -47,6 +48,7 @@ impl Dispatcher {
         self.telemetry.emit(EventKind::DispatchCompleted {
             bead_id: bead_id.clone(),
             exit_code,
+            duration_ms: 0, // TODO(needle-g6g): measure actual dispatch duration
         })?;
 
         Ok(outcome)
