@@ -71,20 +71,38 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
 }
 
 /// Create a bead in the test workspace.
+///
+/// Retries once with `br sync --flush-only` on FrankenSQLite sync conflicts.
 fn create_bead(workspace: &Path, title: &str, priority: u8) -> Result<BeadId> {
     let br = br_path();
-    let output = std::process::Command::new(&br)
-        .args([
-            "create",
-            "--title",
-            title,
-            "--body",
-            &format!("Test bead: {title}"),
-            "--silent",
-        ])
-        .current_dir(workspace)
-        .output()
-        .context("failed to run br create")?;
+    let do_create = || {
+        std::process::Command::new(&br)
+            .args([
+                "create",
+                "--title",
+                title,
+                "--body",
+                &format!("Test bead: {title}"),
+                "--silent",
+            ])
+            .current_dir(workspace)
+            .output()
+            .context("failed to run br create")
+    };
+
+    let mut output = do_create()?;
+
+    // Retry once on sync conflict (FrankenSQLite WAL race).
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("Sync conflict") {
+            let _ = std::process::Command::new(&br)
+                .args(["sync", "--flush-only"])
+                .current_dir(workspace)
+                .output();
+            output = do_create()?;
+        }
+    }
 
     if !output.status.success() {
         anyhow::bail!(

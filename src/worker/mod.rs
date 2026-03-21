@@ -1115,7 +1115,13 @@ mod tests {
     #[tokio::test]
     async fn beads_processed_starts_at_zero() {
         let store = Arc::new(MockStore::empty());
-        let worker = make_worker(store);
+        // Use an isolated workspace home so the registry doesn't pick up
+        // entries left by other tests (e.g., full_cycle_with_echo_agent).
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+        config.workspace.home = dir.path().to_path_buf();
+        let worker = Worker::new(config, "test-worker".to_string(), store);
         assert_eq!(worker.beads_processed(), 0);
     }
 
