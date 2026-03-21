@@ -1,0 +1,21 @@
+# Minimal test agent adapter for E2E testing (no real LLM needed)
+#
+# This adapter simulates a successful agent invocation by:
+# 1. Writing "done" to a DONE file in the workspace
+# 2. Closing the bead via br CLI
+#
+# Usage: needle run --agent test-echo
+#
+# Template variables available:
+#   {workspace}   - Path to the workspace directory
+#   {prompt_file} - Path to the temp file containing the rendered prompt
+#   {bead_id}     - The bead identifier (e.g., needle-abc123)
+#   {model}       - Model name from adapter config (default: "default")
+
+name: test-echo
+agent_cli: bash
+invoke_template: |
+  cd {workspace} && echo "done" > DONE && br close {bead_id} --reason "E2E test completed"
+timeout_secs: 30
+input_method:
+  method: stdin
