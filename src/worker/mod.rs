@@ -1658,6 +1658,172 @@ mod tests {
 
     // ── full cycle test ──
 
+    // ── is_workspace_unset tests ──
+
+    #[test]
+    fn is_workspace_unset_empty_path() {
+        assert!(is_workspace_unset(std::path::Path::new("")));
+    }
+
+    #[test]
+    fn is_workspace_unset_dot_path() {
+        assert!(is_workspace_unset(std::path::Path::new(".")));
+    }
+
+    #[test]
+    fn is_workspace_unset_real_path() {
+        assert!(!is_workspace_unset(std::path::Path::new("/tmp/workspace")));
+    }
+
+    #[test]
+    fn is_workspace_unset_relative_path() {
+        assert!(!is_workspace_unset(std::path::Path::new("some/path")));
+    }
+
+    // ── do_log tests ──
+
+    #[tokio::test]
+    async fn do_log_increments_beads_processed() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        // Isolate workspace home to avoid registry pollution from other tests.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+        config.workspace.home = dir.path().to_path_buf();
+        let mut worker = Worker::new(config, "test-log-inc".to_string(), store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Logging;
+        worker.current_bead = Some(make_test_bead("needle-log-1"));
+
+        assert_eq!(worker.beads_processed(), 0);
+        worker.do_log().unwrap();
+        assert_eq!(worker.beads_processed(), 1);
+        assert_eq!(*worker.state(), WorkerState::Selecting);
+    }
+
+    #[tokio::test]
+    async fn do_log_clears_current_bead_and_effort() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Logging;
+        worker.current_bead = Some(make_test_bead("needle-log-2"));
+        worker.last_effort = Some(EffortData {
+            cycle_start: Instant::now(),
+            agent_name: "test".to_string(),
+            model: None,
+            tokens: dispatch::TokenUsage::default(),
+            estimated_cost_usd: None,
+        });
+
+        worker.do_log().unwrap();
+
+        assert!(worker.current_bead.is_none());
+        assert!(worker.last_effort.is_none());
+    }
+
+    #[tokio::test]
+    async fn do_log_transitions_to_selecting() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Logging;
+        worker.current_bead = Some(make_test_bead("needle-log-3"));
+
+        worker.do_log().unwrap();
+        assert_eq!(*worker.state(), WorkerState::Selecting);
+    }
+
+    // ── handle_exhausted tests ──
+
+    #[tokio::test]
+    async fn handle_exhausted_with_exit_returns_stopped() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.worker.idle_action = IdleAction::Exit;
+        config.self_modification.hot_reload = false;
+        let mut worker = Worker::new(config, "test-exhaust-exit".to_string(), store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Exhausted;
+
+        let result = worker.handle_exhausted().await.unwrap();
+        assert_eq!(result, WorkerState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn handle_exhausted_with_wait_returns_selecting() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.worker.idle_action = IdleAction::Wait;
+        // Use a very short timeout so the test doesn't block.
+        config.worker.idle_timeout = 0;
+        config.self_modification.hot_reload = false;
+        let mut worker = Worker::new(config, "test-exhaust-wait".to_string(), store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Exhausted;
+
+        let result = worker.handle_exhausted().await.unwrap();
+        assert_eq!(result, WorkerState::Selecting);
+    }
+
+    // ── stop tests ──
+
+    #[tokio::test]
+    async fn stop_returns_stopped_state() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        let result = worker.stop("test shutdown").await.unwrap();
+        assert_eq!(result, WorkerState::Stopped);
+    }
+
+    // ── resolve_provider tests ──
+
+    #[tokio::test]
+    async fn resolve_provider_returns_none_for_missing_adapter() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.agent.default = "nonexistent-adapter".to_string();
+        config.self_modification.hot_reload = false;
+        let worker = Worker::new(config, "test-provider".to_string(), store);
+
+        // Default adapter not found → provider is None.
+        assert!(worker.resolve_provider().is_none());
+    }
+
+    // ── restore_home_store tests ──
+
+    #[tokio::test]
+    async fn restore_home_store_is_noop_when_stores_match() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        // home_store and store should be the same Arc initially.
+        assert!(Arc::ptr_eq(&worker.store, &worker.home_store));
+        worker.restore_home_store();
+        assert!(Arc::ptr_eq(&worker.store, &worker.home_store));
+    }
+
+    // ── do_select with exclusion set ──
+
+    #[tokio::test]
+    async fn do_select_clears_exclusion_set_and_retry_count() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.exclusion_set.insert(BeadId::from("old-bead"));
+        worker.retry_count = 3;
+
+        worker.do_select().await.unwrap();
+
+        assert!(worker.exclusion_set.is_empty());
+        assert_eq!(worker.retry_count, 0);
+    }
+
+    // ── full cycle test ──
+
     #[tokio::test]
     async fn full_cycle_with_echo_agent() {
         use std::collections::HashMap;
