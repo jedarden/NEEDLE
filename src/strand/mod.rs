@@ -10,6 +10,7 @@ mod explore;
 mod knot;
 mod mend;
 mod pluck;
+pub mod weave;
 
 use std::time::Instant;
 
@@ -23,6 +24,7 @@ pub use explore::ExploreStrand;
 pub use knot::KnotStrand;
 pub use mend::MendStrand;
 pub use pluck::PluckStrand;
+pub use weave::{WeaveAgent, WeaveStrand};
 
 /// A single selection strategy in the waterfall.
 #[async_trait::async_trait]

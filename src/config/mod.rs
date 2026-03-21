@@ -308,6 +308,61 @@ impl MitosisConfig {
     }
 }
 
+/// Weave strand configuration (gap analysis and bead creation).
+///
+/// Weave analyzes workspace documentation for gaps and creates beads to
+/// address them. Heavily guardrailed to prevent infinite work creation loops.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WeaveConfig {
+    /// Whether the Weave strand is enabled (opt-in, default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Maximum beads to create per weave run (default: 5).
+    #[serde(default = "WeaveConfig::default_max_beads_per_run")]
+    pub max_beads_per_run: u32,
+
+    /// Minimum hours between weave runs per workspace (default: 24).
+    #[serde(default = "WeaveConfig::default_cooldown_hours")]
+    pub cooldown_hours: u64,
+
+    /// Workspaces where weave is forbidden (default: []).
+    #[serde(default)]
+    pub exclude_workspaces: Vec<PathBuf>,
+
+    /// Glob patterns for documentation files to analyze.
+    #[serde(default = "WeaveConfig::default_doc_patterns")]
+    pub doc_patterns: Vec<String>,
+}
+
+impl Default for WeaveConfig {
+    fn default() -> Self {
+        WeaveConfig {
+            enabled: false,
+            max_beads_per_run: Self::default_max_beads_per_run(),
+            cooldown_hours: Self::default_cooldown_hours(),
+            exclude_workspaces: Vec::new(),
+            doc_patterns: Self::default_doc_patterns(),
+        }
+    }
+}
+
+impl WeaveConfig {
+    fn default_max_beads_per_run() -> u32 {
+        5
+    }
+    fn default_cooldown_hours() -> u64 {
+        24
+    }
+    fn default_doc_patterns() -> Vec<String> {
+        vec![
+            "README*".to_string(),
+            "AGENTS.md".to_string(),
+            "docs/**/*".to_string(),
+        ]
+    }
+}
+
 /// Strand waterfall configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StrandsConfig {
@@ -321,6 +376,8 @@ pub struct StrandsConfig {
     pub knot: KnotConfig,
     #[serde(default)]
     pub mitosis: MitosisConfig,
+    #[serde(default)]
+    pub weave: WeaveConfig,
 }
 
 /// File sink configuration for telemetry.
