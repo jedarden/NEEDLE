@@ -6,6 +6,10 @@ rust-version = "1.75"
 description = "Navigates Every Enqueued Deliverable, Logs Effort"
 license = "MIT"
 
+[lib]
+name = "needle"
+path = "src/lib.rs"
+
 [[bin]]
 name = "needle"
 path = "src/main.rs"
@@ -47,6 +51,7 @@ sha2 = "0.10"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = "3"
 
 [profile.release]
 strip = true

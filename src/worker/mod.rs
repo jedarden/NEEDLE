@@ -592,6 +592,16 @@ impl Worker {
     pub fn beads_processed(&self) -> u64 {
         self.beads_processed
     }
+
+    /// Replace the dispatcher (for testing with custom adapters).
+    pub fn set_dispatcher(&mut self, dispatcher: Dispatcher) {
+        self.dispatcher = dispatcher;
+    }
+
+    /// Request a graceful shutdown (sets the internal shutdown flag).
+    pub fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
