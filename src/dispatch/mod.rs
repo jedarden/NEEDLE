@@ -1538,4 +1538,424 @@ input_method:
         assert!(adapters.contains_key("generic"));
         assert_eq!(adapters.len(), 6);
     }
+
+    // ── E2E: Agent adapter invocation (needle-4vq) ──
+    //
+    // These tests validate the full dispatch invocation chain: template
+    // rendering, env var injection, prompt delivery, process management,
+    // timeout enforcement, exit code capture, and output parsing.
+
+    #[tokio::test]
+    async fn e2e_all_template_variables_substituted() {
+        // Verify that {workspace}, {prompt_file}, {bead_id}, and {model} are
+        // all rendered into the command the agent receives.
+        let mut adapter = test_adapter(
+            "vars",
+            "echo ws={workspace} pf={prompt_file} bid={bead_id} m={model}",
+        );
+        adapter.model = Some("test-model-v1".to_string());
+
+        let mut adapters = HashMap::new();
+        adapters.insert("vars".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("vars").unwrap().clone();
+
+        let workspace = std::env::temp_dir().join("needle-e2e-vars");
+        let _ = std::fs::create_dir_all(&workspace);
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("needle-tmpl"),
+                &test_prompt("irrelevant"),
+                &adapter,
+                &workspace,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let out = result.stdout.trim();
+        assert!(
+            out.contains(&format!("ws={}", workspace.display())),
+            "workspace not substituted: {out}"
+        );
+        assert!(
+            out.contains("bid=needle-tmpl"),
+            "bead_id not substituted: {out}"
+        );
+        assert!(
+            out.contains("m=test-model-v1"),
+            "model not substituted: {out}"
+        );
+        // prompt_file is a temp path — just verify it was substituted (not literal)
+        assert!(
+            !out.contains("{prompt_file}"),
+            "prompt_file placeholder not replaced: {out}"
+        );
+        assert!(
+            out.contains("pf=/"),
+            "prompt_file should be an absolute path: {out}"
+        );
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    #[tokio::test]
+    async fn e2e_multiple_environment_variables() {
+        // Verify that all adapter environment variables are set in the child.
+        let mut adapter = test_adapter("multienv", "echo $NDL_A $NDL_B $NDL_C");
+        adapter
+            .environment
+            .insert("NDL_A".to_string(), "alpha".to_string());
+        adapter
+            .environment
+            .insert("NDL_B".to_string(), "beta".to_string());
+        adapter
+            .environment
+            .insert("NDL_C".to_string(), "gamma".to_string());
+
+        let mut adapters = HashMap::new();
+        adapters.insert("multienv".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("multienv").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-env-multi"),
+                &test_prompt("test"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), "alpha beta gamma");
+    }
+
+    #[tokio::test]
+    async fn e2e_prompt_with_shell_metacharacters() {
+        // Verify that shell metacharacters in the prompt body are safely
+        // delivered via the temp file without shell injection or corruption.
+        let dangerous_prompt =
+            "Hello $USER\nLine with `backticks`\nQuotes: 'single' \"double\"\nBackslash: \\\nDollar: $(echo injected)";
+
+        let mut adapters = HashMap::new();
+        adapters.insert(
+            "catprompt".to_string(),
+            test_adapter("catprompt", "cat {prompt_file}"),
+        );
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("catprompt").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-meta"),
+                &test_prompt(dangerous_prompt),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        // The prompt file content should be the exact string, not shell-expanded.
+        assert!(
+            result.stdout.contains("$USER"),
+            "shell variable should be literal, not expanded"
+        );
+        assert!(
+            result.stdout.contains("`backticks`"),
+            "backticks should be preserved"
+        );
+        assert!(
+            result.stdout.contains("$(echo injected)"),
+            "command substitution should be literal"
+        );
+        assert!(
+            result.stdout.contains("'single'"),
+            "single quotes should be preserved"
+        );
+        assert!(
+            result.stdout.contains("\"double\""),
+            "double quotes should be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_prompt_with_newlines_preserved() {
+        let multiline = "line one\nline two\nline three";
+
+        let mut adapters = HashMap::new();
+        adapters.insert(
+            "wc".to_string(),
+            test_adapter("wc", "wc -l < {prompt_file}"),
+        );
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("wc").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-newlines"),
+                &test_prompt(multiline),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        let line_count: i32 = result.stdout.trim().parse().unwrap_or(-1);
+        // wc -l counts newline characters; "line one\nline two\nline three"
+        // has 2 newlines, so wc -l reports 2.
+        assert_eq!(line_count, 2, "prompt should have 2 newlines (3 lines)");
+    }
+
+    #[tokio::test]
+    async fn e2e_exit_code_0_is_success() {
+        use crate::types::Outcome;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("ok".to_string(), test_adapter("ok", "exit 0"));
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("ok").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-exit0"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(Outcome::classify(result.exit_code, false), Outcome::Success);
+    }
+
+    #[tokio::test]
+    async fn e2e_exit_code_1_is_failure() {
+        use crate::types::Outcome;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("f1".to_string(), test_adapter("f1", "exit 1"));
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("f1").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-exit1"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(Outcome::classify(result.exit_code, false), Outcome::Failure);
+    }
+
+    #[tokio::test]
+    async fn e2e_exit_code_2_is_failure() {
+        use crate::types::Outcome;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("f2".to_string(), test_adapter("f2", "exit 2"));
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("f2").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-exit2"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 2);
+        assert_eq!(Outcome::classify(result.exit_code, false), Outcome::Failure);
+    }
+
+    #[tokio::test]
+    async fn e2e_exit_code_137_is_crash() {
+        use crate::types::Outcome;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("crash".to_string(), test_adapter("crash", "exit 137"));
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("crash").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-exit137"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 137);
+        assert_eq!(
+            Outcome::classify(result.exit_code, false),
+            Outcome::Crash(137)
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_timeout_kills_agent_returns_124() {
+        let mut adapter = test_adapter("sleeper", "sleep 100");
+        adapter.timeout_secs = 1;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("sleeper".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("sleeper").unwrap().clone();
+
+        let start = Instant::now();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-timeout"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+        let wall = start.elapsed();
+
+        assert_eq!(result.exit_code, 124, "timeout should yield exit 124");
+        assert!(
+            wall < Duration::from_secs(5),
+            "should have been killed after ~1s, took {:?}",
+            wall
+        );
+        assert!(
+            result.elapsed >= Duration::from_millis(900),
+            "should have waited at least ~1s"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_json_output_capture_and_token_extraction() {
+        // Simulate a claude-like JSON output and verify token extraction works
+        // on real process output.
+        let json = r#"{"type":"result","result":"done","cost_usd":0.001,"usage":{"input_tokens":1500,"output_tokens":750}}"#;
+        let cmd = format!("echo '{json}'");
+
+        let mut adapter = test_adapter("json-agent", &cmd);
+        adapter.token_extraction = TokenExtraction::JsonField {
+            input_path: "usage.input_tokens".to_string(),
+            output_path: "usage.output_tokens".to_string(),
+        };
+
+        let mut adapters = HashMap::new();
+        adapters.insert("json-agent".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("json-agent").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-json"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+
+        // Parse the captured stdout with the token extraction logic.
+        let usage = extract_tokens(&adapter.token_extraction, &result.stdout, &result.stderr);
+        assert_eq!(usage.input_tokens, Some(1500));
+        assert_eq!(usage.output_tokens, Some(750));
+    }
+
+    #[tokio::test]
+    async fn e2e_adapter_with_custom_env_and_base_url() {
+        // Simulate an adapter with ANTHROPIC_BASE_URL and custom env vars,
+        // verifying they're all available to the child process.
+        let mut adapter = test_adapter(
+            "custom-env",
+            "echo base=$ANTHROPIC_BASE_URL custom=$CUSTOM_FLAG",
+        );
+        adapter.environment.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://api.example.com".to_string(),
+        );
+        adapter
+            .environment
+            .insert("CUSTOM_FLAG".to_string(), "enabled".to_string());
+
+        let mut adapters = HashMap::new();
+        adapters.insert("custom-env".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("custom-env").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-baseurl"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert!(
+            result.stdout.contains("base=https://api.example.com"),
+            "ANTHROPIC_BASE_URL not set: {}",
+            result.stdout
+        );
+        assert!(
+            result.stdout.contains("custom=enabled"),
+            "CUSTOM_FLAG not set: {}",
+            result.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_workspace_directory_is_correct() {
+        // Verify the agent process can see the workspace directory.
+        let workspace = std::env::temp_dir().join("needle-e2e-wsdir");
+        let _ = std::fs::create_dir_all(&workspace);
+
+        let mut adapters = HashMap::new();
+        adapters.insert(
+            "pwd".to_string(),
+            test_adapter("pwd", "cd {workspace} && pwd"),
+        );
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("pwd").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-wsdir"),
+                &test_prompt("t"),
+                &adapter,
+                &workspace,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        // Canonicalize both to handle symlinks (e.g., /tmp -> /private/tmp on macOS)
+        let expected = std::fs::canonicalize(&workspace)
+            .unwrap_or_else(|_| workspace.clone())
+            .display()
+            .to_string();
+        let actual = result.stdout.trim().to_string();
+        let actual_canonical = std::fs::canonicalize(&actual)
+            .map(|p| p.display().to_string())
+            .unwrap_or(actual);
+        assert_eq!(actual_canonical, expected);
+
+        let _ = std::fs::remove_dir_all(&workspace);
+    }
 }
