@@ -569,6 +569,7 @@ mod tests {
             labels: vec![],
             workspace: PathBuf::from("/tmp/test-workspace"),
             dependencies: vec![],
+            dependents: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

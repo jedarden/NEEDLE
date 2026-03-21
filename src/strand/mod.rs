@@ -268,6 +268,7 @@ mod tests {
             labels: vec![],
             workspace: std::path::PathBuf::from("/tmp/test"),
             dependencies: vec![],
+            dependents: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

@@ -696,6 +696,7 @@ mod tests {
             labels: labels.iter().map(|s| s.to_string()).collect(),
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
+            dependents: vec![],
             created_at: dt,
             updated_at: dt,
         }

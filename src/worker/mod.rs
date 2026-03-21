@@ -1131,6 +1131,7 @@ mod tests {
             labels: vec![],
             workspace: std::path::PathBuf::from("/tmp/test-workspace"),
             dependencies: vec![],
+            dependents: vec![],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }

@@ -46,6 +46,7 @@ fn arb_bead() -> impl Strategy<Value = Bead> {
             labels: vec![],
             workspace: PathBuf::from("/tmp/test-workspace"),
             dependencies: vec![],
+            dependents: vec![],
             created_at,
             updated_at,
         })

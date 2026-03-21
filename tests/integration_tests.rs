@@ -168,6 +168,7 @@ fn make_bead_with_id(id: &str) -> Bead {
         labels: vec![],
         workspace: PathBuf::from("/tmp/test-workspace"),
         dependencies: vec![],
+            dependents: vec![],
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

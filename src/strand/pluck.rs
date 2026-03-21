@@ -256,6 +256,7 @@ mod tests {
             labels: vec![],
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
+            dependents: vec![],
             created_at: Utc.from_utc_datetime(&dt),
             updated_at: Utc.from_utc_datetime(&dt),
         }
@@ -377,10 +378,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assigned_beads_are_filtered_out() {
+    async fn open_bead_with_stale_assignee_is_claimable() {
+        // An open bead with a leftover assignee from a previous claim is still
+        // claimable. Only in_progress beads are filtered out.
         let store = MemoryStore {
             beads: vec![
-                make_bead_with_assignee("assigned", "worker-1"),
+                make_bead_with_assignee("stale-assignee", "worker-1"),
                 make_bead("unassigned", 1, "2026-01-01 00:00:00"),
             ],
         };
@@ -390,8 +393,7 @@ mod tests {
 
         match result {
             StrandResult::BeadFound(beads) => {
-                assert_eq!(beads.len(), 1);
-                assert_eq!(beads[0].id.as_ref(), "unassigned");
+                assert_eq!(beads.len(), 2, "both open beads should be claimable");
             }
             other => panic!("expected BeadFound, got: {other:?}"),
         }

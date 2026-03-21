@@ -364,8 +364,10 @@ pub struct Bead {
     /// Stored as `source_repo` in br JSON output.
     #[serde(rename = "source_repo", default)]
     pub workspace: std::path::PathBuf,
-    #[serde(default, alias = "dependents")]
+    #[serde(default)]
     pub dependencies: Vec<BrDependency>,
+    #[serde(default)]
+    pub dependents: Vec<BrDependency>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -957,15 +959,19 @@ mod tests {
     }
 
     #[test]
-    fn bead_deserialization_with_dependents_alias() {
-        // br may emit "dependents" instead of "dependencies"
+    fn bead_deserialization_with_both_dependencies_and_dependents() {
+        // br show --json emits both "dependencies" and "dependents" as separate arrays.
+        // They must deserialize into separate fields (not alias each other).
         let json = r#"{
-            "id": "needle-alias",
-            "title": "Alias test",
+            "id": "needle-both",
+            "title": "Both fields test",
             "description": null,
             "priority": 1,
             "status": "open",
             "assignee": null,
+            "dependencies": [
+                {"id": "needle-blocker", "title": "Blocker", "status": "closed", "priority": 1, "dependency_type": "blocks"}
+            ],
             "dependents": [
                 {"id": "needle-child", "title": "Child", "status": "open", "priority": 1, "dependency_type": "blocks"}
             ],
@@ -974,7 +980,9 @@ mod tests {
         }"#;
         let bead: Bead = serde_json::from_str(json).unwrap();
         assert_eq!(bead.dependencies.len(), 1);
-        assert_eq!(bead.dependencies[0].id, BeadId::from("needle-child"));
+        assert_eq!(bead.dependencies[0].id, BeadId::from("needle-blocker"));
+        assert_eq!(bead.dependents.len(), 1);
+        assert_eq!(bead.dependents[0].id, BeadId::from("needle-child"));
     }
 
     #[test]
