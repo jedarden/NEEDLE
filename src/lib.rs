@@ -19,4 +19,5 @@ pub mod registry;
 pub mod strand;
 pub mod telemetry;
 pub mod types;
+pub mod validation;
 pub mod worker;

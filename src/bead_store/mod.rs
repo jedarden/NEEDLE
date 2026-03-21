@@ -110,6 +110,12 @@ pub trait BeadStore: Send + Sync {
     /// Release a claimed bead back to open (e.g., after agent failure).
     async fn release(&self, id: &BeadId) -> Result<()>;
 
+    /// Reopen a closed (Done) bead back to open status.
+    ///
+    /// Used by validation gates when verification fails after an agent has
+    /// already closed the bead.
+    async fn reopen(&self, id: &BeadId) -> Result<()>;
+
     /// List all labels on a bead.
     async fn labels(&self, id: &BeadId) -> Result<Vec<String>>;
 
@@ -333,6 +339,14 @@ impl BeadStore for BrCliBeadStore {
         self.run_br(&["update", id_str, "--status", "open", "--assignee", ""])
             .await
             .with_context(|| format!("br release {id_str} failed"))?;
+        Ok(())
+    }
+
+    async fn reopen(&self, id: &BeadId) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_br(&["reopen", id_str])
+            .await
+            .with_context(|| format!("br reopen {id_str} failed"))?;
         Ok(())
     }
 

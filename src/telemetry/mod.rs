@@ -240,6 +240,18 @@ pub enum EventKind {
         existing_children: u32,
     },
 
+    // ── Validation gates ──
+    VerificationFailed {
+        bead_id: BeadId,
+        command: String,
+        exit_code: Option<i32>,
+        output: String,
+    },
+    VerificationPassed {
+        bead_id: BeadId,
+        gates_run: u32,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -287,6 +299,8 @@ impl EventKind {
             EventKind::MitosisEvaluated { .. } => "bead.mitosis.evaluated",
             EventKind::MitosisSplit { .. } => "bead.mitosis.split",
             EventKind::MitosisSkipped { .. } => "bead.mitosis.skipped",
+            EventKind::VerificationFailed { .. } => "verification.failed",
+            EventKind::VerificationPassed { .. } => "verification.passed",
             EventKind::SinkError { .. } => "telemetry.sink_error",
         }
     }
@@ -309,7 +323,9 @@ impl EventKind {
             | EventKind::StuckReleased { bead_id, .. }
             | EventKind::MendDependencyCleaned { bead_id, .. }
             | EventKind::EffortRecorded { bead_id, .. }
-            | EventKind::MitosisEvaluated { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::MitosisEvaluated { bead_id, .. }
+            | EventKind::VerificationFailed { bead_id, .. }
+            | EventKind::VerificationPassed { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
@@ -615,6 +631,25 @@ impl EventKind {
                     "existing_children": existing_children,
                 })
             }
+            EventKind::VerificationFailed {
+                bead_id,
+                command,
+                exit_code,
+                output,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "command": command,
+                    "exit_code": exit_code,
+                    "output": output,
+                })
+            }
+            EventKind::VerificationPassed { bead_id, gates_run } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "gates_run": gates_run,
+                })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
         }
     }
@@ -662,6 +697,8 @@ impl EventKind {
             | EventKind::MitosisEvaluated { .. }
             | EventKind::MitosisSplit { .. }
             | EventKind::MitosisSkipped { .. }
+            | EventKind::VerificationFailed { .. }
+            | EventKind::VerificationPassed { .. }
             | EventKind::SinkError { .. } => None,
         }
     }

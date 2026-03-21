@@ -153,6 +153,10 @@ impl BeadStore for ConcurrentMockStore {
         Ok(())
     }
 
+    async fn reopen(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
     async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
         Ok(self
             .labels_map
@@ -1524,6 +1528,10 @@ impl BeadStore for MitosisDedupeStore {
     }
 
     async fn release(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn reopen(&self, _id: &BeadId) -> Result<()> {
         Ok(())
     }
 

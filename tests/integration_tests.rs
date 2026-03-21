@@ -116,6 +116,11 @@ impl BeadStore for IntegrationMockStore {
         Ok(())
     }
 
+    async fn reopen(&self, id: &BeadId) -> Result<()> {
+        self.record(&format!("reopen:{id}"));
+        Ok(())
+    }
+
     async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
         self.record(&format!("labels:{id}"));
         Ok(vec![])

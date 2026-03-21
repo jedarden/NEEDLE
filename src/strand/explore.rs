@@ -203,6 +203,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
             Ok(vec![])
         }

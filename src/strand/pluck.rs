@@ -148,6 +148,10 @@ mod tests {
             Ok(())
         }
 
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
         async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
             let bead = self.show(id).await?;
             Ok(bead.labels)
@@ -201,6 +205,10 @@ mod tests {
 
         async fn release(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store connection failed")
+        }
+
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
         }
 
         async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {

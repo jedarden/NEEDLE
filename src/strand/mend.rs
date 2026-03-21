@@ -504,6 +504,9 @@ mod tests {
             self.release_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
             Ok(vec![])
         }
@@ -562,6 +565,9 @@ mod tests {
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store error")
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
         }
         async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
             anyhow::bail!("store error")

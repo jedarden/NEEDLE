@@ -606,6 +606,9 @@ pub struct WorkspaceOverrides {
     pub strands: Option<WorkspaceStrandsOverrides>,
     #[serde(default)]
     pub prompt: Option<PromptConfig>,
+    /// Verification commands run after agent success, before accepting closure.
+    #[serde(default)]
+    pub verification: Option<Vec<String>>,
 }
 
 /// Agent fields overridable at the workspace level.
@@ -661,6 +664,9 @@ pub struct Config {
     /// Daily budget thresholds for cost enforcement.
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// Verification commands run after agent success, before accepting closure.
+    #[serde(default)]
+    pub verification: Vec<String>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -804,7 +810,12 @@ impl ConfigLoader {
         if let Some(ref prompt) = overrides.prompt {
             config.prompt = prompt.clone();
             sources.insert("prompt.context_files".to_string(), source.clone());
-            sources.insert("prompt.instructions".to_string(), source);
+            sources.insert("prompt.instructions".to_string(), source.clone());
+        }
+
+        if let Some(ref verification) = overrides.verification {
+            config.verification = verification.clone();
+            sources.insert("verification".to_string(), source);
         }
     }
 

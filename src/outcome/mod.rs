@@ -3,7 +3,7 @@
 //! Every possible exit code has a named handler. The type system enforces
 //! exhaustiveness — if an outcome can happen, it must have a handler.
 //!
-//! Depends on: `types`, `config`, `bead_store`, `telemetry`.
+//! Depends on: `types`, `config`, `bead_store`, `telemetry`, `validation`.
 
 use std::fmt;
 
@@ -14,6 +14,7 @@ use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{AgentOutcome, Bead, BeadAction, BeadStatus, HandlerResult, Outcome};
+use crate::validation::ValidationGate;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // classify (convenience re-export)
@@ -90,7 +91,15 @@ impl OutcomeHandler {
         })
     }
 
-    /// Success: verify bead was closed by agent. If still open, emit orphaned warning.
+    /// Success: run validation gates (if configured), then verify bead closure.
+    ///
+    /// Flow:
+    /// 1. If verification commands are configured, run them in the workspace.
+    /// 2. If any gate fails: reopen the bead (if agent closed it) and release it.
+    /// 3. If all gates pass (or none configured): check if agent closed the bead.
+    ///    - Closed → emit BeadCompleted.
+    ///    - Still open → emit BeadOrphaned warning.
+    ///
     /// NEEDLE does NOT auto-close — the agent owns closure via `br close`.
     async fn handle_success(
         &self,
@@ -99,6 +108,32 @@ impl OutcomeHandler {
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::info!(bead_id = %bead.id, "agent completed successfully");
 
+        // Run validation gates if configured.
+        if let Some(gate) =
+            ValidationGate::new(self.config.verification.clone(), bead.workspace.clone())
+        {
+            let gate_result = gate.run().await?;
+
+            if !gate_result.passed {
+                return self
+                    .handle_verification_failure(store, bead, &gate_result.failures)
+                    .await;
+            }
+
+            // All gates passed — emit telemetry.
+            let gates_run = self.config.verification.len() as u32;
+            self.telemetry.emit(EventKind::VerificationPassed {
+                bead_id: bead.id.clone(),
+                gates_run,
+            })?;
+            tracing::info!(
+                bead_id = %bead.id,
+                gates_run,
+                "all validation gates passed"
+            );
+        }
+
+        // Normal success flow: check if agent closed the bead.
         let mut events = Vec::new();
 
         match store.show(&bead.id).await {
@@ -134,6 +169,70 @@ impl OutcomeHandler {
         }
 
         Ok((BeadAction::None, events))
+    }
+
+    /// Handle verification failure: reopen the bead if it was closed, then release it.
+    async fn handle_verification_failure(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        failures: &[crate::validation::GateFailure],
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
+        let failure = &failures[0];
+
+        tracing::warn!(
+            bead_id = %bead.id,
+            command = %failure.command,
+            exit_code = ?failure.exit_code,
+            "validation gate failed — releasing bead"
+        );
+
+        // Emit verification failure telemetry.
+        self.telemetry.emit(EventKind::VerificationFailed {
+            bead_id: bead.id.clone(),
+            command: failure.command.clone(),
+            exit_code: failure.exit_code,
+            output: failure.output.clone(),
+        })?;
+
+        // If the agent already closed the bead, reopen it before releasing.
+        match store.show(&bead.id).await {
+            Ok(current) if current.status == BeadStatus::Done => {
+                tracing::info!(
+                    bead_id = %bead.id,
+                    "reopening bead closed by agent (verification failed)"
+                );
+                if let Err(e) = store.reopen(&bead.id).await {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "failed to reopen bead — attempting release anyway"
+                    );
+                }
+            }
+            _ => {}
+        }
+
+        // Release the bead back to open.
+        store.release(&bead.id).await?;
+        self.increment_failure_count(store, bead).await?;
+
+        // Add a label indicating verification failure.
+        if let Err(e) = store.add_label(&bead.id, "verification-failed").await {
+            tracing::warn!(
+                bead_id = %bead.id,
+                error = %e,
+                "failed to add verification-failed label"
+            );
+        }
+
+        let event = EventKind::BeadReleased {
+            bead_id: bead.id.clone(),
+            reason: format!("verification_failed: {}", failure.command),
+        };
+        self.telemetry.emit(event.clone())?;
+
+        Ok((BeadAction::Released, vec![event]))
     }
 
     /// Failure: release bead and increment failure count.
@@ -389,6 +488,7 @@ mod tests {
     #[derive(Debug, Clone)]
     enum StoreAction {
         Release(String),
+        Reopen(String),
         AddLabel(String, String),
         RemoveLabel(String, String),
         Show(String),
@@ -430,7 +530,7 @@ mod tests {
             status,
             assignee: Some("worker-01".to_string()),
             labels: vec![],
-            workspace: PathBuf::from("/tmp/test"),
+            workspace: PathBuf::from("/tmp"),
             dependencies: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -462,6 +562,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(StoreAction::Release(id.to_string()));
+            Ok(())
+        }
+        async fn reopen(&self, id: &BeadId) -> Result<()> {
+            self.actions
+                .lock()
+                .unwrap()
+                .push(StoreAction::Reopen(id.to_string()));
             Ok(())
         }
         async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
@@ -820,5 +927,150 @@ mod tests {
         assert_eq!(format!("{}", Outcome::AgentNotFound), "AgentNotFound");
         assert_eq!(format!("{}", Outcome::Interrupted), "Interrupted");
         assert_eq!(format!("{}", Outcome::Crash(-9)), "Crash(-9)");
+    }
+
+    // ── verification gate tests ──
+
+    fn test_handler_with_verification(commands: Vec<String>) -> OutcomeHandler {
+        let config = Config {
+            verification: commands,
+            ..Config::default()
+        };
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), NopSink);
+        OutcomeHandler::new(config, telemetry)
+    }
+
+    #[tokio::test]
+    async fn handle_success_no_verification_default_behavior() {
+        // No verification configured → normal success flow (unchanged behavior).
+        let handler = test_handler();
+        let store = MockBeadStore::new(BeadStatus::Done);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::None);
+    }
+
+    #[tokio::test]
+    async fn handle_success_verification_passes_accepts_closure() {
+        // Verification passes → bead closure accepted.
+        let handler = test_handler_with_verification(vec!["true".to_string()]);
+        let store = MockBeadStore::new(BeadStatus::Done);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::None);
+        assert!(result
+            .telemetry_events
+            .iter()
+            .any(|e| matches!(e, EventKind::BeadCompleted { .. })));
+    }
+
+    #[tokio::test]
+    async fn handle_success_verification_fails_releases_bead() {
+        // Verification fails → bead released.
+        let handler = test_handler_with_verification(vec!["false".to_string()]);
+        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Released);
+
+        let actions = store.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
+            "verification failure must release bead"
+        );
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "verification-failed")
+            ),
+            "verification failure must add verification-failed label"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_success_verification_fails_reopens_closed_bead() {
+        // Agent closed the bead, but verification fails → reopen then release.
+        let handler = test_handler_with_verification(vec!["false".to_string()]);
+        let store = MockBeadStore::new(BeadStatus::Done);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bead_action, BeadAction::Released);
+
+        let actions = store.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::Reopen(id) if id == "needle-test")),
+            "verification failure on closed bead must reopen it first"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
+            "verification failure must release bead after reopening"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_success_verification_fails_increments_failure_count() {
+        let handler = test_handler_with_verification(vec!["false".to_string()]);
+        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let _result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        let actions = store.actions();
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:1")
+            ),
+            "verification failure must increment failure count"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_success_multiple_gates_first_fails() {
+        // First gate passes, second fails → should stop and release.
+        let handler = test_handler_with_verification(vec![
+            "true".to_string(),
+            "false".to_string(),
+            "echo should-not-run".to_string(),
+        ]);
+        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bead_action, BeadAction::Released);
     }
 }

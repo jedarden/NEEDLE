@@ -289,6 +289,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
             Ok(vec![])
         }
@@ -339,6 +342,9 @@ mod tests {
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store connection failed")
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
         }
         async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
             anyhow::bail!("store connection failed")
