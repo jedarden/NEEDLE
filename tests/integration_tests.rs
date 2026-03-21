@@ -200,6 +200,7 @@ fn test_config(adapter_name: &str) -> Config {
     config.worker.idle_action = IdleAction::Exit;
     config.agent.default = adapter_name.to_string();
     config.agent.timeout = 10;
+    config.self_modification.hot_reload = false;
     config
 }
 
