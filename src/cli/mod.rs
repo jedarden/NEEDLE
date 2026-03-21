@@ -11,11 +11,14 @@ use std::path::PathBuf;
 use std::process::Command as ProcessCommand;
 
 use anyhow::{bail, Context, Result};
+use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::bead_store::BrCliBeadStore;
+use crate::bead_store::{BeadStore, BrCliBeadStore};
 use crate::config::{CliOverrides, Config, ConfigLoader};
 use crate::dispatch;
+use crate::health::HeartbeatData;
+use crate::registry::{Registry, WorkerEntry};
 use crate::worker::Worker;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -89,6 +92,50 @@ pub enum CliCommand {
         format: ListFormat,
     },
 
+    /// Attach to a worker's tmux session.
+    Attach {
+        /// Worker identifier (e.g., alpha, bravo) or partial session name.
+        identifier: String,
+    },
+
+    /// Show fleet status, bead counts, and cost summary.
+    Status {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "table")]
+        format: ListFormat,
+
+        /// Show per-worker breakdown.
+        #[arg(long)]
+        by_worker: bool,
+    },
+
+    /// View or inspect configuration.
+    #[command(name = "config")]
+    ConfigCmd {
+        /// Get a specific config key.
+        #[arg(long)]
+        get: Option<String>,
+
+        /// Dump all resolved config values.
+        #[arg(long)]
+        dump: bool,
+
+        /// Show source annotations (requires --dump).
+        #[arg(long)]
+        show_source: bool,
+    },
+
+    /// Check system health and repair.
+    Doctor {
+        /// Attempt automatic repair of issues found.
+        #[arg(long)]
+        repair: bool,
+
+        /// Workspace to check (defaults to config workspace).
+        #[arg(short = 'w', long)]
+        workspace: Option<PathBuf>,
+    },
+
     /// Show version information.
     Version,
 
@@ -125,6 +172,14 @@ pub fn run() -> Result<()> {
         } => cmd_run(workspace, agent, count, identifier, timeout, resume),
         CliCommand::Stop { all, identifier } => cmd_stop(all, identifier),
         CliCommand::List { format } => cmd_list(format),
+        CliCommand::Attach { identifier } => cmd_attach(&identifier),
+        CliCommand::Status { format, by_worker } => cmd_status(format, by_worker),
+        CliCommand::ConfigCmd {
+            get,
+            dump,
+            show_source,
+        } => cmd_config(get, dump, show_source),
+        CliCommand::Doctor { repair, workspace } => cmd_doctor(repair, workspace),
         CliCommand::Version => {
             cmd_version();
             Ok(())
@@ -455,6 +510,516 @@ fn cmd_test_agent(name: &str) -> Result<()> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// attach, status, config, doctor
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `needle attach <identifier>` — attach to a running worker's tmux session.
+fn cmd_attach(identifier: &str) -> Result<()> {
+    let sessions = list_needle_sessions()?;
+
+    if sessions.is_empty() {
+        bail!("no needle sessions running");
+    }
+
+    // Find matching session: exact match on identifier portion or substring match on full name.
+    let matches: Vec<&TmuxSession> = sessions
+        .iter()
+        .filter(|s| s.name.ends_with(&format!("-{identifier}")) || s.name.contains(identifier))
+        .collect();
+
+    if matches.is_empty() {
+        let available: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+        bail!(
+            "no session matching '{}'; available: {}",
+            identifier,
+            available.join(", ")
+        );
+    }
+
+    if matches.len() > 1 {
+        let names: Vec<&str> = matches.iter().map(|s| s.name.as_str()).collect();
+        bail!(
+            "ambiguous identifier '{}'; matches: {}",
+            identifier,
+            names.join(", ")
+        );
+    }
+
+    let session = &matches[0].name;
+    let status = ProcessCommand::new("tmux")
+        .args(["attach-session", "-t", session])
+        .status()
+        .with_context(|| format!("failed to attach to tmux session '{session}'"))?;
+
+    if !status.success() {
+        bail!("tmux attach-session exited with status {status} for '{session}'");
+    }
+
+    Ok(())
+}
+
+/// `needle status` — show fleet status summary.
+fn cmd_status(format: ListFormat, by_worker: bool) -> Result<()> {
+    let config = ConfigLoader::load_global()?;
+    let needle_home = config.workspace.home.clone();
+    let registry = Registry::default_location(&needle_home);
+    let workers = registry.list().unwrap_or_default();
+    let sessions = list_needle_sessions().unwrap_or_default();
+
+    // Build a fleet summary.
+    let active_count = sessions.len();
+    let registered_count = workers.len();
+    let total_beads: u64 = workers.iter().map(|w| w.beads_processed).sum();
+
+    // Check heartbeat health for registered workers.
+    let heartbeat_dir = needle_home.join("state").join("heartbeats");
+    let heartbeat_statuses: Vec<WorkerStatus> = workers
+        .iter()
+        .map(|w| {
+            let hb_path = heartbeat_dir.join(format!("{}.json", w.id));
+            let heartbeat = if hb_path.exists() {
+                std::fs::read_to_string(&hb_path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<HeartbeatData>(&s).ok())
+            } else {
+                None
+            };
+
+            let is_alive = is_pid_alive(w.pid);
+            let uptime = Utc::now().signed_duration_since(w.started_at);
+
+            WorkerStatus {
+                entry: w.clone(),
+                heartbeat_state: heartbeat.as_ref().map(|h| format!("{}", h.state)),
+                current_bead: heartbeat.and_then(|h| h.current_bead.map(|b| b.to_string())),
+                pid_alive: is_alive,
+                uptime_secs: uptime.num_seconds().max(0) as u64,
+            }
+        })
+        .collect();
+
+    match format {
+        ListFormat::Table => {
+            println!("Fleet Summary");
+            println!("{}", "-".repeat(50));
+            println!("  Active tmux sessions: {active_count}");
+            println!("  Registered workers:   {registered_count}");
+            println!("  Total beads processed: {total_beads}");
+            println!();
+
+            if by_worker && !heartbeat_statuses.is_empty() {
+                println!(
+                    "{:<16} {:<8} {:<14} {:<12} {:<10} {:<8}",
+                    "WORKER", "PID", "STATE", "BEAD", "UPTIME", "ALIVE"
+                );
+                println!("{}", "-".repeat(68));
+                for ws in &heartbeat_statuses {
+                    let state = ws.heartbeat_state.as_deref().unwrap_or("unknown");
+                    let bead = ws.current_bead.as_deref().unwrap_or("-");
+                    let uptime = format_duration(ws.uptime_secs);
+                    let alive = if ws.pid_alive { "yes" } else { "no" };
+                    println!(
+                        "{:<16} {:<8} {:<14} {:<12} {:<10} {:<8}",
+                        ws.entry.id, ws.entry.pid, state, bead, uptime, alive
+                    );
+                }
+            } else if !heartbeat_statuses.is_empty() {
+                println!("Workers:");
+                for ws in &heartbeat_statuses {
+                    let state = ws.heartbeat_state.as_deref().unwrap_or("unknown");
+                    let alive = if ws.pid_alive { "" } else { " (DEAD)" };
+                    println!(
+                        "  {} — {} beads, state: {state}{alive}",
+                        ws.entry.id, ws.entry.beads_processed,
+                    );
+                }
+            }
+
+            if heartbeat_statuses.is_empty() && active_count == 0 {
+                println!("No workers running.");
+            }
+        }
+        ListFormat::Json => {
+            let summary = serde_json::json!({
+                "active_sessions": active_count,
+                "registered_workers": registered_count,
+                "total_beads_processed": total_beads,
+                "workers": heartbeat_statuses.iter().map(|ws| {
+                    serde_json::json!({
+                        "id": ws.entry.id,
+                        "pid": ws.entry.pid,
+                        "workspace": ws.entry.workspace,
+                        "agent": ws.entry.agent,
+                        "beads_processed": ws.entry.beads_processed,
+                        "state": ws.heartbeat_state,
+                        "current_bead": ws.current_bead,
+                        "pid_alive": ws.pid_alive,
+                        "uptime_secs": ws.uptime_secs,
+                    })
+                }).collect::<Vec<_>>(),
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&summary).context("failed to serialize status")?
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// `needle config` — view or inspect configuration.
+fn cmd_config(get: Option<String>, dump: bool, show_source: bool) -> Result<()> {
+    if show_source && !dump {
+        bail!("--show-source requires --dump");
+    }
+
+    let workspace_root = std::env::current_dir().unwrap_or_default();
+    let (config, sources) = ConfigLoader::load_resolved(&workspace_root, CliOverrides::default())?;
+
+    if let Some(key) = get {
+        let value = config_get_key(&config, &key);
+        match value {
+            Some(v) => println!("{v}"),
+            None => bail!("unknown config key: {key}"),
+        }
+        return Ok(());
+    }
+
+    if dump {
+        if show_source {
+            let lines = ConfigLoader::dump_with_sources(&config, &sources);
+            for line in &lines {
+                println!("{line}");
+            }
+        } else {
+            let lines = config_dump(&config);
+            for line in &lines {
+                println!("{line}");
+            }
+        }
+        return Ok(());
+    }
+
+    // Default: show a brief summary.
+    let yaml = serde_yaml::to_string(&config).context("failed to serialize config")?;
+    print!("{yaml}");
+    Ok(())
+}
+
+/// Look up a single config key by dot-separated path.
+fn config_get_key(config: &Config, key: &str) -> Option<String> {
+    match key {
+        "agent.default" => Some(config.agent.default.clone()),
+        "agent.timeout" => Some(config.agent.timeout.to_string()),
+        "worker.max_workers" => Some(config.worker.max_workers.to_string()),
+        "worker.launch_stagger_seconds" => Some(config.worker.launch_stagger_seconds.to_string()),
+        "worker.idle_timeout" => Some(config.worker.idle_timeout.to_string()),
+        "worker.max_claim_retries" => Some(config.worker.max_claim_retries.to_string()),
+        "worker.cpu_load_warn" => Some(config.worker.cpu_load_warn.to_string()),
+        "worker.memory_free_warn_mb" => Some(config.worker.memory_free_warn_mb.to_string()),
+        "health.heartbeat_interval_secs" => Some(config.health.heartbeat_interval_secs.to_string()),
+        "health.heartbeat_ttl_secs" => Some(config.health.heartbeat_ttl_secs.to_string()),
+        "workspace.default" => Some(config.workspace.default.display().to_string()),
+        "workspace.home" => Some(config.workspace.home.display().to_string()),
+        "telemetry.file_sink.enabled" => Some(config.telemetry.file_sink.enabled.to_string()),
+        "prompt.instructions" => Some(
+            config
+                .prompt
+                .instructions
+                .as_deref()
+                .unwrap_or("")
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// Dump all config key-value pairs without source annotations.
+fn config_dump(config: &Config) -> Vec<String> {
+    vec![
+        format!("agent.default: {}", config.agent.default),
+        format!("agent.timeout: {}", config.agent.timeout),
+        format!("worker.max_workers: {}", config.worker.max_workers),
+        format!(
+            "worker.launch_stagger_seconds: {}",
+            config.worker.launch_stagger_seconds
+        ),
+        format!("worker.idle_timeout: {}", config.worker.idle_timeout),
+        format!(
+            "worker.max_claim_retries: {}",
+            config.worker.max_claim_retries
+        ),
+        format!("worker.cpu_load_warn: {}", config.worker.cpu_load_warn),
+        format!(
+            "worker.memory_free_warn_mb: {}",
+            config.worker.memory_free_warn_mb
+        ),
+        format!("workspace.default: {}", config.workspace.default.display()),
+        format!("workspace.home: {}", config.workspace.home.display()),
+        format!(
+            "health.heartbeat_interval_secs: {}",
+            config.health.heartbeat_interval_secs
+        ),
+        format!(
+            "health.heartbeat_ttl_secs: {}",
+            config.health.heartbeat_ttl_secs
+        ),
+        format!(
+            "telemetry.file_sink.enabled: {}",
+            config.telemetry.file_sink.enabled
+        ),
+        format!("prompt.context_files: {:?}", config.prompt.context_files),
+        format!(
+            "prompt.instructions: {}",
+            config.prompt.instructions.as_deref().unwrap_or("")
+        ),
+    ]
+}
+
+/// `needle doctor` — check system health and optionally repair.
+fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
+    let config = ConfigLoader::load_global()?;
+    let needle_home = config.workspace.home.clone();
+
+    let workspace_root = workspace.unwrap_or_else(|| config.workspace.default.clone());
+
+    println!("NEEDLE Doctor");
+    println!("{}", "-".repeat(50));
+    let mut issues_found = 0;
+
+    // 1. Check workspace exists and has .beads/.
+    print!("Workspace ({})... ", workspace_root.display());
+    let beads_dir = workspace_root.join(".beads");
+    if beads_dir.is_dir() {
+        println!("OK");
+    } else {
+        println!("MISSING .beads/ directory");
+        issues_found += 1;
+    }
+
+    // 2. Check registry health.
+    print!("Worker registry... ");
+    let registry = Registry::default_location(&needle_home);
+    match registry.list() {
+        Ok(workers) => {
+            let stale: Vec<&WorkerEntry> =
+                workers.iter().filter(|w| !is_pid_alive(w.pid)).collect();
+            if stale.is_empty() {
+                println!("OK ({} workers registered)", workers.len());
+            } else {
+                println!(
+                    "WARNING: {} stale entries (dead PIDs: {})",
+                    stale.len(),
+                    stale
+                        .iter()
+                        .map(|w| format!("{}(pid={})", w.id, w.pid))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                issues_found += stale.len();
+
+                if repair {
+                    for w in &stale {
+                        if let Err(e) = registry.deregister(&w.id) {
+                            println!("  Failed to deregister {}: {e}", w.id);
+                        } else {
+                            println!("  Deregistered stale worker: {}", w.id);
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            println!("ERROR: {e}");
+            issues_found += 1;
+        }
+    }
+
+    // 3. Check heartbeat files for staleness.
+    print!("Heartbeats... ");
+    let heartbeat_dir = needle_home.join("state").join("heartbeats");
+    if heartbeat_dir.is_dir() {
+        let mut stale_heartbeats = 0;
+        let mut total_heartbeats = 0;
+
+        if let Ok(entries) = std::fs::read_dir(&heartbeat_dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().is_some_and(|e| e == "json") {
+                    total_heartbeats += 1;
+                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                        if let Ok(hb) = serde_json::from_str::<HeartbeatData>(&content) {
+                            let age = Utc::now()
+                                .signed_duration_since(hb.last_heartbeat)
+                                .num_seconds();
+                            if age > config.health.heartbeat_ttl_secs as i64 {
+                                stale_heartbeats += 1;
+                                if repair {
+                                    if let Err(e) = std::fs::remove_file(entry.path()) {
+                                        println!(
+                                            "\n  Failed to remove stale heartbeat {}: {e}",
+                                            entry.path().display()
+                                        );
+                                    } else {
+                                        println!(
+                                            "\n  Removed stale heartbeat: {}",
+                                            entry.path().display()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if stale_heartbeats == 0 {
+            println!("OK ({total_heartbeats} files)");
+        } else {
+            println!("WARNING: {stale_heartbeats} stale of {total_heartbeats}");
+            issues_found += stale_heartbeats;
+        }
+    } else {
+        println!("OK (no heartbeat directory)");
+    }
+
+    // 4. Run br doctor on the workspace.
+    if beads_dir.is_dir() {
+        print!("Bead database... ");
+        let store = BrCliBeadStore::discover(workspace_root.clone());
+        match store {
+            Ok(s) => {
+                let rt =
+                    tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+
+                if repair {
+                    match rt.block_on(s.doctor_repair()) {
+                        Ok(report) => {
+                            if report.warnings.is_empty() && report.fixed.is_empty() {
+                                println!("OK (repaired)");
+                            } else {
+                                if !report.warnings.is_empty() {
+                                    println!("WARNINGS:");
+                                    for w in &report.warnings {
+                                        println!("  {w}");
+                                    }
+                                }
+                                if !report.fixed.is_empty() {
+                                    println!("  Fixed:");
+                                    for f in &report.fixed {
+                                        println!("    {f}");
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("REPAIR FAILED: {e}");
+                            issues_found += 1;
+                        }
+                    }
+                } else {
+                    match rt.block_on(s.doctor_check()) {
+                        Ok(report) => {
+                            if report.warnings.is_empty() {
+                                println!("OK");
+                            } else {
+                                println!("WARNINGS:");
+                                for w in &report.warnings {
+                                    println!("  {w}");
+                                }
+                                issues_found += report.warnings.len();
+                            }
+                        }
+                        Err(e) => {
+                            println!("ERROR: {e}");
+                            issues_found += 1;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                println!("ERROR: could not locate br CLI: {e}");
+                issues_found += 1;
+            }
+        }
+    }
+
+    // 5. Check telemetry log directory.
+    print!("Telemetry logs... ");
+    let log_dir = config
+        .telemetry
+        .file_sink
+        .log_dir
+        .clone()
+        .unwrap_or_else(|| needle_home.join("logs"));
+    if log_dir.is_dir() {
+        let count = std::fs::read_dir(&log_dir)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        println!("OK ({count} files in {})", log_dir.display());
+    } else {
+        println!("OK (no log directory yet)");
+    }
+
+    // Summary.
+    println!();
+    if issues_found == 0 {
+        println!("All checks passed.");
+    } else if repair {
+        println!("{issues_found} issue(s) found and repair attempted.");
+    } else {
+        println!("{issues_found} issue(s) found. Run with --repair to fix.");
+    }
+
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Status helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Per-worker status information for the status command.
+struct WorkerStatus {
+    entry: WorkerEntry,
+    heartbeat_state: Option<String>,
+    current_bead: Option<String>,
+    pid_alive: bool,
+    uptime_secs: u64,
+}
+
+/// Check if a process with the given PID is alive.
+fn is_pid_alive(pid: u32) -> bool {
+    // kill(pid, 0) checks if process exists without sending a signal.
+    libc_kill(pid as i32, 0) == 0
+}
+
+/// Minimal binding to kill(2) — only used for PID existence check.
+///
+/// Returns 0 if the process exists, -1 otherwise.
+fn libc_kill(pid: i32, sig: i32) -> i32 {
+    // SAFETY: kill(pid, 0) is a standard POSIX call that checks PID existence.
+    // No signal is actually sent.
+    unsafe {
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        kill(pid, sig)
+    }
+}
+
+/// Format a duration in seconds to a human-readable string.
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // tmux session discovery
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -749,5 +1314,188 @@ mod tests {
     fn cli_test_agent_requires_name() {
         let cli = Cli::try_parse_from(["needle", "test-agent"]);
         assert!(cli.is_err(), "test-agent should require a name argument");
+    }
+
+    // ── New CLI extension tests ──
+
+    #[test]
+    fn cli_parses_attach() {
+        let cli = Cli::try_parse_from(["needle", "attach", "alpha"]);
+        assert!(cli.is_ok(), "needle attach alpha should parse");
+        if let Ok(Cli {
+            command: CliCommand::Attach { identifier },
+        }) = cli
+        {
+            assert_eq!(identifier, "alpha");
+        }
+    }
+
+    #[test]
+    fn cli_attach_requires_identifier() {
+        let cli = Cli::try_parse_from(["needle", "attach"]);
+        assert!(cli.is_err(), "attach should require an identifier");
+    }
+
+    #[test]
+    fn cli_parses_status_defaults() {
+        let cli = Cli::try_parse_from(["needle", "status"]);
+        assert!(cli.is_ok(), "needle status should parse with defaults");
+        if let Ok(Cli {
+            command: CliCommand::Status { by_worker, .. },
+        }) = cli
+        {
+            assert!(!by_worker, "by_worker should default to false");
+        }
+    }
+
+    #[test]
+    fn cli_parses_status_by_worker() {
+        let cli = Cli::try_parse_from(["needle", "status", "--by-worker"]);
+        assert!(cli.is_ok(), "needle status --by-worker should parse");
+        if let Ok(Cli {
+            command: CliCommand::Status { by_worker, .. },
+        }) = cli
+        {
+            assert!(by_worker);
+        }
+    }
+
+    #[test]
+    fn cli_parses_status_json() {
+        let cli = Cli::try_parse_from(["needle", "status", "--format", "json"]);
+        assert!(cli.is_ok(), "needle status --format json should parse");
+    }
+
+    #[test]
+    fn cli_parses_config_dump() {
+        let cli = Cli::try_parse_from(["needle", "config", "--dump"]);
+        assert!(cli.is_ok(), "needle config --dump should parse");
+        if let Ok(Cli {
+            command: CliCommand::ConfigCmd { dump, .. },
+        }) = cli
+        {
+            assert!(dump);
+        }
+    }
+
+    #[test]
+    fn cli_parses_config_dump_show_source() {
+        let cli = Cli::try_parse_from(["needle", "config", "--dump", "--show-source"]);
+        assert!(
+            cli.is_ok(),
+            "needle config --dump --show-source should parse"
+        );
+        if let Ok(Cli {
+            command: CliCommand::ConfigCmd {
+                dump, show_source, ..
+            },
+        }) = cli
+        {
+            assert!(dump);
+            assert!(show_source);
+        }
+    }
+
+    #[test]
+    fn cli_parses_config_get() {
+        let cli = Cli::try_parse_from(["needle", "config", "--get", "agent.default"]);
+        assert!(cli.is_ok(), "needle config --get should parse");
+        if let Ok(Cli {
+            command: CliCommand::ConfigCmd { get, .. },
+        }) = cli
+        {
+            assert_eq!(get.as_deref(), Some("agent.default"));
+        }
+    }
+
+    #[test]
+    fn cli_parses_doctor() {
+        let cli = Cli::try_parse_from(["needle", "doctor"]);
+        assert!(cli.is_ok(), "needle doctor should parse");
+        if let Ok(Cli {
+            command: CliCommand::Doctor { repair, .. },
+        }) = cli
+        {
+            assert!(!repair);
+        }
+    }
+
+    #[test]
+    fn cli_parses_doctor_repair() {
+        let cli = Cli::try_parse_from(["needle", "doctor", "--repair"]);
+        assert!(cli.is_ok(), "needle doctor --repair should parse");
+        if let Ok(Cli {
+            command: CliCommand::Doctor { repair, .. },
+        }) = cli
+        {
+            assert!(repair);
+        }
+    }
+
+    #[test]
+    fn cli_parses_doctor_with_workspace() {
+        let cli = Cli::try_parse_from(["needle", "doctor", "--workspace", "/tmp/ws"]);
+        assert!(cli.is_ok());
+        if let Ok(Cli {
+            command: CliCommand::Doctor { workspace, .. },
+        }) = cli
+        {
+            assert_eq!(workspace, Some(PathBuf::from("/tmp/ws")));
+        }
+    }
+
+    #[test]
+    fn config_get_key_known_keys() {
+        let config = Config::default();
+        assert!(config_get_key(&config, "agent.default").is_some());
+        assert!(config_get_key(&config, "agent.timeout").is_some());
+        assert!(config_get_key(&config, "worker.max_workers").is_some());
+        assert!(config_get_key(&config, "health.heartbeat_interval_secs").is_some());
+        assert!(config_get_key(&config, "workspace.default").is_some());
+        assert!(config_get_key(&config, "workspace.home").is_some());
+    }
+
+    #[test]
+    fn config_get_key_unknown_returns_none() {
+        let config = Config::default();
+        assert!(config_get_key(&config, "nonexistent.key").is_none());
+    }
+
+    #[test]
+    fn config_dump_returns_all_fields() {
+        let config = Config::default();
+        let lines = config_dump(&config);
+        assert!(lines.len() >= 10, "should have at least 10 config lines");
+        assert!(lines.iter().any(|l| l.starts_with("agent.default:")));
+        assert!(lines.iter().any(|l| l.starts_with("worker.max_workers:")));
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("health.heartbeat_ttl_secs:")));
+    }
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(format_duration(30), "30s");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(format_duration(90), "1m30s");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(format_duration(3700), "1h1m");
+    }
+
+    #[test]
+    fn is_pid_alive_current_process() {
+        assert!(is_pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn is_pid_alive_nonexistent() {
+        // PID 999999 is very unlikely to exist.
+        assert!(!is_pid_alive(999_999));
     }
 }
