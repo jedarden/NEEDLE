@@ -260,8 +260,11 @@ impl MitosisEvaluator {
                 continue;
             }
 
-            // Create child bead.
-            let labels: Vec<&str> = vec!["mitosis-child"];
+            // Create child bead with parent-tracking labels for reliable dedup.
+            // Labels are stored on the bead itself and survive FrankenSQLite
+            // index corruption, unlike dependency relationships.
+            let parent_label = format!("parent-{}", parent.id);
+            let labels: Vec<&str> = vec!["mitosis-child", "mitosis-depth:1", &parent_label];
             let child_id = store
                 .create_bead(&child.title, &child.body, &labels)
                 .await
@@ -340,22 +343,28 @@ impl MitosisEvaluator {
         Ok(count)
     }
 
-    /// Get titles of existing children that block the parent.
+    /// Get titles of existing children for a parent bead.
+    ///
+    /// Uses label-based discovery (`parent-<parent_id>` label) instead of
+    /// reading the parent's dependency list. This is robust against
+    /// FrankenSQLite index corruption where `br dep add` creates the
+    /// dependency link and labels but the relationship doesn't appear in
+    /// `br show --json` output.
     async fn get_existing_children(
         &self,
         store: &dyn BeadStore,
         parent_id: &BeadId,
     ) -> Result<Vec<String>> {
-        let parent = store
-            .show(parent_id)
+        let parent_label = format!("parent-{}", parent_id);
+        let all_beads = store
+            .list_all()
             .await
-            .context("failed to read parent bead for existing children")?;
+            .context("failed to list beads for existing children lookup")?;
 
-        let titles: Vec<String> = parent
-            .dependencies
+        let titles: Vec<String> = all_beads
             .iter()
-            .filter(|d| d.dependency_type == "blocks")
-            .map(|d| d.title.clone())
+            .filter(|b| b.labels.iter().any(|l| l == &parent_label))
+            .map(|b| b.title.clone())
             .collect();
 
         Ok(titles)
@@ -468,16 +477,18 @@ fn titles_match(existing: &str, proposed: &str) -> bool {
 mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
-    use crate::types::{BeadStatus, BrDependency, ClaimResult};
+    use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
     use async_trait::async_trait;
     use chrono::Utc;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     // ── Mock store ──
 
     struct MockStore {
         labels: Vec<String>,
-        parent_deps: Vec<BrDependency>,
+        /// Existing child beads returned by `list_all()` for dedup testing.
+        existing_children: Vec<Bead>,
         created: Mutex<Vec<(String, String)>>,
         deps_added: Mutex<Vec<(String, String)>>,
     }
@@ -486,7 +497,7 @@ mod tests {
         fn new() -> Self {
             MockStore {
                 labels: vec!["failure-count:1".to_string()],
-                parent_deps: Vec::new(),
+                existing_children: Vec::new(),
                 created: Mutex::new(Vec::new()),
                 deps_added: Mutex::new(Vec::new()),
             }
@@ -497,8 +508,9 @@ mod tests {
             self
         }
 
-        fn with_parent_deps(mut self, deps: Vec<BrDependency>) -> Self {
-            self.parent_deps = deps;
+        /// Add existing child beads that will be returned by `list_all()`.
+        fn with_existing_children(mut self, children: Vec<Bead>) -> Self {
+            self.existing_children = children;
             self
         }
     }
@@ -506,7 +518,7 @@ mod tests {
     #[async_trait]
     impl BeadStore for MockStore {
         async fn list_all(&self) -> Result<Vec<Bead>> {
-            Ok(vec![])
+            Ok(self.existing_children.clone())
         }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             Ok(vec![])
@@ -521,7 +533,7 @@ mod tests {
                 assignee: None,
                 labels: self.labels.clone(),
                 workspace: PathBuf::from("/tmp/test"),
-                dependencies: self.parent_deps.clone(),
+                dependencies: vec![],
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })
@@ -751,6 +763,27 @@ End of response."#;
         assert!(matches!(result, MitosisResult::Skipped { .. }));
     }
 
+    /// Create a bead that looks like an existing mitosis child of a parent.
+    fn existing_child(title: &str, parent_id: &str) -> Bead {
+        Bead {
+            id: BeadId::from(format!("existing-{}", title.replace(' ', "-"))),
+            title: title.to_string(),
+            body: Some("Existing child".to_string()),
+            priority: 1,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec![
+                "mitosis-child".to_string(),
+                "mitosis-depth:1".to_string(),
+                format!("parent-{}", parent_id),
+            ],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
     #[tokio::test]
     async fn create_children_with_dedup() {
         let config = MitosisConfig {
@@ -761,14 +794,11 @@ End of response."#;
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
 
-        // Parent already has a child titled "add endpoint"
-        let store = MockStore::new().with_parent_deps(vec![BrDependency {
-            id: BeadId::from("existing-child"),
-            title: "Add endpoint".to_string(),
-            status: "open".to_string(),
-            priority: 1,
-            dependency_type: "blocks".to_string(),
-        }]);
+        // Parent already has a child titled "Add endpoint" (found via label).
+        let store = MockStore::new().with_existing_children(vec![existing_child(
+            "Add endpoint",
+            "parent-001",
+        )]);
 
         let parent = test_bead();
         let proposed = vec![
@@ -811,21 +841,10 @@ End of response."#;
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
 
-        let store = MockStore::new().with_parent_deps(vec![
-            BrDependency {
-                id: BeadId::from("child-1"),
-                title: "Add endpoint".to_string(),
-                status: "open".to_string(),
-                priority: 1,
-                dependency_type: "blocks".to_string(),
-            },
-            BrDependency {
-                id: BeadId::from("child-2"),
-                title: "Write migration".to_string(),
-                status: "open".to_string(),
-                priority: 1,
-                dependency_type: "blocks".to_string(),
-            },
+        // Both proposed children already exist (found via parent label).
+        let store = MockStore::new().with_existing_children(vec![
+            existing_child("Add endpoint", "parent-001"),
+            existing_child("Write migration", "parent-001"),
         ]);
 
         let parent = test_bead();
@@ -850,6 +869,41 @@ End of response."#;
             "all children deduped should result in Skipped"
         );
         assert!(store.created.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dedup_ignores_children_of_other_parents() {
+        // Children exist but belong to a different parent — should not dedup.
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        let store = MockStore::new().with_existing_children(vec![existing_child(
+            "Add endpoint",
+            "different-parent",
+        )]);
+
+        let parent = test_bead();
+        let proposed = vec![ProposedChild {
+            title: "Add endpoint".to_string(),
+            body: "Same title but different parent".to_string(),
+        }];
+
+        let result = evaluator
+            .create_children(&store, &parent, &proposed)
+            .await
+            .unwrap();
+
+        match result {
+            MitosisResult::Split { children } => {
+                assert_eq!(children.len(), 1, "should create child since parent differs");
+            }
+            other => panic!("expected Split, got {:?}", other),
+        }
     }
 
     fn create_test_dispatcher() -> Dispatcher {
