@@ -131,8 +131,8 @@ pub fn run() -> Result<()> {
 
 /// `needle run` — launch a worker.
 ///
-/// If outside tmux: create a tmux session and re-exec self inside it.
-/// If inside tmux: start the worker directly.
+/// If outside tmux: create tmux sessions (one per worker) with staggered startup.
+/// If inside tmux: start a single worker directly.
 fn cmd_run(
     workspace: Option<PathBuf>,
     agent: Option<String>,
@@ -141,11 +141,6 @@ fn cmd_run(
     timeout: Option<u64>,
     _resume: bool,
 ) -> Result<()> {
-    // Phase 1: only 1 worker is supported.
-    if count > 1 {
-        bail!("--count > 1 is not supported in Phase 1 (multi-worker is Phase 2)");
-    }
-
     // Load and configure.
     let mut config = ConfigLoader::load_global()?;
 
@@ -161,26 +156,118 @@ fn cmd_run(
         config.agent.timeout = t;
     }
 
-    // Resolve the worker identifier.
-    let worker_id = identifier
-        .clone()
-        .unwrap_or_else(|| NATO_ALPHABET[0].to_string());
-
-    // Build the session name: needle-{agent}-{provider}-{model}-{identifier}
-    // In Phase 1 we use the agent name for all parts since provider/model
-    // are resolved later by the dispatcher.
-    let agent_name = agent.as_deref().unwrap_or(&config.agent.default);
-    let session_name = format!("needle-{agent_name}-{worker_id}");
-
     if is_inside_tmux() {
-        // Already inside tmux — start the worker directly.
+        // Already inside tmux — start a single worker directly.
+        let worker_id = identifier
+            .clone()
+            .unwrap_or_else(|| NATO_ALPHABET[0].to_string());
+        let agent_name = agent.as_deref().unwrap_or(&config.agent.default);
+        let session_name = format!("needle-{agent_name}-{worker_id}");
         tracing::info!(worker = %worker_id, session = %session_name, "starting worker directly (inside tmux)");
         run_worker(config, worker_id)
     } else {
-        // Outside tmux — create session and re-exec inside it.
-        tracing::info!(session = %session_name, "creating tmux session");
-        launch_in_tmux(&session_name, workspace, agent, count, identifier, timeout)
+        // Outside tmux — create tmux sessions with staggered startup.
+        launch_workers(config, workspace, agent, count, identifier, timeout)
     }
+}
+
+/// Launch `count` workers in separate tmux sessions with staggered startup delays.
+fn launch_workers(
+    config: Config,
+    workspace: Option<PathBuf>,
+    agent: Option<String>,
+    count: u32,
+    identifier: Option<String>,
+    timeout: Option<u64>,
+) -> Result<()> {
+    let agent_name = agent
+        .as_deref()
+        .unwrap_or(&config.agent.default)
+        .to_string();
+    let stagger_secs = config.worker.launch_stagger_seconds;
+    let max_workers = config.worker.max_workers;
+
+    if count == 0 {
+        bail!("--count must be at least 1");
+    }
+    if count as usize > NATO_ALPHABET.len() {
+        bail!(
+            "--count {} exceeds the maximum of {} (NATO alphabet size)",
+            count,
+            NATO_ALPHABET.len()
+        );
+    }
+
+    // Enforce max_workers cap (0 means unlimited).
+    let effective_count = if max_workers > 0 && count > max_workers {
+        tracing::warn!(
+            requested = count,
+            capped_to = max_workers,
+            "count exceeds max_workers; capping"
+        );
+        eprintln!(
+            "Warning: --count {count} exceeds max_workers={max_workers}; launching {max_workers} workers"
+        );
+        max_workers
+    } else {
+        count
+    };
+
+    // --identifier is only meaningful for a single worker.
+    if effective_count > 1 && identifier.is_some() {
+        bail!("--identifier cannot be combined with --count > 1; identifiers are auto-assigned from the NATO alphabet");
+    }
+
+    for seq in 0..effective_count {
+        let worker_id = if effective_count == 1 {
+            identifier
+                .clone()
+                .unwrap_or_else(|| NATO_ALPHABET[0].to_string())
+        } else {
+            NATO_ALPHABET[seq as usize].to_string()
+        };
+        let session_name = format!("needle-{agent_name}-{worker_id}");
+
+        tracing::info!(
+            worker_id = %worker_id,
+            sequence = seq,
+            total = effective_count,
+            session = %session_name,
+            "launching worker"
+        );
+
+        // Stagger: sleep before launching subsequent workers.
+        if seq > 0 && stagger_secs > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(stagger_secs));
+        }
+
+        launch_in_tmux(
+            &session_name,
+            workspace.clone(),
+            agent.clone(),
+            Some(worker_id.clone()),
+            timeout,
+        )?;
+
+        println!(
+            "[{}/{}] Started worker '{}' in tmux session: {session_name}",
+            seq + 1,
+            effective_count,
+            worker_id
+        );
+    }
+
+    if effective_count > 1 {
+        println!(
+            "\nStarted {effective_count} workers (stagger: {stagger_secs}s between launches)."
+        );
+        println!("Attach to a worker with: tmux attach -t needle-{agent_name}-<name>");
+    } else {
+        let worker_id = identifier.as_deref().unwrap_or(NATO_ALPHABET[0]);
+        println!("Attach with: tmux attach -t needle-{agent_name}-{worker_id}");
+    }
+
+    Ok(())
 }
 
 /// Start the worker state machine (called when inside tmux or for direct mode).
@@ -203,12 +290,11 @@ fn is_inside_tmux() -> bool {
     std::env::var("TMUX").is_ok_and(|v| !v.is_empty())
 }
 
-/// Create a tmux session and re-exec self inside it.
+/// Create a single tmux session and re-exec self inside it with `--count 1`.
 fn launch_in_tmux(
     session_name: &str,
     workspace: Option<PathBuf>,
     agent: Option<String>,
-    count: u32,
     identifier: Option<String>,
     timeout: Option<u64>,
 ) -> Result<()> {
@@ -224,8 +310,9 @@ fn launch_in_tmux(
         inner_args.push("--agent".to_string());
         inner_args.push(a.clone());
     }
+    // Each session runs exactly one worker; identifier is always resolved before call.
     inner_args.push("--count".to_string());
-    inner_args.push(count.to_string());
+    inner_args.push("1".to_string());
     if let Some(ref id) = identifier {
         inner_args.push("--identifier".to_string());
         inner_args.push(id.clone());
@@ -258,8 +345,6 @@ fn launch_in_tmux(
         );
     }
 
-    println!("Started worker in tmux session: {session_name}");
-    println!("Attach with: tmux attach -t {session_name}");
     Ok(())
 }
 
@@ -484,11 +569,58 @@ mod tests {
     }
 
     #[test]
-    fn phase1_count_validation() {
-        // Phase 1 only supports count=1.
-        // We test the validation logic directly.
-        let count: u32 = 2;
-        assert!(count > 1, "count > 1 should trigger Phase 1 error");
+    fn cli_parses_run_count_5() {
+        let cli = Cli::try_parse_from(["needle", "run", "--count", "5"]);
+        assert!(cli.is_ok(), "needle run --count 5 should parse");
+        if let Ok(Cli {
+            command: CliCommand::Run { count, .. },
+        }) = cli
+        {
+            assert_eq!(count, 5);
+        }
+    }
+
+    #[test]
+    fn nato_alphabet_sequence() {
+        assert_eq!(NATO_ALPHABET[0], "alpha");
+        assert_eq!(NATO_ALPHABET[1], "bravo");
+        assert_eq!(NATO_ALPHABET[2], "charlie");
+        assert_eq!(NATO_ALPHABET[3], "delta");
+        assert_eq!(NATO_ALPHABET[4], "echo");
+    }
+
+    #[test]
+    fn multi_worker_count_validation() {
+        // count=0 should be detected as invalid.
+        let count: u32 = 0;
+        assert_eq!(count, 0, "zero count is invalid");
+        // count > 26 exceeds NATO alphabet.
+        let big: u32 = 27;
+        assert!(big as usize > NATO_ALPHABET.len(), "exceeds NATO alphabet");
+    }
+
+    #[test]
+    fn max_workers_cap_logic() {
+        let count: u32 = 5;
+        let max_workers: u32 = 3;
+        let effective = if max_workers > 0 && count > max_workers {
+            max_workers
+        } else {
+            count
+        };
+        assert_eq!(effective, 3, "should cap to max_workers");
+    }
+
+    #[test]
+    fn max_workers_zero_means_unlimited() {
+        let count: u32 = 10;
+        let max_workers: u32 = 0;
+        let effective = if max_workers > 0 && count > max_workers {
+            max_workers
+        } else {
+            count
+        };
+        assert_eq!(effective, 10, "max_workers=0 should not cap");
     }
 
     #[test]

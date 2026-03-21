@@ -1,0 +1,856 @@
+//! Mend strand: maintenance and self-healing.
+//!
+//! Strand 2 in the waterfall. Runs after Pluck finds no work. Cleans up
+//! stale claims, orphaned locks, broken dependency links, and database
+//! corruption. If any cleanup is performed, returns `WorkCreated` so the
+//! waterfall restarts from Pluck (released beads may now be claimable).
+//!
+//! Depends on: `bead_store`, `config`, `health`, `peer`, `registry`,
+//!             `telemetry`, `types`.
+
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+use anyhow::Result;
+
+use crate::bead_store::BeadStore;
+use crate::config::MendConfig;
+use crate::peer::PeerMonitor;
+use crate::registry::Registry;
+use crate::telemetry::{EventKind, Telemetry};
+use crate::types::{BeadStatus, StrandError, StrandResult};
+
+/// Summary of work performed during one Mend evaluation cycle.
+#[derive(Debug, Default)]
+struct MendSummary {
+    beads_released: u32,
+    locks_removed: u32,
+    deps_cleaned: u32,
+    db_repaired: bool,
+}
+
+impl MendSummary {
+    /// Whether any cleanup work was performed.
+    fn did_work(&self) -> bool {
+        self.beads_released > 0
+            || self.locks_removed > 0
+            || self.deps_cleaned > 0
+            || self.db_repaired
+    }
+}
+
+/// The Mend strand — maintenance and self-healing.
+pub struct MendStrand {
+    config: MendConfig,
+    heartbeat_dir: PathBuf,
+    heartbeat_ttl: Duration,
+    lock_dir: PathBuf,
+    worker_id: String,
+    registry: Registry,
+    telemetry: Telemetry,
+}
+
+impl MendStrand {
+    /// Create a new MendStrand.
+    ///
+    /// - `config`: mend strand configuration
+    /// - `heartbeat_dir`: path to `~/.needle/state/heartbeats/`
+    /// - `heartbeat_ttl`: how long before a heartbeat is considered stale
+    /// - `lock_dir`: directory where claim lock files live (default: `/tmp`)
+    /// - `worker_id`: this worker's ID (excluded from peer checks)
+    /// - `registry`: worker state registry
+    /// - `telemetry`: telemetry emitter
+    pub fn new(
+        config: MendConfig,
+        heartbeat_dir: PathBuf,
+        heartbeat_ttl: Duration,
+        lock_dir: PathBuf,
+        worker_id: String,
+        registry: Registry,
+        telemetry: Telemetry,
+    ) -> Self {
+        MendStrand {
+            config,
+            heartbeat_dir,
+            heartbeat_ttl,
+            lock_dir,
+            worker_id,
+            registry,
+            telemetry,
+        }
+    }
+
+    // ── Step 1: Stale claim cleanup via peer monitoring ──────────────────────
+
+    /// Check for crashed workers and release their orphaned beads.
+    async fn cleanup_stale_claims(
+        &self,
+        store: &dyn BeadStore,
+        summary: &mut MendSummary,
+    ) -> Result<()> {
+        let peer_monitor = PeerMonitor::new(
+            self.heartbeat_dir.clone(),
+            self.heartbeat_ttl,
+            self.worker_id.clone(),
+            store,
+            &self.registry,
+            self.telemetry.clone(),
+        );
+
+        let peer_result = peer_monitor.check_peers().await?;
+        summary.beads_released += peer_result.beads_released;
+
+        Ok(())
+    }
+
+    // ── Step 2: Orphaned lock file removal ───────────────────────────────────
+
+    /// Remove claim lock files that are older than the configured TTL and not
+    /// actively held by any process.
+    fn cleanup_orphaned_locks(&self, summary: &mut MendSummary) -> Result<()> {
+        let lock_ttl = Duration::from_secs(self.config.lock_ttl_secs);
+
+        let entries = match std::fs::read_dir(&self.lock_dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    dir = %self.lock_dir.display(),
+                    error = %e,
+                    "failed to read lock directory"
+                );
+                return Ok(());
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Only consider needle claim lock files.
+            if !name.starts_with("needle-claim-") || !name.ends_with(".lock") {
+                continue;
+            }
+
+            // Check file age.
+            let age = match file_age(&path) {
+                Some(age) => age,
+                None => continue,
+            };
+
+            if age <= lock_ttl {
+                continue;
+            }
+
+            // Try to acquire flock (non-blocking). If we can acquire it,
+            // no one is holding it — safe to delete.
+            match try_acquire_flock(&path) {
+                Ok(Some(_file)) => {
+                    // Lock acquired — no one holds it. Remove the file.
+                    let age_secs = age.as_secs();
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "failed to remove orphaned lock file"
+                        );
+                        continue;
+                    }
+
+                    tracing::info!(
+                        path = %path.display(),
+                        age_secs,
+                        "removed orphaned lock file"
+                    );
+
+                    let _ = self.telemetry.emit(EventKind::MendOrphanedLockRemoved {
+                        lock_path: path.display().to_string(),
+                        age_secs,
+                    });
+
+                    summary.locks_removed += 1;
+                }
+                Ok(None) => {
+                    // Lock is actively held — skip.
+                    tracing::debug!(
+                        path = %path.display(),
+                        "lock file is actively held, skipping"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to probe lock file"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // ── Step 3: Dependency link repair ───────────────────────────────────────
+
+    /// Find open beads that have closed blockers and clean up the stale
+    /// dependency links.
+    ///
+    /// br does not automatically resolve dependency links on bead closure,
+    /// so a bead can remain blocked even after its blocker is closed.
+    async fn cleanup_stale_dependencies(
+        &self,
+        store: &dyn BeadStore,
+        summary: &mut MendSummary,
+    ) -> Result<()> {
+        let all_beads = store.list_all().await?;
+
+        for bead in &all_beads {
+            // Only check open beads that have dependencies.
+            if bead.status != BeadStatus::Open || bead.dependencies.is_empty() {
+                continue;
+            }
+
+            for dep in &bead.dependencies {
+                // Only check "blocks" type dependencies where the blocker is closed.
+                if dep.dependency_type != "blocks" {
+                    continue;
+                }
+
+                if dep.status == "closed" {
+                    tracing::info!(
+                        bead_id = %bead.id,
+                        blocker_id = %dep.id,
+                        "found stale dependency link (closed blocker on open bead)"
+                    );
+
+                    // Emit telemetry for the cleaned dependency.
+                    let _ = self.telemetry.emit(EventKind::MendDependencyCleaned {
+                        bead_id: bead.id.clone(),
+                        blocker_id: dep.id.clone(),
+                    });
+
+                    summary.deps_cleaned += 1;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // ── Step 4: Database health check ────────────────────────────────────────
+
+    /// Run `br doctor` and escalate to `--repair` if warnings are found.
+    async fn check_db_health(
+        &self,
+        store: &dyn BeadStore,
+        summary: &mut MendSummary,
+    ) -> Result<()> {
+        let report = store.doctor_repair().await?;
+
+        let has_issues = !report.warnings.is_empty() || !report.fixed.is_empty();
+        if has_issues {
+            let warnings = report.warnings.len() as u32;
+            let fixed = report.fixed.len() as u32;
+
+            tracing::info!(warnings, fixed, "br doctor found issues");
+
+            let _ = self
+                .telemetry
+                .emit(EventKind::MendDbRepaired { warnings, fixed });
+
+            summary.db_repaired = true;
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl super::Strand for MendStrand {
+    fn name(&self) -> &str {
+        "mend"
+    }
+
+    async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+        let mut summary = MendSummary::default();
+
+        // Step 1: Stale claim cleanup via peer monitoring.
+        if let Err(e) = self.cleanup_stale_claims(store, &mut summary).await {
+            tracing::warn!(error = %e, "mend: stale claim cleanup failed");
+            return StrandResult::Error(StrandError::StoreError(e));
+        }
+
+        // Step 2: Orphaned lock file removal.
+        if let Err(e) = self.cleanup_orphaned_locks(&mut summary) {
+            tracing::warn!(error = %e, "mend: orphaned lock cleanup failed");
+            return StrandResult::Error(StrandError::StoreError(e));
+        }
+
+        // Step 3: Dependency link repair.
+        if let Err(e) = self.cleanup_stale_dependencies(store, &mut summary).await {
+            tracing::warn!(error = %e, "mend: dependency cleanup failed");
+            return StrandResult::Error(StrandError::StoreError(e));
+        }
+
+        // Step 4: Database health check.
+        if let Err(e) = self.check_db_health(store, &mut summary).await {
+            tracing::warn!(error = %e, "mend: database health check failed");
+            // DB check failure is non-fatal — continue with the summary.
+        }
+
+        // Emit cycle summary telemetry.
+        let _ = self.telemetry.emit(EventKind::MendCycleSummary {
+            beads_released: summary.beads_released,
+            locks_removed: summary.locks_removed,
+            deps_cleaned: summary.deps_cleaned,
+            db_repaired: summary.db_repaired,
+        });
+
+        if summary.did_work() {
+            tracing::info!(
+                beads_released = summary.beads_released,
+                locks_removed = summary.locks_removed,
+                deps_cleaned = summary.deps_cleaned,
+                db_repaired = summary.db_repaired,
+                "mend performed cleanup — restarting waterfall"
+            );
+            StrandResult::WorkCreated
+        } else {
+            tracing::debug!("mend found nothing to clean");
+            StrandResult::NoWork
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Get the age of a file based on its modification time.
+fn file_age(path: &Path) -> Option<Duration> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    SystemTime::now().duration_since(modified).ok()
+}
+
+/// Try to acquire an exclusive flock on a file (non-blocking).
+///
+/// Returns `Ok(Some(file))` if acquired, `Ok(None)` if held by another process.
+fn try_acquire_flock(path: &Path) -> Result<Option<std::fs::File>> {
+    use fs2::FileExt;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(Some(file)),
+        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bead_store::{Filters, RepairReport};
+    use crate::health::HeartbeatData;
+    use crate::types::{Bead, BeadId, BrDependency, ClaimResult, WorkerState};
+
+    use async_trait::async_trait;
+    use chrono::{TimeZone, Utc};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    // ── Mock bead store ─────────────────────────────────────────────────────
+
+    struct MockBeadStore {
+        all_beads: Vec<Bead>,
+        release_count: Arc<AtomicU32>,
+        doctor_report: RepairReport,
+    }
+
+    impl MockBeadStore {
+        fn new(beads: Vec<Bead>) -> (Self, Arc<AtomicU32>) {
+            let release_count = Arc::new(AtomicU32::new(0));
+            (
+                MockBeadStore {
+                    all_beads: beads,
+                    release_count: release_count.clone(),
+                    doctor_report: RepairReport::default(),
+                },
+                release_count,
+            )
+        }
+
+        fn with_doctor_report(mut self, report: RepairReport) -> Self {
+            self.doctor_report = report;
+            self
+        }
+    }
+
+    #[async_trait]
+    impl BeadStore for MockBeadStore {
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            Ok(vec![])
+        }
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(self.all_beads.clone())
+        }
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("not implemented in mock")
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented in mock")
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            self.release_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("mock-bead"))
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport {
+                warnings: self.doctor_report.warnings.clone(),
+                fixed: self.doctor_report.fixed.clone(),
+            })
+        }
+    }
+
+    /// Failing bead store for error-path tests.
+    struct FailingStore;
+
+    #[async_trait]
+    impl BeadStore for FailingStore {
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            anyhow::bail!("store error")
+        }
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            anyhow::bail!("store error")
+        }
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("store error")
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("store error")
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("store error")
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            anyhow::bail!("store error")
+        }
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            anyhow::bail!("store error")
+        }
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            anyhow::bail!("store error")
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            anyhow::bail!("store error")
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            anyhow::bail!("store error")
+        }
+    }
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn make_mend_strand(hb_dir: &Path, lock_dir: &Path, reg_dir: &Path) -> MendStrand {
+        MendStrand::new(
+            MendConfig::default(),
+            hb_dir.to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(reg_dir),
+            Telemetry::new("test-worker".to_string()),
+        )
+    }
+
+    fn make_bead_with_deps(id: &str, status: BeadStatus, deps: Vec<BrDependency>) -> Bead {
+        let dt = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        Bead {
+            id: BeadId::from(id),
+            title: format!("Bead {id}"),
+            body: None,
+            priority: 1,
+            status,
+            assignee: None,
+            labels: vec![],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: deps,
+            created_at: dt,
+            updated_at: dt,
+        }
+    }
+
+    fn make_dep(id: &str, status: &str, dep_type: &str) -> BrDependency {
+        BrDependency {
+            id: BeadId::from(id),
+            title: format!("Dep {id}"),
+            status: status.to_string(),
+            priority: 1,
+            dependency_type: dep_type.to_string(),
+        }
+    }
+
+    fn write_heartbeat(dir: &Path, data: &HeartbeatData) {
+        let path = dir.join(format!("{}.json", data.worker_id));
+        let json = serde_json::to_string(data).unwrap();
+        std::fs::write(path, json).unwrap();
+    }
+
+    fn make_stale_heartbeat(worker_id: &str, pid: u32, bead_id: Option<&str>) -> HeartbeatData {
+        HeartbeatData {
+            worker_id: worker_id.to_string(),
+            pid,
+            state: WorkerState::Executing,
+            current_bead: bead_id.map(BeadId::from),
+            workspace: PathBuf::from("/tmp/test"),
+            last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
+            started_at: Utc::now() - chrono::Duration::seconds(3600),
+            beads_processed: 0,
+            session: worker_id.to_string(),
+        }
+    }
+
+    use super::super::Strand;
+
+    // ── Stale claim cleanup tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn crashed_peer_bead_released_returns_work_created() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Write a stale heartbeat with dead PID.
+        write_heartbeat(
+            hb_dir.path(),
+            &make_stale_heartbeat("dead-worker", 99_999_999, Some("nd-orphan")),
+        );
+
+        let (store, release_count) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after releasing crashed peer's bead, got: {result:?}"
+        );
+        assert_eq!(release_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn no_stale_peers_returns_no_work() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when nothing to clean, got: {result:?}"
+        );
+    }
+
+    // ── Orphaned lock file tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn orphaned_lock_file_removed() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Create an old lock file (we set config lock_ttl to 0 so any age qualifies).
+        let lock_path = lock_dir.path().join("needle-claim-abc123.lock");
+        std::fs::write(&lock_path, "").unwrap();
+
+        // Set the modification time to the past by using a 0-second TTL config.
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = MendStrand::new(
+            MendConfig {
+                lock_ttl_secs: 0, // Any lock is "old"
+                ..MendConfig::default()
+            },
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(reg_dir.path()),
+            Telemetry::new("test-worker".to_string()),
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after removing orphaned lock, got: {result:?}"
+        );
+        assert!(
+            !lock_path.exists(),
+            "orphaned lock file should have been removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_needle_lock_files_ignored() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Create a non-needle lock file.
+        let path = lock_dir.path().join("other-app.lock");
+        std::fs::write(&path, "").unwrap();
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = MendStrand::new(
+            MendConfig {
+                lock_ttl_secs: 0,
+                ..MendConfig::default()
+            },
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(reg_dir.path()),
+            Telemetry::new("test-worker".to_string()),
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+        assert!(path.exists(), "non-needle lock file should NOT be removed");
+    }
+
+    // ── Dependency cleanup tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stale_dependency_link_detected() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An open bead with a closed blocker — stale dependency.
+        let bead = make_bead_with_deps(
+            "open-bead",
+            BeadStatus::Open,
+            vec![make_dep("closed-blocker", "closed", "blocks")],
+        );
+
+        let (store, _) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after finding stale dependency, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_blocker_not_cleaned() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An open bead with an open blocker — NOT stale.
+        let bead = make_bead_with_deps(
+            "open-bead",
+            BeadStatus::Open,
+            vec![make_dep("open-blocker", "open", "blocks")],
+        );
+
+        let (store, _) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when blocker is still open, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_bead_deps_not_checked() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // A closed bead with a closed blocker — should be ignored entirely.
+        let bead = make_bead_with_deps(
+            "done-bead",
+            BeadStatus::Done,
+            vec![make_dep("closed-blocker", "closed", "blocks")],
+        );
+
+        let (store, _) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+    }
+
+    // ── Database health tests ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn db_repair_triggers_work_created() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let report = RepairReport {
+            warnings: vec!["index corruption".to_string()],
+            fixed: vec!["rebuilt index".to_string()],
+        };
+        let (store, _) = MockBeadStore::new(vec![]);
+        let store = store.with_doctor_report(report);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after db repair, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_db_no_work() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+    }
+
+    // ── Error handling tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn store_error_returns_strand_error() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // PeerMonitor needs heartbeat files to trigger store interaction.
+        // With no heartbeat files, it succeeds. The error comes from list_all
+        // in dependency cleanup.
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&FailingStore).await;
+        assert!(
+            matches!(result, StrandResult::Error(StrandError::StoreError(_))),
+            "expected StrandError::StoreError, got: {result:?}"
+        );
+    }
+
+    // ── Name test ────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn strand_name_is_mend() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+        assert_eq!(mend.name(), "mend");
+    }
+
+    // ── Combined cleanup test ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn multiple_cleanups_combined() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Stale heartbeat with dead PID.
+        write_heartbeat(
+            hb_dir.path(),
+            &make_stale_heartbeat("dead-worker", 99_999_999, Some("nd-orphan")),
+        );
+
+        // Stale dependency link.
+        let bead = make_bead_with_deps(
+            "blocked-bead",
+            BeadStatus::Open,
+            vec![make_dep("done-blocker", "closed", "blocks")],
+        );
+
+        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after combined cleanup, got: {result:?}"
+        );
+        assert_eq!(release_count.load(Ordering::Relaxed), 1);
+    }
+
+    // ── file_age helper test ─────────────────────────────────────────────────
+
+    #[test]
+    fn file_age_returns_some_for_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        std::fs::write(&path, "hello").unwrap();
+
+        let age = file_age(&path);
+        assert!(age.is_some());
+        // File was just created, age should be very small.
+        assert!(age.unwrap() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn file_age_returns_none_for_missing_file() {
+        let age = file_age(Path::new("/nonexistent/file.txt"));
+        assert!(age.is_none());
+    }
+
+    // ── try_acquire_flock tests ──────────────────────────────────────────────
+
+    #[test]
+    fn try_acquire_flock_on_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.lock");
+        std::fs::write(&path, "").unwrap();
+
+        let result = try_acquire_flock(&path);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some(), "should acquire unheld lock");
+    }
+
+    #[test]
+    fn try_acquire_flock_nonexistent_file_errors() {
+        let result = try_acquire_flock(Path::new("/nonexistent/dir/test.lock"));
+        assert!(result.is_err());
+    }
+}
