@@ -96,7 +96,7 @@ These decisions are informed by the 14 research files in `docs/research/`:
 | Heartbeat model | File-based heartbeat with TTL (from beads-polis) | Shared memory | Survives worker crashes; observable by peers |
 | Validation gates | Pluggable gate system (inspired by bg-gate) | Hardcoded checks | Different workspaces need different validation |
 | Work decomposition | Built-in mitosis with child-aware dedup | External only (spec2beads) | Mitosis is valid when the split criteria are semantic (multi-task detection) and dedup checks the parent's existing children |
-| Self-modification | Prohibited in automated mode | Gated with approval | Five incidents of cascading self-modification failures |
+| Self-modification | Allowed with release channel promotion (testing → stable → fleet hot-reload) | Prohibited entirely | v1 failures came from untested changes deploying directly to the fleet. Canary testing with defined inputs/outputs prevents this. |
 | Workspace discovery | Explicit configuration | Filesystem scanning | Explore strand's unbounded find caused 35+ load |
 | Alert system | Verify-then-alert with rate limiting | Alert-on-empty | 100% false positive rate from naive alerting |
 
@@ -111,8 +111,8 @@ These decisions are informed by the 9 notes files in `docs/notes/`:
 | Bundler shipped undefined functions | Compiled language eliminates this class entirely. |
 | Agent-owned closure most reliable | NEEDLE does not close beads. Agent receives `br close <id>` instruction in prompt. |
 | stdout/stderr corruption | Telemetry is a structured system, never interleaved with agent output. |
-| Workers modifying their own orchestrator | NEEDLE binary is immutable during a session. Updates apply between sessions only. |
-| ~20 worker practical limit (EX44) | Fleet sizing is configurable with enforced ceiling. Staggered launch is default. |
+| Workers modifying their own orchestrator | Self-modification allowed via release channels. New builds must pass canary tests in isolation before promotion to `:stable`. Fleet hot-reloads from `:stable`, never from `:testing`. |
+| ~20 worker practical limit (EX44) | Fleet sizing is bounded by three runtime factors: provider inference throughput, available CPU, and available RAM. NEEDLE monitors these and warns when saturated. Staggered launch is default. |
 | Bead granularity affects success rate | Document guidelines but don't enforce — this is a bead authoring concern, not orchestration. |
 
 ---
@@ -1268,7 +1268,6 @@ Rate limiting prevents API throttling and controls cost:
 
 ```yaml
 limits:
-  max_workers: 20                    # hard ceiling on total workers
   launch_stagger_seconds: 2          # delay between worker launches
   providers:
     anthropic:
@@ -1290,13 +1289,26 @@ limits:
 - Counters are maintained in the worker state registry
 - RPM limits are enforced via a token bucket per provider (stored in `~/.needle/state/rate_limits/`)
 
-### Fleet Sizing Guidance
+### Fleet Sizing
 
-From `docs/notes/operational-fleet-lessons.md`:
+The practical worker limit is not an arbitrary number. It is driven by three runtime constraints:
 
-- **EX44 (20 cores):** ~20 workers max. 40+ workers drove CPU load to 35+ from explore strand overhead alone.
-- **Rule of thumb:** workers ≤ CPU cores. The agent process dominates CPU, but NEEDLE overhead (lock contention, heartbeat I/O, strand evaluation) adds up.
-- The `max_workers` config is a hard ceiling enforced at launch time. `needle run --count=25` with `max_workers: 20` will launch 20 and log a warning.
+1. **Provider inference throughput.** Each worker waiting on an LLM response is idle CPU but an active API slot. If the provider rate-limits or queues requests, adding workers produces no additional throughput. NEEDLE tracks RPM per provider and warns when request latency exceeds a threshold.
+
+2. **Available CPU.** Each agent process (Claude Code, OpenCode, etc.) consumes CPU during tool execution, file I/O, and git operations. NEEDLE's own overhead (strand evaluation, heartbeat I/O, lock contention) also scales with worker count. When system load exceeds a configurable threshold, NEEDLE emits a `fleet.cpu_saturated` warning.
+
+3. **Available RAM.** Each agent process holds context in memory. Agent processes with large context windows or many tool calls can consume significant RAM. NEEDLE monitors system memory and warns when free memory drops below a threshold.
+
+`max_workers` is a configurable ceiling, not a recommendation. The right value depends on the environment:
+
+```yaml
+worker:
+  max_workers: 0              # 0 = no hard ceiling, rely on runtime monitoring
+  cpu_load_warn: 0.8          # warn when system load average > 80% of cores
+  memory_free_warn_mb: 512    # warn when free memory < 512MB
+```
+
+If `max_workers` is set, it is enforced at launch time. `needle run --count=25` with `max_workers: 20` will launch 20 and log a warning. If set to 0, NEEDLE launches the requested count and relies on runtime monitoring to signal saturation.
 
 ## Race Condition Prevention
 
@@ -1682,17 +1694,141 @@ When subsystems fail, NEEDLE degrades gracefully rather than crashing:
 | Single workspace unreachable | Skip workspace in Explore, continue with others. |
 | Config file unreadable mid-session | Use cached config from boot. Emit warning. |
 
-## Self-Modification Protection
+## Self-Modification and Release Channels
 
-From `docs/notes/self-modification-risks.md`: NEEDLE workers must not modify the NEEDLE binary or configuration during a session.
+NEEDLE workers are allowed to modify NEEDLE itself. The v1 failures (see `docs/notes/self-modification-risks.md`) were not caused by self-modification as a concept — they were caused by untested changes deploying directly to the running fleet. The solution is not to ban self-modification but to gate promotion through release channels with canary testing.
 
-1. **Binary immutability.** The NEEDLE binary is not modified while any worker is running. Updates are applied between sessions only (via `needle upgrade` when no workers are active).
+### Release Channels
 
-2. **Configuration immutability.** Config is loaded at boot and cached for the session. Changes to config files take effect on next worker restart, not mid-session. No hot-reload.
+```
+:testing ──► :stable ──► fleet hot-reload
+                │
+                └── rollback to previous :stable on failure
+```
 
-3. **Workspace exclusion.** If NEEDLE's source code lives in a workspace with beads, workers do not process beads for NEEDLE itself unless explicitly configured. This prevents the self-referential bug cycles documented in v1.
+Three channels:
 
-4. **Version pinning.** All workers in a fleet run the same NEEDLE version. `needle run` checks that the binary version matches the registry version and refuses to start if mismatched.
+| Channel | Purpose | Who writes | Who reads |
+|---------|---------|------------|-----------|
+| `:testing` | Newly built binary, not yet validated | Worker that built it | Canary test harness only |
+| `:stable` | Validated binary, approved for fleet use | Promotion pipeline (after canary passes) | Running fleet via hot-reload |
+| `:latest` | Alias for the most recent `:stable` | Automatic on promotion | `needle upgrade` default target |
+
+### Canary Testing Pipeline
+
+When a worker modifies NEEDLE's source and builds a new binary:
+
+```
+Worker builds new binary
+       │
+       ▼
+  Install as :testing
+  (~/.needle/bin/needle-testing)
+       │
+       ▼
+  Run canary test suite:
+    1. Launch :testing binary with test .beads/ directory
+    2. Test beads have defined inputs and expected outcomes
+    3. :testing processes beads in isolation
+    4. Compare actual outcomes against expected
+       │
+       ├── All pass → Promote :testing to :stable
+       │                 │
+       │                 ▼
+       │              Fleet detects new :stable
+       │              Workers hot-reload on next bead boundary
+       │
+       └── Any fail → Reject :testing
+                        │
+                        ▼
+                     Mark bead as failed
+                     :stable remains unchanged
+                     Fleet continues on previous :stable
+                     Emit canary.failed telemetry
+```
+
+### Canary Test Suite
+
+The canary suite is a set of test beads with known-good outcomes stored in a dedicated test workspace:
+
+```
+~/.needle/canary/
+├── .beads/                    # test bead store
+│   ├── issues.jsonl
+│   └── beads.db
+├── test-workspace/            # mock workspace with source files
+│   ├── src/
+│   │   └── hello.py           # simple file for beads to modify
+│   └── .beads/
+└── expected/                  # expected outcomes per bead
+    ├── bead-001.expected.json # { "exit_code": 0, "bead_closed": true }
+    ├── bead-002.expected.json # { "exit_code": 0, "files_modified": ["src/hello.py"] }
+    └── bead-003.expected.json # { "exit_code": 1, "bead_closed": false }
+```
+
+Test beads cover:
+- **Happy path:** Simple bead that should succeed and close
+- **Failure path:** Bead that should fail (tests outcome handling)
+- **Timeout path:** Bead with intentionally slow agent (tests timeout enforcement)
+- **State machine integrity:** Verify telemetry events match expected state transitions
+- **Mitosis:** Multi-task bead that should split on failure
+
+### Hot-Reload Protocol
+
+Running workers check for a new `:stable` binary between bead processing cycles (after LOGGING, before SELECTING):
+
+1. Compare current binary hash against `:stable` binary hash
+2. If different:
+   a. Emit `worker.upgrade.detected` telemetry
+   b. Complete current bead cycle (never interrupt mid-execution)
+   c. Re-exec with the new binary: `exec ~/.needle/bin/needle-stable run --resume`
+   d. New binary picks up worker state from heartbeat file and registry
+3. If same: continue normally
+
+**`--resume` flag:** Tells the new binary to inherit the worker's identity (ID, session, tmux) rather than creating a new session. The worker continues from the SELECTING state with a fresh binary.
+
+### Rollback
+
+If a promoted `:stable` causes failures in the fleet:
+
+1. Fleet workers emit `worker.errored` or repeated `outcome.failure` telemetry
+2. Human (or automated watchdog) runs: `needle rollback`
+3. Rollback restores the previous `:stable` from backup (`~/.needle/bin/needle-stable.prev`)
+4. Workers hot-reload to the rolled-back binary on next cycle
+
+Rollback is always available because promotion preserves the previous `:stable` as a backup.
+
+### Binary Paths
+
+```
+~/.needle/bin/
+├── needle-testing             # candidate under canary evaluation
+├── needle-stable              # current fleet binary
+├── needle-stable.prev         # previous stable (rollback target)
+└── needle                     # symlink → needle-stable
+```
+
+### Configuration
+
+```yaml
+self_modification:
+  enabled: true                     # allow workers to process NEEDLE beads
+  canary_workspace: ~/.needle/canary  # test workspace with known-good beads
+  auto_promote: true                # promote to :stable automatically if canary passes
+  hot_reload: true                  # fleet hot-reloads from :stable between beads
+```
+
+### Telemetry
+
+| Event Type | Emitted When | Data Fields |
+|------------|-------------|-------------|
+| `canary.started` | Canary test suite begins | `testing_binary_hash`, `test_count` |
+| `canary.passed` | All canary tests passed | `testing_binary_hash`, `duration_ms` |
+| `canary.failed` | One or more canary tests failed | `testing_binary_hash`, `failures` (list) |
+| `promotion.completed` | :testing promoted to :stable | `old_hash`, `new_hash` |
+| `worker.upgrade.detected` | Worker sees new :stable | `old_hash`, `new_hash` |
+| `worker.upgrade.completed` | Worker re-exec'd with new binary | `new_hash` |
+| `rollback.completed` | :stable rolled back to previous | `rolled_back_hash`, `restored_hash` |
 
 ---
 
@@ -1731,12 +1867,14 @@ agent:
 
 # ── Worker Configuration ──
 worker:
-  max_workers: 20
+  max_workers: 0                      # 0 = no hard ceiling, rely on runtime monitoring
   launch_stagger_seconds: 2
   idle_timeout: 300
   idle_action: wait
   max_claim_retries: 5
   identifier_scheme: nato
+  cpu_load_warn: 0.8                  # warn when load > 80% of cores
+  memory_free_warn_mb: 512            # warn when free RAM < 512MB
 
 # ── Workspace Configuration ──
 workspace:
@@ -1814,10 +1952,12 @@ budget:
   warn_usd: 0
   stop_usd: 0
 
-# ── Self-Modification Protection ──
-protection:
-  exclude_workspaces: []
-  allow_self_modification: false
+# ── Self-Modification & Release Channels ──
+self_modification:
+  enabled: true
+  canary_workspace: ~/.needle/canary
+  auto_promote: true
+  hot_reload: true
 ```
 
 ## Workspace Configuration
@@ -1890,7 +2030,7 @@ Configuration is validated at boot time. Invalid configuration causes the worker
 
 ### Warnings (non-fatal)
 
-- `worker.max_workers` > CPU count (performance warning)
+- `worker.max_workers` > 0 and > CPU count (consider runtime monitoring instead)
 - `health.heartbeat_ttl` < `3 * health.heartbeat_interval` (detection may be unreliable)
 - `strands.explore.workspaces` contains paths that don't exist
 - No pricing configured when `telemetry.effort.track_cost: true`
@@ -2241,6 +2381,7 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 | **Strand 6 (Pulse)** | Codebase health scans, auto-bead creation |
 | **Validation gates** | Pluggable pre-closure validation (inspired by bg-gate) |
 | **Hook sink** | Telemetry dispatch to webhooks/commands |
+| **Release channels** | :testing → :stable promotion with canary test suite, fleet hot-reload, rollback |
 | **Self-update** | `needle upgrade` with version checking |
 | **Doctor command** | `needle doctor` for full system health check |
 | **Telemetry queries** | `needle logs --filter`, `needle status --cost` |
@@ -2257,10 +2398,13 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 - [ ] `needle upgrade` downloads and installs new version
 - [ ] `needle doctor` reports system health across all subsystems
 - [ ] One-liner install works on Linux and macOS
+- [ ] Worker modifies NEEDLE source → builds :testing → canary passes → promoted to :stable → fleet hot-reloads
+- [ ] Canary failure rejects :testing, fleet continues on previous :stable
+- [ ] `needle rollback` restores previous :stable and fleet hot-reloads
 
 ### Estimated Scope
 
-~8 additional source files, ~3,000 additional LOC.
+~10 additional source files, ~4,000 additional LOC.
 
 ## Migration from v1
 
