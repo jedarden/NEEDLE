@@ -278,6 +278,36 @@ impl KnotConfig {
     }
 }
 
+/// Mitosis configuration (bead splitting on failure).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MitosisConfig {
+    /// Whether mitosis is enabled for this workspace.
+    #[serde(default = "MitosisConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Only evaluate on first failure, not retries.
+    #[serde(default = "MitosisConfig::default_first_failure_only")]
+    pub first_failure_only: bool,
+}
+
+impl Default for MitosisConfig {
+    fn default() -> Self {
+        MitosisConfig {
+            enabled: Self::default_enabled(),
+            first_failure_only: Self::default_first_failure_only(),
+        }
+    }
+}
+
+impl MitosisConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_first_failure_only() -> bool {
+        true
+    }
+}
+
 /// Strand waterfall configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StrandsConfig {
@@ -289,6 +319,8 @@ pub struct StrandsConfig {
     pub explore: ExploreConfig,
     #[serde(default)]
     pub knot: KnotConfig,
+    #[serde(default)]
+    pub mitosis: MitosisConfig,
 }
 
 /// File sink configuration for telemetry.

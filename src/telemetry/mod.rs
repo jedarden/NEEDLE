@@ -222,6 +222,23 @@ pub enum EventKind {
         model: Option<String>,
     },
 
+    // ── Mitosis ──
+    MitosisEvaluated {
+        bead_id: BeadId,
+        splittable: bool,
+        proposed_children: u32,
+    },
+    MitosisSplit {
+        parent_id: BeadId,
+        children_created: u32,
+        children_skipped: u32,
+        child_ids: Vec<BeadId>,
+    },
+    MitosisSkipped {
+        parent_id: BeadId,
+        existing_children: u32,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -266,6 +283,9 @@ impl EventKind {
             EventKind::BudgetStop { .. } => "budget.stop",
             EventKind::RateLimitWait { .. } => "rate_limit.wait",
             EventKind::RateLimitAllowed { .. } => "rate_limit.allowed",
+            EventKind::MitosisEvaluated { .. } => "bead.mitosis.evaluated",
+            EventKind::MitosisSplit { .. } => "bead.mitosis.split",
+            EventKind::MitosisSkipped { .. } => "bead.mitosis.skipped",
             EventKind::SinkError { .. } => "telemetry.sink_error",
         }
     }
@@ -287,7 +307,10 @@ impl EventKind {
             | EventKind::StuckDetected { bead_id, .. }
             | EventKind::StuckReleased { bead_id, .. }
             | EventKind::MendDependencyCleaned { bead_id, .. }
-            | EventKind::EffortRecorded { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::EffortRecorded { bead_id, .. }
+            | EventKind::MitosisEvaluated { bead_id, .. } => Some(bead_id.clone()),
+            EventKind::MitosisSplit { parent_id, .. }
+            | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
             EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
@@ -557,6 +580,40 @@ impl EventKind {
                     "model": model,
                 })
             }
+            EventKind::MitosisEvaluated {
+                bead_id,
+                splittable,
+                proposed_children,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "splittable": splittable,
+                    "proposed_children": proposed_children,
+                })
+            }
+            EventKind::MitosisSplit {
+                parent_id,
+                children_created,
+                children_skipped,
+                child_ids,
+            } => {
+                let ids: Vec<&str> = child_ids.iter().map(|id| id.as_ref()).collect();
+                serde_json::json!({
+                    "parent_id": parent_id.as_ref(),
+                    "children_created": children_created,
+                    "children_skipped": children_skipped,
+                    "child_ids": ids,
+                })
+            }
+            EventKind::MitosisSkipped {
+                parent_id,
+                existing_children,
+            } => {
+                serde_json::json!({
+                    "parent_id": parent_id.as_ref(),
+                    "existing_children": existing_children,
+                })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
         }
     }
@@ -601,6 +658,9 @@ impl EventKind {
             | EventKind::BudgetStop { .. }
             | EventKind::RateLimitWait { .. }
             | EventKind::RateLimitAllowed { .. }
+            | EventKind::MitosisEvaluated { .. }
+            | EventKind::MitosisSplit { .. }
+            | EventKind::MitosisSkipped { .. }
             | EventKind::SinkError { .. } => None,
         }
     }

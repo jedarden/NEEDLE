@@ -51,6 +51,43 @@ If you cannot complete the task:
 
 Bead ID: {bead_id}";
 
+/// Built-in mitosis analysis template.
+///
+/// The agent receives the bead context and must output JSON describing whether
+/// the bead contains multiple independent tasks and, if so, proposed child beads.
+const DEFAULT_MITOSIS_TEMPLATE: &str = "\
+## Mitosis Analysis
+
+Analyze the following bead and determine if it describes MULTIPLE INDEPENDENT TASKS.
+
+### Bead
+
+**Title:** {bead_title}
+
+**Description:**
+{bead_body}
+
+**Bead ID:** {bead_id}
+
+### Instructions
+
+You must output ONLY a JSON object (no markdown fencing, no explanation).
+
+If the bead describes multiple independent tasks that can be worked on separately:
+{{\"splittable\": true, \"children\": [{{\"title\": \"Short task title\", \"body\": \"Task description and acceptance criteria\"}}, ...]}}
+
+If the bead describes a single task (even if complex or long):
+{{\"splittable\": false}}
+
+### Rules for splitting
+
+- Split ONLY if the bead asks for MORE THAN ONE independent unit of work
+- Each child must be independently completable and closable
+- Valid split: \"add endpoint AND write migration AND update tests\" (three deliverables)
+- Invalid split: bead is long, bead failed, bead has many acceptance criteria for one task
+- Preserve the original acceptance criteria by distributing them to the appropriate child
+- Each child title should be concise and start with a verb";
+
 // ──────────────────────────────────────────────────────────────────────────────
 // BuiltPrompt
 // ──────────────────────────────────────────────────────────────────────────────
@@ -88,6 +125,7 @@ impl PromptBuilder {
     pub fn new(config: &PromptConfig) -> Self {
         let mut templates = BTreeMap::new();
         templates.insert("pluck".to_string(), DEFAULT_PLUCK_TEMPLATE.to_string());
+        templates.insert("mitosis".to_string(), DEFAULT_MITOSIS_TEMPLATE.to_string());
 
         PromptBuilder {
             templates,

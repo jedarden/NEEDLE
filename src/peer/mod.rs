@@ -339,6 +339,9 @@ mod tests {
         async fn full_rebuild(&self) -> Result<()> {
             Ok(())
         }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────

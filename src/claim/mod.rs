@@ -220,7 +220,7 @@ fn workspace_lock_path(lock_dir: &Path, workspace: &Path) -> PathBuf {
 ///
 /// Returns the locked file on success. The lock is released when the
 /// file is dropped (flock auto-releases on close).
-async fn acquire_flock(lock_path: &Path) -> Result<std::fs::File> {
+pub async fn acquire_flock(lock_path: &Path) -> Result<std::fs::File> {
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -365,6 +365,9 @@ mod tests {
             Ok(RepairReport::default())
         }
         async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
     }

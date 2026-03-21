@@ -23,13 +23,14 @@ use crate::config::{Config, ConfigLoader};
 use crate::cost::{self, BudgetCheck, EffortData};
 use crate::dispatch::{self, Dispatcher};
 use crate::health::HealthMonitor;
+use crate::mitosis::MitosisEvaluator;
 use crate::outcome::OutcomeHandler;
 use crate::prompt::{BuiltPrompt, PromptBuilder};
 use crate::rate_limit::RateLimiter;
 use crate::registry::{Registry, WorkerEntry};
 use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{AgentOutcome, Bead, BeadId, ClaimResult, IdleAction, WorkerState};
+use crate::types::{AgentOutcome, Bead, BeadId, ClaimResult, IdleAction, Outcome, WorkerState};
 
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
@@ -45,6 +46,7 @@ pub struct Worker {
     health: HealthMonitor,
     registry: Registry,
     rate_limiter: RateLimiter,
+    mitosis_evaluator: MitosisEvaluator,
 
     // State machine fields
     state: WorkerState,
@@ -107,6 +109,11 @@ impl Worker {
         let registry = Registry::default_location(&config.workspace.home);
         let rate_limiter =
             RateLimiter::new(config.limits.clone(), &config.workspace.home.join("state"));
+        let mitosis_evaluator = MitosisEvaluator::new(
+            config.strands.mitosis.clone(),
+            Telemetry::new(worker_name.clone()),
+            std::path::PathBuf::from("/tmp"),
+        );
 
         Worker {
             config,
@@ -121,6 +128,7 @@ impl Worker {
             health,
             registry,
             rate_limiter,
+            mitosis_evaluator,
             state: WorkerState::Booting,
             current_bead: None,
             exclusion_set: HashSet::new(),
@@ -569,9 +577,53 @@ impl Worker {
             }
         };
 
-        self.outcome_handler
+        let handler_result = self
+            .outcome_handler
             .handle(self.store.as_ref(), &bead, &output, was_interrupted)
             .await?;
+
+        // Evaluate for mitosis after failure — the bead has already been
+        // released and failure count incremented by the outcome handler.
+        if handler_result.outcome == Outcome::Failure {
+            let workspace = self.config.workspace.default.clone();
+            match self
+                .mitosis_evaluator
+                .evaluate(
+                    self.store.as_ref(),
+                    &bead,
+                    &workspace,
+                    &self.dispatcher,
+                    &self.prompt_builder,
+                    &self.config.agent.default,
+                )
+                .await
+            {
+                Ok(crate::mitosis::MitosisResult::Split { children }) => {
+                    tracing::info!(
+                        bead_id = %bead.id,
+                        children = children.len(),
+                        "mitosis created child beads — parent blocked"
+                    );
+                }
+                Ok(crate::mitosis::MitosisResult::NotSplittable) => {
+                    tracing::debug!(bead_id = %bead.id, "mitosis: bead is single task");
+                }
+                Ok(crate::mitosis::MitosisResult::Skipped { reason }) => {
+                    tracing::debug!(
+                        bead_id = %bead.id,
+                        reason = %reason,
+                        "mitosis skipped"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "mitosis evaluation failed (bead already released)"
+                    );
+                }
+            }
+        }
 
         if was_interrupted {
             // After handling interrupted outcome, stop the worker.
@@ -903,6 +955,9 @@ mod tests {
             Ok(RepairReport::default())
         }
         async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
     }

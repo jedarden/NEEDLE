@@ -136,17 +136,16 @@ impl OutcomeHandler {
         Ok((BeadAction::None, events))
     }
 
-    /// Failure: evaluate for mitosis (Phase 2 stub). If not splittable, release
-    /// and increment failure count label.
+    /// Failure: release bead and increment failure count.
+    ///
+    /// Mitosis evaluation (for multi-task splitting) is handled externally by
+    /// the worker after outcome handling — see `MitosisEvaluator`.
     async fn handle_failure(
         &self,
         store: &dyn BeadStore,
         bead: &Bead,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::warn!(bead_id = %bead.id, "agent failure — releasing bead");
-
-        // Phase 1 stub: mitosis always returns "not splittable".
-        let _splittable = false;
 
         store.release(&bead.id).await?;
         self.increment_failure_count(store, bead).await?;
@@ -394,6 +393,7 @@ mod tests {
         RemoveLabel(String, String),
         Show(String),
         CreateBead(String, String),
+        AddDependency(String, String),
     }
 
     struct MockBeadStore {
@@ -495,6 +495,16 @@ mod tests {
             Ok(crate::bead_store::RepairReport::default())
         }
         async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+            self.actions
+                .lock()
+                .unwrap()
+                .push(StoreAction::AddDependency(
+                    blocker_id.to_string(),
+                    blocked_id.to_string(),
+                ));
             Ok(())
         }
     }

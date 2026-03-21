@@ -110,6 +110,11 @@ pub trait BeadStore: Send + Sync {
     /// Create a new bead and return its ID.
     async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId>;
 
+    /// Add a dependency link: `blocker_id` blocks `blocked_id`.
+    ///
+    /// Uses `br dep add <blocker_id> --blocks <blocked_id>`.
+    async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()>;
+
     /// Run `br doctor --repair` and return the report.
     async fn doctor_repair(&self) -> Result<RepairReport>;
 
@@ -363,6 +368,15 @@ impl BeadStore for BrCliBeadStore {
             bail!("br create --silent returned empty ID");
         }
         Ok(BeadId::from(id_str))
+    }
+
+    async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+        let blocker = blocker_id.as_ref();
+        let blocked = blocked_id.as_ref();
+        self.run_br(&["dep", "add", blocker, "--blocks", blocked])
+            .await
+            .with_context(|| format!("br dep add {blocker} --blocks {blocked} failed"))?;
+        Ok(())
     }
 
     async fn doctor_repair(&self) -> Result<RepairReport> {

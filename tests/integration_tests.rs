@@ -136,6 +136,11 @@ impl BeadStore for IntegrationMockStore {
         Ok(BeadId::from("alert-new"))
     }
 
+    async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+        self.record(&format!("add_dep:{}:{}", blocker_id, blocked_id));
+        Ok(())
+    }
+
     async fn doctor_repair(&self) -> Result<RepairReport> {
         Ok(RepairReport::default())
     }
