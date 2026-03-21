@@ -527,9 +527,9 @@ impl BeadStore for BrCliBeadStore {
         }
 
         // Step 2: Reimport from JSONL.
-        self.run_br(&["sync", "--import"])
+        self.run_br(&["sync", "--import-only"])
             .await
-            .context("br sync --import failed during full rebuild")?;
+            .context("br sync --import-only failed during full rebuild")?;
 
         // Step 3: Verify with br doctor.
         let verify = self

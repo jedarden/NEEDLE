@@ -14,6 +14,7 @@
 //! 5. Mitosis splits multi-task beads correctly
 //! 6. Duplicate mitosis on same parent creates zero new children
 //! 7. Concurrent mitosis on same parent: flock serializes
+//! 10. Database corruption — corrupt SQLite, verify auto-repair from JSONL
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -805,6 +806,136 @@ fn real_br_provider_concurrency_limit_enforced() {
             }
         ),
         "should block when at provider limit; got: {decision}"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 10: Database corruption — corrupt SQLite, verify auto-repair and
+//          continued operation
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn real_br_database_corruption_auto_recovery() {
+    use needle::bead_store::RecoveryOutcome;
+
+    // Use a hyphen-free temp directory name: br derives the bead prefix from the
+    // directory name by splitting on hyphens. Temp dirs like "needle-test-foo-XXXXXX"
+    // cause prefix mismatch during db recovery (br expects "needle" but IDs use
+    // the full directory name as prefix). A single-token prefix avoids this.
+    let workspace = tempfile::Builder::new()
+        .prefix("needlecorrupttest")
+        .tempdir()
+        .unwrap();
+    let br = br_path();
+    let init = std::process::Command::new(&br)
+        .args(["init"])
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+    assert!(
+        init.status.success(),
+        "br init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+    let store = store_for_workspace(workspace.path()).unwrap();
+
+    // Create 2 beads so we can verify data integrity after recovery.
+    let bead_a = create_bead(workspace.path(), "survive-corruption-a", 1).unwrap();
+    let bead_b = create_bead(workspace.path(), "survive-corruption-b", 2).unwrap();
+
+    // Verify normal operations work before corruption.
+    let beads_before = store.ready(&Filters::default()).await.unwrap();
+    assert!(
+        beads_before.len() >= 2,
+        "should have at least 2 ready beads before corruption"
+    );
+
+    let shown = store.show(&bead_a).await.unwrap();
+    assert_eq!(shown.title, "survive-corruption-a");
+
+    // ── Corrupt the SQLite database ──────────────────────────────────────
+    let db_path = workspace.path().join(".beads/beads.db");
+    assert!(db_path.exists(), "database file should exist");
+
+    // Record the original db size for comparison after recovery.
+    let original_db_size = std::fs::metadata(&db_path).unwrap().len();
+
+    // Write garbage bytes to corrupt the SQLite header. The first 16 bytes
+    // of a valid SQLite file contain the magic string "SQLite format 3\000".
+    // Overwriting them makes the file unrecognizable.
+    let garbage = b"THIS_IS_CORRUPT_DATA_NOT_SQLITE_AT_ALL____";
+    std::fs::write(&db_path, garbage).unwrap();
+
+    // Note: br auto-recovers from corruption by falling back to JSONL reads,
+    // so operations may still succeed. The key test is that recover_db()
+    // properly rebuilds the database file itself.
+
+    // ── Run auto-recovery ────────────────────────────────────────────────
+    let recovery = store.recover_db().await;
+
+    match &recovery {
+        RecoveryOutcome::Repaired(report) => {
+            // doctor --repair rebuilt the db from JSONL.
+            eprintln!(
+                "  Recovery via repair: {} warnings, {} fixed",
+                report.warnings.len(),
+                report.fixed.len()
+            );
+        }
+        RecoveryOutcome::Rebuilt => {
+            // Full rebuild from JSONL succeeded.
+            eprintln!("  Recovery via full rebuild from JSONL");
+        }
+        RecoveryOutcome::Failed(e) => {
+            panic!("database recovery should succeed; got Failed: {e}");
+        }
+    }
+
+    // ── Verify operations work after recovery ────────────────────────────
+    let beads_after = store.ready(&Filters::default()).await.unwrap();
+    assert!(
+        beads_after.len() >= 2,
+        "should still have at least 2 ready beads after recovery; got {}",
+        beads_after.len()
+    );
+
+    // Verify both original beads survived (data integrity from JSONL).
+    let shown_a = store.show(&bead_a).await.unwrap();
+    assert_eq!(
+        shown_a.title, "survive-corruption-a",
+        "bead A should survive corruption recovery"
+    );
+
+    let shown_b = store.show(&bead_b).await.unwrap();
+    assert_eq!(
+        shown_b.title, "survive-corruption-b",
+        "bead B should survive corruption recovery"
+    );
+
+    // Verify the database file was properly rebuilt (not our garbage data).
+    assert!(
+        db_path.exists(),
+        "database file should exist after recovery"
+    );
+
+    let recovered_db_size = std::fs::metadata(&db_path).unwrap().len();
+    assert!(
+        recovered_db_size > garbage.len() as u64,
+        "rebuilt database ({recovered_db_size}B) should be larger than garbage ({}B)",
+        garbage.len()
+    );
+
+    // The rebuilt database should be roughly the same size as the original.
+    assert!(
+        recovered_db_size >= original_db_size / 2,
+        "rebuilt database ({recovered_db_size}B) should be at least half the original ({original_db_size}B)"
+    );
+
+    // Verify the database file starts with the SQLite magic string.
+    let db_header = std::fs::read(&db_path).unwrap();
+    assert!(
+        db_header.starts_with(b"SQLite format 3"),
+        "rebuilt database should be a valid SQLite file"
     );
 }
 
