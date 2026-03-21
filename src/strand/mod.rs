@@ -10,6 +10,7 @@ mod explore;
 mod knot;
 mod mend;
 mod pluck;
+pub mod pulse;
 pub mod unravel;
 pub mod weave;
 
@@ -26,6 +27,7 @@ pub use explore::ExploreStrand;
 pub use knot::KnotStrand;
 pub use mend::MendStrand;
 pub use pluck::PluckStrand;
+pub use pulse::PulseStrand;
 pub use unravel::{UnravelAgent, UnravelStrand};
 pub use weave::{WeaveAgent, WeaveStrand};
 
@@ -106,6 +108,13 @@ impl StrandRunner {
             config.workspace.default.clone(),
             state_base.join("unravel"),
             Box::new(unravel::CliUnravelAgent::new(config.agent.default.clone())),
+            telemetry.clone(),
+        );
+
+        let pulse = PulseStrand::new(
+            config.strands.pulse.clone(),
+            config.workspace.default.clone(),
+            state_base.join("pulse"),
             telemetry,
         );
 
@@ -117,6 +126,7 @@ impl StrandRunner {
                 Box::new(explore),
                 Box::new(weave),
                 Box::new(unravel),
+                Box::new(pulse),
                 Box::new(knot),
             ],
         }
@@ -361,7 +371,7 @@ mod tests {
         let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
         assert_eq!(
             runner.strand_names(),
-            vec!["pluck", "mend", "explore", "weave", "unravel", "knot"]
+            vec!["pluck", "mend", "explore", "weave", "unravel", "pulse", "knot"]
         );
     }
 }

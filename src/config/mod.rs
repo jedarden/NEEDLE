@@ -417,6 +417,81 @@ impl WeaveConfig {
     }
 }
 
+/// Pulse strand configuration (codebase health scans).
+///
+/// Pulse runs configured scanners (linters, test coverage, etc.) and creates
+/// beads for significant findings. Heavily guardrailed to prevent noise.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PulseConfig {
+    /// Whether the Pulse strand is enabled (opt-in, default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Scanner commands to run (e.g., `cargo clippy`, `npm run lint`).
+    ///
+    /// Each command should output findings to stdout in a parseable format.
+    #[serde(default)]
+    pub scanners: Vec<ScannerConfig>,
+
+    /// Maximum beads to create per pulse run (default: 5).
+    #[serde(default = "PulseConfig::default_max_beads_per_run")]
+    pub max_beads_per_run: u32,
+
+    /// Minimum hours between pulse runs (default: 48).
+    #[serde(default = "PulseConfig::default_cooldown_hours")]
+    pub cooldown_hours: u64,
+
+    /// Minimum severity level to create a bead (1-5, 1=critical, default: 3).
+    #[serde(default = "PulseConfig::default_severity_threshold")]
+    pub severity_threshold: u8,
+
+    /// Custom prompt template for agent-assisted analysis.
+    ///
+    /// Template variables: `{scanner}`, `{output}`, `{workspace}`.
+    #[serde(default)]
+    pub prompt_template: Option<String>,
+}
+
+/// Configuration for a single scanner.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScannerConfig {
+    /// Human-readable name for this scanner (e.g., "clippy").
+    pub name: String,
+
+    /// Shell command to run the scanner.
+    pub command: String,
+
+    /// Minimum severity for findings from this scanner (1-5).
+    /// Overrides global severity_threshold if set.
+    #[serde(default)]
+    pub severity_threshold: Option<u8>,
+}
+
+impl Default for PulseConfig {
+    fn default() -> Self {
+        PulseConfig {
+            enabled: false,
+            scanners: Vec::new(),
+            max_beads_per_run: Self::default_max_beads_per_run(),
+            cooldown_hours: Self::default_cooldown_hours(),
+            severity_threshold: Self::default_severity_threshold(),
+            prompt_template: None,
+        }
+    }
+}
+
+impl PulseConfig {
+    fn default_max_beads_per_run() -> u32 {
+        5
+    }
+    fn default_cooldown_hours() -> u64 {
+        48
+    }
+    fn default_severity_threshold() -> u8 {
+        3
+    }
+}
+
 /// Strand waterfall configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StrandsConfig {
@@ -434,6 +509,8 @@ pub struct StrandsConfig {
     pub weave: WeaveConfig,
     #[serde(default)]
     pub unravel: UnravelConfig,
+    #[serde(default)]
+    pub pulse: PulseConfig,
 }
 
 /// File sink configuration for telemetry.
@@ -622,6 +699,53 @@ pub struct PromptConfig {
     pub templates: std::collections::BTreeMap<String, String>,
 }
 
+/// Self-modification (hot-reload) configuration.
+///
+/// Controls the :testing → :stable promotion pipeline with canary tests.
+/// When enabled, new versions of needle are tested against a canary workspace
+/// before being promoted to stable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelfModificationConfig {
+    /// Whether self-modification is enabled (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to the canary test workspace containing test beads.
+    /// Defaults to `~/.needle/canary/`.
+    #[serde(default = "SelfModificationConfig::default_canary_workspace")]
+    pub canary_workspace: PathBuf,
+
+    /// Automatically promote :testing to :stable when canary passes.
+    /// When false, requires manual `needle promote` command.
+    #[serde(default)]
+    pub auto_promote: bool,
+
+    /// Maximum time (seconds) to run canary tests before considering it a timeout.
+    #[serde(default = "SelfModificationConfig::default_canary_timeout")]
+    pub canary_timeout: u64,
+}
+
+impl Default for SelfModificationConfig {
+    fn default() -> Self {
+        SelfModificationConfig {
+            enabled: false,
+            canary_workspace: Self::default_canary_workspace(),
+            auto_promote: false,
+            canary_timeout: Self::default_canary_timeout(),
+        }
+    }
+}
+
+impl SelfModificationConfig {
+    fn default_canary_workspace() -> PathBuf {
+        dirs_or_home(".needle/canary")
+    }
+
+    fn default_canary_timeout() -> u64 {
+        300 // 5 minutes
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Config Source Tracking
 // ──────────────────────────────────────────────────────────────────────────────
@@ -740,6 +864,9 @@ pub struct Config {
     /// Verification commands run after agent success, before accepting closure.
     #[serde(default)]
     pub verification: Vec<String>,
+    /// Self-modification (hot-reload) configuration.
+    #[serde(default)]
+    pub self_modification: SelfModificationConfig,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -975,6 +1102,42 @@ impl ConfigLoader {
                                 env_var = %key,
                                 value = %value,
                                 "invalid value for health.heartbeat_ttl_secs — expected integer"
+                            );
+                        }
+                    }
+                    "self_modification.enabled" => {
+                        if let Ok(v) = value.parse::<bool>() {
+                            config.self_modification.enabled = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for self_modification.enabled — expected true/false"
+                            );
+                        }
+                    }
+                    "self_modification.auto_promote" => {
+                        if let Ok(v) = value.parse::<bool>() {
+                            config.self_modification.auto_promote = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for self_modification.auto_promote — expected true/false"
+                            );
+                        }
+                    }
+                    "self_modification.canary_timeout" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            config.self_modification.canary_timeout = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for self_modification.canary_timeout — expected integer"
                             );
                         }
                     }

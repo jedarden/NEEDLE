@@ -262,6 +262,27 @@ pub enum EventKind {
         reason: String,
     },
 
+    // ── Pulse ──
+    PulseScannerStarted {
+        scanner_name: String,
+    },
+    PulseScannerCompleted {
+        scanner_name: String,
+        findings_count: u32,
+    },
+    PulseScannerFailed {
+        scanner_name: String,
+        error: String,
+    },
+    PulseBeadCreated {
+        bead_id: BeadId,
+        scanner_name: String,
+        severity: u8,
+    },
+    PulseSkipped {
+        reason: String,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -313,6 +334,11 @@ impl EventKind {
             EventKind::VerificationPassed { .. } => "verification.passed",
             EventKind::UnravelAnalyzed { .. } => "bead.unravel.analyzed",
             EventKind::UnravelSkipped { .. } => "bead.unravel.skipped",
+            EventKind::PulseScannerStarted { .. } => "pulse.scanner_started",
+            EventKind::PulseScannerCompleted { .. } => "pulse.scanner_completed",
+            EventKind::PulseScannerFailed { .. } => "pulse.scanner_failed",
+            EventKind::PulseBeadCreated { .. } => "pulse.bead_created",
+            EventKind::PulseSkipped { .. } => "pulse.skipped",
             EventKind::SinkError { .. } => "telemetry.sink_error",
         }
     }
@@ -361,7 +387,12 @@ impl EventKind {
             | EventKind::BudgetStop { .. }
             | EventKind::RateLimitWait { .. }
             | EventKind::RateLimitAllowed { .. }
+            | EventKind::PulseScannerStarted { .. }
+            | EventKind::PulseScannerCompleted { .. }
+            | EventKind::PulseScannerFailed { .. }
+            | EventKind::PulseSkipped { .. }
             | EventKind::SinkError { .. } => None,
+            EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
     }
 
@@ -679,6 +710,41 @@ impl EventKind {
                     "reason": reason,
                 })
             }
+            EventKind::PulseScannerStarted { scanner_name } => {
+                serde_json::json!({ "scanner_name": scanner_name })
+            }
+            EventKind::PulseScannerCompleted {
+                scanner_name,
+                findings_count,
+            } => {
+                serde_json::json!({
+                    "scanner_name": scanner_name,
+                    "findings_count": findings_count,
+                })
+            }
+            EventKind::PulseScannerFailed {
+                scanner_name,
+                error,
+            } => {
+                serde_json::json!({
+                    "scanner_name": scanner_name,
+                    "error": error,
+                })
+            }
+            EventKind::PulseBeadCreated {
+                bead_id,
+                scanner_name,
+                severity,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "scanner_name": scanner_name,
+                    "severity": severity,
+                })
+            }
+            EventKind::PulseSkipped { reason } => {
+                serde_json::json!({ "reason": reason })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
         }
     }
@@ -730,6 +796,11 @@ impl EventKind {
             | EventKind::VerificationPassed { .. }
             | EventKind::UnravelAnalyzed { .. }
             | EventKind::UnravelSkipped { .. }
+            | EventKind::PulseScannerStarted { .. }
+            | EventKind::PulseScannerCompleted { .. }
+            | EventKind::PulseScannerFailed { .. }
+            | EventKind::PulseBeadCreated { .. }
+            | EventKind::PulseSkipped { .. }
             | EventKind::SinkError { .. } => None,
         }
     }
@@ -2096,6 +2167,25 @@ mod tests {
             EventKind::BudgetStop {
                 daily_cost: 55.0,
                 threshold: 50.0,
+            },
+            EventKind::PulseScannerStarted {
+                scanner_name: "clippy".to_string(),
+            },
+            EventKind::PulseScannerCompleted {
+                scanner_name: "clippy".to_string(),
+                findings_count: 5,
+            },
+            EventKind::PulseScannerFailed {
+                scanner_name: "clippy".to_string(),
+                error: "timeout".to_string(),
+            },
+            EventKind::PulseBeadCreated {
+                bead_id: id.clone(),
+                scanner_name: "clippy".to_string(),
+                severity: 2,
+            },
+            EventKind::PulseSkipped {
+                reason: "cooldown".to_string(),
             },
             EventKind::SinkError {
                 message: "test".to_string(),
