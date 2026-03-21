@@ -334,6 +334,59 @@ pub fn re_exec_stable(
     bail!("hot-reload re-exec is only supported on Unix platforms")
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// ResumeState — state loaded from heartbeat + registry for hot-reload resume
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// State loaded from heartbeat file and registry for worker resumption after
+/// hot-reload. Used by the `--resume` CLI flag to restore worker context.
+#[derive(Debug, Clone)]
+pub struct ResumeState {
+    pub worker_id: String,
+    pub beads_processed: u64,
+    pub session: String,
+}
+
+impl ResumeState {
+    /// Load resume state from heartbeat file and registry.
+    ///
+    /// Returns `None` if no valid heartbeat or registry entry exists for the
+    /// given worker ID.
+    pub fn load(config: &crate::config::Config, worker_id: &str) -> Result<Option<Self>> {
+        let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
+        let heartbeat_path = heartbeat_dir.join(format!("{}.json", worker_id));
+
+        if !heartbeat_path.exists() {
+            tracing::debug!(
+                path = %heartbeat_path.display(),
+                "no heartbeat file for resume"
+            );
+            return Ok(None);
+        }
+
+        let heartbeat_content = fs::read_to_string(&heartbeat_path)
+            .with_context(|| format!("failed to read heartbeat: {}", heartbeat_path.display()))?;
+        let heartbeat: crate::health::HeartbeatData = serde_json::from_str(&heartbeat_content)
+            .with_context(|| format!("failed to parse heartbeat: {}", heartbeat_path.display()))?;
+
+        // Check registry for additional context.
+        let registry = crate::registry::Registry::default_location(&config.workspace.home);
+        let workers = registry.list().context("failed to list registry")?;
+        let entry = workers.iter().find(|w| w.id == worker_id);
+
+        let beads_processed = match entry {
+            Some(e) => e.beads_processed,
+            None => heartbeat.beads_processed,
+        };
+
+        Ok(Some(ResumeState {
+            worker_id: heartbeat.worker_id,
+            beads_processed,
+            session: heartbeat.session,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -287,10 +287,13 @@ fn cmd_run(
 
     if resume {
         // Hot-reload resume: inherit worker identity from --identifier,
-        // continue from SELECTING with the new binary.
+        // load state from heartbeat file + registry, continue from SELECTING.
         let worker_id = identifier
             .clone()
             .unwrap_or_else(|| NATO_ALPHABET[0].to_string());
+
+        // Load resume state from heartbeat and registry.
+        let resume_state = crate::upgrade::ResumeState::load(&config, &worker_id)?;
 
         // Emit upgrade.completed telemetry.
         let current_hash = crate::upgrade::file_hash(
@@ -298,11 +301,24 @@ fn cmd_run(
         )
         .unwrap_or_else(|_| "unknown".to_string());
 
-        tracing::info!(
-            worker = %worker_id,
-            binary_hash = %&current_hash[..current_hash.len().min(12)],
-            "resuming worker after hot-reload"
-        );
+        match &resume_state {
+            Some(state) => {
+                tracing::info!(
+                    worker = %worker_id,
+                    binary_hash = %&current_hash[..current_hash.len().min(12)],
+                    beads_processed = state.beads_processed,
+                    session = %state.session,
+                    "resuming worker after hot-reload"
+                );
+            }
+            None => {
+                tracing::info!(
+                    worker = %worker_id,
+                    binary_hash = %&current_hash[..current_hash.len().min(12)],
+                    "resuming worker after hot-reload (no prior state found)"
+                );
+            }
+        }
 
         let tel = crate::telemetry::Telemetry::new(worker_id.clone());
         tel.emit(crate::telemetry::EventKind::UpgradeCompleted {

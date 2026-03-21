@@ -11,6 +11,7 @@ pub mod config;
 pub mod cost;
 pub mod dispatch;
 pub mod health;
+pub mod hot_reload;
 pub mod mitosis;
 pub mod outcome;
 pub mod peer;

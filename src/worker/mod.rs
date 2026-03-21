@@ -116,6 +116,15 @@ impl Worker {
             std::path::PathBuf::from("/tmp"),
         );
 
+        // Restore beads_processed from registry if this worker was previously registered
+        // (e.g., hot-reload resume). New workers start at 0.
+        let beads_processed = registry
+            .list()
+            .ok()
+            .and_then(|workers| workers.into_iter().find(|w| w.id == worker_name))
+            .map(|entry| entry.beads_processed)
+            .unwrap_or(0);
+
         Worker {
             config,
             worker_name,
@@ -134,7 +143,7 @@ impl Worker {
             current_bead: None,
             exclusion_set: HashSet::new(),
             retry_count: 0,
-            beads_processed: 0,
+            beads_processed,
             shutdown: Arc::new(AtomicBool::new(false)),
             last_error: None,
             boot_time: None,
