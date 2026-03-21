@@ -656,6 +656,361 @@ mod tests {
             s3
         );
     }
+
+    #[test]
+    fn needle_error_transient_without_bead_id() {
+        let e = NeedleError::Transient {
+            message: "lock contention".to_string(),
+            bead_id: None,
+        };
+        let s = e.to_string();
+        assert!(
+            s.contains("transient error: lock contention"),
+            "expected plain transient format in: {}",
+            s
+        );
+        assert!(!s.contains("bead"), "should not mention bead in: {}", s);
+    }
+
+    #[test]
+    fn bead_status_is_done() {
+        assert!(!BeadStatus::Open.is_done());
+        assert!(!BeadStatus::InProgress.is_done());
+        assert!(BeadStatus::Done.is_done());
+        assert!(BeadStatus::Closed.is_done());
+        assert!(!BeadStatus::Blocked.is_done());
+    }
+
+    #[test]
+    fn bead_status_display() {
+        assert_eq!(BeadStatus::Open.to_string(), "open");
+        assert_eq!(BeadStatus::InProgress.to_string(), "in_progress");
+        assert_eq!(BeadStatus::Done.to_string(), "done");
+        assert_eq!(BeadStatus::Closed.to_string(), "done"); // Closed displays as done
+        assert_eq!(BeadStatus::Blocked.to_string(), "blocked");
+    }
+
+    #[test]
+    fn bead_status_closed_deserialization() {
+        // br emits "closed" for done beads — must deserialize correctly
+        let status: BeadStatus = serde_json::from_str(r#""closed""#).unwrap();
+        assert_eq!(status, BeadStatus::Closed);
+        assert!(status.is_done());
+    }
+
+    #[test]
+    fn worker_state_display_all_variants() {
+        assert_eq!(WorkerState::Booting.to_string(), "BOOTING");
+        assert_eq!(WorkerState::Selecting.to_string(), "SELECTING");
+        assert_eq!(WorkerState::Claiming.to_string(), "CLAIMING");
+        assert_eq!(WorkerState::Retrying.to_string(), "RETRYING");
+        assert_eq!(WorkerState::Building.to_string(), "BUILDING");
+        assert_eq!(WorkerState::Dispatching.to_string(), "DISPATCHING");
+        assert_eq!(WorkerState::Executing.to_string(), "EXECUTING");
+        assert_eq!(WorkerState::Handling.to_string(), "HANDLING");
+        assert_eq!(WorkerState::Logging.to_string(), "LOGGING");
+        assert_eq!(WorkerState::Exhausted.to_string(), "EXHAUSTED");
+        assert_eq!(WorkerState::Stopped.to_string(), "STOPPED");
+        assert_eq!(WorkerState::Errored.to_string(), "ERRORED");
+    }
+
+    #[test]
+    fn worker_state_deserialization_roundtrip() {
+        let states = vec![
+            WorkerState::Booting,
+            WorkerState::Selecting,
+            WorkerState::Claiming,
+            WorkerState::Retrying,
+            WorkerState::Building,
+            WorkerState::Dispatching,
+            WorkerState::Executing,
+            WorkerState::Handling,
+            WorkerState::Logging,
+            WorkerState::Exhausted,
+            WorkerState::Stopped,
+            WorkerState::Errored,
+        ];
+        for state in states {
+            let json = serde_json::to_string(&state).unwrap();
+            let parsed: WorkerState = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, state, "roundtrip failed for {:?}", state);
+        }
+    }
+
+    #[test]
+    fn strand_error_display() {
+        let store_err =
+            StrandError::StoreError(anyhow::anyhow!("database disk image is malformed"));
+        assert!(store_err
+            .to_string()
+            .contains("database disk image is malformed"));
+        assert!(store_err.to_string().starts_with("bead store error:"));
+
+        let config_err = StrandError::ConfigError("missing workspace path".to_string());
+        assert!(config_err.to_string().contains("missing workspace path"));
+        assert!(config_err
+            .to_string()
+            .starts_with("strand configuration error:"));
+    }
+
+    #[test]
+    fn strand_error_source() {
+        let store_err = StrandError::StoreError(anyhow::anyhow!("broken"));
+        assert!(
+            std::error::Error::source(&store_err).is_some(),
+            "StoreError should have a source"
+        );
+
+        let config_err = StrandError::ConfigError("bad".to_string());
+        assert!(
+            std::error::Error::source(&config_err).is_none(),
+            "ConfigError should not have a source"
+        );
+    }
+
+    #[test]
+    fn outcome_classify_boundary_values() {
+        // Exact boundaries between ranges
+        assert_eq!(Outcome::classify(0, false), Outcome::Success);
+        assert_eq!(Outcome::classify(1, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(2, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(123, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(124, false), Outcome::Timeout);
+        assert_eq!(Outcome::classify(125, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(126, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(127, false), Outcome::AgentNotFound);
+        assert_eq!(Outcome::classify(128, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(129, false), Outcome::Crash(129)); // First crash code
+
+        // i32 extremes
+        assert_eq!(Outcome::classify(i32::MAX, false), Outcome::Crash(i32::MAX));
+        assert_eq!(Outcome::classify(i32::MIN, false), Outcome::Crash(i32::MIN));
+    }
+
+    #[test]
+    fn outcome_classify_common_signals() {
+        // SIGHUP (128 + 1 = 129)
+        assert_eq!(Outcome::classify(129, false), Outcome::Crash(129));
+        // SIGINT (128 + 2 = 130)
+        assert_eq!(Outcome::classify(130, false), Outcome::Crash(130));
+        // SIGKILL (128 + 9 = 137)
+        assert_eq!(Outcome::classify(137, false), Outcome::Crash(137));
+        // SIGTERM (128 + 15 = 143)
+        assert_eq!(Outcome::classify(143, false), Outcome::Crash(143));
+        // SIGSEGV (128 + 11 = 139)
+        assert_eq!(Outcome::classify(139, false), Outcome::Crash(139));
+    }
+
+    #[test]
+    fn bead_action_display() {
+        assert_eq!(BeadAction::Released.to_string(), "released");
+        assert_eq!(BeadAction::Deferred.to_string(), "deferred");
+        assert_eq!(BeadAction::Alerted.to_string(), "alerted");
+        assert_eq!(BeadAction::None.to_string(), "none");
+    }
+
+    #[test]
+    fn idle_action_default_is_wait() {
+        assert_eq!(IdleAction::default(), IdleAction::Wait);
+    }
+
+    #[test]
+    fn idle_action_serde_roundtrip() {
+        let wait_json = serde_json::to_string(&IdleAction::Wait).unwrap();
+        assert_eq!(wait_json, r#""wait""#);
+        let exit_json = serde_json::to_string(&IdleAction::Exit).unwrap();
+        assert_eq!(exit_json, r#""exit""#);
+
+        let parsed: IdleAction = serde_json::from_str(r#""wait""#).unwrap();
+        assert_eq!(parsed, IdleAction::Wait);
+        let parsed: IdleAction = serde_json::from_str(r#""exit""#).unwrap();
+        assert_eq!(parsed, IdleAction::Exit);
+    }
+
+    #[test]
+    fn identifier_scheme_default_is_hostname_random() {
+        assert_eq!(
+            IdentifierScheme::default(),
+            IdentifierScheme::HostnameRandom
+        );
+    }
+
+    #[test]
+    fn identifier_scheme_serde_roundtrip() {
+        let schemes = vec![
+            (IdentifierScheme::HostnameRandom, r#""hostname_random""#),
+            (IdentifierScheme::Sequential, r#""sequential""#),
+            (IdentifierScheme::Uuid, r#""uuid""#),
+        ];
+        for (scheme, expected_json) in schemes {
+            let json = serde_json::to_string(&scheme).unwrap();
+            assert_eq!(json, expected_json, "serialize {:?}", scheme);
+            let parsed: IdentifierScheme = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, scheme, "roundtrip {:?}", scheme);
+        }
+    }
+
+    #[test]
+    fn exhaustion_diagnosis_display() {
+        assert_eq!(
+            ExhaustionDiagnosis::NoBeadsExist.to_string(),
+            "no_beads_exist"
+        );
+        assert_eq!(ExhaustionDiagnosis::AllClaimed.to_string(), "all_claimed");
+        assert_eq!(ExhaustionDiagnosis::Invisible.to_string(), "invisible");
+    }
+
+    #[test]
+    fn exhaustion_diagnosis_serde_roundtrip() {
+        let variants = vec![
+            ExhaustionDiagnosis::NoBeadsExist,
+            ExhaustionDiagnosis::AllClaimed,
+            ExhaustionDiagnosis::Invisible,
+        ];
+        for variant in variants {
+            let json = serde_json::to_string(&variant).unwrap();
+            let parsed: ExhaustionDiagnosis = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, variant, "roundtrip failed for {:?}", variant);
+        }
+    }
+
+    #[test]
+    fn input_method_serde_roundtrip() {
+        let stdin = InputMethod::Stdin;
+        let json = serde_json::to_string(&stdin).unwrap();
+        let parsed: InputMethod = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, stdin);
+
+        let file = InputMethod::File {
+            path_template: "/tmp/{bead_id}.md".to_string(),
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        let parsed: InputMethod = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, file);
+
+        let args = InputMethod::Args {
+            flag: "--prompt".to_string(),
+        };
+        let json = serde_json::to_string(&args).unwrap();
+        let parsed: InputMethod = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, args);
+    }
+
+    #[test]
+    fn bead_deserialization_with_labels_and_closed_status() {
+        let json = r#"{
+            "id": "needle-xyz",
+            "title": "Labeled bead",
+            "description": null,
+            "priority": 1,
+            "status": "closed",
+            "assignee": "worker-01",
+            "labels": ["deferred", "mitosis-child"],
+            "source_repo": "/tmp/workspace",
+            "dependencies": [],
+            "created_at": "2026-03-20T12:00:00Z",
+            "updated_at": "2026-03-21T08:30:00Z"
+        }"#;
+        let bead: Bead = serde_json::from_str(json).unwrap();
+        assert_eq!(bead.id, BeadId::from("needle-xyz"));
+        assert!(bead.body.is_none());
+        assert!(bead.status.is_done());
+        assert_eq!(bead.status, BeadStatus::Closed);
+        assert_eq!(bead.assignee, Some("worker-01".to_string()));
+        assert_eq!(bead.labels, vec!["deferred", "mitosis-child"]);
+    }
+
+    #[test]
+    fn bead_deserialization_missing_optional_fields() {
+        // br may omit labels and source_repo when empty
+        let json = r#"{
+            "id": "needle-min",
+            "title": "Minimal bead",
+            "description": null,
+            "priority": 3,
+            "status": "open",
+            "assignee": null,
+            "dependencies": [],
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let bead: Bead = serde_json::from_str(json).unwrap();
+        assert!(bead.labels.is_empty());
+        assert_eq!(bead.workspace, std::path::PathBuf::from(""));
+    }
+
+    #[test]
+    fn br_dependency_deserialization() {
+        let json = r#"{
+            "id": "needle-dep",
+            "title": "Dependency bead",
+            "status": "open",
+            "priority": 1,
+            "dependency_type": "blocks"
+        }"#;
+        let dep: BrDependency = serde_json::from_str(json).unwrap();
+        assert_eq!(dep.id, BeadId::from("needle-dep"));
+        assert_eq!(dep.title, "Dependency bead");
+        assert_eq!(dep.status, "open");
+        assert_eq!(dep.priority, 1);
+        assert_eq!(dep.dependency_type, "blocks");
+    }
+
+    #[test]
+    fn bead_deserialization_with_dependents_alias() {
+        // br may emit "dependents" instead of "dependencies"
+        let json = r#"{
+            "id": "needle-alias",
+            "title": "Alias test",
+            "description": null,
+            "priority": 1,
+            "status": "open",
+            "assignee": null,
+            "dependents": [
+                {"id": "needle-child", "title": "Child", "status": "open", "priority": 1, "dependency_type": "blocks"}
+            ],
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let bead: Bead = serde_json::from_str(json).unwrap();
+        assert_eq!(bead.dependencies.len(), 1);
+        assert_eq!(bead.dependencies[0].id, BeadId::from("needle-child"));
+    }
+
+    #[test]
+    fn bead_id_hash_equality() {
+        use std::collections::HashSet;
+        let id1 = BeadId::from("needle-abc");
+        let id2 = BeadId::from("needle-abc");
+        let id3 = BeadId::from("needle-xyz");
+
+        let mut set = HashSet::new();
+        set.insert(id1.clone());
+        assert!(set.contains(&id2));
+        assert!(!set.contains(&id3));
+        set.insert(id3.clone());
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn bead_id_serde_transparent() {
+        // serde(transparent) means it serializes as a plain string, not an object
+        let id = BeadId::from("needle-test");
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, r#""needle-test""#);
+        let parsed: BeadId = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn needle_error_is_error_trait() {
+        // Verify NeedleError implements std::error::Error
+        let e = NeedleError::Transient {
+            message: "test".to_string(),
+            bead_id: None,
+        };
+        let _: &dyn std::error::Error = &e;
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
