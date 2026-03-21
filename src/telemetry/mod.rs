@@ -1330,41 +1330,60 @@ impl HookSink {
 ///
 /// Cloning a `Telemetry` handle is cheap — it shares the same background
 /// writer and sequence counter.
+///
+/// The writer task must be started by calling `start()` from within a tokio
+/// runtime context. This is typically done at the beginning of `Worker::run()`.
 #[derive(Clone)]
 pub struct Telemetry {
     worker_id: WorkerId,
     session_id: String,
     sequence: Arc<AtomicU64>,
     sender: mpsc::UnboundedSender<TelemetryEvent>,
+    /// Pending writer state that needs to be spawned in an async context.
+    /// This is `Some` until `start()` is called.
+    pending_writer: Arc<std::sync::Mutex<Option<PendingWriter>>>,
+}
+
+/// Holds the receiver and sinks until they can be spawned in an async context.
+struct PendingWriter {
+    receiver: mpsc::UnboundedReceiver<TelemetryEvent>,
+    file_sink: Option<FileSink>,
+    stdout_sink: Option<StdoutSink>,
+    hook_sink: Option<HookSink>,
 }
 
 impl Telemetry {
     /// Create a telemetry emitter that writes to a `FileSink`.
     ///
-    /// Spawns a background tokio task that drains events to the sink.
+    /// Does not spawn any async tasks. Call [`start()`](Self::start) from
+    /// within a tokio runtime context before emitting events.
     pub fn new(worker_id: WorkerId) -> Self {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
         // Try to create a file sink; fall back to no-op on error.
-        let sink: Option<FileSink> = FileSink::new(&worker_id, &session_id)
+        let file_sink: Option<FileSink> = FileSink::new(&worker_id, &session_id)
             .map_err(|e| {
                 tracing::warn!(error = %e, "failed to create telemetry file sink");
             })
             .ok();
 
         let sequence = Arc::new(AtomicU64::new(0));
-        Self::spawn_writer(receiver, sink, None, None);
+        let pending = PendingWriter { receiver, file_sink, stdout_sink: None, hook_sink: None };
 
         Telemetry {
             worker_id,
             session_id,
             sequence,
             sender,
+            pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
         }
     }
 
     /// Create a telemetry emitter with both file and stdout sinks.
+    ///
+    /// Does not spawn any async tasks. Call [`start()`](Self::start) from
+    /// within a tokio runtime context before emitting events.
     pub fn with_stdout(worker_id: WorkerId, stdout_config: &StdoutSinkConfig) -> Self {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -1382,17 +1401,21 @@ impl Telemetry {
         };
 
         let sequence = Arc::new(AtomicU64::new(0));
-        Self::spawn_writer(receiver, file_sink, stdout_sink, None);
+        let pending = PendingWriter { receiver, file_sink, stdout_sink, hook_sink: None };
 
         Telemetry {
             worker_id,
             session_id,
             sequence,
             sender,
+            pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
         }
     }
 
     /// Create a telemetry emitter with file, stdout, and hook sinks.
+    ///
+    /// Does not spawn any async tasks. Call [`start()`](Self::start) from
+    /// within a tokio runtime context before emitting events.
     pub fn with_hooks(
         worker_id: WorkerId,
         stdout_config: &StdoutSinkConfig,
@@ -1420,13 +1443,14 @@ impl Telemetry {
         };
 
         let sequence = Arc::new(AtomicU64::new(0));
-        Self::spawn_writer(receiver, file_sink, stdout_sink, hook_sink);
+        let pending = PendingWriter { receiver, file_sink, stdout_sink, hook_sink };
 
         Ok(Telemetry {
             worker_id,
             session_id,
             sequence,
             sender,
+            pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
         })
     }
 
@@ -1467,6 +1491,7 @@ impl Telemetry {
             session_id,
             sequence,
             sender,
+            pending_writer: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1503,25 +1528,28 @@ impl Telemetry {
 
     /// Create a telemetry emitter writing to a specific log directory.
     ///
-    /// Use this when the config specifies a custom log path.
+    /// Use this when the config specifies a custom log path. Does not spawn
+    /// any async tasks. Call [`start()`](Self::start) from within a tokio
+    /// runtime context before emitting events.
     pub fn with_log_dir(worker_id: WorkerId, log_dir: &Path) -> Self {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
-        let sink: Option<FileSink> = FileSink::with_dir(log_dir, &worker_id, &session_id)
+        let file_sink: Option<FileSink> = FileSink::with_dir(log_dir, &worker_id, &session_id)
             .map_err(|e| {
                 tracing::warn!(error = %e, "failed to create telemetry file sink");
             })
             .ok();
 
         let sequence = Arc::new(AtomicU64::new(0));
-        Self::spawn_writer(receiver, sink, None, None);
+        let pending = PendingWriter { receiver, file_sink, stdout_sink: None, hook_sink: None };
 
         Telemetry {
             worker_id,
             session_id,
             sequence,
             sender,
+            pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
         }
     }
 
