@@ -11,6 +11,7 @@ pub mod dispatch;
 pub mod health;
 pub mod outcome;
 pub mod prompt;
+pub mod registry;
 pub mod strand;
 pub mod telemetry;
 pub mod types;

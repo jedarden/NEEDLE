@@ -24,6 +24,7 @@ use crate::dispatch::Dispatcher;
 use crate::health::HealthMonitor;
 use crate::outcome::OutcomeHandler;
 use crate::prompt::{BuiltPrompt, PromptBuilder};
+use crate::registry::{Registry, WorkerEntry};
 use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{AgentOutcome, Bead, BeadId, ClaimResult, IdleAction, WorkerState};
@@ -40,6 +41,7 @@ pub struct Worker {
     dispatcher: Dispatcher,
     outcome_handler: OutcomeHandler,
     health: HealthMonitor,
+    registry: Registry,
 
     // State machine fields
     state: WorkerState,
@@ -91,6 +93,7 @@ impl Worker {
             worker_name.clone(),
             Telemetry::new(worker_name.clone()),
         );
+        let registry = Registry::default_location(&config.workspace.home);
 
         Worker {
             config,
@@ -103,6 +106,7 @@ impl Worker {
             dispatcher,
             outcome_handler,
             health,
+            registry,
             state: WorkerState::Booting,
             current_bead: None,
             exclusion_set: HashSet::new(),
@@ -188,6 +192,10 @@ impl Worker {
                         error_message: msg.clone(),
                         beads_processed: self.beads_processed,
                     })?;
+                    // Best-effort deregister on error.
+                    if let Err(e) = self.registry.deregister(&self.worker_name) {
+                        tracing::warn!(error = %e, "failed to deregister from worker registry on error");
+                    }
                     return Err(err);
                 }
                 WorkerState::Booting => {
@@ -219,6 +227,20 @@ impl Worker {
             worker_name: self.worker_name.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         })?;
+
+        // Register in worker state registry.
+        let entry = WorkerEntry {
+            id: self.worker_name.clone(),
+            pid: std::process::id(),
+            workspace: self.config.workspace.default.clone(),
+            agent: self.config.agent.default.clone(),
+            model: None,
+            started_at: chrono::Utc::now(),
+            beads_processed: 0,
+        };
+        if let Err(e) = self.registry.register(entry) {
+            tracing::warn!(error = %e, "failed to register in worker registry");
+        }
 
         self.set_state(WorkerState::Selecting)?;
 
@@ -478,10 +500,19 @@ impl Worker {
         Ok(())
     }
 
-    /// LOGGING: record telemetry and prepare for next cycle.
+    /// LOGGING: record telemetry, update registry, and prepare for next cycle.
     fn do_log(&mut self) -> Result<()> {
         self.beads_processed += 1;
         self.current_bead = None;
+
+        // Update registry with current beads_processed count (best-effort).
+        if let Err(e) = self
+            .registry
+            .update_beads_processed(&self.worker_name, self.beads_processed)
+        {
+            tracing::warn!(error = %e, "failed to update registry beads_processed");
+        }
+
         self.set_state(WorkerState::Selecting)?;
         Ok(())
     }
@@ -521,7 +552,7 @@ impl Worker {
         }
     }
 
-    /// Graceful stop: emit telemetry and return terminal state.
+    /// Graceful stop: emit telemetry, deregister, and return terminal state.
     async fn stop(&mut self, reason: &str) -> Result<WorkerState> {
         let uptime = self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
@@ -530,6 +561,11 @@ impl Worker {
             beads_processed: self.beads_processed,
             uptime_secs: uptime,
         })?;
+
+        // Deregister from worker state registry (best-effort).
+        if let Err(e) = self.registry.deregister(&self.worker_name) {
+            tracing::warn!(error = %e, "failed to deregister from worker registry");
+        }
 
         tracing::info!(
             reason,
