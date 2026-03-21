@@ -1,7 +1,6 @@
 //! NEEDLE — Navigates Every Enqueued Deliverable, Logs Effort.
 //!
 //! Library crate exposing the public API for integration tests and embedding.
-#![allow(dead_code)]
 
 pub mod bead_store;
 pub mod canary;

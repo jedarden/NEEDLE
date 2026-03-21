@@ -230,6 +230,7 @@ impl PulseStrand {
     }
 
     /// Build the pulse prompt for agent-assisted analysis.
+    #[cfg(test)]
     fn build_prompt(&self, scanner_name: &str, output: &str) -> String {
         if let Some(template) = &self.config.prompt_template {
             return template

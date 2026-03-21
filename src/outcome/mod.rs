@@ -489,6 +489,7 @@ mod tests {
     // ── Mock BeadStore ──
 
     #[derive(Debug, Clone)]
+    #[allow(dead_code)] // Fields read via pattern matching in test assertions
     enum StoreAction {
         Release(String),
         Reopen(String),

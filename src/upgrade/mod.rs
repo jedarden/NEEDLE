@@ -32,15 +32,17 @@ fn asset_download_url(asset_name: &str) -> String {
     )
 }
 
-/// GitHub release asset information.
+/// GitHub release asset information (fields required for JSON deserialization).
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ReleaseAsset {
     name: String,
     browser_download_url: String,
 }
 
-/// GitHub release information.
+/// GitHub release information (fields required for JSON deserialization).
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ReleaseInfo {
     tag_name: String,
     name: Option<String>,

@@ -152,10 +152,9 @@ impl super::Strand for ExploreStrand {
 mod tests {
     use super::*;
     use crate::bead_store::RepairReport;
-    use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
+    use crate::types::{Bead, BeadId, ClaimResult};
 
     use anyhow::Result;
-    use chrono::{TimeZone, Utc};
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -163,23 +162,6 @@ mod tests {
         ExploreConfig {
             enabled,
             workspaces,
-        }
-    }
-
-    fn make_bead(id: &str, priority: u8, workspace: &Path) -> Bead {
-        let dt = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-        Bead {
-            id: BeadId::from(id.to_string()),
-            title: format!("Bead {id}"),
-            body: None,
-            priority,
-            status: BeadStatus::Open,
-            assignee: None,
-            labels: vec![],
-            workspace: workspace.to_path_buf(),
-            dependencies: vec![],
-            created_at: dt,
-            updated_at: dt,
         }
     }
 

@@ -194,7 +194,8 @@ fn extra_vars_for_template(name: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-/// All known built-in template names.
+/// All known built-in template names (used in tests to verify defaults).
+#[cfg(test)]
 const KNOWN_TEMPLATE_NAMES: &[&str] = &["pluck", "mitosis", "weave", "unravel", "pulse"];
 
 // ──────────────────────────────────────────────────────────────────────────────

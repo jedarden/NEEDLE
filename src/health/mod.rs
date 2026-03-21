@@ -7,7 +7,7 @@
 //! independent of the async runtime. The main worker updates shared state
 //! via `Arc<Mutex<SharedHeartbeatState>>`.
 //!
-//! Depends on: `config`, `telemetry`, `types`.
+//! Depends on: `config`, `types`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -71,14 +71,13 @@ pub struct HealthMonitor {
     shared_state: Arc<Mutex<SharedHeartbeatState>>,
     shutdown: Arc<AtomicBool>,
     emitter_handle: Option<std::thread::JoinHandle<()>>,
-    telemetry: Telemetry,
 }
 
 impl HealthMonitor {
     /// Create a new health monitor.
     ///
     /// Does not start the emitter — call `start_emitter()` after construction.
-    pub fn new(config: Config, worker_name: String, telemetry: Telemetry) -> Self {
+    pub fn new(config: Config, worker_name: String, _telemetry: Telemetry) -> Self {
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
         let heartbeat_interval = Duration::from_secs(config.health.heartbeat_interval_secs);
         let heartbeat_ttl = Duration::from_secs(config.health.heartbeat_ttl_secs);
@@ -97,7 +96,6 @@ impl HealthMonitor {
             })),
             shutdown: Arc::new(AtomicBool::new(false)),
             emitter_handle: None,
-            telemetry,
         }
     }
 
