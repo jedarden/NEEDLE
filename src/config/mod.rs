@@ -214,6 +214,34 @@ impl MendConfig {
     }
 }
 
+/// Explore strand configuration (multi-workspace discovery).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExploreConfig {
+    /// Whether the Explore strand is enabled.
+    #[serde(default = "ExploreConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Explicit workspace paths to search for beads.
+    /// No filesystem scanning — only these paths are checked.
+    #[serde(default)]
+    pub workspaces: Vec<PathBuf>,
+}
+
+impl Default for ExploreConfig {
+    fn default() -> Self {
+        ExploreConfig {
+            enabled: Self::default_enabled(),
+            workspaces: Vec::new(),
+        }
+    }
+}
+
+impl ExploreConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+}
+
 /// Knot strand configuration (exhaustion alerting).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnotConfig {
@@ -256,6 +284,8 @@ pub struct StrandsConfig {
     pub pluck: PluckConfig,
     #[serde(default)]
     pub mend: MendConfig,
+    #[serde(default)]
+    pub explore: ExploreConfig,
     #[serde(default)]
     pub knot: KnotConfig,
 }

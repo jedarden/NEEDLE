@@ -6,6 +6,7 @@
 //!
 //! Depends on: `types`, `config`, `bead_store`.
 
+mod explore;
 mod knot;
 mod mend;
 mod pluck;
@@ -18,6 +19,7 @@ use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::types::{BeadId, StrandResult};
 
+pub use explore::ExploreStrand;
 pub use knot::KnotStrand;
 pub use mend::MendStrand;
 pub use pluck::PluckStrand;
@@ -44,7 +46,7 @@ impl StrandRunner {
 
     /// Build the default strand waterfall from config.
     ///
-    /// The waterfall order is: Pluck → Mend → Knot.
+    /// The waterfall order is: Pluck → Mend → Explore → Knot.
     pub fn from_config(
         config: &Config,
         worker_id: &str,
@@ -66,9 +68,19 @@ impl StrandRunner {
             telemetry,
         );
 
+        let explore = ExploreStrand::new(
+            config.strands.explore.clone(),
+            config.workspace.default.clone(),
+        );
+
         let knot = KnotStrand::new(config.strands.knot.clone());
         StrandRunner {
-            strands: vec![Box::new(pluck), Box::new(mend), Box::new(knot)],
+            strands: vec![
+                Box::new(pluck),
+                Box::new(mend),
+                Box::new(explore),
+                Box::new(knot),
+            ],
         }
     }
 
@@ -297,12 +309,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_config_includes_pluck_mend_and_knot() {
+    async fn from_config_includes_pluck_mend_explore_and_knot() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
         let registry = crate::registry::Registry::new(dir.path());
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
-        assert_eq!(runner.strand_names(), vec!["pluck", "mend", "knot"]);
+        assert_eq!(
+            runner.strand_names(),
+            vec!["pluck", "mend", "explore", "knot"]
+        );
     }
 }
