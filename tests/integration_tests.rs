@@ -201,6 +201,9 @@ fn test_config(adapter_name: &str) -> Config {
     config.agent.default = adapter_name.to_string();
     config.agent.timeout = 10;
     config.self_modification.hot_reload = false;
+    // Match the test bead workspace so the remote-store-switch logic
+    // doesn't fire (it would try to create a BrCliBeadStore).
+    config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
     config
 }
 

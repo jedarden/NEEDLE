@@ -122,6 +122,12 @@ impl super::Strand for ExploreStrand {
                             .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
                     });
 
+                    // Tag each candidate with the workspace it came from
+                    // so the worker can create the correct bead store.
+                    for bead in &mut candidates {
+                        bead.workspace = workspace.clone();
+                    }
+
                     tracing::info!(
                         workspace = %workspace.display(),
                         candidates = candidates.len(),

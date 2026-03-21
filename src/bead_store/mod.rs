@@ -468,11 +468,14 @@ impl BeadStore for BrCliBeadStore {
     }
 
     async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+        // blocker_id blocks blocked_id (child blocks parent)
+        // br dep add <ISSUE> <DEPENDS_ON> --type blocks
+        // ISSUE depends on DEPENDS_ON, so blocked_id depends on blocker_id
         let blocker = blocker_id.as_ref();
         let blocked = blocked_id.as_ref();
-        self.run_br(&["dep", "add", blocker, "--blocks", blocked])
+        self.run_br(&["dep", "add", blocked, blocker, "--type", "blocks"])
             .await
-            .with_context(|| format!("br dep add {blocker} --blocks {blocked} failed"))?;
+            .with_context(|| format!("br dep add {blocked} {blocker} --type blocks failed"))?;
         Ok(())
     }
 

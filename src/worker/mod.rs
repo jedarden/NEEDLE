@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::bead_store::BeadStore;
 use crate::claim::Claimer;
@@ -38,6 +38,8 @@ pub struct Worker {
     config: Config,
     worker_name: String,
     store: Arc<dyn BeadStore>,
+    /// Home workspace store — kept for restore after processing a remote bead.
+    home_store: Arc<dyn BeadStore>,
     telemetry: Telemetry,
     strands: StrandRunner,
     claimer: Claimer,
@@ -121,6 +123,7 @@ impl Worker {
         Worker {
             config,
             worker_name,
+            home_store: store.clone(),
             store,
             telemetry,
             strands,
@@ -335,28 +338,35 @@ impl Worker {
         self.retry_count = 0;
         self.current_bead = None;
 
+        // Restore home store if it was swapped for a remote workspace.
+        self.restore_home_store();
+
         self.health.update_state(&WorkerState::Selecting, None);
 
-        let candidate_id = self.strands.select(self.store.as_ref()).await?;
+        let candidate = self.strands.select(self.store.as_ref()).await?;
 
-        match candidate_id {
-            Some(id) => {
-                tracing::debug!(bead_id = %id, "candidate found");
-                // Store the candidate ID temporarily — we need it for claiming.
-                // We'll set current_bead after successful claim.
-                self.current_bead = Some(Bead {
-                    id,
-                    title: String::new(),
-                    body: None,
-                    priority: 0,
-                    status: crate::types::BeadStatus::Open,
-                    assignee: None,
-                    labels: vec![],
-                    workspace: std::path::PathBuf::new(),
-                    dependencies: vec![],
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                });
+        match candidate {
+            Some(bead) => {
+                tracing::debug!(bead_id = %bead.id, "candidate found");
+
+                // If the bead is from a remote workspace (found by Explore),
+                // swap the active store so claim/show/release operate on the
+                // correct workspace. Only switch if the workspace has a real
+                // .beads/ directory — avoids false triggers from mock/stub beads.
+                let bead_ws = &bead.workspace;
+                if !is_workspace_unset(bead_ws)
+                    && bead_ws != &self.config.workspace.default
+                    && bead_ws.join(".beads").is_dir()
+                {
+                    tracing::info!(
+                        bead_id = %bead.id,
+                        remote_workspace = %bead_ws.display(),
+                        "bead is from remote workspace, switching store"
+                    );
+                    self.switch_store_to(bead_ws)?;
+                }
+
+                self.current_bead = Some(bead);
                 self.set_state(WorkerState::Claiming)?;
             }
             None => {
@@ -365,6 +375,41 @@ impl Worker {
         }
 
         Ok(())
+    }
+
+    /// Swap the active bead store to a remote workspace.
+    ///
+    /// Creates a new BrCliBeadStore and rebuilds the Claimer to use it.
+    /// The home store is restored at the start of the next select cycle.
+    fn switch_store_to(&mut self, workspace: &std::path::Path) -> Result<()> {
+        let remote_store = Arc::new(
+            crate::bead_store::BrCliBeadStore::discover(workspace.to_path_buf())
+                .context("failed to create bead store for remote workspace")?,
+        );
+        self.store = remote_store.clone();
+        self.claimer = Claimer::new(
+            remote_store,
+            std::path::PathBuf::from("/tmp"),
+            self.config.worker.max_claim_retries,
+            100,
+            self.telemetry.clone(),
+        );
+        Ok(())
+    }
+
+    /// Restore the home workspace store if it was swapped for a remote bead.
+    fn restore_home_store(&mut self) {
+        if !Arc::ptr_eq(&self.store, &self.home_store) {
+            tracing::debug!("restoring home workspace store");
+            self.store = self.home_store.clone();
+            self.claimer = Claimer::new(
+                self.home_store.clone(),
+                std::path::PathBuf::from("/tmp"),
+                self.config.worker.max_claim_retries,
+                100,
+                self.telemetry.clone(),
+            );
+        }
     }
 
     /// CLAIMING: attempt to claim the selected bead.
@@ -380,8 +425,19 @@ impl Worker {
         let claim = self.claimer.claim_one(&bead_id, &self.worker_name).await?;
 
         match claim {
-            ClaimResult::Claimed(bead) => {
+            ClaimResult::Claimed(mut bead) => {
                 tracing::info!(bead_id = %bead.id, title = %bead.title, "claimed bead");
+                // Preserve the workspace from the pre-claim bead (set by
+                // Explore for remote beads). The claimed bead from br's JSON
+                // returns source_repo as "." (cwd-relative), so we treat empty
+                // or "." as unset and restore from the pre-claim bead.
+                if is_workspace_unset(&bead.workspace) {
+                    if let Some(ref pre_claim) = self.current_bead {
+                        if !is_workspace_unset(&pre_claim.workspace) {
+                            bead.workspace = pre_claim.workspace.clone();
+                        }
+                    }
+                }
                 self.current_bead = Some(bead);
                 // Start effort tracking for this cycle.
                 self.last_effort = Some(EffortData {
@@ -437,11 +493,14 @@ impl Worker {
             }
         };
 
-        let prompt = self.prompt_builder.build_pluck(
-            bead,
-            &self.config.workspace.default,
-            &self.worker_name,
-        )?;
+        let build_ws = if is_workspace_unset(&bead.workspace) {
+            &self.config.workspace.default
+        } else {
+            &bead.workspace
+        };
+        let prompt = self
+            .prompt_builder
+            .build_pluck(bead, build_ws, &self.worker_name)?;
 
         // Store the prompt for the dispatch phase. We use a transient field pattern:
         // the prompt is passed via self.built_prompt.
@@ -528,9 +587,16 @@ impl Worker {
             was_interrupted = true;
             None
         } else {
+            // Use the bead's workspace if set (remote bead from Explore),
+            // otherwise fall back to the config's default workspace.
+            let dispatch_ws = if is_workspace_unset(&bead.workspace) {
+                &self.config.workspace.default
+            } else {
+                &bead.workspace
+            };
             let result = self
                 .dispatcher
-                .dispatch(&bead.id, &prompt, &adapter, &self.config.workspace.default)
+                .dispatch(&bead.id, &prompt, &adapter, dispatch_ws)
                 .await?;
             was_interrupted = self.shutdown.load(Ordering::SeqCst);
             Some(result)
@@ -591,7 +657,11 @@ impl Worker {
         // Evaluate for mitosis after failure — the bead has already been
         // released and failure count incremented by the outcome handler.
         if handler_result.outcome == Outcome::Failure {
-            let workspace = self.config.workspace.default.clone();
+            let workspace = if is_workspace_unset(&bead.workspace) {
+                self.config.workspace.default.clone()
+            } else {
+                bead.workspace.clone()
+            };
             match self
                 .mitosis_evaluator
                 .evaluate(
@@ -953,6 +1023,16 @@ impl Worker {
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
     }
+}
+
+/// Check if a workspace path should be treated as "unset".
+///
+/// br's JSON output sets `source_repo` to `"."` (cwd-relative) for local
+/// beads. We treat empty paths and `"."` as unset so that the Explore
+/// strand's absolute workspace path is preserved through the claim cycle.
+fn is_workspace_unset(path: &std::path::Path) -> bool {
+    let s = path.as_os_str();
+    s.is_empty() || s == "."
 }
 
 #[cfg(test)]
@@ -1592,6 +1672,9 @@ mod tests {
         // Use a simple echo adapter so the test finishes quickly.
         config.agent.default = "echo-test".to_string();
         config.agent.timeout = 5;
+        // Set workspace.default to match the bead's workspace so the remote
+        // store switch logic doesn't fire.
+        config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
 
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 

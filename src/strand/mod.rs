@@ -20,7 +20,7 @@ use anyhow::Result;
 
 use crate::bead_store::BeadStore;
 use crate::config::Config;
-use crate::types::{BeadId, StrandResult};
+use crate::types::{Bead, StrandResult};
 
 pub use explore::ExploreStrand;
 pub use knot::KnotStrand;
@@ -118,55 +118,76 @@ impl StrandRunner {
         }
     }
 
-    /// Run the waterfall, returning the first candidate bead ID or None.
-    pub async fn select(&self, store: &dyn BeadStore) -> Result<Option<BeadId>> {
-        for strand in &self.strands {
-            let start = Instant::now();
-            let result = strand.evaluate(store).await;
-            let elapsed_ms = start.elapsed().as_millis() as u64;
+    /// Run the waterfall, returning the first candidate bead or None.
+    ///
+    /// Returns the full `Bead` (including its workspace path) so the caller
+    /// can create the correct bead store for remote beads found by Explore.
+    ///
+    /// When a strand returns `WorkCreated`, the waterfall restarts from Pluck.
+    /// A restart cap prevents infinite loops (e.g. a strand that always creates
+    /// work without producing a claimable bead).
+    pub async fn select(&self, store: &dyn BeadStore) -> Result<Option<Bead>> {
+        const MAX_RESTARTS: u32 = 3;
+        let mut restarts = 0u32;
 
-            match result {
-                StrandResult::BeadFound(beads) => {
-                    tracing::info!(
-                        strand = strand.name(),
-                        candidates = beads.len(),
-                        elapsed_ms,
-                        "strand found candidates"
-                    );
-                    if let Some(bead) = beads.into_iter().next() {
-                        return Ok(Some(bead.id));
+        'waterfall: loop {
+            for strand in &self.strands {
+                let start = Instant::now();
+                let result = strand.evaluate(store).await;
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+
+                match result {
+                    StrandResult::BeadFound(beads) => {
+                        tracing::info!(
+                            strand = strand.name(),
+                            candidates = beads.len(),
+                            elapsed_ms,
+                            "strand found candidates"
+                        );
+                        if let Some(bead) = beads.into_iter().next() {
+                            return Ok(Some(bead));
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                StrandResult::WorkCreated => {
-                    tracing::info!(
-                        strand = strand.name(),
-                        elapsed_ms,
-                        "strand created new work, restarting waterfall"
-                    );
-                    // New work was synthesized; restart the waterfall from scratch.
-                    return Ok(None);
-                }
-                StrandResult::NoWork => {
-                    tracing::debug!(
-                        strand = strand.name(),
-                        elapsed_ms,
-                        "strand returned no work"
-                    );
-                    continue;
-                }
-                StrandResult::Error(e) => {
-                    tracing::warn!(
-                        strand = strand.name(),
-                        error = %e,
-                        elapsed_ms,
-                        "strand error, continuing to next strand"
-                    );
-                    continue;
+                    StrandResult::WorkCreated => {
+                        restarts += 1;
+                        tracing::info!(
+                            strand = strand.name(),
+                            elapsed_ms,
+                            restart = restarts,
+                            "strand created new work, restarting waterfall"
+                        );
+                        if restarts > MAX_RESTARTS {
+                            tracing::warn!(
+                                max_restarts = MAX_RESTARTS,
+                                "waterfall restart cap reached, treating as exhausted"
+                            );
+                            return Ok(None);
+                        }
+                        continue 'waterfall;
+                    }
+                    StrandResult::NoWork => {
+                        tracing::debug!(
+                            strand = strand.name(),
+                            elapsed_ms,
+                            "strand returned no work"
+                        );
+                        continue;
+                    }
+                    StrandResult::Error(e) => {
+                        tracing::warn!(
+                            strand = strand.name(),
+                            error = %e,
+                            elapsed_ms,
+                            "strand error, continuing to next strand"
+                        );
+                        continue;
+                    }
                 }
             }
+            // All strands evaluated without finding work or triggering a restart.
+            return Ok(None);
         }
-        Ok(None)
     }
 
     /// Return the names of all configured strands (for telemetry/debugging).
@@ -180,7 +201,7 @@ impl StrandRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::Bead;
+    use crate::types::{Bead, BeadId};
 
     /// A stub strand that always returns the given result.
     struct StubStrand {
@@ -309,11 +330,14 @@ mod tests {
         ]);
         let store = EmptyStore;
         let result = runner.select(&store).await.unwrap();
-        assert_eq!(result, Some(BeadId::from("test-001".to_string())));
+        assert_eq!(
+            result.map(|b| b.id),
+            Some(BeadId::from("test-001".to_string()))
+        );
     }
 
     #[tokio::test]
-    async fn work_created_returns_none_to_restart() {
+    async fn work_created_restarts_waterfall() {
         let runner = StrandRunner::new(vec![
             Box::new(StubStrand::work_created("creator")),
             Box::new(StubStrand::beads(
@@ -322,9 +346,13 @@ mod tests {
             )),
         ]);
         let store = EmptyStore;
-        // WorkCreated causes restart (returns None), second strand is not evaluated
+        // WorkCreated restarts the waterfall. On the second pass, "creator"
+        // returns NoWork (stub consumed) and "finder" yields the bead.
         let result = runner.select(&store).await.unwrap();
-        assert!(result.is_none());
+        assert_eq!(
+            result.map(|b| b.id),
+            Some(BeadId::from("test-002".to_string()))
+        );
     }
 
     #[tokio::test]
