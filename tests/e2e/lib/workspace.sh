@@ -169,3 +169,41 @@ create_home_workspace() {
         return 1
     }
 }
+
+# ── Configure explore.workspaces in needle config ──────────────────────────────
+
+# Writes a needle config.yaml with explore.workspaces set to the given paths.
+# Also sets worker.idle_action: exit so E2E tests terminate after exhaustion.
+#
+# Usage:
+#   configure_explore_workspaces <config_dir> <workspace_path> [workspace_path2 ...]
+#
+# Arguments:
+#   config_dir     - Directory where config.yaml will be written (will be created)
+#   workspace_path - One or more workspace paths to include in explore.workspaces
+#
+# Example:
+#   configure_explore_workspaces "$FAKE_HOME/.config/needle" "$REMOTE_WS"
+
+configure_explore_workspaces() {
+    local config_dir="${1:?config_dir required}"
+    shift
+
+    if [ $# -eq 0 ]; then
+        echo "FATAL: at least one workspace path required"
+        return 1
+    fi
+
+    mkdir -p "$config_dir"
+
+    # Build YAML list of workspace paths
+    local ws_yaml=""
+    for ws in "$@"; do
+        ws_yaml+="      - ${ws}"$'\n'
+    done
+
+    {
+        printf 'worker:\n  idle_action: exit\nstrands:\n  explore:\n    enabled: true\n    workspaces:\n'
+        printf '%s' "$ws_yaml"
+    } > "$config_dir/config.yaml"
+}
