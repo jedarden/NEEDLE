@@ -127,24 +127,12 @@ YAML
 
 echo "Step 4: Configuring needle with explore.workspaces..."
 CONFIG_DIR_A="$FAKE_HOME_A/.config/needle"
-mkdir -p "$CONFIG_DIR_A"
 
-cat > "$CONFIG_DIR_A/config.yaml" <<YAML
-worker:
-  idle_action: exit
-  max_workers: 1
-agent:
-  default: test-echo
-  timeout: 30
-health:
-  heartbeat_interval_secs: 1
-  heartbeat_ttl_secs: 5
-strands:
-  explore:
-    enabled: true
-    workspaces:
-      - $REMOTE_WS_A
-YAML
+configure_explore_workspaces "$CONFIG_DIR_A" "$REMOTE_WS_A"
+
+# Append fast heartbeat settings for E2E timing
+printf '\nhealth:\n  heartbeat_interval_secs: 1\n  heartbeat_ttl_secs: 5\n' \
+    >> "$CONFIG_DIR_A/config.yaml"
 
 echo "  Explore workspaces: [$REMOTE_WS_A]"
 
