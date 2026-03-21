@@ -1128,10 +1128,61 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
         .clone()
         .unwrap_or_else(|| needle_home.join("logs"));
     if log_dir.is_dir() {
-        let count = std::fs::read_dir(&log_dir)
-            .map(|entries| entries.count())
-            .unwrap_or(0);
-        println!("OK ({count} files in {})", log_dir.display());
+        let retention_days = config.telemetry.file_sink.retention_days;
+        let mut total_logs = 0u64;
+        let mut expired_logs = 0u64;
+
+        if let Ok(entries) = std::fs::read_dir(&log_dir) {
+            let cutoff = if retention_days > 0 {
+                Some(
+                    std::time::SystemTime::now()
+                        - std::time::Duration::from_secs(u64::from(retention_days) * 86400),
+                )
+            } else {
+                None
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                total_logs += 1;
+
+                if let Some(cutoff) = cutoff {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        if let Ok(modified) = meta.modified() {
+                            if modified < cutoff {
+                                expired_logs += 1;
+                                if repair {
+                                    if let Err(e) = std::fs::remove_file(&path) {
+                                        println!(
+                                            "\n  Failed to remove expired log {}: {e}",
+                                            path.display()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if expired_logs > 0 {
+            if repair {
+                println!(
+                    "cleaned {expired_logs} expired of {total_logs} files (retention: {retention_days}d)"
+                );
+            } else {
+                println!(
+                    "WARNING: {expired_logs} expired of {total_logs} files (retention: {retention_days}d)"
+                );
+            }
+            issues_found += expired_logs as usize;
+        } else {
+            println!("OK ({total_logs} files in {})", log_dir.display());
+        }
     } else {
         println!("OK (no log directory yet)");
     }

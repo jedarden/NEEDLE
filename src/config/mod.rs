@@ -540,6 +540,10 @@ pub struct FileSinkConfig {
     /// Directory for log files (defaults to `workspace.home/logs`).
     #[serde(default)]
     pub log_dir: Option<PathBuf>,
+
+    /// Number of days to retain log files (0 = no cleanup). Default: 30.
+    #[serde(default = "FileSinkConfig::default_retention_days")]
+    pub retention_days: u32,
 }
 
 impl Default for FileSinkConfig {
@@ -547,6 +551,7 @@ impl Default for FileSinkConfig {
         FileSinkConfig {
             enabled: Self::default_enabled(),
             log_dir: None,
+            retention_days: Self::default_retention_days(),
         }
     }
 }
@@ -554,6 +559,10 @@ impl Default for FileSinkConfig {
 impl FileSinkConfig {
     fn default_enabled() -> bool {
         true
+    }
+
+    fn default_retention_days() -> u32 {
+        30
     }
 }
 
