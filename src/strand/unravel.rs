@@ -155,8 +155,22 @@ impl UnravelStrand {
     }
 
     /// Build the unravel prompt for a human-blocked bead.
-    fn build_prompt(bead: &Bead) -> String {
+    ///
+    /// Uses `config.prompt_template` when set; otherwise falls back to the
+    /// built-in template.  Template variables: `{id}`, `{title}`, `{body}`,
+    /// `{labels}`.
+    fn build_prompt(&self, bead: &Bead) -> String {
         let body = bead.body.as_deref().unwrap_or("(no description)");
+        let labels = bead.labels.join(", ");
+
+        if let Some(template) = &self.config.prompt_template {
+            return template
+                .replace("{id}", bead.id.as_ref())
+                .replace("{title}", &bead.title)
+                .replace("{body}", body)
+                .replace("{labels}", &labels);
+        }
+
         format!(
             "## Human-Blocked Bead\n\n\
              **ID:** {id}\n\
@@ -180,7 +194,7 @@ impl UnravelStrand {
             id = bead.id,
             title = bead.title,
             body = body,
-            labels = bead.labels.join(", "),
+            labels = labels,
         )
     }
 
@@ -315,7 +329,7 @@ impl super::Strand for UnravelStrand {
             beads_processed += 1;
 
             // Build prompt and dispatch agent.
-            let prompt = Self::build_prompt(bead);
+            let prompt = self.build_prompt(bead);
             let response = match self
                 .agent
                 .propose_alternatives(&prompt, &self.workspace)
@@ -443,6 +457,67 @@ impl super::Strand for UnravelStrand {
             tracing::info!("unravel strand: no new alternatives created");
             StrandResult::NoWork
         }
+    }
+}
+
+// ─── Production agent ────────────────────────────────────────────────────────
+
+/// Production `UnravelAgent` that invokes the configured AI agent via subprocess.
+///
+/// The agent binary is called with `--print` so it emits the response as plain
+/// text on stdout without tool-use side-effects.  The prompt is written to a
+/// temp file and fed via stdin redirection.
+pub struct CliUnravelAgent {
+    /// Agent binary name or path (e.g., `"claude"`).
+    agent_cmd: String,
+}
+
+impl CliUnravelAgent {
+    /// Create a new `CliUnravelAgent`.
+    ///
+    /// `agent_cmd` is the binary used for analysis (typically taken from
+    /// `config.agent.default`).
+    pub fn new(agent_cmd: String) -> Self {
+        CliUnravelAgent { agent_cmd }
+    }
+}
+
+#[async_trait::async_trait]
+impl UnravelAgent for CliUnravelAgent {
+    async fn propose_alternatives(&self, prompt: &str, workspace: &Path) -> Result<String> {
+        // Write the prompt to a temp file.
+        let tmp_dir = std::env::temp_dir().join("needle");
+        std::fs::create_dir_all(&tmp_dir)
+            .context("failed to create needle temp dir for unravel")?;
+        let tmp_file = tmp_dir.join(format!("unravel-{}.md", std::process::id()));
+        std::fs::write(&tmp_file, prompt).context("failed to write unravel prompt to temp file")?;
+
+        // Build the shell command: cd into workspace, pipe prompt to agent.
+        let cmd = format!(
+            "cd {} && {} --print < {}",
+            workspace.display(),
+            self.agent_cmd,
+            tmp_file.display(),
+        );
+
+        let output = tokio::process::Command::new("bash")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn unravel agent: {}", self.agent_cmd))?;
+
+        // Always clean up the temp file.
+        let _ = std::fs::remove_file(&tmp_file);
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "unravel agent exited with code {}",
+                output.status.code().unwrap_or(-1)
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 }
 
@@ -632,6 +707,7 @@ mod tests {
             max_beads_per_run: 5,
             max_alternatives_per_bead: 3,
             cooldown_hours: 168, // 7 days
+            ..UnravelConfig::default()
         }
     }
 
@@ -1079,5 +1155,46 @@ mod tests {
         let h2 = workspace_hash(Path::new("/home/user/project"));
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 16);
+    }
+
+    // ── Custom prompt template tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn custom_prompt_template_substitutes_variables() {
+        let config = UnravelConfig {
+            enabled: true,
+            prompt_template: Some("ID={id} TITLE={title} BODY={body} LABELS={labels}".to_string()),
+            ..UnravelConfig::default()
+        };
+        let strand = UnravelStrand::new(
+            config,
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp/state"),
+            Box::new(MockAgent::new("NO_ALTERNATIVES")),
+            Telemetry::new("test".to_string()),
+        );
+        let bead = make_bead("nd-1", "Fix it", &["human", "urgent"]);
+        let prompt = strand.build_prompt(&bead);
+        assert!(prompt.contains("ID=nd-1"));
+        assert!(prompt.contains("TITLE=Fix it"));
+        assert!(prompt.contains("BODY=Description for Fix it"));
+        assert!(prompt.contains("LABELS=human, urgent"));
+    }
+
+    #[tokio::test]
+    async fn default_prompt_template_contains_key_sections() {
+        let strand = UnravelStrand::new(
+            make_enabled_config(),
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp/state"),
+            Box::new(MockAgent::new("NO_ALTERNATIVES")),
+            Telemetry::new("test".to_string()),
+        );
+        let bead = make_bead("nd-2", "Approve deployment", &["human"]);
+        let prompt = strand.build_prompt(&bead);
+        assert!(prompt.contains("nd-2"));
+        assert!(prompt.contains("Approve deployment"));
+        assert!(prompt.contains("NO_ALTERNATIVES"));
+        assert!(prompt.contains("JSON array"));
     }
 }

@@ -13,6 +13,7 @@ mod pluck;
 pub mod unravel;
 pub mod weave;
 
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -27,6 +28,19 @@ pub use mend::MendStrand;
 pub use pluck::PluckStrand;
 pub use unravel::{UnravelAgent, UnravelStrand};
 pub use weave::{WeaveAgent, WeaveStrand};
+
+// ─── Placeholder agent ──────────────────────────────────────────────────────
+// Weave uses a placeholder because it has no production CliWeaveAgent yet.
+// Unravel uses the real CliUnravelAgent from the unravel module.
+
+struct PlaceholderWeaveAgent;
+
+#[async_trait::async_trait]
+impl WeaveAgent for PlaceholderWeaveAgent {
+    async fn analyze_gaps(&self, _prompt: &str, _workspace: &Path) -> Result<String> {
+        anyhow::bail!("weave strand requires a real agent — configure an adapter or use StrandRunner::new to inject one")
+    }
+}
 
 /// A single selection strategy in the waterfall.
 #[async_trait::async_trait]
@@ -50,7 +64,8 @@ impl StrandRunner {
 
     /// Build the default strand waterfall from config.
     ///
-    /// The waterfall order is: Pluck → Mend → Explore → Knot.
+    /// The waterfall order is:
+    /// Pluck → Mend → Explore → Weave → Unravel → Knot.
     pub fn from_config(
         config: &Config,
         worker_id: &str,
@@ -69,12 +84,29 @@ impl StrandRunner {
             lock_dir,
             worker_id.to_string(),
             registry,
-            telemetry,
+            telemetry.clone(),
         );
 
         let explore = ExploreStrand::new(
             config.strands.explore.clone(),
             config.workspace.default.clone(),
+        );
+
+        let state_base = config.workspace.home.join("state");
+
+        let weave = WeaveStrand::new(
+            config.strands.weave.clone(),
+            config.workspace.default.clone(),
+            state_base.join("weave"),
+            Box::new(PlaceholderWeaveAgent),
+        );
+
+        let unravel = UnravelStrand::new(
+            config.strands.unravel.clone(),
+            config.workspace.default.clone(),
+            state_base.join("unravel"),
+            Box::new(unravel::CliUnravelAgent::new(config.agent.default.clone())),
+            telemetry,
         );
 
         let knot = KnotStrand::new(config.strands.knot.clone());
@@ -83,6 +115,8 @@ impl StrandRunner {
                 Box::new(pluck),
                 Box::new(mend),
                 Box::new(explore),
+                Box::new(weave),
+                Box::new(unravel),
                 Box::new(knot),
             ],
         }
@@ -319,7 +353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_config_includes_pluck_mend_explore_and_knot() {
+    async fn from_config_includes_full_waterfall() {
         let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
         let registry = crate::registry::Registry::new(dir.path());
@@ -327,7 +361,7 @@ mod tests {
         let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
         assert_eq!(
             runner.strand_names(),
-            vec!["pluck", "mend", "explore", "knot"]
+            vec!["pluck", "mend", "explore", "weave", "unravel", "knot"]
         );
     }
 }

@@ -329,6 +329,13 @@ pub struct UnravelConfig {
     /// Minimum hours between re-analysis of the same bead (default: 168 = 7 days).
     #[serde(default = "UnravelConfig::default_cooldown_hours")]
     pub cooldown_hours: u64,
+
+    /// Custom prompt template for the alternative-proposal agent invocation.
+    ///
+    /// Template variables: `{id}`, `{title}`, `{body}`, `{labels}`.
+    /// When `None`, the built-in template is used.
+    #[serde(default)]
+    pub prompt_template: Option<String>,
 }
 
 impl Default for UnravelConfig {
@@ -338,6 +345,7 @@ impl Default for UnravelConfig {
             max_beads_per_run: Self::default_max_beads_per_run(),
             max_alternatives_per_bead: Self::default_max_alternatives_per_bead(),
             cooldown_hours: Self::default_cooldown_hours(),
+            prompt_template: None,
         }
     }
 }
