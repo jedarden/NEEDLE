@@ -151,6 +151,9 @@ impl Worker {
     /// The main loop is a match on `self.state`. Every state has a handler
     /// that performs its actions and sets `self.state` to the next state.
     pub async fn run(&mut self) -> Result<WorkerState> {
+        // Start the telemetry writer now that we are inside the tokio runtime.
+        self.telemetry.start();
+
         // Boot: validate config and initialize.
         self.boot()?;
 

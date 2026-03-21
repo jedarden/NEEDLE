@@ -1369,7 +1369,12 @@ impl Telemetry {
             .ok();
 
         let sequence = Arc::new(AtomicU64::new(0));
-        let pending = PendingWriter { receiver, file_sink, stdout_sink: None, hook_sink: None };
+        let pending = PendingWriter {
+            receiver,
+            file_sink,
+            stdout_sink: None,
+            hook_sink: None,
+        };
 
         Telemetry {
             worker_id,
@@ -1401,7 +1406,12 @@ impl Telemetry {
         };
 
         let sequence = Arc::new(AtomicU64::new(0));
-        let pending = PendingWriter { receiver, file_sink, stdout_sink, hook_sink: None };
+        let pending = PendingWriter {
+            receiver,
+            file_sink,
+            stdout_sink,
+            hook_sink: None,
+        };
 
         Telemetry {
             worker_id,
@@ -1443,7 +1453,12 @@ impl Telemetry {
         };
 
         let sequence = Arc::new(AtomicU64::new(0));
-        let pending = PendingWriter { receiver, file_sink, stdout_sink, hook_sink };
+        let pending = PendingWriter {
+            receiver,
+            file_sink,
+            stdout_sink,
+            hook_sink,
+        };
 
         Ok(Telemetry {
             worker_id,
@@ -1542,7 +1557,12 @@ impl Telemetry {
             .ok();
 
         let sequence = Arc::new(AtomicU64::new(0));
-        let pending = PendingWriter { receiver, file_sink, stdout_sink: None, hook_sink: None };
+        let pending = PendingWriter {
+            receiver,
+            file_sink,
+            stdout_sink: None,
+            hook_sink: None,
+        };
 
         Telemetry {
             worker_id,
@@ -1550,6 +1570,18 @@ impl Telemetry {
             sequence,
             sender,
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
+        }
+    }
+
+    /// Start the background writer task.
+    ///
+    /// Must be called from within a tokio runtime context (e.g. inside
+    /// `block_on` or an async function). Calling this more than once on
+    /// the same handle is a no-op.
+    pub fn start(&self) {
+        let pending = self.pending_writer.lock().unwrap().take();
+        if let Some(pw) = pending {
+            Self::spawn_writer(pw.receiver, pw.file_sink, pw.stdout_sink, pw.hook_sink);
         }
     }
 
@@ -2762,5 +2794,40 @@ mod tests {
         assert_eq!(parsed["event_type"], "worker.started");
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // Regression test for needle-xeh: Telemetry construction must not require
+    // an active tokio runtime. The writer is deferred until start() is called.
+    #[test]
+    fn telemetry_new_does_not_require_runtime() {
+        // This runs outside any tokio context. Before the fix, this panicked
+        // with "there is no reactor running, must be called from the context
+        // of a Tokio 1.x runtime".
+        let telemetry = Telemetry::new("needle-test".to_string());
+        // emit() should be safe even without a started writer (channel is unbounded)
+        assert!(telemetry.emit(EventKind::QueueEmpty).is_ok());
+    }
+
+    #[tokio::test]
+    async fn telemetry_start_spawns_writer_and_delivers_events() {
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-start".to_string(), sink);
+
+        // start() must be called from inside the runtime
+        telemetry.start();
+
+        telemetry
+            .emit(EventKind::WorkerStarted {
+                worker_name: "test-start".to_string(),
+                version: "0.0.0".to_string(),
+            })
+            .unwrap();
+
+        // Give the background task a moment to drain the channel.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let received = events.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].event_type, "worker.started");
     }
 }
