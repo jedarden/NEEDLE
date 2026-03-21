@@ -350,11 +350,65 @@ impl FileSinkConfig {
     }
 }
 
+/// Stdout sink verbosity level.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StdoutFormat {
+    /// One-line summary: time, worker, event type only.
+    Minimal,
+    /// Default: time, worker, event type, bead ID, brief details.
+    #[default]
+    Normal,
+    /// Full details including data payload.
+    Verbose,
+}
+
+/// Stdout sink color mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorMode {
+    /// Auto-detect from terminal (isatty).
+    #[default]
+    Auto,
+    /// Always emit ANSI color codes.
+    Always,
+    /// Never emit color codes.
+    Never,
+}
+
+/// Stdout sink configuration for human-readable telemetry output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StdoutSinkConfig {
+    /// Enable or disable the stdout sink.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Verbosity: minimal, normal, verbose.
+    #[serde(default)]
+    pub format: StdoutFormat,
+
+    /// Color mode: auto, always, never.
+    #[serde(default)]
+    pub color: ColorMode,
+}
+
+impl Default for StdoutSinkConfig {
+    fn default() -> Self {
+        StdoutSinkConfig {
+            enabled: false,
+            format: StdoutFormat::Normal,
+            color: ColorMode::Auto,
+        }
+    }
+}
+
 /// Telemetry configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TelemetryConfig {
     #[serde(default)]
     pub file_sink: FileSinkConfig,
+    #[serde(default)]
+    pub stdout_sink: StdoutSinkConfig,
 }
 
 /// Health monitoring configuration (heartbeat, peer detection).

@@ -20,6 +20,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
+use crate::config::{ColorMode, StdoutFormat, StdoutSinkConfig};
 use crate::types::{BeadId, WorkerId, WorkerState};
 
 // ─── TelemetryEvent ──────────────────────────────────────────────────────────
@@ -746,6 +747,260 @@ impl TelemetrySink for FileSink {
     }
 }
 
+// ─── StdoutSink ───────────────────────────────────────────────────────────────
+
+/// Human-readable, color-coded telemetry sink for interactive monitoring.
+///
+/// Format: `HH:MM:SS [worker] EVENT detail`
+pub struct StdoutSink {
+    format: StdoutFormat,
+    use_color: bool,
+}
+
+impl StdoutSink {
+    /// Create a new stdout sink from config.
+    pub fn new(config: &StdoutSinkConfig) -> Self {
+        let use_color = match config.color {
+            ColorMode::Always => true,
+            ColorMode::Never => false,
+            ColorMode::Auto => atty_stdout(),
+        };
+        StdoutSink {
+            format: config.format,
+            use_color,
+        }
+    }
+
+    /// Format a single event as a human-readable line.
+    pub fn format_event(&self, event: &TelemetryEvent) -> String {
+        let time = event.timestamp.format("%H:%M:%S");
+        let worker = &event.worker_id;
+        let etype = &event.event_type;
+
+        // Build the summary portion based on event type.
+        let summary = self.event_summary(event);
+
+        match self.format {
+            StdoutFormat::Minimal => {
+                let line = format!("{time} [{worker}] {etype}");
+                if self.use_color {
+                    self.colorize(etype, &line)
+                } else {
+                    line
+                }
+            }
+            StdoutFormat::Normal => {
+                let bead_part = event
+                    .bead_id
+                    .as_ref()
+                    .map(|b| format!(" {}", b.as_ref()))
+                    .unwrap_or_default();
+                let summary_part = if summary.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({summary})")
+                };
+                let line = format!(
+                    "{time} [{worker}] {}{bead_part}{summary_part}",
+                    Self::short_type(etype)
+                );
+                if self.use_color {
+                    self.colorize(etype, &line)
+                } else {
+                    line
+                }
+            }
+            StdoutFormat::Verbose => {
+                let bead_part = event
+                    .bead_id
+                    .as_ref()
+                    .map(|b| format!(" {}", b.as_ref()))
+                    .unwrap_or_default();
+                let data_part = if event.data.is_object()
+                    && event.data.as_object().map_or(true, |m| m.is_empty())
+                {
+                    String::new()
+                } else {
+                    format!(" {}", event.data)
+                };
+                let dur = event
+                    .duration_ms
+                    .map(|d| format!(" {}ms", d))
+                    .unwrap_or_default();
+                let line = format!(
+                    "{time} [{worker}] {}{bead_part}{dur}{data_part}",
+                    Self::short_type(etype)
+                );
+                if self.use_color {
+                    self.colorize(etype, &line)
+                } else {
+                    line
+                }
+            }
+        }
+    }
+
+    /// Shorten the dotted event type to an uppercase action word.
+    fn short_type(event_type: &str) -> &str {
+        match event_type {
+            "worker.started" => "STARTED",
+            "worker.stopped" => "STOPPED",
+            "worker.errored" => "ERROR",
+            "worker.exhausted" => "EXHAUSTED",
+            "worker.idle" => "IDLE",
+            "worker.state_transition" => "STATE",
+            "worker.queue_empty" => "QUEUE_EMPTY",
+            "strand.evaluated" => "STRAND",
+            "strand.skipped" => "STRAND_SKIP",
+            "bead.claim.attempted" => "CLAIMING",
+            "bead.claim.succeeded" => "CLAIMED",
+            "bead.claim.race_lost" => "RACE_LOST",
+            "bead.claim.failed" => "CLAIM_FAIL",
+            "bead.released" => "RELEASED",
+            "bead.completed" => "COMPLETED",
+            "bead.orphaned" => "ORPHANED",
+            "agent.dispatched" => "DISPATCHED",
+            "agent.completed" => "AGENT_DONE",
+            "outcome.classified" => "OUTCOME",
+            "outcome.handled" => "HANDLED",
+            "heartbeat.emitted" => "HEARTBEAT",
+            "peer.stale" => "PEER_STALE",
+            "peer.crashed" => "PEER_CRASHED",
+            "health.check" => "HEALTH",
+            "effort.recorded" => "EFFORT",
+            "budget.warning" => "BUDGET_WARN",
+            "budget.stop" => "BUDGET_STOP",
+            "rate_limit.wait" => "RATE_WAIT",
+            "rate_limit.allowed" => "RATE_OK",
+            "bead.mitosis.evaluated" => "MITOSIS_EVAL",
+            "bead.mitosis.split" => "MITOSIS",
+            "bead.mitosis.skipped" => "MITOSIS_SKIP",
+            "mend.orphaned_lock_removed" => "MEND_LOCK",
+            "mend.dependency_cleaned" => "MEND_DEP",
+            "mend.db_repaired" => "MEND_REPAIR",
+            "mend.db_rebuilt" => "MEND_REBUILD",
+            "mend.cycle_summary" => "MEND_DONE",
+            "telemetry.sink_error" => "SINK_ERR",
+            other => other,
+        }
+    }
+
+    /// Produce a brief summary from the event data.
+    fn event_summary(&self, event: &TelemetryEvent) -> String {
+        let d = &event.data;
+        match event.event_type.as_str() {
+            "bead.claim.succeeded" => String::new(),
+            "agent.dispatched" => d["agent"]
+                .as_str()
+                .map(|a| format!("agent={a}"))
+                .unwrap_or_default(),
+            "agent.completed" => {
+                let exit = d["exit_code"].as_i64().unwrap_or(-1);
+                let dur = d["duration_ms"].as_u64().unwrap_or(0);
+                format!("exit={exit}, {}", format_duration_ms(dur))
+            }
+            "outcome.classified" => d["outcome"].as_str().unwrap_or("unknown").to_string(),
+            "outcome.handled" => {
+                let outcome = d["outcome"].as_str().unwrap_or("?");
+                let action = d["action"].as_str().unwrap_or("?");
+                format!("{outcome} → {action}")
+            }
+            "effort.recorded" => {
+                let agent = d["agent_name"].as_str().unwrap_or("?");
+                let cost = d["estimated_cost_usd"].as_f64();
+                let dur = d["elapsed_ms"].as_u64().unwrap_or(0);
+                match cost {
+                    Some(c) => format!("{agent}, {}, ${c:.4}", format_duration_ms(dur)),
+                    None => format!("{agent}, {}", format_duration_ms(dur)),
+                }
+            }
+            "worker.stopped" => {
+                let reason = d["reason"].as_str().unwrap_or("?");
+                let beads = d["beads_processed"].as_u64().unwrap_or(0);
+                format!("{reason}, {beads} beads")
+            }
+            "worker.errored" => d["error_message"].as_str().unwrap_or("unknown").to_string(),
+            "worker.idle" => {
+                let secs = d["backoff_seconds"].as_u64().unwrap_or(0);
+                format!("backoff {secs}s")
+            }
+            "bead.mitosis.split" => {
+                let created = d["children_created"].as_u64().unwrap_or(0);
+                format!("{created} children")
+            }
+            "budget.warning" | "budget.stop" => {
+                let cost = d["daily_cost"].as_f64().unwrap_or(0.0);
+                let thresh = d["threshold"].as_f64().unwrap_or(0.0);
+                format!("${cost:.2}/${thresh:.2}")
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// Wrap text in ANSI color based on event type category.
+    fn colorize(&self, event_type: &str, text: &str) -> String {
+        let code = match event_type {
+            t if t.starts_with("worker.errored") || t.starts_with("budget.stop") => "\x1b[31m", // red
+            t if t.starts_with("bead.claim.succeeded") || t == "bead.completed" => "\x1b[32m", // green
+            t if t.starts_with("agent.") || t.starts_with("outcome.") => "\x1b[36m", // cyan
+            t if t.starts_with("bead.claim.race_lost")
+                || t.starts_with("bead.claim.failed")
+                || t == "bead.released"
+                || t == "bead.orphaned" =>
+            {
+                "\x1b[33m"
+            } // yellow
+            t if t.starts_with("budget.warning") || t.starts_with("rate_limit") => "\x1b[33m", // yellow
+            t if t.starts_with("mend.") || t.starts_with("peer.") => "\x1b[35m", // magenta
+            t if t.starts_with("heartbeat") || t.starts_with("health") => "\x1b[90m", // dim
+            _ => "\x1b[0m",                                                      // reset / default
+        };
+        format!("{code}{text}\x1b[0m")
+    }
+}
+
+impl TelemetrySink for StdoutSink {
+    fn write(&self, event: &TelemetryEvent) -> Result<()> {
+        let line = self.format_event(event);
+        println!("{line}");
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<()> {
+        use std::io::Write;
+        std::io::stdout().flush()?;
+        Ok(())
+    }
+}
+
+/// Check if stdout is a terminal (for auto color detection).
+fn atty_stdout() -> bool {
+    unsafe { libc_isatty(1) != 0 }
+}
+
+extern "C" {
+    #[link_name = "isatty"]
+    fn libc_isatty(fd: i32) -> i32;
+}
+
+/// Public wrapper for formatting milliseconds as human-readable duration.
+pub fn format_duration_ms_public(ms: u64) -> String {
+    format_duration_ms(ms)
+}
+
+/// Format milliseconds as human-readable duration.
+fn format_duration_ms(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else if ms < 60_000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        let mins = ms / 60_000;
+        let secs = (ms % 60_000) / 1000;
+        format!("{mins}m{secs}s")
+    }
+}
+
 // ─── Session ID generation ───────────────────────────────────────────────────
 
 /// Generate an 8-hex-char session ID.
@@ -797,7 +1052,35 @@ impl Telemetry {
             .ok();
 
         let sequence = Arc::new(AtomicU64::new(0));
-        Self::spawn_writer(receiver, sink);
+        Self::spawn_writer(receiver, sink, None);
+
+        Telemetry {
+            worker_id,
+            session_id,
+            sequence,
+            sender,
+        }
+    }
+
+    /// Create a telemetry emitter with both file and stdout sinks.
+    pub fn with_stdout(worker_id: WorkerId, stdout_config: &StdoutSinkConfig) -> Self {
+        let session_id = generate_session_id();
+        let (sender, receiver) = mpsc::unbounded_channel();
+
+        let file_sink: Option<FileSink> = FileSink::new(&worker_id, &session_id)
+            .map_err(|e| {
+                tracing::warn!(error = %e, "failed to create telemetry file sink");
+            })
+            .ok();
+
+        let stdout_sink = if stdout_config.enabled {
+            Some(StdoutSink::new(stdout_config))
+        } else {
+            None
+        };
+
+        let sequence = Arc::new(AtomicU64::new(0));
+        Self::spawn_writer(receiver, file_sink, stdout_sink);
 
         Telemetry {
             worker_id,
@@ -876,7 +1159,7 @@ impl Telemetry {
             .ok();
 
         let sequence = Arc::new(AtomicU64::new(0));
-        Self::spawn_writer(receiver, sink);
+        Self::spawn_writer(receiver, sink, None);
 
         Telemetry {
             worker_id,
@@ -886,23 +1169,181 @@ impl Telemetry {
         }
     }
 
-    /// Spawn background writer task draining the channel to the sink.
-    fn spawn_writer(mut receiver: mpsc::UnboundedReceiver<TelemetryEvent>, sink: Option<FileSink>) {
+    /// Spawn background writer task draining the channel to the sinks.
+    fn spawn_writer(
+        mut receiver: mpsc::UnboundedReceiver<TelemetryEvent>,
+        file_sink: Option<FileSink>,
+        stdout_sink: Option<StdoutSink>,
+    ) {
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                if let Some(ref s) = sink {
+                if let Some(ref s) = file_sink {
                     if let Err(e) = s.write(&event) {
-                        // Log but do not propagate — sink errors must not crash workers.
-                        tracing::warn!(error = %e, "telemetry sink write failed");
+                        tracing::warn!(error = %e, "telemetry file sink write failed");
+                    }
+                }
+                if let Some(ref s) = stdout_sink {
+                    if let Err(e) = s.write(&event) {
+                        tracing::warn!(error = %e, "telemetry stdout sink write failed");
                     }
                 }
             }
-            // Flush on disconnect.
-            if let Some(ref s) = sink {
+            if let Some(ref s) = file_sink {
+                let _ = s.flush();
+            }
+            if let Some(ref s) = stdout_sink {
                 let _ = s.flush();
             }
         });
     }
+}
+
+// ─── Log querying ────────────────────────────────────────────────────────────
+
+/// Parse a `--since` value into a `DateTime<Utc>`.
+///
+/// Accepts relative durations like `1h`, `30m`, `24h`, `7d` or absolute
+/// ISO 8601 / date strings like `2026-03-20` or `2026-03-20T15:00:00Z`.
+pub fn parse_since(input: &str) -> Result<DateTime<Utc>> {
+    let trimmed = input.trim();
+
+    // Try relative duration: Nh, Nm, Nd, Ns
+    if let Some(rest) = trimmed.strip_suffix('h') {
+        let hours: i64 = rest.parse().context("invalid hours in --since")?;
+        return Ok(Utc::now() - chrono::Duration::hours(hours));
+    }
+    if let Some(rest) = trimmed.strip_suffix('m') {
+        let mins: i64 = rest.parse().context("invalid minutes in --since")?;
+        return Ok(Utc::now() - chrono::Duration::minutes(mins));
+    }
+    if let Some(rest) = trimmed.strip_suffix('d') {
+        let days: i64 = rest.parse().context("invalid days in --since")?;
+        return Ok(Utc::now() - chrono::Duration::days(days));
+    }
+    if let Some(rest) = trimmed.strip_suffix('s') {
+        if rest.chars().all(|c| c.is_ascii_digit()) {
+            let secs: i64 = rest.parse().context("invalid seconds in --since")?;
+            return Ok(Utc::now() - chrono::Duration::seconds(secs));
+        }
+    }
+
+    // Try ISO 8601 with time
+    if let Ok(dt) = trimmed.parse::<DateTime<Utc>>() {
+        return Ok(dt);
+    }
+
+    // Try date-only (YYYY-MM-DD) → midnight UTC
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        let dt = date.and_hms_opt(0, 0, 0).context("invalid date")?;
+        return Ok(DateTime::from_naive_utc_and_offset(dt, Utc));
+    }
+
+    anyhow::bail!(
+        "unrecognized --since format: '{}'. Use relative (1h, 30m, 7d) or ISO date (2026-03-20)",
+        input
+    )
+}
+
+/// Convert a glob-style filter pattern to a regex.
+///
+/// Supports `*` as wildcard. E.g., `bead.claim.*` → `^bead\.claim\..*$`
+pub fn glob_to_regex(pattern: &str) -> Result<regex::Regex> {
+    let mut re = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => re.push_str(".*"),
+            '.' => re.push_str("\\."),
+            '?' => re.push('.'),
+            c => re.push(c),
+        }
+    }
+    re.push('$');
+    regex::Regex::new(&re).context("invalid filter pattern")
+}
+
+/// Read and parse JSONL log files from a directory.
+///
+/// Returns events sorted by timestamp. Optionally filters by `since` and
+/// event type `filter` (glob pattern).
+pub fn read_logs(
+    log_dir: &Path,
+    since: Option<DateTime<Utc>>,
+    filter: Option<&regex::Regex>,
+) -> Result<Vec<TelemetryEvent>> {
+    let mut events = Vec::new();
+
+    if !log_dir.is_dir() {
+        return Ok(events);
+    }
+
+    let entries = std::fs::read_dir(log_dir)
+        .with_context(|| format!("cannot read log directory: {}", log_dir.display()))?;
+
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("cannot read log file: {}", path.display()))?;
+        for line in contents.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: TelemetryEvent = match serde_json::from_str(line) {
+                Ok(e) => e,
+                Err(_) => continue, // Skip malformed lines
+            };
+            if let Some(ref cutoff) = since {
+                if event.timestamp < *cutoff {
+                    continue;
+                }
+            }
+            if let Some(re) = filter {
+                if !re.is_match(&event.event_type) {
+                    continue;
+                }
+            }
+            events.push(event);
+        }
+    }
+
+    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    Ok(events)
+}
+
+/// Compute cost summary from effort events.
+pub fn compute_cost_summary(events: &[TelemetryEvent]) -> CostSummary {
+    let mut summary = CostSummary::default();
+    for event in events {
+        if event.event_type == "effort.recorded" {
+            summary.total_events += 1;
+            if let Some(cost) = event.data["estimated_cost_usd"].as_f64() {
+                summary.total_cost_usd += cost;
+            }
+            if let Some(tokens_in) = event.data["tokens_in"].as_u64() {
+                summary.total_tokens_in += tokens_in;
+            }
+            if let Some(tokens_out) = event.data["tokens_out"].as_u64() {
+                summary.total_tokens_out += tokens_out;
+            }
+            if let Some(elapsed) = event.data["elapsed_ms"].as_u64() {
+                summary.total_elapsed_ms += elapsed;
+            }
+        }
+    }
+    summary
+}
+
+/// Aggregated cost data from effort events.
+#[derive(Debug, Default)]
+pub struct CostSummary {
+    pub total_events: u64,
+    pub total_cost_usd: f64,
+    pub total_tokens_in: u64,
+    pub total_tokens_out: u64,
+    pub total_elapsed_ms: u64,
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────
@@ -1438,5 +1879,311 @@ mod tests {
             assert_eq!(parsed.event_type, event.event_type);
             assert_eq!(parsed.sequence, event.sequence);
         }
+    }
+
+    // ── StdoutSink tests ──
+
+    #[test]
+    fn stdout_sink_format_minimal() {
+        let sink = StdoutSink {
+            format: StdoutFormat::Minimal,
+            use_color: false,
+        };
+        let event = TelemetryEvent {
+            timestamp: chrono::NaiveDate::from_ymd_opt(2026, 3, 20)
+                .unwrap()
+                .and_hms_opt(15, 30, 0)
+                .unwrap()
+                .and_utc(),
+            event_type: "bead.claim.succeeded".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 0,
+            bead_id: Some(BeadId::from("nd-a3f8")),
+            workspace: None,
+            data: serde_json::json!({"bead_id": "nd-a3f8"}),
+            duration_ms: None,
+        };
+        let line = sink.format_event(&event);
+        assert!(line.contains("15:30:00"));
+        assert!(line.contains("[alpha]"));
+        assert!(line.contains("bead.claim.succeeded"));
+    }
+
+    #[test]
+    fn stdout_sink_format_normal_includes_bead_id() {
+        let sink = StdoutSink {
+            format: StdoutFormat::Normal,
+            use_color: false,
+        };
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "bead.claim.succeeded".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 0,
+            bead_id: Some(BeadId::from("nd-a3f8")),
+            workspace: None,
+            data: serde_json::json!({"bead_id": "nd-a3f8"}),
+            duration_ms: None,
+        };
+        let line = sink.format_event(&event);
+        assert!(line.contains("CLAIMED"), "should use short type: {}", line);
+        assert!(line.contains("nd-a3f8"), "should include bead id: {}", line);
+    }
+
+    #[test]
+    fn stdout_sink_format_verbose_includes_data() {
+        let sink = StdoutSink {
+            format: StdoutFormat::Verbose,
+            use_color: false,
+        };
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "agent.dispatched".to_string(),
+            worker_id: "bravo".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 5,
+            bead_id: Some(BeadId::from("nd-xyz")),
+            workspace: None,
+            data: serde_json::json!({"bead_id": "nd-xyz", "agent": "claude", "prompt_len": 500}),
+            duration_ms: Some(3000),
+        };
+        let line = sink.format_event(&event);
+        assert!(
+            line.contains("DISPATCHED"),
+            "should use short type: {}",
+            line
+        );
+        assert!(line.contains("3000ms"), "should include duration: {}", line);
+        assert!(line.contains("claude"), "should include data: {}", line);
+    }
+
+    #[test]
+    fn stdout_sink_colorize_returns_ansi_codes() {
+        let sink = StdoutSink {
+            format: StdoutFormat::Normal,
+            use_color: true,
+        };
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "worker.errored".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({"error_type": "config", "error_message": "bad", "beads_processed": 0}),
+            duration_ms: None,
+        };
+        let line = sink.format_event(&event);
+        assert!(line.contains("\x1b[31m"), "errors should be red: {}", line);
+        assert!(line.contains("\x1b[0m"), "should have reset: {}", line);
+    }
+
+    // ── parse_since tests ──
+
+    #[test]
+    fn parse_since_relative_hours() {
+        let now = Utc::now();
+        let dt = parse_since("1h").unwrap();
+        let diff = now.signed_duration_since(dt).num_minutes();
+        assert!((58..=62).contains(&diff), "should be ~60 min ago: {diff}");
+    }
+
+    #[test]
+    fn parse_since_relative_minutes() {
+        let now = Utc::now();
+        let dt = parse_since("30m").unwrap();
+        let diff = now.signed_duration_since(dt).num_minutes();
+        assert!((28..=32).contains(&diff), "should be ~30 min ago: {diff}");
+    }
+
+    #[test]
+    fn parse_since_relative_days() {
+        let now = Utc::now();
+        let dt = parse_since("7d").unwrap();
+        let diff = now.signed_duration_since(dt).num_days();
+        assert!((6..=8).contains(&diff), "should be ~7 days ago: {diff}");
+    }
+
+    #[test]
+    fn parse_since_absolute_date() {
+        let dt = parse_since("2026-03-20").unwrap();
+        assert_eq!(dt.format("%Y-%m-%d").to_string(), "2026-03-20");
+    }
+
+    #[test]
+    fn parse_since_invalid_fails() {
+        assert!(parse_since("not-a-date").is_err());
+    }
+
+    // ── glob_to_regex tests ──
+
+    #[test]
+    fn glob_to_regex_wildcard() {
+        let re = glob_to_regex("bead.claim.*").unwrap();
+        assert!(re.is_match("bead.claim.succeeded"));
+        assert!(re.is_match("bead.claim.failed"));
+        assert!(!re.is_match("worker.started"));
+    }
+
+    #[test]
+    fn glob_to_regex_exact() {
+        let re = glob_to_regex("worker.started").unwrap();
+        assert!(re.is_match("worker.started"));
+        assert!(!re.is_match("worker.stopped"));
+    }
+
+    #[test]
+    fn glob_to_regex_double_wildcard() {
+        let re = glob_to_regex("*.*").unwrap();
+        assert!(re.is_match("bead.claim.succeeded"));
+        assert!(re.is_match("worker.started"));
+    }
+
+    // ── read_logs and cost summary tests ──
+
+    #[test]
+    fn read_logs_empty_dir() {
+        let dir = std::env::temp_dir().join("needle-test-logs-empty");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = read_logs(&dir, None, None).unwrap();
+        assert!(events.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_logs_with_filter() {
+        let dir = std::env::temp_dir().join("needle-test-logs-filter");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let event1 = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "bead.claim.succeeded".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 0,
+            bead_id: Some(BeadId::from("nd-abc")),
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: None,
+        };
+        let event2 = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "worker.started".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 1,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: None,
+        };
+
+        let log_file = dir.join("test-aabb0011.jsonl");
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&event1).unwrap(),
+            serde_json::to_string(&event2).unwrap()
+        );
+        std::fs::write(&log_file, content).unwrap();
+
+        let re = glob_to_regex("bead.claim.*").unwrap();
+        let events = read_logs(&dir, None, Some(&re)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "bead.claim.succeeded");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compute_cost_summary_aggregates() {
+        let events = vec![
+            TelemetryEvent {
+                timestamp: Utc::now(),
+                event_type: "effort.recorded".to_string(),
+                worker_id: "alpha".to_string(),
+                session_id: "aabb0011".to_string(),
+                sequence: 0,
+                bead_id: Some(BeadId::from("nd-1")),
+                workspace: None,
+                data: serde_json::json!({
+                    "bead_id": "nd-1",
+                    "elapsed_ms": 10000,
+                    "agent_name": "claude",
+                    "tokens_in": 5000,
+                    "tokens_out": 1000,
+                    "estimated_cost_usd": 0.05,
+                }),
+                duration_ms: Some(10000),
+            },
+            TelemetryEvent {
+                timestamp: Utc::now(),
+                event_type: "effort.recorded".to_string(),
+                worker_id: "alpha".to_string(),
+                session_id: "aabb0011".to_string(),
+                sequence: 1,
+                bead_id: Some(BeadId::from("nd-2")),
+                workspace: None,
+                data: serde_json::json!({
+                    "bead_id": "nd-2",
+                    "elapsed_ms": 20000,
+                    "agent_name": "claude",
+                    "tokens_in": 8000,
+                    "tokens_out": 2000,
+                    "estimated_cost_usd": 0.08,
+                }),
+                duration_ms: Some(20000),
+            },
+            TelemetryEvent {
+                timestamp: Utc::now(),
+                event_type: "bead.claim.succeeded".to_string(),
+                worker_id: "alpha".to_string(),
+                session_id: "aabb0011".to_string(),
+                sequence: 2,
+                bead_id: Some(BeadId::from("nd-1")),
+                workspace: None,
+                data: serde_json::json!({}),
+                duration_ms: None,
+            },
+        ];
+
+        let summary = compute_cost_summary(&events);
+        assert_eq!(summary.total_events, 2);
+        assert!((summary.total_cost_usd - 0.13).abs() < 0.001);
+        assert_eq!(summary.total_tokens_in, 13000);
+        assert_eq!(summary.total_tokens_out, 3000);
+        assert_eq!(summary.total_elapsed_ms, 30000);
+    }
+
+    // ── format_duration_ms tests ──
+
+    #[test]
+    fn format_duration_ms_milliseconds() {
+        assert_eq!(format_duration_ms(500), "500ms");
+    }
+
+    #[test]
+    fn format_duration_ms_seconds() {
+        assert_eq!(format_duration_ms(3500), "3.5s");
+    }
+
+    #[test]
+    fn format_duration_ms_minutes() {
+        assert_eq!(format_duration_ms(125_000), "2m5s");
+    }
+
+    #[test]
+    fn short_type_mappings() {
+        assert_eq!(StdoutSink::short_type("bead.claim.succeeded"), "CLAIMED");
+        assert_eq!(StdoutSink::short_type("worker.started"), "STARTED");
+        assert_eq!(StdoutSink::short_type("agent.dispatched"), "DISPATCHED");
+        assert_eq!(StdoutSink::short_type("outcome.handled"), "HANDLED");
+        assert_eq!(StdoutSink::short_type("effort.recorded"), "EFFORT");
+        assert_eq!(StdoutSink::short_type("bead.mitosis.split"), "MITOSIS");
+        assert_eq!(StdoutSink::short_type("unknown.event"), "unknown.event");
     }
 }

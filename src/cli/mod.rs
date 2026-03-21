@@ -7,18 +7,19 @@
 //!
 //! Depends on: `worker`, `config`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 use anyhow::{bail, Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::bead_store::{BeadStore, BrCliBeadStore};
-use crate::config::{CliOverrides, Config, ConfigLoader};
+use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::HeartbeatData;
 use crate::registry::{Registry, WorkerEntry};
+use crate::telemetry;
 use crate::worker::Worker;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -107,6 +108,33 @@ pub enum CliCommand {
         /// Show per-worker breakdown.
         #[arg(long)]
         by_worker: bool,
+
+        /// Show cost summary.
+        #[arg(long)]
+        cost: bool,
+
+        /// Filter events since this time (e.g., 1h, 24h, 7d, 2026-03-20).
+        #[arg(long)]
+        since: Option<String>,
+    },
+
+    /// View and query telemetry logs.
+    Logs {
+        /// Stream events in real-time (tail -f equivalent).
+        #[arg(long)]
+        follow: bool,
+
+        /// Filter by event type (glob pattern, e.g., "bead.claim.*").
+        #[arg(long)]
+        filter: Option<String>,
+
+        /// Show events since this time (e.g., 1h, 24h, 7d, 2026-03-20).
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Output format: human (default) or jsonl.
+        #[arg(long, value_enum, default_value = "human")]
+        format: LogFormat,
     },
 
     /// View or inspect configuration.
@@ -153,6 +181,13 @@ pub enum ListFormat {
     Json,
 }
 
+/// Output format for the logs command.
+#[derive(Debug, Clone, ValueEnum)]
+pub enum LogFormat {
+    Human,
+    Jsonl,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ──────────────────────────────────────────────────────────────────────────────
@@ -173,7 +208,18 @@ pub fn run() -> Result<()> {
         CliCommand::Stop { all, identifier } => cmd_stop(all, identifier),
         CliCommand::List { format } => cmd_list(format),
         CliCommand::Attach { identifier } => cmd_attach(&identifier),
-        CliCommand::Status { format, by_worker } => cmd_status(format, by_worker),
+        CliCommand::Status {
+            format,
+            by_worker,
+            cost,
+            since,
+        } => cmd_status(format, by_worker, cost, since),
+        CliCommand::Logs {
+            follow,
+            filter,
+            since,
+            format,
+        } => cmd_logs(follow, filter, since, format),
         CliCommand::ConfigCmd {
             get,
             dump,
@@ -559,7 +605,12 @@ fn cmd_attach(identifier: &str) -> Result<()> {
 }
 
 /// `needle status` — show fleet status summary.
-fn cmd_status(format: ListFormat, by_worker: bool) -> Result<()> {
+fn cmd_status(
+    format: ListFormat,
+    by_worker: bool,
+    cost: bool,
+    since: Option<String>,
+) -> Result<()> {
     let config = ConfigLoader::load_global()?;
     let needle_home = config.workspace.home.clone();
     let registry = Registry::default_location(&needle_home);
@@ -662,6 +713,46 @@ fn cmd_status(format: ListFormat, by_worker: bool) -> Result<()> {
                 "{}",
                 serde_json::to_string_pretty(&summary).context("failed to serialize status")?
             );
+        }
+    }
+
+    // Cost summary (if requested).
+    if cost {
+        let log_dir = needle_home.join("logs");
+        let cutoff = since.as_deref().map(telemetry::parse_since).transpose()?;
+        let events = telemetry::read_logs(&log_dir, cutoff, None)?;
+        let cs = telemetry::compute_cost_summary(&events);
+
+        match format {
+            ListFormat::Table => {
+                println!();
+                println!("Cost Summary");
+                println!("{}", "-".repeat(50));
+                println!("  Dispatch events:  {}", cs.total_events);
+                println!("  Total cost:       ${:.4}", cs.total_cost_usd);
+                println!(
+                    "  Tokens:           {} in / {} out",
+                    cs.total_tokens_in, cs.total_tokens_out
+                );
+                println!(
+                    "  Agent time:       {}",
+                    telemetry::format_duration_ms_public(cs.total_elapsed_ms)
+                );
+            }
+            ListFormat::Json => {
+                let cost_json = serde_json::json!({
+                    "dispatch_events": cs.total_events,
+                    "total_cost_usd": cs.total_cost_usd,
+                    "total_tokens_in": cs.total_tokens_in,
+                    "total_tokens_out": cs.total_tokens_out,
+                    "total_elapsed_ms": cs.total_elapsed_ms,
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&cost_json)
+                        .context("failed to serialize cost summary")?
+                );
+            }
         }
     }
 
@@ -973,6 +1064,192 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Logs command
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `needle logs` — view and query telemetry logs.
+fn cmd_logs(
+    follow: bool,
+    filter: Option<String>,
+    since: Option<String>,
+    format: LogFormat,
+) -> Result<()> {
+    let config = ConfigLoader::load_global()?;
+    let needle_home = config.workspace.home.clone();
+    let log_dir = config
+        .telemetry
+        .file_sink
+        .log_dir
+        .clone()
+        .unwrap_or_else(|| needle_home.join("logs"));
+
+    let filter_re = filter
+        .as_deref()
+        .map(telemetry::glob_to_regex)
+        .transpose()?;
+
+    let cutoff = since.as_deref().map(telemetry::parse_since).transpose()?;
+
+    if follow {
+        cmd_logs_follow(&log_dir, filter_re.as_ref(), cutoff, &format)
+    } else {
+        cmd_logs_query(&log_dir, filter_re.as_ref(), cutoff, &format)
+    }
+}
+
+/// Non-follow mode: read all logs and print them.
+fn cmd_logs_query(
+    log_dir: &Path,
+    filter: Option<&regex::Regex>,
+    since: Option<DateTime<Utc>>,
+    format: &LogFormat,
+) -> Result<()> {
+    let events = telemetry::read_logs(log_dir, since, filter)?;
+
+    if events.is_empty() {
+        println!("No matching events found.");
+        return Ok(());
+    }
+
+    let stdout_sink = telemetry::StdoutSink::new(&StdoutSinkConfig {
+        enabled: true,
+        format: crate::config::StdoutFormat::Normal,
+        color: crate::config::ColorMode::Auto,
+    });
+
+    for event in &events {
+        match format {
+            LogFormat::Human => {
+                println!("{}", stdout_sink.format_event(event));
+            }
+            LogFormat::Jsonl => {
+                let line = serde_json::to_string(event).context("failed to serialize event")?;
+                println!("{line}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Follow mode: tail new events from all log files.
+fn cmd_logs_follow(
+    log_dir: &Path,
+    filter: Option<&regex::Regex>,
+    since: Option<DateTime<Utc>>,
+    format: &LogFormat,
+) -> Result<()> {
+    use std::io::BufRead;
+
+    if !log_dir.is_dir() {
+        bail!("log directory does not exist: {}", log_dir.display());
+    }
+
+    let stdout_sink = telemetry::StdoutSink::new(&StdoutSinkConfig {
+        enabled: true,
+        format: crate::config::StdoutFormat::Normal,
+        color: crate::config::ColorMode::Auto,
+    });
+
+    // Build set of known log files and their current sizes (to tail from end).
+    let mut file_positions: std::collections::HashMap<PathBuf, u64> =
+        std::collections::HashMap::new();
+
+    // Print existing events since cutoff first, then tail.
+    if let Some(ref cutoff) = since {
+        let events = telemetry::read_logs(log_dir, Some(*cutoff), filter)?;
+        for event in &events {
+            match format {
+                LogFormat::Human => println!("{}", stdout_sink.format_event(event)),
+                LogFormat::Jsonl => {
+                    if let Ok(line) = serde_json::to_string(event) {
+                        println!("{line}");
+                    }
+                }
+            }
+        }
+    }
+
+    // Record current positions (after initial read).
+    if let Ok(entries) = std::fs::read_dir(log_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+                let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                file_positions.insert(path, len);
+            }
+        }
+    }
+
+    // Polling loop: check for new content every 500ms.
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Check for new files.
+        if let Ok(entries) = std::fs::read_dir(log_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                    continue;
+                }
+                file_positions.entry(path).or_insert(0);
+            }
+        }
+
+        // Read new content from each file.
+        let positions: Vec<(PathBuf, u64)> = file_positions
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        for (path, pos) in positions {
+            let current_len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if current_len <= pos {
+                continue;
+            }
+
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+
+            use std::io::Seek;
+            let mut reader = std::io::BufReader::new(file);
+            if reader.seek(std::io::SeekFrom::Start(pos)).is_err() {
+                continue;
+            }
+
+            let mut new_pos = pos;
+            let mut line_buf = String::new();
+            while reader.read_line(&mut line_buf).unwrap_or(0) > 0 {
+                let trimmed = line_buf.trim();
+                if !trimmed.is_empty() {
+                    if let Ok(event) = serde_json::from_str::<telemetry::TelemetryEvent>(trimmed) {
+                        let passes_filter = filter
+                            .map(|re| re.is_match(&event.event_type))
+                            .unwrap_or(true);
+                        if passes_filter {
+                            match format {
+                                LogFormat::Human => {
+                                    println!("{}", stdout_sink.format_event(&event))
+                                }
+                                LogFormat::Jsonl => {
+                                    if let Ok(line) = serde_json::to_string(&event) {
+                                        println!("{line}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                new_pos += line_buf.len() as u64;
+                line_buf.clear();
+            }
+            file_positions.insert(path, new_pos);
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1497,5 +1774,109 @@ mod tests {
     fn is_pid_alive_nonexistent() {
         // PID 999999 is very unlikely to exist.
         assert!(!is_pid_alive(999_999));
+    }
+
+    // ── Logs subcommand parsing tests ──
+
+    #[test]
+    fn cli_parses_logs_defaults() {
+        let cli = Cli::try_parse_from(["needle", "logs"]);
+        assert!(cli.is_ok(), "needle logs should parse with defaults");
+        if let Ok(Cli {
+            command:
+                CliCommand::Logs {
+                    follow,
+                    filter,
+                    since,
+                    ..
+                },
+        }) = cli
+        {
+            assert!(!follow);
+            assert!(filter.is_none());
+            assert!(since.is_none());
+        }
+    }
+
+    #[test]
+    fn cli_parses_logs_follow() {
+        let cli = Cli::try_parse_from(["needle", "logs", "--follow"]);
+        assert!(cli.is_ok(), "needle logs --follow should parse");
+        if let Ok(Cli {
+            command: CliCommand::Logs { follow, .. },
+        }) = cli
+        {
+            assert!(follow);
+        }
+    }
+
+    #[test]
+    fn cli_parses_logs_filter() {
+        let cli = Cli::try_parse_from(["needle", "logs", "--filter", "bead.claim.*"]);
+        assert!(cli.is_ok(), "needle logs --filter should parse");
+        if let Ok(Cli {
+            command: CliCommand::Logs { filter, .. },
+        }) = cli
+        {
+            assert_eq!(filter.as_deref(), Some("bead.claim.*"));
+        }
+    }
+
+    #[test]
+    fn cli_parses_logs_since() {
+        let cli = Cli::try_parse_from(["needle", "logs", "--since", "1h"]);
+        assert!(cli.is_ok(), "needle logs --since should parse");
+        if let Ok(Cli {
+            command: CliCommand::Logs { since, .. },
+        }) = cli
+        {
+            assert_eq!(since.as_deref(), Some("1h"));
+        }
+    }
+
+    #[test]
+    fn cli_parses_logs_format_jsonl() {
+        let cli = Cli::try_parse_from(["needle", "logs", "--format", "jsonl"]);
+        assert!(cli.is_ok(), "needle logs --format jsonl should parse");
+    }
+
+    #[test]
+    fn cli_parses_logs_all_flags() {
+        let cli = Cli::try_parse_from([
+            "needle", "logs", "--follow", "--filter", "bead.*", "--since", "24h", "--format",
+            "jsonl",
+        ]);
+        assert!(cli.is_ok(), "needle logs with all flags should parse");
+    }
+
+    #[test]
+    fn cli_parses_status_cost() {
+        let cli = Cli::try_parse_from(["needle", "status", "--cost"]);
+        assert!(cli.is_ok(), "needle status --cost should parse");
+        if let Ok(Cli {
+            command: CliCommand::Status { cost, .. },
+        }) = cli
+        {
+            assert!(cost);
+        }
+    }
+
+    #[test]
+    fn cli_parses_status_cost_since() {
+        let cli = Cli::try_parse_from(["needle", "status", "--cost", "--since", "7d"]);
+        assert!(cli.is_ok(), "needle status --cost --since should parse");
+        if let Ok(Cli {
+            command: CliCommand::Status { cost, since, .. },
+        }) = cli
+        {
+            assert!(cost);
+            assert_eq!(since.as_deref(), Some("7d"));
+        }
+    }
+
+    #[test]
+    fn log_format_variants() {
+        let _human = LogFormat::Human;
+        let _jsonl = LogFormat::Jsonl;
     }
 }
