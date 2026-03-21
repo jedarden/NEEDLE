@@ -309,6 +309,12 @@ impl super::Strand for PulseStrand {
                 "pulse strand: running scanner"
             );
 
+            self.telemetry
+                .emit(EventKind::PulseScannerStarted {
+                    scanner_name: scanner.name.clone(),
+                })
+                .ok();
+
             let output = match self.run_scanner(&scanner.name, &scanner.command).await {
                 Ok(o) => o,
                 Err(e) => {
@@ -317,6 +323,12 @@ impl super::Strand for PulseStrand {
                         error = %e,
                         "pulse strand: scanner failed"
                     );
+                    self.telemetry
+                        .emit(EventKind::PulseScannerFailed {
+                            scanner_name: scanner.name.clone(),
+                            error: e.to_string(),
+                        })
+                        .ok();
                     continue;
                 }
             };
