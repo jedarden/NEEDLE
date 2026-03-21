@@ -163,7 +163,7 @@ impl Worker {
             self.transition(WorkerState::Executing, WorkerState::Handling)
                 .await?;
             self.outcome_handler
-                .handle(self.store.as_ref(), &bead.id, output)
+                .handle(self.store.as_ref(), &bead.id, output, false)
                 .await?;
 
             self.transition(WorkerState::Handling, WorkerState::Logging)
