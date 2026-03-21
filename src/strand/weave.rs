@@ -251,10 +251,19 @@ impl WeaveStrand {
     }
 
     /// Build the weave prompt from discovered docs and existing beads.
+    ///
+    /// Uses `config.prompt_template` when set; otherwise falls back to the
+    /// built-in template. Template variables: `{doc_files}`, `{existing_beads}`,
+    /// `{workspace}`.
     fn build_prompt(&self, doc_files: &str, existing_beads: &str) -> String {
-        // Use the default weave template inline (the full PromptBuilder
-        // pipeline is available at the worker level, but here we just
-        // need the raw prompt text for the agent).
+        if let Some(template) = &self.config.prompt_template {
+            return template
+                .replace("{doc_files}", doc_files)
+                .replace("{existing_beads}", existing_beads)
+                .replace("{workspace}", &self.workspace.display().to_string());
+        }
+
+        // Built-in default template.
         format!(
             "## Workspace Documentation\n\n\
              {doc_files}\n\n\
@@ -484,6 +493,66 @@ impl super::Strand for WeaveStrand {
     }
 }
 
+// ─── CLI agent implementation ────────────────────────────────────────────────
+
+/// Production `WeaveAgent` that shells out to a CLI agent (e.g., `claude`).
+///
+/// The agent is invoked in `--print` mode so it emits its analysis as plain
+/// text on stdout without tool-use side-effects. The prompt is written to a
+/// temp file and fed via stdin redirection.
+pub struct CliWeaveAgent {
+    /// Agent binary name or path (e.g., `"claude"`).
+    agent_cmd: String,
+}
+
+impl CliWeaveAgent {
+    /// Create a new `CliWeaveAgent`.
+    ///
+    /// `agent_cmd` is the binary used for analysis (typically taken from
+    /// `config.agent.default`).
+    pub fn new(agent_cmd: String) -> Self {
+        CliWeaveAgent { agent_cmd }
+    }
+}
+
+#[async_trait::async_trait]
+impl WeaveAgent for CliWeaveAgent {
+    async fn analyze_gaps(&self, prompt: &str, workspace: &Path) -> Result<String> {
+        // Write the prompt to a temp file.
+        let tmp_dir = std::env::temp_dir().join("needle");
+        std::fs::create_dir_all(&tmp_dir).context("failed to create needle temp dir for weave")?;
+        let tmp_file = tmp_dir.join(format!("weave-{}.md", std::process::id()));
+        std::fs::write(&tmp_file, prompt).context("failed to write weave prompt to temp file")?;
+
+        // Build the shell command: cd into workspace, pipe prompt to agent.
+        let cmd = format!(
+            "cd {} && {} --print < {}",
+            workspace.display(),
+            self.agent_cmd,
+            tmp_file.display(),
+        );
+
+        let output = tokio::process::Command::new("bash")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn weave agent: {}", self.agent_cmd))?;
+
+        // Always clean up the temp file.
+        let _ = std::fs::remove_file(&tmp_file);
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "weave agent exited with code {}",
+                output.status.code().unwrap_or(-1)
+            );
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+}
+
 // ─── Unit tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -639,6 +708,7 @@ mod tests {
             cooldown_hours: 24,
             exclude_workspaces: vec![],
             doc_patterns: vec!["README*".to_string()],
+            prompt_template: None,
         }
     }
 

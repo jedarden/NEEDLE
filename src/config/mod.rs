@@ -387,6 +387,13 @@ pub struct WeaveConfig {
     /// Glob patterns for documentation files to analyze.
     #[serde(default = "WeaveConfig::default_doc_patterns")]
     pub doc_patterns: Vec<String>,
+
+    /// Custom prompt template for the gap analysis agent invocation.
+    ///
+    /// Template variables: `{doc_files}`, `{existing_beads}`, `{workspace}`.
+    /// When `None`, the built-in template is used.
+    #[serde(default)]
+    pub prompt_template: Option<String>,
 }
 
 impl Default for WeaveConfig {
@@ -397,6 +404,7 @@ impl Default for WeaveConfig {
             cooldown_hours: Self::default_cooldown_hours(),
             exclude_workspaces: Vec::new(),
             doc_patterns: Self::default_doc_patterns(),
+            prompt_template: None,
         }
     }
 }

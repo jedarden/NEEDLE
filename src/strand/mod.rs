@@ -14,7 +14,6 @@ pub mod pulse;
 pub mod unravel;
 pub mod weave;
 
-use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -29,20 +28,7 @@ pub use mend::MendStrand;
 pub use pluck::PluckStrand;
 pub use pulse::PulseStrand;
 pub use unravel::{UnravelAgent, UnravelStrand};
-pub use weave::{WeaveAgent, WeaveStrand};
-
-// ─── Placeholder agent ──────────────────────────────────────────────────────
-// Weave uses a placeholder because it has no production CliWeaveAgent yet.
-// Unravel uses the real CliUnravelAgent from the unravel module.
-
-struct PlaceholderWeaveAgent;
-
-#[async_trait::async_trait]
-impl WeaveAgent for PlaceholderWeaveAgent {
-    async fn analyze_gaps(&self, _prompt: &str, _workspace: &Path) -> Result<String> {
-        anyhow::bail!("weave strand requires a real agent — configure an adapter or use StrandRunner::new to inject one")
-    }
-}
+pub use weave::{CliWeaveAgent, WeaveAgent, WeaveStrand};
 
 /// A single selection strategy in the waterfall.
 #[async_trait::async_trait]
@@ -100,7 +86,7 @@ impl StrandRunner {
             config.strands.weave.clone(),
             config.workspace.default.clone(),
             state_base.join("weave"),
-            Box::new(PlaceholderWeaveAgent),
+            Box::new(CliWeaveAgent::new(config.agent.default.clone())),
         );
 
         let unravel = UnravelStrand::new(
