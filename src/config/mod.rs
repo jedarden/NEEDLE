@@ -1747,4 +1747,613 @@ mod tests {
         );
         assert_eq!(format!("{}", ConfigSource::CliOverride), "CLI argument");
     }
+
+    // ── Validation edge cases ──
+
+    #[test]
+    fn max_workers_over_50_fails_validation() {
+        let mut config = Config::default();
+        config.worker.max_workers = 51;
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.iter().any(|e| e.field == "worker.max_workers"
+                && e.message.contains("exceeds practical fleet limit")),
+            "expected fleet limit error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cpu_load_warn_zero_fails_validation() {
+        let mut config = Config::default();
+        config.worker.cpu_load_warn = 0.0;
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.iter().any(|e| e.field == "worker.cpu_load_warn"),
+            "expected cpu_load_warn error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cpu_load_warn_negative_fails_validation() {
+        let mut config = Config::default();
+        config.worker.cpu_load_warn = -0.5;
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.iter().any(|e| e.field == "worker.cpu_load_warn"),
+            "expected cpu_load_warn error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cpu_load_warn_over_one_fails_validation() {
+        let mut config = Config::default();
+        config.worker.cpu_load_warn = 1.1;
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.iter().any(|e| e.field == "worker.cpu_load_warn"),
+            "expected cpu_load_warn error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cpu_load_warn_at_one_passes_validation() {
+        let mut config = Config::default();
+        config.worker.cpu_load_warn = 1.0;
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            !errors.iter().any(|e| e.field == "worker.cpu_load_warn"),
+            "cpu_load_warn=1.0 should be valid, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn heartbeat_ttl_below_3x_interval_fails_validation() {
+        let mut config = Config::default();
+        config.health.heartbeat_interval_secs = 30;
+        config.health.heartbeat_ttl_secs = 60; // < 3*30=90
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.iter().any(|e| e.field == "health.heartbeat_ttl_secs"
+                && e.message.contains("detection may be unreliable")),
+            "expected heartbeat_ttl warning, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn heartbeat_ttl_at_3x_interval_passes_validation() {
+        let mut config = Config::default();
+        config.health.heartbeat_interval_secs = 30;
+        config.health.heartbeat_ttl_secs = 90; // = 3*30
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.field == "health.heartbeat_ttl_secs"),
+            "heartbeat_ttl=3*interval should be valid, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn multiple_validation_errors_collected() {
+        let mut config = Config::default();
+        config.agent.default = String::new();
+        config.worker.max_workers = 0;
+        config.worker.cpu_load_warn = -1.0;
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.len() >= 3,
+            "expected >= 3 errors, got {}",
+            errors.len()
+        );
+    }
+
+    // ── YAML file loading tests ──
+
+    #[test]
+    fn load_partial_yaml_uses_defaults_for_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "agent:\n  timeout: 999\n").unwrap();
+        let config = ConfigLoader::load_from_path(&path).unwrap();
+        assert_eq!(config.agent.timeout, 999);
+        assert_eq!(
+            config.agent.default, "claude",
+            "missing fields should use default"
+        );
+        assert_eq!(
+            config.worker.max_workers, 4,
+            "missing worker section should use defaults"
+        );
+    }
+
+    #[test]
+    fn load_invalid_yaml_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "invalid: [yaml: broken: {{{").unwrap();
+        let result = ConfigLoader::load_from_path(&path);
+        assert!(result.is_err(), "invalid YAML should return error");
+    }
+
+    #[test]
+    fn load_yaml_with_unknown_fields_is_tolerated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "agent:\n  default: test\nunknown_section:\n  key: value\n",
+        )
+        .unwrap();
+        let config = ConfigLoader::load_from_path(&path).unwrap();
+        assert_eq!(config.agent.default, "test");
+    }
+
+    #[test]
+    fn load_empty_yaml_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "").unwrap();
+        let config = ConfigLoader::load_from_path(&path).unwrap();
+        assert_eq!(config.agent.default, "claude");
+        assert_eq!(config.worker.max_workers, 4);
+    }
+
+    #[test]
+    fn load_yaml_with_all_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let yaml = r#"
+agent:
+  default: test-agent
+  timeout: 500
+  args:
+    - "--verbose"
+worker:
+  max_workers: 8
+  idle_timeout: 120
+  launch_stagger_seconds: 5
+  max_claim_retries: 10
+health:
+  heartbeat_interval_secs: 15
+  heartbeat_ttl_secs: 120
+strands:
+  explore:
+    enabled: false
+  mitosis:
+    enabled: false
+    first_failure_only: false
+"#;
+        std::fs::write(&path, yaml).unwrap();
+        let config = ConfigLoader::load_from_path(&path).unwrap();
+        assert_eq!(config.agent.default, "test-agent");
+        assert_eq!(config.agent.timeout, 500);
+        assert_eq!(config.agent.args, vec!["--verbose".to_string()]);
+        assert_eq!(config.worker.max_workers, 8);
+        assert_eq!(config.worker.idle_timeout, 120);
+        assert_eq!(config.worker.launch_stagger_seconds, 5);
+        assert_eq!(config.worker.max_claim_retries, 10);
+        assert_eq!(config.health.heartbeat_interval_secs, 15);
+        assert_eq!(config.health.heartbeat_ttl_secs, 120);
+        assert!(!config.strands.explore.enabled);
+        assert!(!config.strands.mitosis.enabled);
+        assert!(!config.strands.mitosis.first_failure_only);
+    }
+
+    // ── Environment variable override tests (additional paths) ──
+
+    #[test]
+    fn env_override_worker_idle_timeout() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_WORKER__IDLE_TIMEOUT";
+        std::env::set_var(key, "180");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert_eq!(config.worker.idle_timeout, 180);
+        assert!(sources.contains_key("worker.idle_timeout"));
+    }
+
+    #[test]
+    fn env_override_worker_launch_stagger() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_WORKER__LAUNCH_STAGGER_SECONDS";
+        std::env::set_var(key, "5");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert_eq!(config.worker.launch_stagger_seconds, 5);
+        assert!(sources.contains_key("worker.launch_stagger_seconds"));
+    }
+
+    #[test]
+    fn env_override_health_heartbeat_interval() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_HEALTH__HEARTBEAT_INTERVAL_SECS";
+        std::env::set_var(key, "15");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert_eq!(config.health.heartbeat_interval_secs, 15);
+        assert!(sources.contains_key("health.heartbeat_interval_secs"));
+    }
+
+    #[test]
+    fn env_override_health_heartbeat_ttl() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_HEALTH__HEARTBEAT_TTL_SECS";
+        std::env::set_var(key, "600");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert_eq!(config.health.heartbeat_ttl_secs, 600);
+        assert!(sources.contains_key("health.heartbeat_ttl_secs"));
+    }
+
+    #[test]
+    fn env_override_self_modification_enabled() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_SELF_MODIFICATION__ENABLED";
+        std::env::set_var(key, "true");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert!(config.self_modification.enabled);
+        assert!(sources.contains_key("self_modification.enabled"));
+    }
+
+    #[test]
+    fn env_override_self_modification_auto_promote() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_SELF_MODIFICATION__AUTO_PROMOTE";
+        std::env::set_var(key, "true");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert!(config.self_modification.auto_promote);
+        assert!(sources.contains_key("self_modification.auto_promote"));
+    }
+
+    #[test]
+    fn env_override_self_modification_canary_timeout() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_SELF_MODIFICATION__CANARY_TIMEOUT";
+        std::env::set_var(key, "600");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert_eq!(config.self_modification.canary_timeout, 600);
+        assert!(sources.contains_key("self_modification.canary_timeout"));
+    }
+
+    #[test]
+    fn env_override_invalid_bool_ignored() {
+        let mut config = Config::default();
+        let original = config.self_modification.enabled;
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_SELF_MODIFICATION__ENABLED";
+        std::env::set_var(key, "not_a_bool");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert_eq!(config.self_modification.enabled, original);
+        assert!(!sources.contains_key("self_modification.enabled"));
+    }
+
+    // ── Workspace override tests (additional paths) ──
+
+    #[test]
+    fn workspace_config_overrides_verification() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "verification:\n  - cargo test\n  - cargo clippy\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert_eq!(
+            config.verification,
+            vec!["cargo test".to_string(), "cargo clippy".to_string()]
+        );
+        assert!(
+            matches!(
+                sources.get("verification"),
+                Some(ConfigSource::WorkspaceFile(_))
+            ),
+            "verification source should be WorkspaceFile"
+        );
+    }
+
+    #[test]
+    fn workspace_config_overrides_strands_weave() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "strands:\n  weave:\n    enabled: true\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert!(
+            sources.contains_key("strands.weave"),
+            "strands.weave should be tracked in sources"
+        );
+    }
+
+    #[test]
+    fn workspace_config_overrides_strands_pulse() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "strands:\n  pulse:\n    enabled: true\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert!(sources.contains_key("strands.pulse"));
+    }
+
+    #[test]
+    fn workspace_config_overrides_strands_unravel() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "strands:\n  unravel:\n    enabled: true\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert!(sources.contains_key("strands.unravel"));
+    }
+
+    #[test]
+    fn workspace_invalid_yaml_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".needle.yaml"), "agent: {{{invalid yaml").unwrap();
+
+        let result = ConfigLoader::load_workspace(dir.path());
+        assert!(
+            result.is_err(),
+            "invalid workspace YAML should return error"
+        );
+    }
+
+    // ── Default value assertion tests ──
+
+    #[test]
+    fn default_agent_config_values() {
+        let config = AgentConfig::default();
+        assert_eq!(config.default, "claude");
+        assert_eq!(config.timeout, 3600);
+        assert!(config.args.is_empty());
+    }
+
+    #[test]
+    fn default_worker_config_values() {
+        let config = WorkerConfig::default();
+        assert_eq!(config.max_workers, 4);
+        assert_eq!(config.launch_stagger_seconds, 2);
+        assert_eq!(config.idle_timeout, 60);
+        assert_eq!(config.max_claim_retries, 3);
+        assert!((config.cpu_load_warn - 0.8).abs() < f64::EPSILON);
+        assert_eq!(config.memory_free_warn_mb, 512);
+    }
+
+    #[test]
+    fn default_health_config_values() {
+        let config = HealthConfig::default();
+        assert_eq!(config.heartbeat_interval_secs, 30);
+        assert_eq!(config.heartbeat_ttl_secs, 300);
+    }
+
+    #[test]
+    fn default_mend_config_values() {
+        let config = MendConfig::default();
+        assert_eq!(config.stuck_threshold_secs, 300);
+        assert_eq!(config.lock_ttl_secs, 600);
+        assert_eq!(config.db_check_interval, 50);
+    }
+
+    #[test]
+    fn default_explore_config_values() {
+        let config = ExploreConfig::default();
+        assert!(config.enabled);
+        assert!(config.workspaces.is_empty());
+    }
+
+    #[test]
+    fn default_knot_config_values() {
+        let config = KnotConfig::default();
+        assert_eq!(config.alert_cooldown_minutes, 60);
+        assert_eq!(config.exhaustion_threshold, 3);
+        assert!(config.alert_destination.is_none());
+    }
+
+    #[test]
+    fn default_mitosis_config_values() {
+        let config = MitosisConfig::default();
+        assert!(config.enabled);
+        assert!(config.first_failure_only);
+        assert_eq!(config.force_failure_threshold, 0);
+    }
+
+    #[test]
+    fn default_weave_config_values() {
+        let config = WeaveConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.max_beads_per_run, 5);
+        assert_eq!(config.cooldown_hours, 24);
+        assert!(config.exclude_workspaces.is_empty());
+        assert!(!config.doc_patterns.is_empty());
+        assert!(config.prompt_template.is_none());
+    }
+
+    #[test]
+    fn default_unravel_config_values() {
+        let config = UnravelConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.max_beads_per_run, 5);
+        assert_eq!(config.max_alternatives_per_bead, 3);
+        assert_eq!(config.cooldown_hours, 168);
+        assert!(config.prompt_template.is_none());
+    }
+
+    #[test]
+    fn default_pulse_config_values() {
+        let config = PulseConfig::default();
+        assert!(!config.enabled);
+        assert!(config.scanners.is_empty());
+        assert_eq!(config.max_beads_per_run, 5);
+        assert_eq!(config.cooldown_hours, 48);
+        assert_eq!(config.severity_threshold, 3);
+        assert!(config.prompt_template.is_none());
+    }
+
+    #[test]
+    fn default_self_modification_config_values() {
+        let config = SelfModificationConfig::default();
+        assert!(!config.enabled);
+        assert!(!config.auto_promote);
+        assert_eq!(config.canary_timeout, 300);
+        assert!(config.hot_reload);
+    }
+
+    #[test]
+    fn default_telemetry_config_values() {
+        let config = TelemetryConfig::default();
+        assert!(config.file_sink.enabled);
+        assert!(!config.stdout_sink.enabled);
+        assert!(config.hooks.is_empty());
+    }
+
+    // ── Full hierarchy test ──
+
+    #[test]
+    fn load_resolved_applies_workspace_then_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a .beads directory so it looks like a workspace.
+        std::fs::create_dir_all(dir.path().join(".beads")).unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "agent:\n  default: workspace-agent\n  timeout: 777\n",
+        )
+        .unwrap();
+
+        let cli = CliOverrides {
+            workspace: Some(dir.path().to_path_buf()),
+            agent_binary: Some("cli-agent".to_string()),
+            ..Default::default()
+        };
+
+        let (config, sources) = ConfigLoader::load_resolved(dir.path(), cli).unwrap();
+
+        // CLI should win over workspace for agent.default.
+        assert_eq!(config.agent.default, "cli-agent");
+        assert_eq!(
+            sources.get("agent.default"),
+            Some(&ConfigSource::CliOverride)
+        );
+        // Workspace should still win for agent.timeout (CLI didn't override it).
+        assert_eq!(config.agent.timeout, 777);
+    }
+
+    // ── dump_with_sources coverage ──
+
+    #[test]
+    fn dump_with_sources_includes_all_fields() {
+        let config = Config::default();
+        let sources = SourceMap::new();
+        let lines = ConfigLoader::dump_with_sources(&config, &sources);
+
+        let expected_prefixes = [
+            "agent.default",
+            "agent.timeout",
+            "worker.max_workers",
+            "worker.idle_timeout",
+            "worker.launch_stagger_seconds",
+            "health.heartbeat_interval_secs",
+            "health.heartbeat_ttl_secs",
+            "prompt.context_files",
+            "prompt.instructions",
+        ];
+
+        for prefix in expected_prefixes {
+            assert!(
+                lines.iter().any(|l| l.starts_with(prefix)),
+                "dump should include '{}', but got: {:?}",
+                prefix,
+                lines
+            );
+        }
+    }
+
+    #[test]
+    fn dump_with_sources_shows_env_var_source() {
+        let config = Config::default();
+        let mut sources = SourceMap::new();
+        sources.insert(
+            "worker.max_workers".to_string(),
+            ConfigSource::EnvVar("NEEDLE_WORKER__MAX_WORKERS".to_string()),
+        );
+
+        let lines = ConfigLoader::dump_with_sources(&config, &sources);
+        let line = lines
+            .iter()
+            .find(|l| l.starts_with("worker.max_workers"))
+            .unwrap();
+        assert!(
+            line.contains("NEEDLE_WORKER__MAX_WORKERS env var"),
+            "should show env var source: {}",
+            line
+        );
+    }
+
+    // ── ConfigError display ──
+
+    #[test]
+    fn config_error_display_format() {
+        let err = ConfigError {
+            field: "agent.default".to_string(),
+            message: "must not be empty".to_string(),
+        };
+        assert_eq!(format!("{}", err), "agent.default: must not be empty");
+    }
 }
