@@ -62,7 +62,13 @@ impl Worker {
     /// Construct a worker from config, a worker name, and a bead store implementation.
     pub fn new(config: Config, worker_name: String, store: Arc<dyn BeadStore>) -> Self {
         let telemetry = Telemetry::new(worker_name.clone());
-        let strands = StrandRunner::from_config(&config);
+        let strand_registry = Registry::default_location(&config.workspace.home);
+        let strands = StrandRunner::from_config(
+            &config,
+            &worker_name,
+            strand_registry,
+            Telemetry::new(worker_name.clone()),
+        );
         let claimer = Claimer::new(
             store.clone(),
             std::path::PathBuf::from("/tmp"),

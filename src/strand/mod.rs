@@ -7,6 +7,7 @@
 //! Depends on: `types`, `config`, `bead_store`.
 
 mod knot;
+mod mend;
 mod pluck;
 
 use std::time::Instant;
@@ -18,6 +19,7 @@ use crate::config::Config;
 use crate::types::{BeadId, StrandResult};
 
 pub use knot::KnotStrand;
+pub use mend::MendStrand;
 pub use pluck::PluckStrand;
 
 /// A single selection strategy in the waterfall.
@@ -41,11 +43,32 @@ impl StrandRunner {
     }
 
     /// Build the default strand waterfall from config.
-    pub fn from_config(config: &Config) -> Self {
+    ///
+    /// The waterfall order is: Pluck → Mend → Knot.
+    pub fn from_config(
+        config: &Config,
+        worker_id: &str,
+        registry: crate::registry::Registry,
+        telemetry: crate::telemetry::Telemetry,
+    ) -> Self {
         let pluck = PluckStrand::new(config.strands.pluck.exclude_labels.clone());
+
+        let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
+        let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
+        let lock_dir = std::path::PathBuf::from("/tmp");
+        let mend = MendStrand::new(
+            config.strands.mend.clone(),
+            heartbeat_dir,
+            heartbeat_ttl,
+            lock_dir,
+            worker_id.to_string(),
+            registry,
+            telemetry,
+        );
+
         let knot = KnotStrand::new(config.strands.knot.clone());
         StrandRunner {
-            strands: vec![Box::new(pluck), Box::new(knot)],
+            strands: vec![Box::new(pluck), Box::new(mend), Box::new(knot)],
         }
     }
 
@@ -268,9 +291,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_config_includes_pluck_and_knot() {
+    async fn from_config_includes_pluck_mend_and_knot() {
+        let dir = tempfile::tempdir().unwrap();
         let config = Config::default();
-        let runner = StrandRunner::from_config(&config);
-        assert_eq!(runner.strand_names(), vec!["pluck", "knot"]);
+        let registry = crate::registry::Registry::new(dir.path());
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
+        assert_eq!(runner.strand_names(), vec!["pluck", "mend", "knot"]);
     }
 }

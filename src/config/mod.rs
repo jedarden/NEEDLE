@@ -182,12 +182,22 @@ pub struct MendConfig {
     /// Beads stuck in_progress longer than this (seconds) are candidates.
     #[serde(default = "MendConfig::default_stuck_threshold_secs")]
     pub stuck_threshold_secs: u64,
+
+    /// Lock files older than this (seconds) are considered orphaned.
+    #[serde(default = "MendConfig::default_lock_ttl_secs")]
+    pub lock_ttl_secs: u64,
+
+    /// Run `br doctor` after every N beads processed (0 = disabled).
+    #[serde(default = "MendConfig::default_db_check_interval")]
+    pub db_check_interval: u64,
 }
 
 impl Default for MendConfig {
     fn default() -> Self {
         MendConfig {
             stuck_threshold_secs: Self::default_stuck_threshold_secs(),
+            lock_ttl_secs: Self::default_lock_ttl_secs(),
+            db_check_interval: Self::default_db_check_interval(),
         }
     }
 }
@@ -195,6 +205,12 @@ impl Default for MendConfig {
 impl MendConfig {
     fn default_stuck_threshold_secs() -> u64 {
         300
+    }
+    fn default_lock_ttl_secs() -> u64 {
+        600
+    }
+    fn default_db_check_interval() -> u64 {
+        50
     }
 }
 

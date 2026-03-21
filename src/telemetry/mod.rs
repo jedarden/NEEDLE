@@ -170,6 +170,27 @@ pub enum EventKind {
         peer_count: u32,
     },
 
+    // ── Mend strand ──
+    MendOrphanedLockRemoved {
+        lock_path: String,
+        age_secs: u64,
+    },
+    MendDependencyCleaned {
+        bead_id: BeadId,
+        blocker_id: BeadId,
+    },
+    MendDbRepaired {
+        warnings: u32,
+        fixed: u32,
+    },
+    MendDbRebuilt,
+    MendCycleSummary {
+        beads_released: u32,
+        locks_removed: u32,
+        deps_cleaned: u32,
+        db_repaired: bool,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -204,6 +225,11 @@ impl EventKind {
             EventKind::StuckDetected { .. } => "peer.stale",
             EventKind::StuckReleased { .. } => "peer.crashed",
             EventKind::HealthCheck { .. } => "health.check",
+            EventKind::MendOrphanedLockRemoved { .. } => "mend.orphaned_lock_removed",
+            EventKind::MendDependencyCleaned { .. } => "mend.dependency_cleaned",
+            EventKind::MendDbRepaired { .. } => "mend.db_repaired",
+            EventKind::MendDbRebuilt => "mend.db_rebuilt",
+            EventKind::MendCycleSummary { .. } => "mend.cycle_summary",
             EventKind::SinkError { .. } => "telemetry.sink_error",
         }
     }
@@ -223,7 +249,8 @@ impl EventKind {
             | EventKind::OutcomeClassified { bead_id, .. }
             | EventKind::OutcomeHandled { bead_id, .. }
             | EventKind::StuckDetected { bead_id, .. }
-            | EventKind::StuckReleased { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::StuckReleased { bead_id, .. }
+            | EventKind::MendDependencyCleaned { bead_id, .. } => Some(bead_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
             EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
@@ -235,6 +262,10 @@ impl EventKind {
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
             | EventKind::HealthCheck { .. }
+            | EventKind::MendOrphanedLockRemoved { .. }
+            | EventKind::MendDbRepaired { .. }
+            | EventKind::MendDbRebuilt
+            | EventKind::MendCycleSummary { .. }
             | EventKind::SinkError { .. } => None,
         }
     }
@@ -397,6 +428,38 @@ impl EventKind {
                     "peer_count": peer_count,
                 })
             }
+            EventKind::MendOrphanedLockRemoved {
+                lock_path,
+                age_secs,
+            } => {
+                serde_json::json!({ "lock_path": lock_path, "age_secs": age_secs })
+            }
+            EventKind::MendDependencyCleaned {
+                bead_id,
+                blocker_id,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "blocker_id": blocker_id.as_ref(),
+                })
+            }
+            EventKind::MendDbRepaired { warnings, fixed } => {
+                serde_json::json!({ "warnings": warnings, "fixed": fixed })
+            }
+            EventKind::MendDbRebuilt => serde_json::json!({}),
+            EventKind::MendCycleSummary {
+                beads_released,
+                locks_removed,
+                deps_cleaned,
+                db_repaired,
+            } => {
+                serde_json::json!({
+                    "beads_released": beads_released,
+                    "locks_removed": locks_removed,
+                    "deps_cleaned": deps_cleaned,
+                    "db_repaired": db_repaired,
+                })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
         }
     }
@@ -428,6 +491,11 @@ impl EventKind {
             | EventKind::StuckDetected { .. }
             | EventKind::StuckReleased { .. }
             | EventKind::HealthCheck { .. }
+            | EventKind::MendOrphanedLockRemoved { .. }
+            | EventKind::MendDependencyCleaned { .. }
+            | EventKind::MendDbRepaired { .. }
+            | EventKind::MendDbRebuilt
+            | EventKind::MendCycleSummary { .. }
             | EventKind::SinkError { .. } => None,
         }
     }
