@@ -39,8 +39,7 @@ use needle::registry::{Registry, WorkerEntry};
 use needle::strand::{ExploreStrand, MendStrand, Strand};
 use needle::telemetry::Telemetry;
 use needle::types::{
-    Bead, BeadId, BeadStatus, BrDependency, ClaimOutcome, ClaimResult, InputMethod, StrandResult,
-    WorkerState,
+    Bead, BeadId, BeadStatus, ClaimOutcome, ClaimResult, InputMethod, StrandResult, WorkerState,
 };
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1472,8 +1471,8 @@ fn br_path() -> PathBuf {
 struct MitosisDedupeStore {
     parent_id: BeadId,
     labels: Vec<String>,
-    /// Map from child_id → child_title, updated atomically via create_bead.
-    created_children: Mutex<HashMap<String, String>>,
+    /// Created children: (id, title, labels), updated atomically via create_bead.
+    created_children: Mutex<Vec<(String, String, Vec<String>)>>,
 }
 
 impl MitosisDedupeStore {
@@ -1481,7 +1480,7 @@ impl MitosisDedupeStore {
         MitosisDedupeStore {
             parent_id: BeadId::from(parent_id),
             labels,
-            created_children: Mutex::new(HashMap::new()),
+            created_children: Mutex::new(Vec::new()),
         }
     }
 
@@ -1497,22 +1496,28 @@ impl BeadStore for MitosisDedupeStore {
     }
 
     async fn list_all(&self) -> Result<Vec<Bead>> {
-        Ok(vec![])
+        // Return created children as beads with their labels for dedup lookup.
+        let children = self.created_children.lock().unwrap();
+        let beads: Vec<Bead> = children
+            .iter()
+            .map(|(id, title, labels)| Bead {
+                id: BeadId::from(id.clone()),
+                title: title.clone(),
+                body: Some("Mitosis child".to_string()),
+                priority: 1,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: labels.clone(),
+                workspace: PathBuf::from("/tmp/test"),
+                dependencies: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .collect();
+        Ok(beads)
     }
 
     async fn show(&self, _id: &BeadId) -> Result<Bead> {
-        // Build the parent bead with current children as blocking dependencies.
-        let children = self.created_children.lock().unwrap();
-        let deps: Vec<BrDependency> = children
-            .iter()
-            .map(|(id, title)| BrDependency {
-                id: BeadId::from(id.clone()),
-                title: title.clone(),
-                status: "open".to_string(),
-                priority: 1,
-                dependency_type: "blocks".to_string(),
-            })
-            .collect();
         Ok(Bead {
             id: self.parent_id.clone(),
             title: format!("Parent {}", self.parent_id),
@@ -1522,7 +1527,7 @@ impl BeadStore for MitosisDedupeStore {
             assignee: None,
             labels: self.labels.clone(),
             workspace: PathBuf::from("/tmp/test"),
-            dependencies: deps,
+            dependencies: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         })
@@ -1554,17 +1559,16 @@ impl BeadStore for MitosisDedupeStore {
         Ok(())
     }
 
-    async fn create_bead(&self, title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+    async fn create_bead(&self, title: &str, _body: &str, labels: &[&str]) -> Result<BeadId> {
         let mut children = self.created_children.lock().unwrap();
         let count = children.len() + 1;
         let id = format!("mitosis-child-{count:03}");
-        children.insert(id.clone(), title.to_string());
+        let label_strings: Vec<String> = labels.iter().map(|l| l.to_string()).collect();
+        children.push((id.clone(), title.to_string(), label_strings));
         Ok(BeadId::from(id))
     }
 
     async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
-        // The child was already registered in created_children via create_bead;
-        // reflecting it in show() is handled there.
         Ok(())
     }
 
