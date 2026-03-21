@@ -189,6 +189,7 @@ pub enum EventKind {
         locks_removed: u32,
         deps_cleaned: u32,
         db_repaired: bool,
+        db_rebuilt: bool,
     },
 
     // ── Internal ──
@@ -452,12 +453,14 @@ impl EventKind {
                 locks_removed,
                 deps_cleaned,
                 db_repaired,
+                db_rebuilt,
             } => {
                 serde_json::json!({
                     "beads_released": beads_released,
                     "locks_removed": locks_removed,
                     "deps_cleaned": deps_cleaned,
                     "db_repaired": db_repaired,
+                    "db_rebuilt": db_rebuilt,
                 })
             }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
