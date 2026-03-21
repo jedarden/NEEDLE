@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::cost::{BudgetConfig, PricingConfig};
 use crate::types::{IdentifierScheme, IdleAction};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -472,6 +473,12 @@ pub struct Config {
     pub prompt: PromptConfig,
     #[serde(default)]
     pub health: HealthConfig,
+    /// Per-model token pricing (USD per million tokens).
+    #[serde(default = "crate::cost::default_pricing")]
+    pub pricing: PricingConfig,
+    /// Daily budget thresholds for cost enforcement.
+    #[serde(default)]
+    pub budget: BudgetConfig,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

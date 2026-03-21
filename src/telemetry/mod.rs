@@ -192,6 +192,25 @@ pub enum EventKind {
         db_rebuilt: bool,
     },
 
+    // ── Effort tracking ──
+    EffortRecorded {
+        bead_id: BeadId,
+        elapsed_ms: u64,
+        agent_name: String,
+        model: Option<String>,
+        tokens_in: Option<u64>,
+        tokens_out: Option<u64>,
+        estimated_cost_usd: Option<f64>,
+    },
+    BudgetWarning {
+        daily_cost: f64,
+        threshold: f64,
+    },
+    BudgetStop {
+        daily_cost: f64,
+        threshold: f64,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -231,6 +250,9 @@ impl EventKind {
             EventKind::MendDbRepaired { .. } => "mend.db_repaired",
             EventKind::MendDbRebuilt => "mend.db_rebuilt",
             EventKind::MendCycleSummary { .. } => "mend.cycle_summary",
+            EventKind::EffortRecorded { .. } => "effort.recorded",
+            EventKind::BudgetWarning { .. } => "budget.warning",
+            EventKind::BudgetStop { .. } => "budget.stop",
             EventKind::SinkError { .. } => "telemetry.sink_error",
         }
     }
@@ -251,7 +273,8 @@ impl EventKind {
             | EventKind::OutcomeHandled { bead_id, .. }
             | EventKind::StuckDetected { bead_id, .. }
             | EventKind::StuckReleased { bead_id, .. }
-            | EventKind::MendDependencyCleaned { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::MendDependencyCleaned { bead_id, .. }
+            | EventKind::EffortRecorded { bead_id, .. } => Some(bead_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
             EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
@@ -267,6 +290,8 @@ impl EventKind {
             | EventKind::MendDbRepaired { .. }
             | EventKind::MendDbRebuilt
             | EventKind::MendCycleSummary { .. }
+            | EventKind::BudgetWarning { .. }
+            | EventKind::BudgetStop { .. }
             | EventKind::SinkError { .. } => None,
         }
     }
@@ -463,6 +488,43 @@ impl EventKind {
                     "db_rebuilt": db_rebuilt,
                 })
             }
+            EventKind::EffortRecorded {
+                bead_id,
+                elapsed_ms,
+                agent_name,
+                model,
+                tokens_in,
+                tokens_out,
+                estimated_cost_usd,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "elapsed_ms": elapsed_ms,
+                    "agent_name": agent_name,
+                    "model": model,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "estimated_cost_usd": estimated_cost_usd,
+                })
+            }
+            EventKind::BudgetWarning {
+                daily_cost,
+                threshold,
+            } => {
+                serde_json::json!({
+                    "daily_cost": daily_cost,
+                    "threshold": threshold,
+                })
+            }
+            EventKind::BudgetStop {
+                daily_cost,
+                threshold,
+            } => {
+                serde_json::json!({
+                    "daily_cost": daily_cost,
+                    "threshold": threshold,
+                })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
         }
     }
@@ -472,7 +534,11 @@ impl EventKind {
         match self {
             EventKind::DispatchCompleted { duration_ms, .. }
             | EventKind::BeadCompleted { duration_ms, .. }
-            | EventKind::StrandEvaluated { duration_ms, .. } => Some(*duration_ms),
+            | EventKind::StrandEvaluated { duration_ms, .. }
+            | EventKind::EffortRecorded {
+                elapsed_ms: duration_ms,
+                ..
+            } => Some(*duration_ms),
             EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
             | EventKind::WorkerErrored { .. }
@@ -499,6 +565,8 @@ impl EventKind {
             | EventKind::MendDbRepaired { .. }
             | EventKind::MendDbRebuilt
             | EventKind::MendCycleSummary { .. }
+            | EventKind::BudgetWarning { .. }
+            | EventKind::BudgetStop { .. }
             | EventKind::SinkError { .. } => None,
         }
     }
@@ -1230,6 +1298,23 @@ mod tests {
                 db_healthy: true,
                 disk_free_mb: 10240,
                 peer_count: 2,
+            },
+            EventKind::EffortRecorded {
+                bead_id: id.clone(),
+                elapsed_ms: 45000,
+                agent_name: "claude-sonnet".to_string(),
+                model: Some("claude-sonnet-4-6".to_string()),
+                tokens_in: Some(10000),
+                tokens_out: Some(2000),
+                estimated_cost_usd: Some(0.06),
+            },
+            EventKind::BudgetWarning {
+                daily_cost: 8.50,
+                threshold: 5.0,
+            },
+            EventKind::BudgetStop {
+                daily_cost: 55.0,
+                threshold: 50.0,
             },
             EventKind::SinkError {
                 message: "test".to_string(),

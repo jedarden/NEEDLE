@@ -7,6 +7,7 @@ pub mod bead_store;
 pub mod claim;
 pub mod cli;
 pub mod config;
+pub mod cost;
 pub mod dispatch;
 pub mod health;
 pub mod outcome;

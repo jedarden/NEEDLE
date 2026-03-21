@@ -20,7 +20,8 @@ use anyhow::{bail, Result};
 use crate::bead_store::BeadStore;
 use crate::claim::Claimer;
 use crate::config::{Config, ConfigLoader};
-use crate::dispatch::Dispatcher;
+use crate::cost::{self, BudgetCheck, EffortData};
+use crate::dispatch::{self, Dispatcher};
 use crate::health::HealthMonitor;
 use crate::outcome::OutcomeHandler;
 use crate::prompt::{BuiltPrompt, PromptBuilder};
@@ -56,6 +57,8 @@ pub struct Worker {
     // Transient fields — pass data between state handlers within a single cycle.
     built_prompt: Option<BuiltPrompt>,
     exec_output: Option<(AgentOutcome, bool)>,
+    /// Effort tracking data for the current bead cycle.
+    last_effort: Option<EffortData>,
 }
 
 impl Worker {
@@ -123,6 +126,7 @@ impl Worker {
             boot_time: None,
             built_prompt: None,
             exec_output: None,
+            last_effort: None,
         }
     }
 
@@ -359,6 +363,14 @@ impl Worker {
             ClaimResult::Claimed(bead) => {
                 tracing::info!(bead_id = %bead.id, title = %bead.title, "claimed bead");
                 self.current_bead = Some(bead);
+                // Start effort tracking for this cycle.
+                self.last_effort = Some(EffortData {
+                    cycle_start: Instant::now(),
+                    agent_name: String::new(),
+                    model: None,
+                    tokens: dispatch::TokenUsage::default(),
+                    estimated_cost_usd: None,
+                });
                 self.set_state(WorkerState::Building)?;
             }
             ClaimResult::RaceLost { claimed_by } => {
@@ -467,10 +479,10 @@ impl Worker {
         };
 
         let output = match exec_result {
-            Some(result) => AgentOutcome {
+            Some(ref result) => AgentOutcome {
                 exit_code: result.exit_code,
-                stdout: result.stdout,
-                stderr: result.stderr,
+                stdout: result.stdout.clone(),
+                stderr: result.stderr.clone(),
             },
             None => AgentOutcome {
                 exit_code: 130, // Simulated SIGINT
@@ -478,6 +490,19 @@ impl Worker {
                 stderr: "interrupted before execution".to_string(),
             },
         };
+
+        // Extract tokens and compute cost for effort tracking.
+        let tokens =
+            dispatch::extract_tokens(&adapter.token_extraction, &output.stdout, &output.stderr);
+        let model_name = adapter.model.as_deref().unwrap_or("");
+        let estimated_cost = cost::estimate_cost(&tokens, model_name, &self.config.pricing);
+
+        if let Some(ref mut effort) = self.last_effort {
+            effort.agent_name = adapter.name.clone();
+            effort.model = adapter.model.clone();
+            effort.tokens = tokens;
+            effort.estimated_cost_usd = estimated_cost;
+        }
 
         self.exec_output = Some((output, was_interrupted));
         self.set_state(WorkerState::Handling)?;
@@ -514,8 +539,43 @@ impl Worker {
         Ok(())
     }
 
-    /// LOGGING: record telemetry, update registry, and prepare for next cycle.
+    /// LOGGING: record effort telemetry, check budget, update registry, and
+    /// prepare for next cycle.
     fn do_log(&mut self) -> Result<()> {
+        let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
+
+        // Emit effort.recorded telemetry event.
+        if let (Some(ref effort), Some(ref id)) = (&self.last_effort, &bead_id) {
+            let elapsed_ms = effort.cycle_start.elapsed().as_millis() as u64;
+            self.telemetry.emit(EventKind::EffortRecorded {
+                bead_id: id.clone(),
+                elapsed_ms,
+                agent_name: effort.agent_name.clone(),
+                model: effort.model.clone(),
+                tokens_in: effort.tokens.input_tokens,
+                tokens_out: effort.tokens.output_tokens,
+                estimated_cost_usd: effort.estimated_cost_usd,
+            })?;
+
+            if let Some(cost_usd) = effort.estimated_cost_usd {
+                tracing::info!(
+                    bead_id = %id,
+                    elapsed_ms,
+                    agent = %effort.agent_name,
+                    model = ?effort.model,
+                    tokens_in = ?effort.tokens.input_tokens,
+                    tokens_out = ?effort.tokens.output_tokens,
+                    cost_usd = %format!("{:.4}", cost_usd),
+                    "effort recorded"
+                );
+            }
+        }
+
+        // Check daily budget thresholds.
+        self.check_budget()?;
+
+        // Clear per-cycle state.
+        self.last_effort = None;
         self.beads_processed += 1;
         self.current_bead = None;
 
@@ -640,6 +700,59 @@ impl Worker {
             }
             None => bail!("no agent adapters available"),
         }
+    }
+
+    /// Check daily budget and emit appropriate telemetry / trigger shutdown.
+    fn check_budget(&mut self) -> Result<()> {
+        // Skip if no budget configured.
+        if self.config.budget.warn_usd <= 0.0 && self.config.budget.stop_usd <= 0.0 {
+            return Ok(());
+        }
+
+        // Resolve log directory for scanning.
+        let log_dir = self
+            .config
+            .telemetry
+            .file_sink
+            .log_dir
+            .clone()
+            .unwrap_or_else(|| self.config.workspace.home.join("logs"));
+        let daily_cost = cost::scan_daily_cost(&log_dir);
+
+        match cost::check_budget(daily_cost, &self.config.budget) {
+            BudgetCheck::Ok => {}
+            BudgetCheck::Warn {
+                daily_cost,
+                threshold,
+            } => {
+                tracing::warn!(
+                    daily_cost = %format!("{:.2}", daily_cost),
+                    threshold = %format!("{:.2}", threshold),
+                    "daily cost exceeds warning threshold"
+                );
+                self.telemetry.emit(EventKind::BudgetWarning {
+                    daily_cost,
+                    threshold,
+                })?;
+            }
+            BudgetCheck::Stop {
+                daily_cost,
+                threshold,
+            } => {
+                tracing::error!(
+                    daily_cost = %format!("{:.2}", daily_cost),
+                    threshold = %format!("{:.2}", threshold),
+                    "daily cost exceeds stop threshold — shutting down"
+                );
+                self.telemetry.emit(EventKind::BudgetStop {
+                    daily_cost,
+                    threshold,
+                })?;
+                self.state = WorkerState::Stopped;
+            }
+        }
+
+        Ok(())
     }
 
     /// Return the current worker state (for testing/inspection).
