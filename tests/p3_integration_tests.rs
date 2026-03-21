@@ -279,8 +279,7 @@ async fn unravel_creates_alternatives_without_modifying_original() {
     let telemetry = Telemetry::new("test-unravel".to_string());
 
     // Create a bead and label it as human-blocked (lowercase per filter_human_beads).
-    let bead_id =
-        create_bead(workspace.path(), "Human-blocked: need API key from vendor").unwrap();
+    let bead_id = create_bead(workspace.path(), "Human-blocked: need API key from vendor").unwrap();
     add_label(workspace.path(), &bead_id, "human").unwrap();
 
     let agent_response = r#"[
@@ -317,7 +316,7 @@ async fn unravel_creates_alternatives_without_modifying_original() {
     // Verify original bead is still open and unmodified.
     let original = store.show(&bead_id).await.unwrap();
     assert!(
-        original.title.contains("HUMAN-blocked"),
+        original.title.contains("Human-blocked"),
         "original bead title should be unmodified"
     );
 
