@@ -705,4 +705,62 @@ mod tests {
         assert_eq!(report.warnings.len(), 2);
         assert_eq!(report.fixed.len(), 1);
     }
+
+    #[test]
+    fn parse_doctor_output_filters_sqlite3_not_available() {
+        let report = BrCliBeadStore::parse_doctor_output(
+            "WARN sqlite3 not available for integrity check\nWARN real issue\nFIXED something\n",
+        );
+        assert_eq!(
+            report.warnings,
+            vec!["real issue"],
+            "sqlite3 not available should be filtered out"
+        );
+        assert_eq!(report.fixed, vec!["something"]);
+    }
+
+    // ── Sync conflict detection tests ─────────────────────────────────────
+
+    #[test]
+    fn sync_conflict_detects_sync_conflict_marker() {
+        assert!(is_sync_conflict("Error: SYNC_CONFLICT detected"));
+    }
+
+    #[test]
+    fn sync_conflict_detects_jsonl_is_newer() {
+        assert!(is_sync_conflict("JSONL is newer than database"));
+    }
+
+    #[test]
+    fn sync_conflict_detects_lowercase_marker() {
+        assert!(is_sync_conflict("sync conflict on update"));
+    }
+
+    #[test]
+    fn sync_conflict_in_longer_stderr() {
+        let msg = "br [\"update\"] exited with code 6\nstderr: SYNC_CONFLICT\nstdout: ";
+        assert!(is_sync_conflict(msg));
+    }
+
+    #[test]
+    fn sync_conflict_returns_false_for_non_conflict() {
+        assert!(!is_sync_conflict("bead not found"));
+        assert!(!is_sync_conflict("database disk image is malformed"));
+        assert!(!is_sync_conflict(""));
+    }
+
+    #[test]
+    fn sync_conflict_is_case_sensitive() {
+        // SYNC_CONFLICT is an exact marker, case matters
+        assert!(!is_sync_conflict("sync_conflict"));
+        assert!(is_sync_conflict("SYNC_CONFLICT"));
+    }
+
+    // ── parse_beads edge case tests ───────────────────────────────────────
+
+    #[test]
+    fn parse_beads_whitespace_only_returns_empty() {
+        let beads = BrCliBeadStore::parse_beads("   \n\t  ", "test").unwrap();
+        assert!(beads.is_empty());
+    }
 }

@@ -53,7 +53,7 @@ impl StrandRunner {
     /// Build the default strand waterfall from config.
     ///
     /// The waterfall order is:
-    /// Pluck → Mend → Explore → Weave → Unravel → Knot.
+    /// Pluck → Mend → Explore → Weave → Unravel → Pulse → Knot.
     pub fn from_config(
         config: &Config,
         worker_id: &str,
