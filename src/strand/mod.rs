@@ -10,20 +10,9 @@ use anyhow::Result;
 
 use crate::bead_store::BeadStore;
 use crate::config::Config;
-use crate::types::{Bead, BeadId};
+use crate::types::{BeadId, StrandResult};
 
-/// Result of a strand evaluation.
-#[derive(Debug)]
-pub enum StrandResult {
-    /// A candidate bead was found.
-    Candidate(Bead),
-    /// This strand found nothing; continue to next strand.
-    Empty,
-    /// The strand encountered an error during evaluation.
-    Error(anyhow::Error),
-}
-
-/// A single selection strategy.
+/// A single selection strategy in the waterfall.
 #[async_trait::async_trait]
 pub trait Strand: Send + Sync {
     /// Human-readable name for telemetry.
@@ -45,18 +34,31 @@ impl StrandRunner {
 
     /// Build the default strand waterfall from config.
     pub fn from_config(_config: &Config) -> Self {
-        // TODO(needle-nva): construct default strands (Mend → Explore → Defer)
+        // TODO(needle-sxp): construct default strands (Pluck → Mend → Defer)
         StrandRunner { strands: vec![] }
     }
 
-    /// Run the waterfall, returning the first candidate or None.
+    /// Run the waterfall, returning the first candidate bead ID or None.
     pub async fn select(&self, store: &dyn BeadStore) -> Result<Option<BeadId>> {
         for strand in &self.strands {
             match strand.evaluate(store).await {
-                StrandResult::Candidate(bead) => return Ok(Some(bead.id)),
-                StrandResult::Empty => continue,
+                StrandResult::BeadFound(beads) => {
+                    if let Some(bead) = beads.into_iter().next() {
+                        return Ok(Some(bead.id));
+                    }
+                    continue;
+                }
+                StrandResult::WorkCreated => {
+                    // New work was synthesized; restart the waterfall from scratch.
+                    return Ok(None);
+                }
+                StrandResult::NoWork => continue,
                 StrandResult::Error(e) => {
-                    tracing::warn!(strand = strand.name(), error = %e, "strand error, continuing");
+                    tracing::warn!(
+                        strand = strand.name(),
+                        error = %e,
+                        "strand error, continuing to next strand"
+                    );
                     continue;
                 }
             }

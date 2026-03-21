@@ -10,18 +10,7 @@ use anyhow::Result;
 use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::telemetry::Telemetry;
-use crate::types::BeadId;
-
-/// Result of a claim attempt.
-#[derive(Debug)]
-pub enum ClaimResult {
-    /// Bead was successfully claimed.
-    Claimed,
-    /// Another worker claimed it first.
-    RaceLost,
-    /// Bead no longer exists or is not claimable.
-    Unavailable,
-}
+use crate::types::{BeadId, ClaimResult};
 
 /// Handles the claim protocol for a single bead.
 pub struct Claimer {
@@ -34,7 +23,9 @@ impl Claimer {
         Claimer { config, telemetry }
     }
 
-    /// Attempt to claim a bead, with retries up to `max_retries`.
+    /// Attempt to claim a bead, with retries up to `config.max_claim_retries`.
+    ///
+    /// On success, fetches and returns the full bead via `store.get()`.
     pub async fn claim(&self, store: &dyn BeadStore, bead_id: &BeadId) -> Result<ClaimResult> {
         for attempt in 1..=self.config.max_claim_retries {
             tracing::debug!(bead_id = %bead_id, attempt, "attempting claim");
@@ -50,7 +41,8 @@ impl Claimer {
                         .emit(crate::telemetry::EventKind::ClaimSuccess {
                             bead_id: bead_id.clone(),
                         })?;
-                    return Ok(ClaimResult::Claimed);
+                    let bead = store.get(bead_id).await?;
+                    return Ok(ClaimResult::Claimed(bead));
                 }
                 Ok(false) => {
                     self.telemetry
@@ -63,15 +55,21 @@ impl Claimer {
                         ))
                         .await;
                     } else {
-                        return Ok(ClaimResult::RaceLost);
+                        return Ok(ClaimResult::RaceLost {
+                            claimed_by: "(unknown)".to_string(),
+                        });
                     }
                 }
                 Err(e) => {
                     tracing::warn!(bead_id = %bead_id, error = %e, "claim error");
-                    return Err(e);
+                    return Ok(ClaimResult::NotClaimable {
+                        reason: e.to_string(),
+                    });
                 }
             }
         }
-        Ok(ClaimResult::RaceLost)
+        Ok(ClaimResult::RaceLost {
+            claimed_by: "(unknown)".to_string(),
+        })
     }
 }

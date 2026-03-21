@@ -10,7 +10,7 @@ use anyhow::Result;
 use std::sync::Arc;
 
 use crate::bead_store::BeadStore;
-use crate::claim::{ClaimResult, Claimer};
+use crate::claim::Claimer;
 use crate::config::Config;
 use crate::dispatch::Dispatcher;
 use crate::health::HealthMonitor;
@@ -18,7 +18,7 @@ use crate::outcome::OutcomeHandler;
 use crate::prompt::PromptBuilder;
 use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::WorkerState;
+use crate::types::{ClaimResult, WorkerState};
 
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
@@ -61,13 +61,14 @@ impl Worker {
 
     /// Run the worker loop until exhausted, stopped, or errored.
     pub async fn run(&mut self) -> Result<WorkerState> {
+        let _ = &self.config;
         self.transition(WorkerState::Booting, WorkerState::Selecting)
             .await?;
 
         loop {
-            let candidate = self.strands.select(self.store.as_ref()).await?;
+            let candidate_id = self.strands.select(self.store.as_ref()).await?;
 
-            let bead_id = match candidate {
+            let bead_id = match candidate_id {
                 Some(id) => id,
                 None => {
                     tracing::info!("no ready beads — worker exhausted");
@@ -79,32 +80,38 @@ impl Worker {
                 .await?;
             let claim = self.claimer.claim(self.store.as_ref(), &bead_id).await?;
 
-            match claim {
-                ClaimResult::Claimed => {}
-                ClaimResult::RaceLost | ClaimResult::Unavailable => {
+            let bead = match claim {
+                ClaimResult::Claimed(bead) => bead,
+                ClaimResult::RaceLost { claimed_by } => {
+                    tracing::debug!(bead_id = %bead_id, %claimed_by, "claim race lost");
                     self.transition(WorkerState::Claiming, WorkerState::Selecting)
                         .await?;
                     continue;
                 }
-            }
+                ClaimResult::NotClaimable { reason } => {
+                    tracing::debug!(bead_id = %bead_id, %reason, "bead not claimable");
+                    self.transition(WorkerState::Claiming, WorkerState::Selecting)
+                        .await?;
+                    continue;
+                }
+            };
 
             self.transition(WorkerState::Claiming, WorkerState::Building)
                 .await?;
-            let bead = self.store.get(&bead_id).await?;
             let prompt = self.prompt_builder.build(&bead)?;
 
             self.transition(WorkerState::Building, WorkerState::Dispatching)
                 .await?;
-            self.health.update_heartbeat(Some(&bead_id)).await?;
+            self.health.update_heartbeat(Some(&bead.id)).await?;
 
             self.transition(WorkerState::Dispatching, WorkerState::Executing)
                 .await?;
-            let outcome = self.dispatcher.dispatch(&bead_id, &prompt).await?;
+            let output = self.dispatcher.dispatch(&bead.id, &prompt).await?;
 
             self.transition(WorkerState::Executing, WorkerState::Handling)
                 .await?;
             self.outcome_handler
-                .handle(self.store.as_ref(), &bead_id, outcome)
+                .handle(self.store.as_ref(), &bead.id, output)
                 .await?;
 
             self.transition(WorkerState::Handling, WorkerState::Logging)
