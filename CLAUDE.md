@@ -1,53 +1,65 @@
-# NEEDLE — Project Conventions
+# NEEDLE Project Conventions
 
 ## Overview
 
-NEEDLE is a single Rust binary that orchestrates AI agent workers against a
-bead queue. Workers select beads, dispatch a headless agent CLI, and handle
-outcomes deterministically.
+NEEDLE (Navigates Every Enqueued Deliverable, Logs Effort) is a Rust bead worker
+binary. It automates bead processing by running the `br` CLI to select, claim,
+dispatch an AI agent, and handle outcomes.
+
+## MSRV
+
+Minimum Supported Rust Version: **1.75** (2023-12-28).
+
+Pinned in `rust-toolchain.toml`. Do not add dependencies that require a newer
+Rust edition without updating MSRV and rust-toolchain.toml.
 
 ## Module Dependency Graph
 
-Strict layering — no upward imports:
+```
+cli
+ └─ worker
+     ├─ strand ─ bead_store ─ types
+     ├─ claim  ─ bead_store, telemetry, types
+     ├─ prompt ─ config, types
+     ├─ dispatch ─ config, telemetry, types
+     ├─ outcome  ─ bead_store, config, telemetry, types
+     ├─ health   ─ config, telemetry, types
+     ├─ bead_store ─ types
+     ├─ telemetry  ─ types
+     └─ config     ─ types
+```
+
+Leaf modules (no internal deps): `types`, `config`, `telemetry`, `bead_store`, `health`.
+
+## Code Style
+
+- No `unwrap()` or `expect()` in non-test code — use `?` with `anyhow`.
+- All public functions return `Result<T>`.
+- Telemetry must be emitted at every state transition and outcome.
+- Match arms must be exhaustive — no catch-all `_` on outcome enums.
+- Run `cargo clippy --all-targets -- -D warnings` before committing.
+- Run `cargo fmt` before committing.
+
+## Testing
+
+- Unit tests live in `#[cfg(test)]` modules in each source file.
+- Integration tests live in `tests/`.
+- Do not use `tokio_test::block_on` — use `#[tokio::test]`.
+- Test the public interface, not internals.
+
+## Commit Convention
 
 ```
-cli → worker → strand / claim / prompt / dispatch / outcome
-                    ↓               ↓
-             bead_store / telemetry / health
-                    ↓
-              config / types  (leaf — no internal deps)
+feat(needle-XYZ): short description
+fix(needle-XYZ): short description
+test(needle-XYZ): short description
 ```
-
-Circular dependencies are a build error. The compiler enforces this.
-
-## Code Conventions
-
-- **Edition:** Rust 2021
-- **MSRV:** stable (tracked in `rust-toolchain.toml`)
-- **Error handling:** `anyhow::Result` for fallible functions; `thiserror` for
-  domain-specific error types that need to be matched by callers
-- **Async:** `tokio` runtime; use `async fn` for I/O-bound code
-- **Logging:** `tracing` macros (`tracing::info!`, `tracing::debug!`, etc.)
-  — never `println!` or `eprintln!` in library code
-- **Telemetry:** All state transitions go through `telemetry::Telemetry::emit`
-  — never interleave structured events with agent stdout/stderr
-
-## Stub Convention
-
-Unimplemented functions use `todo!("ModuleName::function_name")` with the
-bead ID that owns the implementation in a comment above.
-
-## Test Convention
-
-- Unit tests live in `#[cfg(test)]` blocks in the same file
-- Integration tests go in `tests/`
-- Use `Config::default_for_test()` for test fixtures
 
 ## Bead Workflow
 
-1. Pick up a bead from `br ready`
-2. Claim it: `br update <id> --status in_progress --assignee <worker-name>`
-3. Implement, build, test, clippy
-4. Commit: `git add ... && git commit -m "feat(<bead-id>): description"`
-5. Push: `git push`
-6. Close: `br close <id> --body "Summary"`
+Beads are managed with the `br` CLI (beads_rust). Each bead's body contains
+deliverables and acceptance criteria. Close beads with:
+
+```bash
+br close BEAD_ID --body "Summary of what was done"
+```
