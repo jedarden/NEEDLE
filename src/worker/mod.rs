@@ -1492,6 +1492,87 @@ mod tests {
         assert_eq!(*worker.state(), WorkerState::Selecting);
     }
 
+    // ── Invariant violation tests for dispatch/execute/handle ──
+
+    #[tokio::test]
+    async fn do_dispatch_without_bead_is_invariant_error() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Dispatching;
+        worker.current_bead = None;
+
+        let result = worker.do_dispatch().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invariant"));
+    }
+
+    #[tokio::test]
+    async fn do_execute_without_bead_is_invariant_error() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Executing;
+        worker.current_bead = None;
+
+        let result = worker.do_execute().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invariant"));
+    }
+
+    #[tokio::test]
+    async fn do_execute_without_prompt_is_invariant_error() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Executing;
+        worker.current_bead = Some(make_test_bead("needle-exec"));
+        worker.built_prompt = None;
+
+        let result = worker.do_execute().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invariant"));
+    }
+
+    #[tokio::test]
+    async fn do_handle_without_bead_is_invariant_error() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Handling;
+        worker.current_bead = None;
+
+        let result = worker.do_handle().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invariant"));
+    }
+
+    #[tokio::test]
+    async fn do_handle_without_exec_output_is_invariant_error() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Handling;
+        worker.current_bead = Some(make_test_bead("needle-handle"));
+        worker.exec_output = None;
+
+        let result = worker.do_handle().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invariant"));
+    }
+
+    // ── request_shutdown API ──
+
+    #[tokio::test]
+    async fn request_shutdown_sets_flag() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let worker = make_worker(store);
+
+        assert!(!worker.shutdown.load(Ordering::SeqCst));
+        worker.request_shutdown();
+        assert!(worker.shutdown.load(Ordering::SeqCst));
+    }
+
     // ── full cycle test ──
 
     #[tokio::test]
