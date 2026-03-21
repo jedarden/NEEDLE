@@ -557,8 +557,9 @@ impl BrCliBeadStore {
         for line in stdout.lines() {
             if let Some(rest) = line.strip_prefix("WARN ") {
                 // Filter out non-actionable warnings that cannot be repaired
-                // (e.g., sqlite3 binary not installed on the system).
-                if rest.contains("sqlite3 not available") {
+                // (e.g., sqlite3 binary not installed on the system, or
+                // leftover recovery backup files from a prior repair/rebuild).
+                if rest.contains("sqlite3 not available") || rest.contains("recovery_artifacts") {
                     continue;
                 }
                 report.warnings.push(rest.to_string());
@@ -717,6 +718,18 @@ mod tests {
             "sqlite3 not available should be filtered out"
         );
         assert_eq!(report.fixed, vec!["something"]);
+    }
+
+    #[test]
+    fn parse_doctor_output_filters_recovery_artifacts() {
+        let report = BrCliBeadStore::parse_doctor_output(
+            "WARN db.recovery_artifacts: Preserved recovery artifacts remain for this database family (1 item(s))\nWARN real issue\n",
+        );
+        assert_eq!(
+            report.warnings,
+            vec!["real issue"],
+            "recovery_artifacts should be filtered out"
+        );
     }
 
     // ── Sync conflict detection tests ─────────────────────────────────────
