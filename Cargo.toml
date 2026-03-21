@@ -42,6 +42,9 @@ async-trait = "0.1"
 # Cross-platform file locking (flock)
 fs2 = "0.4"
 
+# Hashing (prompt content hash for telemetry)
+sha2 = "0.10"
+
 [dev-dependencies]
 tokio-test = "0.4"
 

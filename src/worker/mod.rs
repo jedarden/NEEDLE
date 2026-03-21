@@ -46,7 +46,7 @@ impl Worker {
             100,
             Telemetry::new(worker_name.clone()),
         );
-        let prompt_builder = PromptBuilder::new(config.clone());
+        let prompt_builder = PromptBuilder::new(&config.prompt);
         let dispatcher = Dispatcher::new(config.clone(), Telemetry::new(worker_name.clone()));
         let outcome_handler =
             OutcomeHandler::new(config.clone(), Telemetry::new(worker_name.clone()));
@@ -109,7 +109,11 @@ impl Worker {
 
             self.transition(WorkerState::Claiming, WorkerState::Building)
                 .await?;
-            let prompt = self.prompt_builder.build(&bead)?;
+            let prompt = self.prompt_builder.build_pluck(
+                &bead,
+                &self.config.workspace.default,
+                &self.worker_name,
+            )?;
 
             self.transition(WorkerState::Building, WorkerState::Dispatching)
                 .await?;
@@ -117,7 +121,7 @@ impl Worker {
 
             self.transition(WorkerState::Dispatching, WorkerState::Executing)
                 .await?;
-            let output = self.dispatcher.dispatch(&bead.id, &prompt).await?;
+            let output = self.dispatcher.dispatch(&bead.id, &prompt.content).await?;
 
             self.transition(WorkerState::Executing, WorkerState::Handling)
                 .await?;

@@ -250,6 +250,21 @@ pub struct TelemetryConfig {
     pub file_sink: FileSinkConfig,
 }
 
+/// Prompt construction configuration.
+///
+/// Loaded from the `prompt` section of workspace config (`.needle.yaml`).
+/// Phase 1 uses these fields directly; Phase 3 adds per-strand template overrides.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PromptConfig {
+    /// Paths to context files read from the workspace and included in prompts.
+    #[serde(default)]
+    pub context_files: Vec<PathBuf>,
+
+    /// Free-form instructions appended to every prompt.
+    #[serde(default)]
+    pub instructions: Option<String>,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Top-level Config
 // ──────────────────────────────────────────────────────────────────────────────
@@ -269,6 +284,8 @@ pub struct Config {
     pub strands: StrandsConfig,
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    #[serde(default)]
+    pub prompt: PromptConfig,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
