@@ -950,4 +950,564 @@ mod tests {
         assert!(reason.contains("missing label"));
         assert!(reason.contains("expected exit 0"));
     }
+
+    #[test]
+    fn mismatch_reason_failure() {
+        let runner = CanaryRunner::new(
+            PathBuf::from("/tmp/.needle"),
+            PathBuf::from("/tmp/canary"),
+            300,
+        );
+
+        let expected = ExpectedOutcome::Failure {
+            final_status: "open".to_string(),
+            labels: vec!["failure-count:1".to_string()],
+        };
+
+        let actual = ActualOutcome {
+            exit_code: Some(0),
+            final_status: "done".to_string(),
+            labels: vec![],
+            state_transitions: vec![],
+        };
+
+        let reason = runner.mismatch_reason(&expected, &actual);
+        assert!(reason.contains("status mismatch"));
+        assert!(reason.contains("missing label"));
+        assert!(reason.contains("expected non-zero exit, got 0"));
+    }
+
+    #[test]
+    fn mismatch_reason_timeout() {
+        let runner = CanaryRunner::new(
+            PathBuf::from("/tmp/.needle"),
+            PathBuf::from("/tmp/canary"),
+            300,
+        );
+
+        let expected = ExpectedOutcome::Timeout {
+            final_status: "open".to_string(),
+        };
+
+        let actual = ActualOutcome {
+            exit_code: Some(0),
+            final_status: "done".to_string(),
+            labels: vec![],
+            state_transitions: vec![],
+        };
+
+        let reason = runner.mismatch_reason(&expected, &actual);
+        assert!(reason.contains("status mismatch"));
+        assert!(reason.contains("expected 'open'"));
+        assert!(reason.contains("got 'done'"));
+    }
+
+    #[test]
+    fn mismatch_reason_state_machine() {
+        let runner = CanaryRunner::new(
+            PathBuf::from("/tmp/.needle"),
+            PathBuf::from("/tmp/canary"),
+            300,
+        );
+
+        let expected = ExpectedOutcome::StateMachine {
+            transitions: vec![
+                "BOOTING".to_string(),
+                "SELECTING".to_string(),
+                "DISPATCHING".to_string(),
+            ],
+        };
+
+        let actual = ActualOutcome {
+            exit_code: Some(0),
+            final_status: "done".to_string(),
+            labels: vec![],
+            state_transitions: vec!["BOOTING".to_string()],
+        };
+
+        let reason = runner.mismatch_reason(&expected, &actual);
+        assert!(reason.contains("missing state transitions"));
+        assert!(reason.contains("SELECTING"));
+        assert!(reason.contains("DISPATCHING"));
+    }
+
+    #[test]
+    fn outcomes_match_timeout() {
+        let runner = CanaryRunner::new(
+            PathBuf::from("/tmp/.needle"),
+            PathBuf::from("/tmp/canary"),
+            300,
+        );
+
+        let expected = ExpectedOutcome::Timeout {
+            final_status: "open".to_string(),
+        };
+
+        let actual = ActualOutcome {
+            exit_code: None,
+            final_status: "open".to_string(),
+            labels: vec![],
+            state_transitions: vec![],
+        };
+        assert!(runner.outcomes_match(&expected, &actual));
+
+        let actual_wrong = ActualOutcome {
+            exit_code: Some(0),
+            final_status: "done".to_string(),
+            labels: vec![],
+            state_transitions: vec![],
+        };
+        assert!(!runner.outcomes_match(&expected, &actual_wrong));
+    }
+
+    #[test]
+    fn discover_test_beads_reads_yaml_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let expected_dir = tmp.path().join("expected");
+        std::fs::create_dir_all(&expected_dir).unwrap();
+
+        // Create test YAML files.
+        std::fs::write(
+            expected_dir.join("bead-001.yaml"),
+            "type: success\nfinal_status: done\n",
+        )
+        .unwrap();
+        std::fs::write(
+            expected_dir.join("bead-002.yaml"),
+            "type: failure\nfinal_status: open\n",
+        )
+        .unwrap();
+        // Non-YAML file should be ignored.
+        std::fs::write(expected_dir.join("README.md"), "not a test").unwrap();
+
+        let runner =
+            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+
+        let beads = runner.discover_test_beads().unwrap();
+        assert_eq!(beads.len(), 2);
+        assert!(beads.contains(&"bead-001".to_string()));
+        assert!(beads.contains(&"bead-002".to_string()));
+    }
+
+    #[test]
+    fn discover_test_beads_missing_expected_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner =
+            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+
+        let result = runner.discover_test_beads();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("expected outcomes directory not found"));
+    }
+
+    #[test]
+    fn load_expected_outcome_success_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let expected_dir = tmp.path().join("expected");
+        std::fs::create_dir_all(&expected_dir).unwrap();
+
+        std::fs::write(
+            expected_dir.join("test-ok.yaml"),
+            "type: success\nfinal_status: done\nlabels:\n  - verified\n",
+        )
+        .unwrap();
+
+        let runner =
+            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+
+        let outcome = runner.load_expected_outcome("test-ok").unwrap();
+        match outcome {
+            ExpectedOutcome::Success {
+                final_status,
+                labels,
+            } => {
+                assert_eq!(final_status, "done");
+                assert_eq!(labels, vec!["verified".to_string()]);
+            }
+            other => panic!("expected Success, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn load_expected_outcome_failure_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let expected_dir = tmp.path().join("expected");
+        std::fs::create_dir_all(&expected_dir).unwrap();
+
+        std::fs::write(
+            expected_dir.join("test-fail.yaml"),
+            "type: failure\nfinal_status: open\nlabels:\n  - failure-count:1\n",
+        )
+        .unwrap();
+
+        let runner =
+            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+
+        let outcome = runner.load_expected_outcome("test-fail").unwrap();
+        match outcome {
+            ExpectedOutcome::Failure {
+                final_status,
+                labels,
+            } => {
+                assert_eq!(final_status, "open");
+                assert_eq!(labels, vec!["failure-count:1".to_string()]);
+            }
+            other => panic!("expected Failure, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn load_expected_outcome_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let expected_dir = tmp.path().join("expected");
+        std::fs::create_dir_all(&expected_dir).unwrap();
+
+        let runner =
+            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+
+        let result = runner.load_expected_outcome("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_expected_outcome_invalid_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        let expected_dir = tmp.path().join("expected");
+        std::fs::create_dir_all(&expected_dir).unwrap();
+
+        std::fs::write(expected_dir.join("bad.yaml"), "not: valid: : yaml: [").unwrap();
+
+        let runner =
+            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+
+        let result = runner.load_expected_outcome("bad");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn promote_moves_testing_to_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let needle_home = tmp.path().to_path_buf();
+        let bin_dir = needle_home.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // Create a fake testing binary.
+        let testing = bin_dir.join("needle-testing");
+        std::fs::write(&testing, b"testing-binary-v2").unwrap();
+
+        // Create a fake current stable binary.
+        let stable = bin_dir.join("needle-stable");
+        std::fs::write(&stable, b"stable-binary-v1").unwrap();
+
+        let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
+
+        runner.promote().unwrap();
+
+        // Testing should be gone.
+        assert!(!runner.testing_binary().exists());
+        // Stable should have the testing content.
+        assert_eq!(
+            std::fs::read_to_string(runner.stable_binary()).unwrap(),
+            "testing-binary-v2"
+        );
+        // Previous stable should have the old stable content.
+        assert_eq!(
+            std::fs::read_to_string(runner.prev_binary()).unwrap(),
+            "stable-binary-v1"
+        );
+        // Symlink should exist and point to stable.
+        assert!(runner.symlink_path().exists());
+    }
+
+    #[test]
+    fn promote_no_testing_binary_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = CanaryRunner::new(tmp.path().to_path_buf(), PathBuf::from("/tmp/canary"), 300);
+
+        let result = runner.promote();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("testing binary not found"));
+    }
+
+    #[test]
+    fn promote_first_time_no_existing_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let needle_home = tmp.path().to_path_buf();
+        let bin_dir = needle_home.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // Only testing exists, no stable.
+        std::fs::write(bin_dir.join("needle-testing"), b"first-build").unwrap();
+
+        let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
+
+        runner.promote().unwrap();
+
+        assert!(!runner.testing_binary().exists());
+        assert_eq!(
+            std::fs::read_to_string(runner.stable_binary()).unwrap(),
+            "first-build"
+        );
+        // No prev should exist.
+        assert!(!runner.prev_binary().exists());
+    }
+
+    #[test]
+    fn reject_removes_testing_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let needle_home = tmp.path().to_path_buf();
+        let bin_dir = needle_home.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        std::fs::write(bin_dir.join("needle-testing"), b"bad-binary").unwrap();
+
+        let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
+
+        runner.reject().unwrap();
+        assert!(!runner.testing_binary().exists());
+    }
+
+    #[test]
+    fn reject_no_testing_binary_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = CanaryRunner::new(tmp.path().to_path_buf(), PathBuf::from("/tmp/canary"), 300);
+
+        // Should not error even when no testing binary exists.
+        runner.reject().unwrap();
+    }
+
+    #[test]
+    fn rollback_restores_previous_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let needle_home = tmp.path().to_path_buf();
+        let bin_dir = needle_home.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        // Set up: stable and prev both exist.
+        std::fs::write(bin_dir.join("needle-stable"), b"bad-stable-v2").unwrap();
+        std::fs::write(bin_dir.join("needle-stable.prev"), b"good-stable-v1").unwrap();
+
+        let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
+
+        runner.rollback().unwrap();
+
+        // Stable should now have the prev content.
+        assert_eq!(
+            std::fs::read_to_string(runner.stable_binary()).unwrap(),
+            "good-stable-v1"
+        );
+        // Prev should be gone (moved to stable).
+        assert!(!runner.prev_binary().exists());
+        // Old stable should be saved as rollback backup.
+        let rollback_path = needle_home.join("bin/needle-stable.rollback");
+        assert_eq!(
+            std::fs::read_to_string(&rollback_path).unwrap(),
+            "bad-stable-v2"
+        );
+    }
+
+    #[test]
+    fn rollback_no_prev_binary_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = CanaryRunner::new(tmp.path().to_path_buf(), PathBuf::from("/tmp/canary"), 300);
+
+        let result = runner.rollback();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("no previous stable binary"));
+    }
+
+    #[test]
+    fn status_reports_channel_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let needle_home = tmp.path().to_path_buf();
+        let bin_dir = needle_home.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        std::fs::write(bin_dir.join("needle-testing"), b"testing").unwrap();
+        std::fs::write(bin_dir.join("needle-stable"), b"stable").unwrap();
+
+        let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
+
+        let status = runner.status().unwrap();
+        assert!(status.testing_exists);
+        assert!(status.stable_exists);
+        assert!(!status.prev_exists);
+        assert!(status.symlink_target.is_none());
+    }
+
+    #[test]
+    fn status_empty_needle_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = CanaryRunner::new(tmp.path().to_path_buf(), PathBuf::from("/tmp/canary"), 300);
+
+        let status = runner.status().unwrap();
+        assert!(!status.testing_exists);
+        assert!(!status.stable_exists);
+        assert!(!status.prev_exists);
+        assert!(status.symlink_target.is_none());
+    }
+
+    #[test]
+    fn run_missing_testing_binary_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = CanaryRunner::new(tmp.path().to_path_buf(), tmp.path().to_path_buf(), 300);
+
+        let result = runner.run();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("testing binary not found"));
+    }
+
+    #[test]
+    fn run_missing_workspace_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let needle_home = tmp.path().to_path_buf();
+        let bin_dir = needle_home.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join("needle-testing"), b"test").unwrap();
+
+        let runner = CanaryRunner::new(
+            needle_home,
+            PathBuf::from("/tmp/nonexistent-canary-workspace"),
+            300,
+        );
+
+        let result = runner.run();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("canary workspace not found"));
+    }
+
+    #[test]
+    fn expected_outcome_serde_roundtrip() {
+        let outcomes = vec![
+            ExpectedOutcome::Success {
+                final_status: "done".to_string(),
+                labels: vec!["verified".to_string()],
+            },
+            ExpectedOutcome::Failure {
+                final_status: "open".to_string(),
+                labels: vec!["failure-count:1".to_string()],
+            },
+            ExpectedOutcome::Timeout {
+                final_status: "open".to_string(),
+            },
+            ExpectedOutcome::StateMachine {
+                transitions: vec!["BOOTING".to_string(), "SELECTING".to_string()],
+            },
+        ];
+
+        for expected in &outcomes {
+            let yaml = serde_yaml::to_string(expected).unwrap();
+            let parsed: ExpectedOutcome = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(*expected, parsed);
+        }
+    }
+
+    #[test]
+    fn canary_test_result_bead_id_all_variants() {
+        let variants = [
+            CanaryTestResult::Passed {
+                bead_id: "pass-id".to_string(),
+                expected: ExpectedOutcome::Success {
+                    final_status: "done".to_string(),
+                    labels: vec![],
+                },
+                actual: ActualOutcome {
+                    exit_code: Some(0),
+                    final_status: "done".to_string(),
+                    labels: vec![],
+                    state_transitions: vec![],
+                },
+            },
+            CanaryTestResult::Failed {
+                bead_id: "fail-id".to_string(),
+                expected: ExpectedOutcome::Success {
+                    final_status: "done".to_string(),
+                    labels: vec![],
+                },
+                actual: ActualOutcome {
+                    exit_code: Some(1),
+                    final_status: "open".to_string(),
+                    labels: vec![],
+                    state_transitions: vec![],
+                },
+                reason: "mismatch".to_string(),
+            },
+            CanaryTestResult::TimedOut {
+                bead_id: "timeout-id".to_string(),
+                elapsed_secs: 300,
+            },
+            CanaryTestResult::Error {
+                bead_id: "error-id".to_string(),
+                message: "test error".to_string(),
+            },
+        ];
+
+        let expected_ids = ["pass-id", "fail-id", "timeout-id", "error-id"];
+        for (result, expected_id) in variants.iter().zip(expected_ids.iter()) {
+            assert_eq!(result.bead_id(), *expected_id);
+        }
+    }
+
+    #[test]
+    fn success_with_extra_labels_still_matches() {
+        let runner = CanaryRunner::new(
+            PathBuf::from("/tmp/.needle"),
+            PathBuf::from("/tmp/canary"),
+            300,
+        );
+
+        let expected = ExpectedOutcome::Success {
+            final_status: "done".to_string(),
+            labels: vec!["verified".to_string()],
+        };
+
+        // Actual has extra labels beyond what's expected — should still match.
+        let actual = ActualOutcome {
+            exit_code: Some(0),
+            final_status: "done".to_string(),
+            labels: vec!["verified".to_string(), "extra-label".to_string()],
+            state_transitions: vec![],
+        };
+
+        assert!(runner.outcomes_match(&expected, &actual));
+    }
+
+    #[test]
+    fn failure_with_none_exit_code_does_not_match() {
+        let runner = CanaryRunner::new(
+            PathBuf::from("/tmp/.needle"),
+            PathBuf::from("/tmp/canary"),
+            300,
+        );
+
+        let expected = ExpectedOutcome::Failure {
+            final_status: "open".to_string(),
+            labels: vec![],
+        };
+
+        // Exit code is None (e.g., killed by signal) — is_some_and(|c| c != 0) is false.
+        let actual = ActualOutcome {
+            exit_code: None,
+            final_status: "open".to_string(),
+            labels: vec![],
+            state_transitions: vec![],
+        };
+
+        assert!(!runner.outcomes_match(&expected, &actual));
+    }
 }
