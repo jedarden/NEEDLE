@@ -173,27 +173,61 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// Map an exit code to an `Outcome` variant.
+    /// Classify an exit code into an `Outcome` variant.
     ///
-    /// Every explicitly-named code has its own arm. The final `other` arm
-    /// captures all remaining positive codes and maps them to `Failure`.
-    /// Negative codes map to `Crash`.
-    pub fn classify(exit_code: i32) -> Self {
+    /// Every exit code range has an explicit match arm — no wildcards.
+    /// The `was_interrupted` flag takes precedence over exit code analysis.
+    ///
+    /// # Mapping (per spec)
+    /// - `was_interrupted=true` → `Interrupted` (checked first)
+    /// - exit 0 → `Success`
+    /// - exit 1 → `Failure`
+    /// - exit 124 → `Timeout`
+    /// - exit 127 → `AgentNotFound`
+    /// - exit >128 → `Crash(exit_code)`
+    /// - exit <0 → `Crash(exit_code)`
+    /// - all other → `Failure`
+    pub fn classify(exit_code: i32, was_interrupted: bool) -> Self {
+        // Interrupted flag takes precedence (graceful shutdown path).
+        if was_interrupted {
+            return Outcome::Interrupted;
+        }
+
+        // Explicit mapping for every exit code range — NO wildcards.
+        // Each range is explicitly enumerated to ensure compile errors
+        // if a new Outcome variant is added without updating this match.
         match exit_code {
+            // Success
             0 => Outcome::Success,
+            // Explicit failure code
             1 => Outcome::Failure,
-            2..=99 => Outcome::Failure,
-            100 => Outcome::Timeout,
+            // Timeout (GNU timeout exit code)
             124 => Outcome::Timeout,
-            126 => Outcome::AgentNotFound,
+            // Agent not found (shell exit code for missing command)
             127 => Outcome::AgentNotFound,
-            130 => Outcome::Interrupted,
-            143 => Outcome::Interrupted,
-            other if other < 0 => Outcome::Crash(other),
-            other => {
-                let _ = other;
-                Outcome::Failure
-            }
+            // Failure range: 2-123
+            2..=123 => Outcome::Failure,
+            // Failure: 125-126 (125 is timeout's exit status, 126 is command not executable)
+            125..=126 => Outcome::Failure,
+            // Signal exits: >128 (128 + signal number)
+            // These are all crashes per the spec.
+            129..=i32::MAX => Outcome::Crash(exit_code),
+            // Exit code 128 is technically "exit from shell" but treat as crash
+            128 => Outcome::Crash(128),
+            // Negative exit codes (abnormal termination)
+            i32::MIN..=-1 => Outcome::Crash(exit_code),
+        }
+    }
+
+    /// Return a string representation for telemetry/logging.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Outcome::Success => "success",
+            Outcome::Failure => "failure",
+            Outcome::Timeout => "timeout",
+            Outcome::AgentNotFound => "agent_not_found",
+            Outcome::Interrupted => "interrupted",
+            Outcome::Crash(_) => "crash",
         }
     }
 }
@@ -484,30 +518,56 @@ mod tests {
 
     #[test]
     fn outcome_classify_key_codes() {
-        assert_eq!(Outcome::classify(0), Outcome::Success);
-        assert_eq!(Outcome::classify(1), Outcome::Failure);
-        assert_eq!(Outcome::classify(100), Outcome::Timeout);
-        assert_eq!(Outcome::classify(127), Outcome::AgentNotFound);
-        assert_eq!(Outcome::classify(130), Outcome::Interrupted);
+        // Core mappings per spec
+        assert_eq!(Outcome::classify(0, false), Outcome::Success);
+        assert_eq!(Outcome::classify(1, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(124, false), Outcome::Timeout);
+        assert_eq!(Outcome::classify(127, false), Outcome::AgentNotFound);
     }
 
     #[test]
     fn outcome_classify_ranges() {
-        // 2..=99 map to Failure
-        assert_eq!(Outcome::classify(2), Outcome::Failure);
-        assert_eq!(Outcome::classify(50), Outcome::Failure);
-        assert_eq!(Outcome::classify(99), Outcome::Failure);
-        // 124 -> Timeout (GNU timeout)
-        assert_eq!(Outcome::classify(124), Outcome::Timeout);
-        // 126 -> AgentNotFound (permission denied)
-        assert_eq!(Outcome::classify(126), Outcome::AgentNotFound);
-        // 143 -> Interrupted (SIGTERM)
-        assert_eq!(Outcome::classify(143), Outcome::Interrupted);
+        // 2..=123 map to Failure (except 124 which is Timeout)
+        assert_eq!(Outcome::classify(2, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(50, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(99, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(100, false), Outcome::Failure); // NOT timeout per spec
+        assert_eq!(Outcome::classify(123, false), Outcome::Failure);
+        // 125-126 -> Failure (not AgentNotFound per spec)
+        assert_eq!(Outcome::classify(125, false), Outcome::Failure);
+        assert_eq!(Outcome::classify(126, false), Outcome::Failure);
+        // >128 -> Crash (signal exits)
+        assert_eq!(Outcome::classify(129, false), Outcome::Crash(129));
+        assert_eq!(Outcome::classify(130, false), Outcome::Crash(130)); // SIGINT -> Crash
+        assert_eq!(Outcome::classify(137, false), Outcome::Crash(137)); // SIGKILL
+        assert_eq!(Outcome::classify(143, false), Outcome::Crash(143)); // SIGTERM -> Crash
+        assert_eq!(Outcome::classify(255, false), Outcome::Crash(255));
         // negative -> Crash
-        assert_eq!(Outcome::classify(-1), Outcome::Crash(-1));
-        assert_eq!(Outcome::classify(-9), Outcome::Crash(-9));
-        // other positive -> Failure
-        assert_eq!(Outcome::classify(200), Outcome::Failure);
+        assert_eq!(Outcome::classify(-1, false), Outcome::Crash(-1));
+        assert_eq!(Outcome::classify(-9, false), Outcome::Crash(-9));
+        // Large positive values >255 -> Crash per spec (exit > 128)
+        assert_eq!(Outcome::classify(256, false), Outcome::Crash(256));
+        assert_eq!(Outcome::classify(1000, false), Outcome::Crash(1000));
+    }
+
+    #[test]
+    fn outcome_classify_interrupted_flag() {
+        // was_interrupted=true always returns Interrupted, regardless of exit code
+        assert_eq!(Outcome::classify(0, true), Outcome::Interrupted);
+        assert_eq!(Outcome::classify(1, true), Outcome::Interrupted);
+        assert_eq!(Outcome::classify(127, true), Outcome::Interrupted);
+        assert_eq!(Outcome::classify(-1, true), Outcome::Interrupted);
+        assert_eq!(Outcome::classify(137, true), Outcome::Interrupted);
+    }
+
+    #[test]
+    fn outcome_as_str() {
+        assert_eq!(Outcome::Success.as_str(), "success");
+        assert_eq!(Outcome::Failure.as_str(), "failure");
+        assert_eq!(Outcome::Timeout.as_str(), "timeout");
+        assert_eq!(Outcome::AgentNotFound.as_str(), "agent_not_found");
+        assert_eq!(Outcome::Interrupted.as_str(), "interrupted");
+        assert_eq!(Outcome::Crash(137).as_str(), "crash");
     }
 
     #[test]
@@ -592,6 +652,38 @@ pub enum IdleAction {
     Wait,
     /// Exit cleanly.
     Exit,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// BeadAction
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Action taken on a bead by the outcome handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BeadAction {
+    /// Bead was released back to open status.
+    Released,
+    /// Bead was deferred (e.g., timeout with deferred label).
+    Deferred,
+    /// An alert bead was created.
+    Alerted,
+    /// No action taken (e.g., success with bead already closed).
+    None,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// HandlerResult
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Result of handling an agent outcome.
+#[derive(Debug)]
+pub struct HandlerResult {
+    /// The classified outcome.
+    pub outcome: Outcome,
+    /// Action taken on the bead.
+    pub bead_action: BeadAction,
+    /// Telemetry events emitted during handling.
+    pub telemetry_events: Vec<crate::telemetry::EventKind>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
