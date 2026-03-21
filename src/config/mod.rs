@@ -198,11 +198,38 @@ impl MendConfig {
 }
 
 /// Knot strand configuration (exhaustion alerting).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnotConfig {
     /// Alert destination (e.g., webhook URL).
     #[serde(default)]
     pub alert_destination: Option<String>,
+
+    /// Minimum minutes between alert beads for the same workspace.
+    #[serde(default = "KnotConfig::default_alert_cooldown_minutes")]
+    pub alert_cooldown_minutes: u64,
+
+    /// Number of consecutive exhaustion cycles before creating an alert bead.
+    #[serde(default = "KnotConfig::default_exhaustion_threshold")]
+    pub exhaustion_threshold: u64,
+}
+
+impl Default for KnotConfig {
+    fn default() -> Self {
+        KnotConfig {
+            alert_destination: None,
+            alert_cooldown_minutes: Self::default_alert_cooldown_minutes(),
+            exhaustion_threshold: Self::default_exhaustion_threshold(),
+        }
+    }
+}
+
+impl KnotConfig {
+    fn default_alert_cooldown_minutes() -> u64 {
+        60
+    }
+    fn default_exhaustion_threshold() -> u64 {
+        3
+    }
 }
 
 /// Strand waterfall configuration.

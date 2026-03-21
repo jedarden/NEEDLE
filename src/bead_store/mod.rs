@@ -46,6 +46,12 @@ pub trait BeadStore: Send + Sync {
     /// Returns `Err` if JSON parsing or br invocation fails.
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>>;
 
+    /// List ALL beads in the workspace (no readiness/filter checks).
+    ///
+    /// Used by Knot strand for three-state verification — a DIFFERENT code
+    /// path from `ready()` to avoid v1's false-positive bug.
+    async fn list_all(&self) -> Result<Vec<Bead>>;
+
     /// Fetch a single bead by ID.
     async fn show(&self, id: &BeadId) -> Result<Bead>;
 
@@ -65,6 +71,12 @@ pub trait BeadStore: Send + Sync {
 
     /// Add a label to a bead.
     async fn add_label(&self, id: &BeadId, label: &str) -> Result<()>;
+
+    /// Remove a label from a bead.
+    async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()>;
+
+    /// Create a new bead and return its ID.
+    async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId>;
 
     /// Run `br doctor --repair` and return the report.
     async fn doctor_repair(&self) -> Result<RepairReport>;
@@ -171,6 +183,14 @@ impl BrCliBeadStore {
 
 #[async_trait]
 impl BeadStore for BrCliBeadStore {
+    async fn list_all(&self) -> Result<Vec<Bead>> {
+        let stdout = self
+            .run_br(&["list", "--json", "--limit", "0"])
+            .await
+            .context("br list --json failed")?;
+        Self::parse_beads(&stdout, "br list --json")
+    }
+
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
         let mut args = vec!["ready", "--json", "--limit", "0"];
 
@@ -247,7 +267,7 @@ impl BeadStore for BrCliBeadStore {
 
     async fn release(&self, id: &BeadId) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_br(&["update", id_str, "--status", "open"])
+        self.run_br(&["update", id_str, "--status", "open", "--assignee", ""])
             .await
             .with_context(|| format!("br release {id_str} failed"))?;
         Ok(())
@@ -262,11 +282,41 @@ impl BeadStore for BrCliBeadStore {
 
     async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
         let id_str = id.as_ref();
-        // br label add <id> <label> — syntax may vary; adjust if br CLI differs.
         self.run_br(&["label", "add", id_str, label])
             .await
             .with_context(|| format!("br label add {id_str} {label} failed"))?;
         Ok(())
+    }
+
+    async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_br(&["label", "remove", id_str, label])
+            .await
+            .with_context(|| format!("br label remove {id_str} {label} failed"))?;
+        Ok(())
+    }
+
+    async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
+        let mut args: Vec<String> = vec![
+            "create".into(),
+            "--title".into(),
+            title.into(),
+            "--body".into(),
+            body.into(),
+            "--json".into(),
+            "--silent".into(),
+        ];
+        if !labels.is_empty() {
+            args.push("--labels".into());
+            args.push(labels.join(","));
+        }
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let stdout = self.run_br(&arg_refs).await.context("br create failed")?;
+        let id_str = stdout.trim();
+        if id_str.is_empty() {
+            bail!("br create --silent returned empty ID");
+        }
+        Ok(BeadId::from(id_str))
     }
 
     async fn doctor_repair(&self) -> Result<RepairReport> {

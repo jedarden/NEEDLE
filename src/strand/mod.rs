@@ -6,6 +6,7 @@
 //!
 //! Depends on: `types`, `config`, `bead_store`.
 
+mod knot;
 mod pluck;
 
 use std::time::Instant;
@@ -16,6 +17,7 @@ use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::types::{BeadId, StrandResult};
 
+pub use knot::KnotStrand;
 pub use pluck::PluckStrand;
 
 /// A single selection strategy in the waterfall.
@@ -41,8 +43,9 @@ impl StrandRunner {
     /// Build the default strand waterfall from config.
     pub fn from_config(config: &Config) -> Self {
         let pluck = PluckStrand::new(config.strands.pluck.exclude_labels.clone());
+        let knot = KnotStrand::new(config.strands.knot.clone());
         StrandRunner {
-            strands: vec![Box::new(pluck)],
+            strands: vec![Box::new(pluck), Box::new(knot)],
         }
     }
 
@@ -176,6 +179,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BeadStore for EmptyStore {
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(vec![])
+        }
         async fn ready(&self, _filters: &crate::bead_store::Filters) -> Result<Vec<Bead>> {
             Ok(vec![])
         }
@@ -262,9 +268,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn from_config_includes_pluck() {
+    async fn from_config_includes_pluck_and_knot() {
         let config = Config::default();
         let runner = StrandRunner::from_config(&config);
-        assert_eq!(runner.strand_names(), vec!["pluck"]);
+        assert_eq!(runner.strand_names(), vec!["pluck", "knot"]);
     }
 }

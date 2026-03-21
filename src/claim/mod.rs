@@ -300,6 +300,9 @@ mod tests {
 
     #[async_trait]
     impl BeadStore for MockBeadStore {
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(self.beads.lock().unwrap().clone())
+        }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             Ok(self.beads.lock().unwrap().clone())
         }

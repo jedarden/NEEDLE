@@ -107,6 +107,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BeadStore for MemoryStore {
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(self.beads.clone())
+        }
         async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
             let result: Vec<Bead> = self
                 .beads
@@ -172,6 +175,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BeadStore for FailingStore {
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            anyhow::bail!("store connection failed")
+        }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             anyhow::bail!("store connection failed")
         }
