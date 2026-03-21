@@ -76,3 +76,96 @@ verify_beads_workspace() {
 
     return 0
 }
+
+# ── Create remote workspace with a bead ──────────────────────────────────────────
+
+# Creates a beads workspace and adds a single bead to it.
+# Useful for testing Explore strand that searches remote workspaces.
+#
+# Usage:
+#   create_remote_workspace_with_bead <workspace_path> <bead_id_var> [title] [description]
+#
+# Arguments:
+#   workspace_path - Directory path for the workspace (will be created)
+#   bead_id_var    - Variable name to store the created bead ID
+#   title          - Optional bead title (default: "Remote task")
+#   description    - Optional bead description (default: "Remote workspace task")
+#
+# Environment:
+#   BR_BIN - path to br CLI (required)
+#
+# Example:
+#   create_remote_workspace_with_bead "$TMPBASE/remote_ws" REMOTE_BEAD_ID \
+#       "Create DONE file" "Create a file called DONE in workspace root"
+
+create_remote_workspace_with_bead() {
+    local workspace_path="${1:?workspace_path required}"
+    local bead_id_var="${2:?bead_id_var required}"
+    local title="${3:-Remote task}"
+    local description="${4:-Remote workspace task}"
+
+    if [ -z "${BR_BIN:-}" ]; then
+        echo "FATAL: BR_BIN not set. Set it before calling create_remote_workspace_with_bead."
+        return 1
+    fi
+
+    # Create and initialize workspace
+    mkdir -p "$workspace_path"
+    (cd "$workspace_path" && "$BR_BIN" init 2>&1) || {
+        echo "FATAL: br init failed for remote workspace at $workspace_path"
+        return 1
+    }
+
+    # Create the bead (with retry on transient sync issues)
+    local bead_id
+    bead_id="$(cd "$workspace_path" && "$BR_BIN" create \
+        --title "$title" \
+        --description "$description" \
+        --silent 2>/dev/null)" || {
+        # Retry after sync flush on failure
+        (cd "$workspace_path" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+        bead_id="$(cd "$workspace_path" && "$BR_BIN" create \
+            --title "$title" \
+            --description "$description" \
+            --silent)" || {
+            echo "FATAL: br create failed in $workspace_path"
+            return 1
+        }
+    }
+
+    # Export bead ID to caller's variable name
+    eval "$bead_id_var=\"\$bead_id\""
+}
+
+# ── Create home workspace (empty, no beads) ───────────────────────────────────────
+
+# Creates an empty beads workspace with no beads.
+# Useful for testing strand waterfall where home workspace has no work,
+# so Pluck/Mend return NoWork and the worker must progress to Explore.
+#
+# Usage:
+#   create_home_workspace <workspace_path>
+#
+# Arguments:
+#   workspace_path - Directory path for the workspace (will be created)
+#
+# Environment:
+#   BR_BIN - path to br CLI (required)
+#
+# Example:
+#   create_home_workspace "$SCENARIO_DIR/home_workspace"
+
+create_home_workspace() {
+    local workspace_path="${1:?workspace_path required}"
+
+    if [ -z "${BR_BIN:-}" ]; then
+        echo "FATAL: BR_BIN not set. Set it before calling create_home_workspace."
+        return 1
+    fi
+
+    mkdir -p "$workspace_path"
+    (cd "$workspace_path" && "$BR_BIN" init 2>&1) || {
+        echo "FATAL: br init failed for home workspace at $workspace_path"
+        return 1
+    }
+}
