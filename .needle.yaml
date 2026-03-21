@@ -1,0 +1,17 @@
+# NEEDLE workspace configuration
+# Workspace: /home/coding/NEEDLE
+
+agent:
+  default: claude
+  timeout: 3600
+
+strands:
+  explore:
+    enabled: true
+    workspaces: []
+
+prompt:
+  context_files: []
+  instructions: |
+    You are working on the NEEDLE project.
+    Follow the conventions in CLAUDE.md and the plan in plan/plan.md.
