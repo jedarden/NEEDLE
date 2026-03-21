@@ -39,6 +39,9 @@ which = "4"
 # Async traits
 async-trait = "0.1"
 
+# Cross-platform file locking (flock)
+fs2 = "0.4"
+
 [dev-dependencies]
 tokio-test = "0.4"
 

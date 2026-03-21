@@ -40,8 +40,10 @@ impl Worker {
         let telemetry = Telemetry::new(worker_name.clone());
         let strands = StrandRunner::from_config(&config);
         let claimer = Claimer::new(
-            config.clone(),
-            worker_name.clone(),
+            store.clone(),
+            std::path::PathBuf::from("/tmp"),
+            config.worker.max_claim_retries,
+            100,
             Telemetry::new(worker_name.clone()),
         );
         let prompt_builder = PromptBuilder::new(config.clone());
@@ -87,7 +89,7 @@ impl Worker {
 
             self.transition(WorkerState::Selecting, WorkerState::Claiming)
                 .await?;
-            let claim = self.claimer.claim(self.store.as_ref(), &bead_id).await?;
+            let claim = self.claimer.claim_one(&bead_id, &self.worker_name).await?;
 
             let bead = match claim {
                 ClaimResult::Claimed(bead) => bead,
