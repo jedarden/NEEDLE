@@ -439,6 +439,12 @@ mod tests {
                 .push(StoreAction::AddLabel(id.to_string(), label.to_string()));
             Ok(())
         }
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
         async fn doctor_repair(&self) -> Result<crate::bead_store::RepairReport> {
             Ok(crate::bead_store::RepairReport::default())
         }
