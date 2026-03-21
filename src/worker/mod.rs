@@ -1162,6 +1162,338 @@ mod tests {
         assert!(worker.current_bead.is_some());
     }
 
+    // ── Specialized mock stores for claim tests ──
+
+    /// A store that always returns RaceLost on claim.
+    struct RaceLostStore {
+        beads: Mutex<Vec<Bead>>,
+    }
+
+    impl RaceLostStore {
+        fn new(beads: Vec<Bead>) -> Self {
+            RaceLostStore {
+                beads: Mutex::new(beads),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BeadStore for RaceLostStore {
+        async fn ready(&self, _f: &Filters) -> Result<Vec<Bead>> {
+            Ok(self.beads.lock().unwrap().clone())
+        }
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(self.beads.lock().unwrap().clone())
+        }
+        async fn show(&self, id: &BeadId) -> Result<Bead> {
+            self.beads
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|b| b.id == *id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("not found"))
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::RaceLost {
+                claimed_by: "other-worker".to_string(),
+            })
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn add_label(&self, _id: &BeadId, _l: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_label(&self, _id: &BeadId, _l: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn create_bead(&self, _t: &str, _b: &str, _l: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new"))
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _a: &BeadId, _b: &BeadId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A store that always returns NotClaimable on claim.
+    struct NotClaimableStore {
+        beads: Mutex<Vec<Bead>>,
+    }
+
+    impl NotClaimableStore {
+        fn new(beads: Vec<Bead>) -> Self {
+            NotClaimableStore {
+                beads: Mutex::new(beads),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BeadStore for NotClaimableStore {
+        async fn ready(&self, _f: &Filters) -> Result<Vec<Bead>> {
+            Ok(self.beads.lock().unwrap().clone())
+        }
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(self.beads.lock().unwrap().clone())
+        }
+        async fn show(&self, id: &BeadId) -> Result<Bead> {
+            self.beads
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|b| b.id == *id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("not found"))
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::NotClaimable {
+                reason: "already closed".to_string(),
+            })
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn add_label(&self, _id: &BeadId, _l: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_label(&self, _id: &BeadId, _l: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn create_bead(&self, _t: &str, _b: &str, _l: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new"))
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _a: &BeadId, _b: &BeadId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    // ── do_claim tests ──
+
+    #[tokio::test]
+    async fn do_claim_race_lost_adds_to_exclusion_and_retries() {
+        let bead = make_test_bead("needle-race");
+        let store: Arc<dyn BeadStore> = Arc::new(RaceLostStore::new(vec![bead]));
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        // Simulate: strand selected a candidate, now in Claiming state.
+        worker.current_bead = Some(make_test_bead("needle-race"));
+        worker.state = WorkerState::Claiming;
+
+        worker.do_claim().await.unwrap();
+
+        // Should transition to Retrying and add the bead to exclusion set.
+        assert_eq!(*worker.state(), WorkerState::Retrying);
+        assert!(worker.exclusion_set.contains(&BeadId::from("needle-race")));
+        assert_eq!(worker.retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn do_claim_not_claimable_transitions_to_retrying() {
+        // NotClaimable from the store gets wrapped by the Claimer into
+        // AllRaceLost → RaceLost at the worker level. The worker treats
+        // this as a race-lost situation and transitions to Retrying.
+        let bead = make_test_bead("needle-closed");
+        let store: Arc<dyn BeadStore> = Arc::new(NotClaimableStore::new(vec![bead]));
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        worker.current_bead = Some(make_test_bead("needle-closed"));
+        worker.state = WorkerState::Claiming;
+
+        worker.do_claim().await.unwrap();
+
+        // Claimer wraps NotClaimable → AllRaceLost → RaceLost at worker level.
+        assert_eq!(*worker.state(), WorkerState::Retrying);
+        assert!(worker
+            .exclusion_set
+            .contains(&BeadId::from("needle-closed")));
+        assert_eq!(worker.retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn do_claim_no_current_bead_resets_to_selecting() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Claiming;
+        worker.current_bead = None;
+
+        worker.do_claim().await.unwrap();
+        assert_eq!(*worker.state(), WorkerState::Selecting);
+    }
+
+    // ── do_retry tests ──
+
+    #[tokio::test]
+    async fn do_retry_below_max_transitions_to_selecting() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Retrying;
+        worker.retry_count = 1; // Below default max (3)
+
+        worker.do_retry().unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Selecting);
+        // Retry count preserved — it's only reset when max is exceeded.
+        assert_eq!(worker.retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn do_retry_at_max_resets_and_selects() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Retrying;
+        worker.retry_count = worker.config.worker.max_claim_retries; // At max
+        worker.exclusion_set.insert(BeadId::from("some-bead"));
+
+        worker.do_retry().unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Selecting);
+        assert_eq!(worker.retry_count, 0);
+        assert!(worker.exclusion_set.is_empty());
+        assert!(worker.current_bead.is_none());
+    }
+
+    // ── do_build tests ──
+
+    #[tokio::test]
+    async fn do_build_without_bead_is_invariant_error() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Building;
+        worker.current_bead = None;
+
+        let result = worker.do_build();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invariant"));
+    }
+
+    #[tokio::test]
+    async fn do_build_with_bead_transitions_to_dispatching() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Building;
+        worker.current_bead = Some(make_test_bead("needle-build"));
+
+        worker.do_build().unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Dispatching);
+        assert!(worker.built_prompt.is_some());
+    }
+
+    // ── check_budget tests ──
+
+    #[tokio::test]
+    async fn check_budget_no_config_skips() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        // Default config has warn_usd=0, stop_usd=0 → skip.
+        assert_eq!(worker.config.budget.warn_usd, 0.0);
+        assert_eq!(worker.config.budget.stop_usd, 0.0);
+
+        worker.check_budget().unwrap();
+        // State should be unchanged (not Stopped).
+        assert_eq!(*worker.state(), WorkerState::Selecting);
+    }
+
+    #[tokio::test]
+    async fn check_budget_stop_transitions_to_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+
+        // Write a fake log file with an effort.recorded event that has a cost.
+        // The cost scanner expects: event_type, timestamp (YYYY-MM-DD prefix), data.estimated_cost_usd
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let log_content = format!(
+            r#"{{"event_type":"effort.recorded","timestamp":"{}T12:00:00Z","data":{{"estimated_cost_usd":50.0}}}}"#,
+            today
+        );
+        std::fs::write(log_dir.join("worker.jsonl"), &log_content).unwrap();
+
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+        config.workspace.home = dir.path().to_path_buf();
+        config.telemetry.file_sink.log_dir = Some(log_dir);
+        config.budget.stop_usd = 10.0; // Cost (50) exceeds this threshold.
+        config.budget.warn_usd = 5.0;
+
+        let mut worker = Worker::new(config, "test-budget".to_string(), store);
+        worker.boot().unwrap();
+
+        worker.check_budget().unwrap();
+        assert_eq!(*worker.state(), WorkerState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn check_budget_warn_does_not_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let log_content = format!(
+            r#"{{"event_type":"effort.recorded","timestamp":"{}T12:00:00Z","data":{{"estimated_cost_usd":8.0}}}}"#,
+            today
+        );
+        std::fs::write(log_dir.join("worker.jsonl"), &log_content).unwrap();
+
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+        config.workspace.home = dir.path().to_path_buf();
+        config.telemetry.file_sink.log_dir = Some(log_dir);
+        config.budget.warn_usd = 5.0; // Cost (8) exceeds warn but not stop.
+        config.budget.stop_usd = 20.0;
+
+        let mut worker = Worker::new(config, "test-budget-warn".to_string(), store);
+        worker.boot().unwrap();
+
+        worker.check_budget().unwrap();
+        // State should still be Selecting — warn doesn't stop the worker.
+        assert_eq!(*worker.state(), WorkerState::Selecting);
+    }
+
+    // ── full cycle test ──
+
     #[tokio::test]
     async fn full_cycle_with_echo_agent() {
         use std::collections::HashMap;
