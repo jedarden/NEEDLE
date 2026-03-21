@@ -795,10 +795,8 @@ End of response."#;
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
 
         // Parent already has a child titled "Add endpoint" (found via label).
-        let store = MockStore::new().with_existing_children(vec![existing_child(
-            "Add endpoint",
-            "parent-001",
-        )]);
+        let store = MockStore::new()
+            .with_existing_children(vec![existing_child("Add endpoint", "parent-001")]);
 
         let parent = test_bead();
         let proposed = vec![
@@ -882,10 +880,8 @@ End of response."#;
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
 
-        let store = MockStore::new().with_existing_children(vec![existing_child(
-            "Add endpoint",
-            "different-parent",
-        )]);
+        let store = MockStore::new()
+            .with_existing_children(vec![existing_child("Add endpoint", "different-parent")]);
 
         let parent = test_bead();
         let proposed = vec![ProposedChild {
@@ -900,7 +896,11 @@ End of response."#;
 
         match result {
             MitosisResult::Split { children } => {
-                assert_eq!(children.len(), 1, "should create child since parent differs");
+                assert_eq!(
+                    children.len(),
+                    1,
+                    "should create child since parent differs"
+                );
             }
             other => panic!("expected Split, got {:?}", other),
         }
