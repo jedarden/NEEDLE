@@ -141,10 +141,20 @@ pub enum WorkerState {
 
 impl fmt::Display for WorkerState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Use serde_json to derive the SCREAMING_SNAKE_CASE string, keeping
-        // Display in sync with the serialization format automatically.
-        let v = serde_json::to_value(self).expect("WorkerState is always serializable");
-        let s = v.as_str().expect("WorkerState serializes as a string");
+        let s = match self {
+            WorkerState::Booting => "BOOTING",
+            WorkerState::Selecting => "SELECTING",
+            WorkerState::Claiming => "CLAIMING",
+            WorkerState::Retrying => "RETRYING",
+            WorkerState::Building => "BUILDING",
+            WorkerState::Dispatching => "DISPATCHING",
+            WorkerState::Executing => "EXECUTING",
+            WorkerState::Handling => "HANDLING",
+            WorkerState::Logging => "LOGGING",
+            WorkerState::Exhausted => "EXHAUSTED",
+            WorkerState::Stopped => "STOPPED",
+            WorkerState::Errored => "ERRORED",
+        };
         f.write_str(s)
     }
 }
