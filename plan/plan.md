@@ -754,6 +754,66 @@ needle-codex-openai-gpt4-charlie
 
 `--count=N` launches N workers with sequential NATO alphabet identifiers (alpha, bravo, charlie, ...). Workers are launched with staggered delay (default: 2s between launches) to prevent thundering herd on startup (learned from `docs/notes/operational-fleet-lessons.md`).
 
+### CLI Help System
+
+Every subcommand and flag is discoverable via `--help` or `-h`. Help text is embedded in the binary and generated from the same source as the CLI parser (e.g., `clap` derive macros in Rust).
+
+**Top-level help:**
+
+```
+$ needle --help
+
+NEEDLE — Navigates Every Enqueued Deliverable, Logs Effort
+
+Deterministic bead processing with explicit outcome paths.
+
+Usage: needle <COMMAND>
+
+Commands:
+  run          Launch worker(s) to process beads
+  stop         Stop running worker(s)
+  list         List active workers
+  attach       Attach to a worker's tmux session
+  status       Show fleet status, bead counts, and cost summary
+  config       View or modify configuration
+  doctor       Check system health and repair
+  test-agent   Validate an agent adapter
+  logs         Query telemetry logs
+  rollback     Roll back to previous stable binary
+  version      Show version information
+  help         Print this message or the help of a subcommand
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
+
+**Subcommand help (example):**
+
+```
+$ needle run --help
+
+Launch worker(s) to process beads
+
+Usage: needle run [OPTIONS]
+
+Options:
+  -w, --workspace <PATH>     Workspace to process beads from [default: config value]
+  -a, --agent <NAME>         Agent adapter to use [default: config value]
+  -c, --count <N>            Number of workers to launch [default: 1]
+  -i, --identifier <NAME>    Worker identifier (overrides NATO naming)
+  -t, --timeout <SECONDS>    Agent execution timeout [default: config value]
+      --resume               Resume an existing worker session (used by hot-reload)
+  -h, --help                 Print help
+```
+
+**Design notes:**
+- Every flag has a one-line description
+- Default values shown in brackets (sourced from config)
+- Subcommand grouping follows the lifecycle: launch → monitor → operate → maintain
+- `needle help <command>` and `needle <command> --help` are equivalent
+- Help output is plain text, no colors, suitable for piping to other tools or agents
+
 ---
 
 # Strand Waterfall
@@ -2198,9 +2258,31 @@ provider: anthropic
 model: claude-sonnet-4-6
 ```
 
-## Prompt Construction
+## Prompt Templates
 
-The prompt given to the agent is a deterministic function of the bead state — same bead produces the same prompt.
+Prompts are configurable at both the global and workspace level. Every agent-invoking operation (Pluck execution, Weave gap analysis, Unravel alternatives, Pulse scanning, Mitosis splitting) uses a named prompt template. Templates are deterministic functions of their inputs — same bead state produces the same prompt.
+
+### Template Variables
+
+All templates have access to these variables:
+
+| Variable | Available In | Description |
+|----------|-------------|-------------|
+| `{bead_id}` | All | Current bead ID |
+| `{bead_title}` | All | Bead title |
+| `{bead_body}` | All | Bead body/description |
+| `{workspace_path}` | All | Absolute path to workspace |
+| `{context_file_contents}` | All | Contents of configured context files |
+| `{workspace_instructions}` | All | Instructions from `.needle.yaml` |
+| `{worker_id}` | All | Worker identifier |
+| `{existing_children}` | Mitosis | Parent's current children (titles + IDs) |
+| `{human_bead_context}` | Unravel | The HUMAN-blocked bead being analyzed |
+| `{scan_results}` | Pulse | Output from configured scanners |
+| `{doc_files}` | Weave | Documentation file listing and contents |
+
+### Built-in Templates
+
+**`pluck` — Bead execution (default):**
 
 ```markdown
 ## Task
@@ -2234,9 +2316,141 @@ If you cannot complete the task:
 Bead ID: {bead_id}
 ```
 
+**`mitosis` — Split analysis:**
+
+```markdown
+## Bead Analysis
+
+Title: {bead_title}
+Body: {bead_body}
+
+## Existing Children
+
+{existing_children}
+
+## Question
+
+Does this bead describe more than one independent task? A task is independent
+if it produces a distinct deliverable and could be completed without completing
+the other tasks in this bead.
+
+If yes, list each independent task as a structured child bead with:
+- title: concise task description
+- body: what needs to be done
+- dependencies: which other children must complete first (by title)
+
+If this bead describes a single task (even a complex one), respond with: SINGLE_TASK
+
+Do not propose children that duplicate any existing children listed above.
+```
+
+**`weave` — Gap analysis:**
+
+```markdown
+## Workspace Documentation
+
+{doc_files}
+
+## Current Open Beads
+
+{existing_beads}
+
+## Question
+
+Review the documentation above. Identify gaps where documented features,
+APIs, or workflows are incomplete, missing tests, or have no corresponding
+implementation bead.
+
+For each gap found, propose a bead with:
+- title: concise description of what's missing
+- body: what needs to be done to close the gap
+- priority: 1 (critical), 2 (important), or 3 (nice-to-have)
+
+Do not propose beads that duplicate any existing open beads listed above.
+If no gaps are found, respond with: NO_GAPS
+```
+
+**`unravel` — Alternative proposals:**
+
+```markdown
+## Blocked Bead
+
+Title: {bead_title}
+Body: {bead_body}
+Status: Blocked (requires human decision)
+
+## Question
+
+This bead is blocked because it requires a human decision. Analyze the bead
+and propose alternative approaches that could be executed by an automated
+agent without the human decision.
+
+For each alternative, provide:
+- title: concise description of the alternative approach
+- body: what would be done differently
+- tradeoffs: what is gained and what is lost compared to the original approach
+
+If no viable alternatives exist, respond with: NO_ALTERNATIVES
+```
+
+**`pulse` — Health scan bead creation:**
+
+```markdown
+## Scan Results
+
+{scan_results}
+
+## Current Open Beads
+
+{existing_beads}
+
+## Question
+
+Review the scan results above. For issues that are significant enough to
+warrant a fix, propose a bead with:
+- title: concise description of the issue
+- body: what needs to be fixed and how
+- priority: based on severity (1=critical, 2=important, 3=minor)
+
+Do not propose beads that duplicate any existing open beads listed above.
+If no significant issues are found, respond with: NO_ISSUES
+```
+
+### Overriding Templates
+
+Templates are overridable at the workspace level in `.needle.yaml`:
+
+```yaml
+prompt:
+  context_files:
+    - CLAUDE.md
+    - AGENTS.md
+  instructions: |
+    This workspace uses the repository pattern.
+    Run `cargo test` before closing the bead.
+
+  templates:
+    pluck: |
+      {bead_title}
+
+      {bead_body}
+
+      Workspace: {workspace_path}
+      {context_file_contents}
+      {workspace_instructions}
+
+      Close when done: br close {bead_id} --body "summary"
+      Bead ID: {bead_id}
+
+    mitosis: |
+      ... custom mitosis prompt ...
+```
+
+If a template is not overridden at the workspace level, the built-in default is used. Templates can also be overridden globally in `~/.needle/config.yaml` under `prompt.templates`.
+
 ### Agent-Owned Closure
 
-The prompt instructs the agent to close the bead via `br close`. NEEDLE does not close beads itself. This is a deliberate design decision based on v1 experience:
+The pluck template instructs the agent to close the bead via `br close`. NEEDLE does not close beads itself. This is a deliberate design decision based on v1 experience:
 
 - The agent knows whether the work is actually done
 - NEEDLE's post-dispatch parsing of agent output was fragile
