@@ -801,4 +801,222 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert!(findings[0].title.contains("error"));
     }
+
+    // ── End-to-end tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn scanner_runs_and_creates_beads() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let telemetry = Telemetry::new("test".to_string());
+
+        let config = PulseConfig {
+            enabled: true,
+            scanners: vec![crate::config::ScannerConfig {
+                name: "echo-scanner".to_string(),
+                command: "echo 'src/foo.rs:10:1: error: unused import'".to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 0,
+            severity_threshold: 5, // Accept all
+            max_beads_per_run: 10,
+            ..PulseConfig::default()
+        };
+
+        let strand = PulseStrand::new(
+            config,
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
+            telemetry,
+        );
+        let store = MockStore::new();
+        let result = strand.evaluate(&store).await;
+
+        assert!(matches!(result, StrandResult::WorkCreated));
+        let beads = store.created_beads();
+        assert_eq!(beads.len(), 1);
+        assert!(beads[0].0.contains("[Pulse]"));
+        assert!(beads[0].0.contains("error"));
+        assert!(beads[0].2.contains(&"pulse-finding".to_string()));
+    }
+
+    #[tokio::test]
+    async fn dedup_prevents_duplicate_beads_across_scans() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+
+        let config = PulseConfig {
+            enabled: true,
+            scanners: vec![crate::config::ScannerConfig {
+                name: "echo-scanner".to_string(),
+                command: "echo 'error: same issue every time'".to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 0, // No cooldown so we can run twice
+            severity_threshold: 5,
+            max_beads_per_run: 10,
+            ..PulseConfig::default()
+        };
+
+        let ws = workspace_dir.path().to_path_buf();
+
+        // First scan: should create a bead
+        let telemetry = Telemetry::new("test".to_string());
+        let strand = PulseStrand::new(
+            config.clone(),
+            ws.clone(),
+            state_dir.path().to_path_buf(),
+            telemetry,
+        );
+        let store1 = MockStore::new();
+        let result1 = strand.evaluate(&store1).await;
+        assert!(matches!(result1, StrandResult::WorkCreated));
+        assert_eq!(store1.created_beads().len(), 1);
+
+        // Second scan: same output, should NOT create a bead (dedup)
+        let telemetry2 = Telemetry::new("test".to_string());
+        let strand2 = PulseStrand::new(config, ws, state_dir.path().to_path_buf(), telemetry2);
+        let store2 = MockStore::new();
+        let result2 = strand2.evaluate(&store2).await;
+        assert!(matches!(result2, StrandResult::NoWork));
+        assert!(store2.created_beads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn max_beads_per_run_limits_creation() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let telemetry = Telemetry::new("test".to_string());
+
+        // Scanner outputs 3 errors but max_beads_per_run is 2
+        let config = PulseConfig {
+            enabled: true,
+            scanners: vec![crate::config::ScannerConfig {
+                name: "multi-error".to_string(),
+                command: "printf 'error: issue one\\nerror: issue two\\nerror: issue three\\n'"
+                    .to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 0,
+            severity_threshold: 5,
+            max_beads_per_run: 2,
+            ..PulseConfig::default()
+        };
+
+        let strand = PulseStrand::new(
+            config,
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
+            telemetry,
+        );
+        let store = MockStore::new();
+        let result = strand.evaluate(&store).await;
+
+        assert!(matches!(result, StrandResult::WorkCreated));
+        assert_eq!(store.created_beads().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn scanner_with_no_findings_returns_no_work() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let telemetry = Telemetry::new("test".to_string());
+
+        let config = PulseConfig {
+            enabled: true,
+            scanners: vec![crate::config::ScannerConfig {
+                name: "clean-scanner".to_string(),
+                command: "echo 'all checks passed'".to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 0,
+            severity_threshold: 5,
+            max_beads_per_run: 10,
+            ..PulseConfig::default()
+        };
+
+        let strand = PulseStrand::new(
+            config,
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
+            telemetry,
+        );
+        let store = MockStore::new();
+        let result = strand.evaluate(&store).await;
+
+        assert!(matches!(result, StrandResult::NoWork));
+        assert!(store.created_beads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn state_persists_after_scan() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let telemetry = Telemetry::new("test".to_string());
+
+        let config = PulseConfig {
+            enabled: true,
+            scanners: vec![crate::config::ScannerConfig {
+                name: "persist-test".to_string(),
+                command: "echo 'error: test finding'".to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 0,
+            severity_threshold: 5,
+            max_beads_per_run: 10,
+            ..PulseConfig::default()
+        };
+
+        let strand = PulseStrand::new(
+            config,
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
+            telemetry,
+        );
+        let store = MockStore::new();
+        strand.evaluate(&store).await;
+
+        // Verify state was persisted
+        let state_path = strand.state_file_path();
+        let state = PulseState::load(&state_path).unwrap();
+        assert!(state.last_run.is_some());
+        assert!(!state.seen_fingerprints.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_prompt_uses_custom_template() {
+        let telemetry = Telemetry::new("test".to_string());
+        let strand = PulseStrand::new(
+            PulseConfig {
+                prompt_template: Some(
+                    "Scanner: {scanner}\nOutput: {output}\nWorkspace: {workspace}".to_string(),
+                ),
+                ..PulseConfig::default()
+            },
+            PathBuf::from("/my/workspace"),
+            PathBuf::from("/tmp/state"),
+            telemetry,
+        );
+
+        let prompt = strand.build_prompt("clippy", "error: test");
+        assert!(prompt.contains("Scanner: clippy"));
+        assert!(prompt.contains("Output: error: test"));
+        assert!(prompt.contains("Workspace: /my/workspace"));
+    }
+
+    #[tokio::test]
+    async fn build_prompt_uses_default_when_no_template() {
+        let telemetry = Telemetry::new("test".to_string());
+        let strand = PulseStrand::new(
+            PulseConfig::default(),
+            PathBuf::from("/my/workspace"),
+            PathBuf::from("/tmp/state"),
+            telemetry,
+        );
+
+        let prompt = strand.build_prompt("clippy", "error: test");
+        assert!(prompt.contains("## Scanner: clippy"));
+        assert!(prompt.contains("## Task"));
+        assert!(prompt.contains("error: test"));
+    }
 }
