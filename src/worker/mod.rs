@@ -69,23 +69,25 @@ pub struct Worker {
 impl Worker {
     /// Construct a worker from config, a worker name, and a bead store implementation.
     pub fn new(config: Config, worker_name: String, store: Arc<dyn BeadStore>) -> Self {
-        let telemetry = Telemetry::new(worker_name.clone());
+        // Create a single telemetry instance with hooks (if configured) and share
+        // clones with all sub-components so that hook sinks receive every event.
+        let telemetry = Telemetry::from_config(worker_name.clone(), &config.telemetry)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
+                Telemetry::new(worker_name.clone())
+            });
         let strand_registry = Registry::default_location(&config.workspace.home);
-        let strands = StrandRunner::from_config(
-            &config,
-            &worker_name,
-            strand_registry,
-            Telemetry::new(worker_name.clone()),
-        );
+        let strands =
+            StrandRunner::from_config(&config, &worker_name, strand_registry, telemetry.clone());
         let claimer = Claimer::new(
             store.clone(),
             std::path::PathBuf::from("/tmp"),
             config.worker.max_claim_retries,
             100,
-            Telemetry::new(worker_name.clone()),
+            telemetry.clone(),
         );
         let prompt_builder = PromptBuilder::new(&config.prompt);
-        let dispatcher = match Dispatcher::new(&config, Telemetry::new(worker_name.clone())) {
+        let dispatcher = match Dispatcher::new(&config, telemetry.clone()) {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to load adapters, using built-in defaults");
@@ -93,26 +95,17 @@ impl Worker {
                     .into_iter()
                     .map(|a| (a.name.clone(), a))
                     .collect();
-                Dispatcher::with_adapters(
-                    builtins,
-                    Telemetry::new(worker_name.clone()),
-                    config.agent.timeout,
-                )
+                Dispatcher::with_adapters(builtins, telemetry.clone(), config.agent.timeout)
             }
         };
-        let outcome_handler =
-            OutcomeHandler::new(config.clone(), Telemetry::new(worker_name.clone()));
-        let health = HealthMonitor::new(
-            config.clone(),
-            worker_name.clone(),
-            Telemetry::new(worker_name.clone()),
-        );
+        let outcome_handler = OutcomeHandler::new(config.clone(), telemetry.clone());
+        let health = HealthMonitor::new(config.clone(), worker_name.clone(), telemetry.clone());
         let registry = Registry::default_location(&config.workspace.home);
         let rate_limiter =
             RateLimiter::new(config.limits.clone(), &config.workspace.home.join("state"));
         let mitosis_evaluator = MitosisEvaluator::new(
             config.strands.mitosis.clone(),
-            Telemetry::new(worker_name.clone()),
+            telemetry.clone(),
             std::path::PathBuf::from("/tmp"),
         );
 

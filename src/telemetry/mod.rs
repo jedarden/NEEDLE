@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::config::{ColorMode, HookConfig, StdoutFormat, StdoutSinkConfig};
+use crate::config::{ColorMode, HookConfig, StdoutFormat, StdoutSinkConfig, TelemetryConfig};
 use crate::types::{BeadId, WorkerId, WorkerState};
 
 // ─── TelemetryEvent ──────────────────────────────────────────────────────────
@@ -1428,6 +1428,22 @@ impl Telemetry {
             sequence,
             sender,
         })
+    }
+
+    /// Create a telemetry emitter from a `TelemetryConfig`.
+    ///
+    /// Selects the right constructor based on configured sinks:
+    /// - Hooks configured → [`with_hooks`](Self::with_hooks)
+    /// - Stdout enabled   → [`with_stdout`](Self::with_stdout)
+    /// - Otherwise        → [`new`](Self::new) (file sink only)
+    pub fn from_config(worker_id: WorkerId, config: &TelemetryConfig) -> Result<Self> {
+        if !config.hooks.is_empty() {
+            Self::with_hooks(worker_id, &config.stdout_sink, &config.hooks)
+        } else if config.stdout_sink.enabled {
+            Ok(Self::with_stdout(worker_id, &config.stdout_sink))
+        } else {
+            Ok(Self::new(worker_id))
+        }
     }
 
     /// Create a telemetry emitter with a custom sink (for testing).

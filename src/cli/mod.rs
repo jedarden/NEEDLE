@@ -320,7 +320,11 @@ fn cmd_run(
             }
         }
 
-        let tel = crate::telemetry::Telemetry::new(worker_id.clone());
+        let tel = crate::telemetry::Telemetry::from_config(worker_id.clone(), &config.telemetry)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "hook telemetry init failed, falling back");
+                crate::telemetry::Telemetry::new(worker_id.clone())
+            });
         tel.emit(crate::telemetry::EventKind::UpgradeCompleted {
             new_hash: current_hash,
         })?;
@@ -1593,7 +1597,11 @@ fn cmd_rollback() -> Result<()> {
     runner.rollback()?;
 
     // Emit rollback telemetry.
-    let tel = crate::telemetry::Telemetry::new("rollback".to_string());
+    let tel = crate::telemetry::Telemetry::from_config("rollback".to_string(), &config.telemetry)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "hook telemetry init failed, falling back");
+            crate::telemetry::Telemetry::new("rollback".to_string())
+        });
     tel.emit(crate::telemetry::EventKind::RollbackCompleted {
         rolled_back_hash: stable_hash,
         restored_hash: prev_hash,
