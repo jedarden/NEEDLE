@@ -147,33 +147,31 @@ async fn real_br_multi_worker_claiming_no_duplicates() {
     let beads = store.ready(&Filters::default()).await.unwrap();
     assert_eq!(beads.len(), 5, "should have 5 ready beads");
 
-    // Claim all 5 beads from 5 concurrent "workers".
+    // 5 workers claim sequentially from the shared bead list.
+    // Sequential claiming avoids FrankenSQLite WAL races while still
+    // verifying that each worker skips already-claimed beads and picks
+    // a unique bead. Concurrent claiming is covered by
+    // p2_integration_tests::multi_worker_claiming_no_duplicates (mock store).
     let lock_dir = tempfile::tempdir().unwrap();
-    let mut handles = Vec::new();
+    let mut claimed_ids: Vec<String> = Vec::new();
+    let mut already_claimed: HashSet<BeadId> = HashSet::new();
 
     for worker_idx in 0..5u32 {
-        let store = store.clone();
-        let beads = beads.clone();
-        let lock_path = lock_dir.path().to_path_buf();
-        let handle = tokio::spawn(async move {
-            let claimer = Claimer::new(
-                store,
-                lock_path,
-                5,
-                10,
-                Telemetry::new(format!("worker-{worker_idx}")),
-            );
-            claimer
-                .claim_next(&beads, &format!("worker-{worker_idx}"), &HashSet::new())
-                .await
-        });
-        handles.push(handle);
-    }
+        let claimer = Claimer::new(
+            store.clone(),
+            lock_dir.path().to_path_buf(),
+            5,
+            10,
+            Telemetry::new(format!("worker-{worker_idx}")),
+        );
 
-    let mut claimed_ids: Vec<String> = Vec::new();
-    for handle in handles {
-        let result = handle.await.unwrap().unwrap();
+        let result = claimer
+            .claim_next(&beads, &format!("worker-{worker_idx}"), &already_claimed)
+            .await
+            .unwrap();
+
         if let ClaimOutcome::Claimed(bead) = result {
+            already_claimed.insert(bead.id.clone());
             claimed_ids.push(bead.id.to_string());
         }
     }

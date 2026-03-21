@@ -26,6 +26,9 @@ const CORRUPTION_MARKERS: &[&str] = &[
     "file is not a database",
 ];
 
+/// Known error strings that indicate br sync conflicts.
+const SYNC_CONFLICT_MARKERS: &[&str] = &["SYNC_CONFLICT", "JSONL is newer", "sync conflict"];
+
 /// Check if an error message indicates SQLite database corruption.
 ///
 /// Returns `true` if the message contains any known corruption marker.
@@ -34,6 +37,15 @@ pub fn is_corruption_error(msg: &str) -> bool {
     CORRUPTION_MARKERS
         .iter()
         .any(|marker| lower.contains(marker))
+}
+
+/// Check if an error message indicates a br sync conflict.
+///
+/// Returns `true` if the message contains any known sync conflict marker.
+pub fn is_sync_conflict(msg: &str) -> bool {
+    SYNC_CONFLICT_MARKERS
+        .iter()
+        .any(|marker| msg.contains(marker))
 }
 
 /// Outcome of a database recovery attempt.
