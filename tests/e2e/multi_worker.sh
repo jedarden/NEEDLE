@@ -6,7 +6,7 @@
 #
 # Strategy:
 #   - Create 10 beads
-#   - Launch 3 workers against the same workspace (each TMUX=fake, --count 1)
+#   - Launch 3 workers against the same workspace (each NEEDLE_INNER=1, --count 1)
 #   - After all workers exhaust, verify all 10 beads are CLOSED and each was
 #     claimed exactly once (via telemetry aggregation)
 #
@@ -152,7 +152,7 @@ YAML
 
 echo "Step 5: Launching 3 concurrent workers..."
 
-export TMUX=fake
+export NEEDLE_INNER=1
 
 TELEMETRY_DIR="$HOME/.needle/logs"
 WORKER_NAMES=("alpha" "bravo" "charlie")

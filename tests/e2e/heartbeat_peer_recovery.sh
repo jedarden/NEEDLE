@@ -218,7 +218,7 @@ echo ""
 echo "=== Phase 1: Worker A — process bead-2, detect stale peer ==="
 echo ""
 
-export TMUX=fake
+export NEEDLE_INNER=1
 TELEMETRY_DIR="$HOME/.needle/logs"
 
 EXIT_CODE_A=0

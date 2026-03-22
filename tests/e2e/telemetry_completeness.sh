@@ -162,7 +162,7 @@ YAML
 # ── Step 5: Run needle ──────────────────────────────────────────────────────
 
 echo "Step 5: Running needle worker..."
-export TMUX=fake
+export NEEDLE_INNER=1
 
 TELEMETRY_DIR="$HOME/.needle/logs"
 EXIT_CODE=0

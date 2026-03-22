@@ -188,9 +188,9 @@ YAML
 
 echo "Step 5: Running needle worker..."
 
-# TMUX=fake makes needle think it's inside tmux, so it runs the worker directly
-# instead of launching a tmux session.
-export TMUX=fake
+# NEEDLE_INNER=1 marks this as a re-entrant inner invocation, so needle runs the
+# worker directly instead of launching another tmux session.
+export NEEDLE_INNER=1
 
 TELEMETRY_DIR="$HOME/.needle/logs"
 EXIT_CODE=0

@@ -203,7 +203,7 @@ echo "  Mitosis config: enabled=true, force_failure_threshold=3"
 # ── Step 5: Run needle (should trigger 3 failures then mitosis) ──────────────
 
 echo "Step 5: Running needle worker..."
-export TMUX=fake
+export NEEDLE_INNER=1
 
 TELEMETRY_DIR="$HOME/.needle/logs"
 EXIT_CODE=0

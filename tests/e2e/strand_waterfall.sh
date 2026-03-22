@@ -139,7 +139,7 @@ echo "  Explore workspaces: [$REMOTE_WS_A]"
 # ── Step 5: Run needle with home workspace ───────────────────────────────────
 
 echo "Step 5: Running needle worker with home workspace..."
-export TMUX=fake
+export NEEDLE_INNER=1
 
 TELEMETRY_DIR_A="$FAKE_HOME_A/.needle/logs"
 EXIT_CODE_A=0
@@ -303,7 +303,7 @@ YAML
 # ── Step 3: Run needle ──────────────────────────────────────────────────────
 
 echo "Step 3: Running needle worker..."
-export TMUX=fake
+export NEEDLE_INNER=1
 
 TELEMETRY_DIR_B="$FAKE_HOME_B/.needle/logs"
 EXIT_CODE_B=0

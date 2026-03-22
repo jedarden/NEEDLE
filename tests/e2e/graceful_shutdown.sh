@@ -140,8 +140,8 @@ echo "Step 5: Running needle worker and sending SIGTERM..."
 
 TELEMETRY_DIR="$HOME/.needle/logs"
 
-# TMUX=fake makes needle think it's inside tmux, running the worker directly.
-export TMUX=fake
+# NEEDLE_INNER=1 marks this as a re-entrant inner invocation, running the worker directly.
+export NEEDLE_INNER=1
 
 # Launch needle in background.
 "$NEEDLE_BIN" run \
