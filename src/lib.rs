@@ -2,6 +2,7 @@
 //!
 //! Library crate exposing the public API for integration tests and embedding.
 
+pub mod agent_event;
 pub mod bead_store;
 pub mod canary;
 pub mod claim;
