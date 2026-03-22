@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "needle"
 path = "src/main.rs"
 
+[[bin]]
+name = "needle-transform-claude"
+path = "src/bin/needle_transform_claude.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
