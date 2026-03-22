@@ -2289,4 +2289,116 @@ mod tests {
         let cli = Cli::try_parse_from(["needle", "rollback"]);
         assert!(cli.is_ok(), "needle rollback should parse");
     }
+
+    // ── Session collision avoidance tests ──
+
+    /// Helper: given an occupied set, pick the next N available NATO names.
+    fn pick_available_names(occupied: &HashSet<String>, count: usize) -> Result<Vec<String>> {
+        let mut ids = Vec::with_capacity(count);
+        for name in NATO_ALPHABET {
+            if ids.len() >= count {
+                break;
+            }
+            if occupied.contains(*name) {
+                continue;
+            }
+            ids.push(name.to_string());
+        }
+        if ids.len() < count {
+            bail!(
+                "cannot launch {} workers — only {} NATO names available ({} occupied)",
+                count,
+                ids.len(),
+                occupied.len()
+            );
+        }
+        Ok(ids)
+    }
+
+    #[test]
+    fn pick_names_no_sessions_running() {
+        let occupied = HashSet::new();
+        let names = pick_available_names(&occupied, 3).unwrap();
+        assert_eq!(names, vec!["alpha", "bravo", "charlie"]);
+    }
+
+    #[test]
+    fn pick_names_skips_occupied() {
+        let occupied: HashSet<String> = ["alpha", "bravo"].iter().map(|s| s.to_string()).collect();
+        let names = pick_available_names(&occupied, 2).unwrap();
+        assert_eq!(names, vec!["charlie", "delta"]);
+    }
+
+    #[test]
+    fn pick_names_skips_non_contiguous_occupied() {
+        let occupied: HashSet<String> = ["alpha", "charlie", "echo"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let names = pick_available_names(&occupied, 3).unwrap();
+        assert_eq!(names, vec!["bravo", "delta", "foxtrot"]);
+    }
+
+    #[test]
+    fn pick_names_all_occupied_fails() {
+        let occupied: HashSet<String> = NATO_ALPHABET.iter().map(|s| s.to_string()).collect();
+        let result = pick_available_names(&occupied, 1);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("26 occupied"), "got: {msg}");
+    }
+
+    #[test]
+    fn pick_names_partial_exhaustion_fails() {
+        // Occupy 25 names, request 2 — only 1 available.
+        let occupied: HashSet<String> = NATO_ALPHABET[..25].iter().map(|s| s.to_string()).collect();
+        let result = pick_available_names(&occupied, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn identifier_collision_detected() {
+        let occupied: HashSet<String> = ["alpha"].iter().map(|s| s.to_string()).collect();
+        let requested = "alpha";
+        assert!(
+            occupied.contains(requested),
+            "should detect identifier collision"
+        );
+    }
+
+    #[test]
+    fn identifier_no_collision() {
+        let occupied: HashSet<String> = ["bravo"].iter().map(|s| s.to_string()).collect();
+        let requested = "alpha";
+        assert!(!occupied.contains(requested), "alpha is not occupied");
+    }
+
+    #[test]
+    fn parse_worker_id_from_session_name() {
+        let agent = "claude";
+        let prefix = format!("needle-{agent}-");
+        let session_name = "needle-claude-foxtrot";
+        let worker_id = session_name.strip_prefix(&prefix);
+        assert_eq!(worker_id, Some("foxtrot"));
+    }
+
+    #[test]
+    fn parse_worker_id_different_agent_ignored() {
+        let agent = "claude";
+        let prefix = format!("needle-{agent}-");
+        let session_name = "needle-gemini-alpha";
+        let worker_id = session_name.strip_prefix(&prefix);
+        assert_eq!(worker_id, None, "different agent session should not match");
+    }
+
+    #[test]
+    fn single_worker_picks_first_available() {
+        let occupied: HashSet<String> = ["alpha"].iter().map(|s| s.to_string()).collect();
+        let worker_id = NATO_ALPHABET
+            .iter()
+            .find(|name| !occupied.contains(**name))
+            .map(|s| s.to_string())
+            .unwrap();
+        assert_eq!(worker_id, "bravo");
+    }
 }
