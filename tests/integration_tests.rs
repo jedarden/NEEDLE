@@ -168,7 +168,7 @@ fn make_bead_with_id(id: &str) -> Bead {
         labels: vec![],
         workspace: PathBuf::from("/tmp/test-workspace"),
         dependencies: vec![],
-            dependents: vec![],
+        dependents: vec![],
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -193,6 +193,7 @@ fn test_adapter(name: &str, template: &str, timeout_secs: u64) -> AgentAdapter {
         provider: None,
         model: None,
         token_extraction: needle::dispatch::TokenExtraction::None,
+        output_transform: None,
     }
 }
 

@@ -213,7 +213,7 @@ fn make_bead(id: &str, priority: u8) -> Bead {
         labels: vec![],
         workspace: PathBuf::from("/tmp/test-workspace"),
         dependencies: vec![],
-            dependents: vec![],
+        dependents: vec![],
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -1443,6 +1443,7 @@ fn create_mitosis_dispatcher(json_response: &str) -> needle::dispatch::Dispatche
         provider: None,
         model: None,
         token_extraction: needle::dispatch::TokenExtraction::None,
+        output_transform: None,
     };
     adapters.insert("mitosis-bash".to_string(), adapter);
     let telemetry = Telemetry::new("mitosis-test".to_string());
@@ -1511,7 +1512,7 @@ impl BeadStore for MitosisDedupeStore {
                 labels: labels.clone(),
                 workspace: PathBuf::from("/tmp/test"),
                 dependencies: vec![],
-            dependents: vec![],
+                dependents: vec![],
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })

@@ -318,6 +318,7 @@ pub enum ClaimResult {
 /// Aggregate outcome after exhausting all candidates for a selection cycle.
 #[non_exhaustive]
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum ClaimOutcome {
     /// Successfully claimed a bead.
     Claimed(Bead),

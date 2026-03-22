@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::config::Config;
 use crate::prompt::BuiltPrompt;
@@ -196,6 +196,21 @@ pub struct AgentAdapter {
     /// How to extract token usage from agent output.
     #[serde(default)]
     pub token_extraction: TokenExtraction,
+    /// Optional binary/script to normalize agent stdout into universal JSONL.
+    ///
+    /// When set, the named binary is invoked with the raw agent stdout piped to
+    /// its stdin.  Its stdout replaces the raw output for all downstream
+    /// processing (token extraction, outcome parsing, …).
+    ///
+    /// Example adapter YAML:
+    /// ```yaml
+    /// output_transform: "needle-transform-claude"
+    /// ```
+    ///
+    /// The binary must be present on PATH; `needle test-agent <name>` will
+    /// report an error if it cannot be found.
+    #[serde(default)]
+    pub output_transform: Option<String>,
 }
 
 fn default_input_method() -> InputMethod {
@@ -243,6 +258,7 @@ fn builtin_claude_sonnet() -> AgentAdapter {
             input_path: "result.usage.input_tokens".to_string(),
             output_path: "result.usage.output_tokens".to_string(),
         },
+        output_transform: None,
     }
 }
 
@@ -267,6 +283,7 @@ fn builtin_claude_opus() -> AgentAdapter {
             input_path: "result.usage.input_tokens".to_string(),
             output_path: "result.usage.output_tokens".to_string(),
         },
+        output_transform: None,
     }
 }
 
@@ -288,6 +305,7 @@ fn builtin_opencode() -> AgentAdapter {
         provider: None,
         model: None,
         token_extraction: TokenExtraction::None,
+        output_transform: None,
     }
 }
 
@@ -311,6 +329,7 @@ fn builtin_codex() -> AgentAdapter {
         provider: Some("openai".to_string()),
         model: Some("gpt-4".to_string()),
         token_extraction: TokenExtraction::None,
+        output_transform: None,
     }
 }
 
@@ -338,6 +357,7 @@ fn builtin_aider() -> AgentAdapter {
             input_group: 1,
             output_group: 2,
         },
+        output_transform: None,
     }
 }
 
@@ -355,6 +375,7 @@ fn builtin_generic() -> AgentAdapter {
         provider: None,
         model: None,
         token_extraction: TokenExtraction::None,
+        output_transform: None,
     }
 }
 
@@ -574,12 +595,70 @@ impl Dispatcher {
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
 
+        // If output_transform is configured, spawn it now and wire up a bounded
+        // channel so the agent's stdout can be tee'd to it in real-time without
+        // the agent being blocked by a slow transform consumer.
+        let transform_tx: Option<tokio::sync::mpsc::Sender<String>> =
+            if let Some(ref transform_cmd) = adapter.output_transform {
+                let mut transform_child = tokio::process::Command::new("bash")
+                    .arg("-c")
+                    .arg(transform_cmd)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .with_context(|| {
+                        format!("failed to spawn output_transform: {transform_cmd}")
+                    })?;
+
+                let transform_stdin = transform_child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| anyhow::anyhow!("failed to open output_transform stdin"))?;
+
+                // Bounded channel: capacity 64 lines. try_send drops lines when
+                // the transform is slower than the agent, preventing back-pressure.
+                let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
+
+                tokio::spawn(async move {
+                    let mut writer = tokio::io::BufWriter::new(transform_stdin);
+                    while let Some(line) = rx.recv().await {
+                        if writer.write_all(line.as_bytes()).await.is_err() {
+                            break;
+                        }
+                        if writer.write_all(b"\n").await.is_err() {
+                            break;
+                        }
+                    }
+                    let _ = writer.flush().await;
+                    drop(writer); // close stdin → transform gets EOF
+                    let _ = transform_child.wait().await;
+                });
+
+                Some(tx)
+            } else {
+                None
+            };
+
         let stdout_task = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut pipe) = stdout_pipe {
-                let _ = AsyncReadExt::read_to_end(&mut pipe, &mut buf).await;
+            let mut captured = String::new();
+            if let Some(pipe) = stdout_pipe {
+                let reader = tokio::io::BufReader::new(pipe);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    captured.push_str(&line);
+                    captured.push('\n');
+                    if let Some(ref tx) = transform_tx {
+                        // Non-blocking: if the channel is full, drop this line
+                        // for the transform rather than back-pressuring the agent.
+                        let _ = tx.try_send(line);
+                    }
+                }
             }
-            String::from_utf8_lossy(&buf).into_owned()
+            // Dropping transform_tx here closes the channel; the feeder task
+            // sees rx.recv() == None and shuts down the transform process.
+            drop(transform_tx);
+            captured
         });
 
         let stderr_task = tokio::spawn(async move {
@@ -660,6 +739,7 @@ pub struct AgentTestResult {
     pub input_method: String,
     pub probe_result: Option<ProbeResult>,
     pub token_extraction_ok: Option<bool>,
+    pub output_transform_ok: Option<bool>,
     pub status: AgentTestStatus,
     pub errors: Vec<String>,
 }
@@ -771,7 +851,22 @@ pub fn test_agent(adapter_name: &str, config: &Config) -> Result<AgentTestResult
         errors.push("token extraction failed with sample data".to_string());
     }
 
-    // 6. Determine overall status.
+    // 6. Validate output_transform binary exists on PATH (if configured).
+    let output_transform_ok = if let Some(ref transform) = adapter.output_transform {
+        match which::which(transform) {
+            Ok(_) => Some(true),
+            Err(_) => {
+                errors.push(format!(
+                    "output_transform binary '{transform}' not found on PATH"
+                ));
+                Some(false)
+            }
+        }
+    } else {
+        None
+    };
+
+    // 7. Determine overall status.
     let status = if cli_path.is_none() {
         AgentTestStatus::Error
     } else if !errors.is_empty() {
@@ -787,6 +882,7 @@ pub fn test_agent(adapter_name: &str, config: &Config) -> Result<AgentTestResult
         input_method,
         probe_result,
         token_extraction_ok,
+        output_transform_ok,
         status,
         errors,
     })
@@ -867,6 +963,11 @@ pub fn print_test_result(result: &AgentTestResult) {
         Some(false) => println!("Tokens:  extraction FAILED"),
         None => println!("Tokens:  none configured"),
     }
+    match result.output_transform_ok {
+        Some(true) => println!("Transform: binary found"),
+        Some(false) => println!("Transform: binary NOT FOUND"),
+        None => println!("Transform: none configured"),
+    }
     println!("Status:  {}", result.status);
     for err in &result.errors {
         println!("  !! {err}");
@@ -894,6 +995,7 @@ mod tests {
             provider: None,
             model: None,
             token_extraction: TokenExtraction::None,
+            output_transform: None,
         }
     }
 
