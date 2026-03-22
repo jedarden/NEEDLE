@@ -7,6 +7,7 @@
 //!
 //! Depends on: `worker`, `config`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
@@ -394,14 +395,64 @@ fn launch_workers(
         bail!("--identifier cannot be combined with --count > 1; identifiers are auto-assigned from the NATO alphabet");
     }
 
-    for seq in 0..effective_count {
-        let worker_id = if effective_count == 1 {
-            identifier
-                .clone()
+    // Detect existing sessions to avoid name collisions.
+    let occupied = occupied_worker_ids(&agent_name)?;
+    if !occupied.is_empty() {
+        tracing::info!(
+            occupied = ?occupied,
+            "found existing worker sessions"
+        );
+    }
+
+    // Reject --identifier collision early.
+    if let Some(ref id) = identifier {
+        if occupied.contains(id) {
+            bail!(
+                "worker '{}' is already running in session 'needle-{}-{}'",
+                id,
+                agent_name,
+                id
+            );
+        }
+    }
+
+    // Build the list of worker IDs, skipping occupied names.
+    let worker_ids: Vec<String> = if effective_count == 1 {
+        vec![identifier.clone().unwrap_or_else(|| {
+            // Pick the first available NATO name.
+            NATO_ALPHABET
+                .iter()
+                .find(|name| !occupied.contains(**name))
+                .map(|s| s.to_string())
                 .unwrap_or_else(|| NATO_ALPHABET[0].to_string())
-        } else {
-            NATO_ALPHABET[seq as usize].to_string()
-        };
+        })]
+    } else {
+        let mut ids = Vec::with_capacity(effective_count as usize);
+        for name in NATO_ALPHABET {
+            if ids.len() >= effective_count as usize {
+                break;
+            }
+            if occupied.contains(*name) {
+                tracing::warn!(
+                    worker_id = %name,
+                    "skipping occupied worker name"
+                );
+                continue;
+            }
+            ids.push(name.to_string());
+        }
+        if ids.len() < effective_count as usize {
+            bail!(
+                "cannot launch {} workers — only {} NATO names available ({} occupied)",
+                effective_count,
+                ids.len(),
+                occupied.len()
+            );
+        }
+        ids
+    };
+
+    for (seq, worker_id) in worker_ids.iter().enumerate() {
         let session_name = format!("needle-{agent_name}-{worker_id}");
 
         tracing::info!(
@@ -439,7 +490,7 @@ fn launch_workers(
         );
         println!("Attach to a worker with: tmux attach -t needle-{agent_name}-<name>");
     } else {
-        let worker_id = identifier.as_deref().unwrap_or(NATO_ALPHABET[0]);
+        let worker_id = &worker_ids[0];
         println!("Attach with: tmux attach -t needle-{agent_name}-{worker_id}");
     }
 
@@ -1496,6 +1547,22 @@ fn list_needle_sessions() -> Result<Vec<TmuxSession>> {
         .collect();
 
     Ok(sessions)
+}
+
+/// Return the set of worker IDs already running for a given agent.
+///
+/// Parses tmux session names matching `needle-{agent}-{worker_id}` and returns
+/// the `{worker_id}` portion. Returns an empty set if no sessions are running
+/// or tmux is unavailable.
+fn occupied_worker_ids(agent: &str) -> Result<HashSet<String>> {
+    let prefix = format!("needle-{agent}-");
+    let sessions = list_needle_sessions()?;
+    let ids = sessions
+        .iter()
+        .filter_map(|s| s.name.strip_prefix(&prefix))
+        .map(|id| id.to_string())
+        .collect();
+    Ok(ids)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
