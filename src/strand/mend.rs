@@ -15,6 +15,7 @@ use anyhow::Result;
 
 use crate::bead_store::BeadStore;
 use crate::config::MendConfig;
+use crate::health::HealthMonitor;
 use crate::peer::PeerMonitor;
 use crate::registry::Registry;
 use crate::telemetry::{EventKind, Telemetry};
@@ -101,6 +102,75 @@ impl MendStrand {
 
         let peer_result = peer_monitor.check_peers().await?;
         summary.beads_released += peer_result.beads_released;
+
+        Ok(())
+    }
+
+    // ── Step 1.5: Orphaned in-progress bead recovery ────────────────────────
+
+    /// Scan all in-progress beads and release any whose assignee does not
+    /// correspond to a live worker. This catches beads orphaned by workers
+    /// that died without leaving a heartbeat file (or whose heartbeat was
+    /// already cleaned up).
+    async fn cleanup_orphaned_in_progress(
+        &self,
+        store: &dyn BeadStore,
+        summary: &mut MendSummary,
+    ) -> Result<()> {
+        let all_beads = store.list_all().await?;
+        let workers = self.registry.list()?;
+
+        // Build a set of (worker_id, is_alive) for registered workers.
+        let live_worker_ids: std::collections::HashSet<String> = workers
+            .iter()
+            .filter(|w| HealthMonitor::check_pid_alive(w.pid))
+            .map(|w| w.id.clone())
+            .collect();
+
+        for bead in &all_beads {
+            if bead.status != BeadStatus::InProgress {
+                continue;
+            }
+
+            let assignee = match &bead.assignee {
+                Some(a) if !a.is_empty() => a,
+                _ => continue,
+            };
+
+            // Skip if the assignee matches our own worker (we're running).
+            if assignee == &self.worker_id {
+                continue;
+            }
+
+            // Skip if the assignee matches a registered, alive worker.
+            if live_worker_ids.contains(assignee.as_str()) {
+                continue;
+            }
+
+            // Orphaned: assignee is not a live registered worker. Release it.
+            tracing::info!(
+                bead_id = %bead.id,
+                assignee = %assignee,
+                "releasing orphaned in-progress bead (assignee has no live worker)"
+            );
+
+            match store.release(&bead.id).await {
+                Ok(()) => {
+                    let _ = self.telemetry.emit(EventKind::StuckReleased {
+                        bead_id: bead.id.clone(),
+                        peer_worker: assignee.clone(),
+                    });
+                    summary.beads_released += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "failed to release orphaned in-progress bead"
+                    );
+                }
+            }
+        }
 
         Ok(())
     }
@@ -343,6 +413,12 @@ impl super::Strand for MendStrand {
         if let Err(e) = self.cleanup_stale_claims(store, &mut summary).await {
             tracing::warn!(error = %e, "mend: stale claim cleanup failed");
             return StrandResult::Error(StrandError::StoreError(e));
+        }
+
+        // Step 1.5: Orphaned in-progress bead recovery (registry-based).
+        if let Err(e) = self.cleanup_orphaned_in_progress(store, &mut summary).await {
+            tracing::warn!(error = %e, "mend: orphaned in-progress cleanup failed");
+            // Non-fatal — continue with remaining steps.
         }
 
         // Step 2: Orphaned lock file removal.
@@ -637,6 +713,24 @@ mod tests {
         }
     }
 
+    fn make_in_progress_bead(id: &str, assignee: &str) -> Bead {
+        let dt = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        Bead {
+            id: BeadId::from(id),
+            title: format!("Bead {id}"),
+            body: None,
+            priority: 1,
+            status: BeadStatus::InProgress,
+            assignee: Some(assignee.to_string()),
+            labels: vec![],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            dependents: vec![],
+            created_at: dt,
+            updated_at: dt,
+        }
+    }
+
     fn write_heartbeat(dir: &Path, data: &HeartbeatData) {
         let path = dir.join(format!("{}.json", data.worker_id));
         let json = serde_json::to_string(data).unwrap();
@@ -698,6 +792,134 @@ mod tests {
             matches!(result, StrandResult::NoWork),
             "expected NoWork when nothing to clean, got: {result:?}"
         );
+    }
+
+    // ── Orphaned in-progress bead tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn orphaned_in_progress_bead_released() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An in-progress bead assigned to a worker that doesn't exist.
+        let bead = make_in_progress_bead("nd-orphan", "dead-worker");
+
+        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after releasing orphaned in-progress bead, got: {result:?}"
+        );
+        assert_eq!(release_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn in_progress_bead_with_live_worker_not_released() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An in-progress bead assigned to a worker that is registered and alive.
+        let bead = make_in_progress_bead("nd-active", "alive-worker");
+
+        // Register the worker with our own PID (which is alive).
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "alive-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when assignee is a live worker, got: {result:?}"
+        );
+        assert_eq!(release_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn in_progress_bead_own_worker_not_released() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An in-progress bead assigned to ourselves.
+        let bead = make_in_progress_bead("nd-mine", "test-worker");
+
+        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when bead is assigned to ourselves, got: {result:?}"
+        );
+        assert_eq!(release_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn in_progress_bead_with_dead_registered_worker_released() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An in-progress bead assigned to a worker that is registered but dead.
+        let bead = make_in_progress_bead("nd-stale", "dead-registered");
+
+        // Register the worker with a dead PID.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "dead-registered".to_string(),
+                pid: 99_999_999,
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after releasing bead from dead registered worker, got: {result:?}"
+        );
+        assert_eq!(release_count.load(Ordering::Relaxed), 1);
     }
 
     // ── Orphaned lock file tests ─────────────────────────────────────────────
