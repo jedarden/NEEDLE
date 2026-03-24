@@ -296,6 +296,42 @@ pub enum EventKind {
         restored_hash: String,
     },
 
+    // ── Output transform ──
+    OutputTransformSpawned {
+        bead_id: BeadId,
+        transform_cmd: String,
+        log_path: String,
+    },
+    OutputTransformExited {
+        bead_id: BeadId,
+        exit_code: i32,
+    },
+    OutputTransformSkipped {
+        bead_id: BeadId,
+        reason: String,
+    },
+
+    // ── Transform lifecycle ──
+    TransformStarted {
+        bead_id: BeadId,
+        transform_binary: String,
+        agent: String,
+    },
+    TransformCompleted {
+        bead_id: BeadId,
+        events_written: u64,
+        duration_ms: u64,
+    },
+    TransformFailed {
+        bead_id: BeadId,
+        error: String,
+        exit_code: i32,
+    },
+    TransformSkipped {
+        bead_id: BeadId,
+        reason: String,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -355,6 +391,13 @@ impl EventKind {
             EventKind::UpgradeDetected { .. } => "worker.upgrade.detected",
             EventKind::UpgradeCompleted { .. } => "worker.upgrade.completed",
             EventKind::RollbackCompleted { .. } => "rollback.completed",
+            EventKind::OutputTransformSpawned { .. } => "agent.transform.spawned",
+            EventKind::OutputTransformExited { .. } => "agent.transform.exited",
+            EventKind::OutputTransformSkipped { .. } => "agent.transform.skipped",
+            EventKind::TransformStarted { .. } => "transform.started",
+            EventKind::TransformCompleted { .. } => "transform.completed",
+            EventKind::TransformFailed { .. } => "transform.failed",
+            EventKind::TransformSkipped { .. } => "transform.skipped",
             EventKind::SinkError { .. } => "telemetry.sink_error",
         }
     }
@@ -381,7 +424,14 @@ impl EventKind {
             | EventKind::VerificationFailed { bead_id, .. }
             | EventKind::VerificationPassed { bead_id, .. }
             | EventKind::UnravelAnalyzed { bead_id, .. }
-            | EventKind::UnravelSkipped { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::UnravelSkipped { bead_id, .. }
+            | EventKind::OutputTransformSpawned { bead_id, .. }
+            | EventKind::OutputTransformExited { bead_id, .. }
+            | EventKind::OutputTransformSkipped { bead_id, .. }
+            | EventKind::TransformStarted { bead_id, .. }
+            | EventKind::TransformCompleted { bead_id, .. }
+            | EventKind::TransformFailed { bead_id, .. }
+            | EventKind::TransformSkipped { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
@@ -779,6 +829,51 @@ impl EventKind {
                     "restored_hash": restored_hash,
                 })
             }
+            EventKind::OutputTransformSpawned {
+                bead_id,
+                transform_cmd,
+                log_path,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "transform_cmd": transform_cmd,
+                "log_path": log_path,
+            }),
+            EventKind::OutputTransformExited { bead_id, exit_code } => {
+                serde_json::json!({ "bead_id": bead_id, "exit_code": exit_code })
+            }
+            EventKind::OutputTransformSkipped { bead_id, reason } => {
+                serde_json::json!({ "bead_id": bead_id, "reason": reason })
+            }
+            EventKind::TransformStarted {
+                bead_id,
+                transform_binary,
+                agent,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "transform_binary": transform_binary,
+                "agent": agent,
+            }),
+            EventKind::TransformCompleted {
+                bead_id,
+                events_written,
+                duration_ms,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "events_written": events_written,
+                "duration_ms": duration_ms,
+            }),
+            EventKind::TransformFailed {
+                bead_id,
+                error,
+                exit_code,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "error": error,
+                "exit_code": exit_code,
+            }),
+            EventKind::TransformSkipped { bead_id, reason } => {
+                serde_json::json!({ "bead_id": bead_id, "reason": reason })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
         }
     }
@@ -838,7 +933,14 @@ impl EventKind {
             | EventKind::UpgradeDetected { .. }
             | EventKind::UpgradeCompleted { .. }
             | EventKind::RollbackCompleted { .. }
+            | EventKind::OutputTransformSpawned { .. }
+            | EventKind::OutputTransformExited { .. }
+            | EventKind::OutputTransformSkipped { .. }
+            | EventKind::TransformStarted { .. }
+            | EventKind::TransformFailed { .. }
+            | EventKind::TransformSkipped { .. }
             | EventKind::SinkError { .. } => None,
+            EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
         }
     }
 }
@@ -1338,10 +1440,14 @@ pub struct Telemetry {
     worker_id: WorkerId,
     session_id: String,
     sequence: Arc<AtomicU64>,
-    sender: mpsc::UnboundedSender<TelemetryEvent>,
+    /// Wrapped in Arc<Mutex<Option<...>>> so that `shutdown()` can drop the
+    /// sender explicitly (closing the channel) even while clones still exist.
+    sender: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<TelemetryEvent>>>>,
     /// Pending writer state that needs to be spawned in an async context.
     /// This is `Some` until `start()` is called.
     pending_writer: Arc<std::sync::Mutex<Option<PendingWriter>>>,
+    /// JoinHandle for the background writer task, set by `start()`.
+    writer_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 /// Holds the receiver and sinks until they can be spawned in an async context.
@@ -1380,8 +1486,9 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
-            sender,
+            sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
+            writer_handle: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1417,8 +1524,9 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
-            sender,
+            sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
+            writer_handle: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1464,8 +1572,9 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
-            sender,
+            sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
+            writer_handle: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
@@ -1505,8 +1614,9 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
-            sender,
+            sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(None)),
+            writer_handle: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1527,7 +1637,10 @@ impl Telemetry {
             data: kind.to_data(),
         };
         tracing::debug!(event_type = %event.event_type, seq, "telemetry event");
-        self.sender.send(event).ok(); // ok() — never block, never panic
+        // Lock the shared sender; None means shutdown() has been called.
+        if let Some(ref s) = *self.sender.lock().unwrap() {
+            s.send(event).ok(); // ok() — never block, never panic
+        }
         Ok(())
     }
 
@@ -1568,8 +1681,9 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
-            sender,
+            sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
+            writer_handle: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1581,7 +1695,27 @@ impl Telemetry {
     pub fn start(&self) {
         let pending = self.pending_writer.lock().unwrap().take();
         if let Some(pw) = pending {
-            Self::spawn_writer(pw.receiver, pw.file_sink, pw.stdout_sink, pw.hook_sink);
+            let handle =
+                Self::spawn_writer(pw.receiver, pw.file_sink, pw.stdout_sink, pw.hook_sink);
+            *self.writer_handle.lock().unwrap() = Some(handle);
+        }
+    }
+
+    /// Flush and shut down the background writer.
+    ///
+    /// Drops the shared sender (closing the channel) so the writer task
+    /// processes all buffered events and flushes its `BufWriter` before
+    /// exiting. Awaits the task's `JoinHandle` to guarantee completion.
+    ///
+    /// Call this at every terminal path in the worker before the tokio
+    /// Runtime is dropped, or the BufWriter flush will be cancelled.
+    pub async fn shutdown(&self) {
+        // Drop the sender to signal EOF to the writer task.
+        *self.sender.lock().unwrap() = None;
+        // Await the writer task so the flush completes before we return.
+        let handle = self.writer_handle.lock().unwrap().take();
+        if let Some(h) = handle {
+            let _ = h.await;
         }
     }
 
@@ -1591,7 +1725,7 @@ impl Telemetry {
         file_sink: Option<FileSink>,
         stdout_sink: Option<StdoutSink>,
         hook_sink: Option<HookSink>,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
                 if let Some(ref s) = file_sink {
@@ -1624,7 +1758,7 @@ impl Telemetry {
             if let Some(ref s) = stdout_sink {
                 let _ = s.flush();
             }
-        });
+        })
     }
 }
 

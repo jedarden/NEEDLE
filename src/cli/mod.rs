@@ -1243,6 +1243,34 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
         println!("OK (no log directory yet)");
     }
 
+    // 6. Check that output_transform binaries referenced by adapters are on PATH.
+    print!("Adapter transforms... ");
+    match dispatch::load_adapters(&config.agent.adapters_dir, &dispatch::builtin_adapters()) {
+        Ok(adapters) => {
+            let mut missing: Vec<String> = adapters
+                .values()
+                .filter_map(|a| a.output_transform.as_deref())
+                .filter(|bin| which::which(bin).is_err())
+                .map(str::to_owned)
+                .collect();
+            missing.sort();
+            missing.dedup();
+            if missing.is_empty() {
+                println!("OK");
+            } else {
+                println!(
+                    "WARNING: transform binary not on PATH: {}",
+                    missing.join(", ")
+                );
+                issues_found += missing.len();
+            }
+        }
+        Err(e) => {
+            println!("ERROR: could not load adapters: {e}");
+            issues_found += 1;
+        }
+    }
+
     // Summary.
     println!();
     if issues_found == 0 {

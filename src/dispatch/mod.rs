@@ -22,6 +22,20 @@ use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{BeadId, InputMethod};
 
 // ──────────────────────────────────────────────────────────────────────────────
+// TransformReport
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Result reported by the output-transform writer task after it finishes.
+struct TransformReport {
+    /// Number of lines written to the transform's stdin.
+    events_written: u64,
+    /// Transform process exit code (-1 if it couldn't be reaped).
+    exit_code: i32,
+    /// Wall-clock time from transform spawn to exit.
+    duration_ms: u64,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // ExecutionResult
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -258,7 +272,7 @@ fn builtin_claude_sonnet() -> AgentAdapter {
             input_path: "result.usage.input_tokens".to_string(),
             output_path: "result.usage.output_tokens".to_string(),
         },
-        output_transform: None,
+        output_transform: Some("needle-transform-claude".to_string()),
     }
 }
 
@@ -283,7 +297,7 @@ fn builtin_claude_opus() -> AgentAdapter {
             input_path: "result.usage.input_tokens".to_string(),
             output_path: "result.usage.output_tokens".to_string(),
         },
-        output_transform: None,
+        output_transform: Some("needle-transform-claude".to_string()),
     }
 }
 
@@ -598,47 +612,93 @@ impl Dispatcher {
         // If output_transform is configured, spawn it now and wire up a bounded
         // channel so the agent's stdout can be tee'd to it in real-time without
         // the agent being blocked by a slow transform consumer.
-        let transform_tx: Option<tokio::sync::mpsc::Sender<String>> =
-            if let Some(ref transform_cmd) = adapter.output_transform {
-                let mut transform_child = tokio::process::Command::new("bash")
+        let (transform_tx, transform_report_rx): (
+            Option<tokio::sync::mpsc::Sender<String>>,
+            Option<tokio::sync::oneshot::Receiver<TransformReport>>,
+        ) = if let Some(ref transform_cmd) = adapter.output_transform {
+            // Check if the transform binary is available.
+            if which::which(transform_cmd).is_err() {
+                let _ = self.telemetry.emit(EventKind::TransformSkipped {
+                    bead_id: bead_id.clone(),
+                    reason: format!("binary not found: {transform_cmd}"),
+                });
+                (None, None)
+            } else {
+                let _ = self.telemetry.emit(EventKind::TransformStarted {
+                    bead_id: bead_id.clone(),
+                    transform_binary: transform_cmd.clone(),
+                    agent: adapter.name.clone(),
+                });
+
+                match tokio::process::Command::new("bash")
                     .arg("-c")
                     .arg(transform_cmd)
                     .stdin(std::process::Stdio::piped())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .spawn()
-                    .with_context(|| {
-                        format!("failed to spawn output_transform: {transform_cmd}")
-                    })?;
+                {
+                    Ok(mut transform_child) => {
+                        match transform_child.stdin.take() {
+                            Some(transform_stdin) => {
+                                // Bounded channel: capacity 64 lines.
+                                // try_send drops lines when the transform is
+                                // slower than the agent.
+                                let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
+                                let transform_start = Instant::now();
+                                let (report_tx, report_rx) = tokio::sync::oneshot::channel();
 
-                let transform_stdin = transform_child
-                    .stdin
-                    .take()
-                    .ok_or_else(|| anyhow::anyhow!("failed to open output_transform stdin"))?;
+                                tokio::spawn(async move {
+                                    let mut writer = tokio::io::BufWriter::new(transform_stdin);
+                                    let mut events_written: u64 = 0;
+                                    while let Some(line) = rx.recv().await {
+                                        events_written += 1;
+                                        if writer.write_all(line.as_bytes()).await.is_err() {
+                                            break;
+                                        }
+                                        if writer.write_all(b"\n").await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    let _ = writer.flush().await;
+                                    drop(writer); // close stdin → transform gets EOF
+                                    let exit_status = transform_child.wait().await.ok();
+                                    let _ = report_tx.send(TransformReport {
+                                        events_written,
+                                        exit_code: exit_status.and_then(|s| s.code()).unwrap_or(-1),
+                                        duration_ms: transform_start.elapsed().as_millis() as u64,
+                                    });
+                                });
 
-                // Bounded channel: capacity 64 lines. try_send drops lines when
-                // the transform is slower than the agent, preventing back-pressure.
-                let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
-
-                tokio::spawn(async move {
-                    let mut writer = tokio::io::BufWriter::new(transform_stdin);
-                    while let Some(line) = rx.recv().await {
-                        if writer.write_all(line.as_bytes()).await.is_err() {
-                            break;
-                        }
-                        if writer.write_all(b"\n").await.is_err() {
-                            break;
+                                (Some(tx), Some(report_rx))
+                            }
+                            None => {
+                                let _ = self.telemetry.emit(EventKind::TransformFailed {
+                                    bead_id: bead_id.clone(),
+                                    error: "failed to open transform stdin".to_string(),
+                                    exit_code: -1,
+                                });
+                                (None, None)
+                            }
                         }
                     }
-                    let _ = writer.flush().await;
-                    drop(writer); // close stdin → transform gets EOF
-                    let _ = transform_child.wait().await;
-                });
-
-                Some(tx)
-            } else {
-                None
-            };
+                    Err(e) => {
+                        let _ = self.telemetry.emit(EventKind::TransformFailed {
+                            bead_id: bead_id.clone(),
+                            error: e.to_string(),
+                            exit_code: -1,
+                        });
+                        (None, None)
+                    }
+                }
+            }
+        } else {
+            let _ = self.telemetry.emit(EventKind::TransformSkipped {
+                bead_id: bead_id.clone(),
+                reason: "not configured".to_string(),
+            });
+            (None, None)
+        };
 
         let stdout_task = tokio::spawn(async move {
             let mut captured = String::new();
@@ -694,6 +754,34 @@ impl Dispatcher {
         let elapsed = start.elapsed();
         let stdout = stdout_task.await.unwrap_or_default();
         let stderr = stderr_task.await.unwrap_or_default();
+
+        // Emit transform lifecycle completion telemetry.
+        if let Some(report_rx) = transform_report_rx {
+            match report_rx.await {
+                Ok(report) => {
+                    if report.exit_code == 0 {
+                        let _ = self.telemetry.emit(EventKind::TransformCompleted {
+                            bead_id: bead_id.clone(),
+                            events_written: report.events_written,
+                            duration_ms: report.duration_ms,
+                        });
+                    } else {
+                        let _ = self.telemetry.emit(EventKind::TransformFailed {
+                            bead_id: bead_id.clone(),
+                            error: format!("exit code {}", report.exit_code),
+                            exit_code: report.exit_code,
+                        });
+                    }
+                }
+                Err(_) => {
+                    let _ = self.telemetry.emit(EventKind::TransformFailed {
+                        bead_id: bead_id.clone(),
+                        error: "transform task panicked or was cancelled".to_string(),
+                        exit_code: -1,
+                    });
+                }
+            }
+        }
 
         Ok(ExecutionResult {
             exit_code,

@@ -230,6 +230,7 @@ impl Worker {
                     if let Err(e) = self.registry.deregister(&self.worker_name) {
                         tracing::warn!(error = %e, "failed to deregister from worker registry on error");
                     }
+                    self.telemetry.shutdown().await;
                     return Err(err);
                 }
                 WorkerState::Booting => {
@@ -894,6 +895,8 @@ impl Worker {
             uptime_secs = uptime,
             "worker stopped"
         );
+
+        self.telemetry.shutdown().await;
 
         Ok(WorkerState::Stopped)
     }
@@ -1858,6 +1861,7 @@ mod tests {
             provider: None,
             model: None,
             token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
         };
         let mut adapters = HashMap::new();
         adapters.insert("echo-test".to_string(), echo_adapter);

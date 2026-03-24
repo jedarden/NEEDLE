@@ -534,7 +534,7 @@ mod tests {
                 labels: self.labels.clone(),
                 workspace: PathBuf::from("/tmp/test"),
                 dependencies: vec![],
-            dependents: vec![],
+                dependents: vec![],
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })
