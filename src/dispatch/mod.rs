@@ -22,20 +22,6 @@ use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{BeadId, InputMethod};
 
 // ──────────────────────────────────────────────────────────────────────────────
-// TransformReport
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Result reported by the output-transform writer task after it finishes.
-struct TransformReport {
-    /// Number of lines written to the transform's stdin.
-    events_written: u64,
-    /// Transform process exit code (-1 if it couldn't be reaped).
-    exit_code: i32,
-    /// Wall-clock time from transform spawn to exit.
-    duration_ms: u64,
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
 // ExecutionResult
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -343,7 +329,7 @@ fn builtin_codex() -> AgentAdapter {
         provider: Some("openai".to_string()),
         model: Some("gpt-4".to_string()),
         token_extraction: TokenExtraction::None,
-        output_transform: None,
+        output_transform: Some("needle-transform-codex".to_string()),
     }
 }
 
@@ -612,9 +598,17 @@ impl Dispatcher {
         // If output_transform is configured, spawn it now and wire up a bounded
         // channel so the agent's stdout can be tee'd to it in real-time without
         // the agent being blocked by a slow transform consumer.
-        let (transform_tx, transform_report_rx): (
+        //
+        // Returns: (channel-sender, transform-child, log-writer-task, spawn-instant)
+        // The child is kept here (not moved into a task) so we can kill it after
+        // the agent exits.  The log-writer task reads transform stdout and writes
+        // normalized JSONL to ~/.needle/logs/<worker>-<bead_id>.agent.jsonl.
+        #[allow(clippy::type_complexity)]
+        let (transform_tx, transform_child_opt, transform_log_task, transform_start): (
             Option<tokio::sync::mpsc::Sender<String>>,
-            Option<tokio::sync::oneshot::Receiver<TransformReport>>,
+            Option<tokio::process::Child>,
+            Option<tokio::task::JoinHandle<u64>>,
+            Option<Instant>,
         ) = if let Some(ref transform_cmd) = adapter.output_transform {
             // Check if the transform binary is available.
             if which::which(transform_cmd).is_err() {
@@ -622,7 +616,7 @@ impl Dispatcher {
                     bead_id: bead_id.clone(),
                     reason: format!("binary not found: {transform_cmd}"),
                 });
-                (None, None)
+                (None, None, None, None)
             } else {
                 let _ = self.telemetry.emit(EventKind::TransformStarted {
                     bead_id: bead_id.clone(),
@@ -634,25 +628,27 @@ impl Dispatcher {
                     .arg("-c")
                     .arg(transform_cmd)
                     .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::inherit())
                     .spawn()
                 {
                     Ok(mut transform_child) => {
                         match transform_child.stdin.take() {
                             Some(transform_stdin) => {
+                                let transform_stdout = transform_child.stdout.take();
+
                                 // Bounded channel: capacity 64 lines.
                                 // try_send drops lines when the transform is
                                 // slower than the agent.
                                 let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
                                 let transform_start = Instant::now();
-                                let (report_tx, report_rx) = tokio::sync::oneshot::channel();
 
+                                // Feeder task: forwards channel lines to
+                                // transform stdin.  Dropping the writer closes
+                                // stdin → transform receives EOF.
                                 tokio::spawn(async move {
                                     let mut writer = tokio::io::BufWriter::new(transform_stdin);
-                                    let mut events_written: u64 = 0;
                                     while let Some(line) = rx.recv().await {
-                                        events_written += 1;
                                         if writer.write_all(line.as_bytes()).await.is_err() {
                                             break;
                                         }
@@ -661,16 +657,24 @@ impl Dispatcher {
                                         }
                                     }
                                     let _ = writer.flush().await;
-                                    drop(writer); // close stdin → transform gets EOF
-                                    let exit_status = transform_child.wait().await.ok();
-                                    let _ = report_tx.send(TransformReport {
-                                        events_written,
-                                        exit_code: exit_status.and_then(|s| s.code()).unwrap_or(-1),
-                                        duration_ms: transform_start.elapsed().as_millis() as u64,
-                                    });
+                                    // writer drops → transform gets stdin EOF
                                 });
 
-                                (Some(tx), Some(report_rx))
+                                // Compute per-bead log file path.
+                                let log_path = agent_log_path(self.telemetry.worker_id(), bead_id);
+
+                                // Log writer task: reads transform stdout and
+                                // writes normalized JSONL to the log file.
+                                // Returns number of lines written.
+                                let log_task =
+                                    tokio::spawn(write_transform_log(transform_stdout, log_path));
+
+                                (
+                                    Some(tx),
+                                    Some(transform_child),
+                                    Some(log_task),
+                                    Some(transform_start),
+                                )
                             }
                             None => {
                                 let _ = self.telemetry.emit(EventKind::TransformFailed {
@@ -678,7 +682,7 @@ impl Dispatcher {
                                     error: "failed to open transform stdin".to_string(),
                                     exit_code: -1,
                                 });
-                                (None, None)
+                                (None, None, None, None)
                             }
                         }
                     }
@@ -688,7 +692,7 @@ impl Dispatcher {
                             error: e.to_string(),
                             exit_code: -1,
                         });
-                        (None, None)
+                        (None, None, None, None)
                     }
                 }
             }
@@ -697,7 +701,7 @@ impl Dispatcher {
                 bead_id: bead_id.clone(),
                 reason: "not configured".to_string(),
             });
-            (None, None)
+            (None, None, None, None)
         };
 
         let stdout_task = tokio::spawn(async move {
@@ -752,34 +756,41 @@ impl Dispatcher {
         };
 
         let elapsed = start.elapsed();
+        // Await stdout/stderr readers; dropping transform_tx here closes the
+        // feeder channel, causing the feeder task to close transform stdin.
         let stdout = stdout_task.await.unwrap_or_default();
         let stderr = stderr_task.await.unwrap_or_default();
 
-        // Emit transform lifecycle completion telemetry.
-        if let Some(report_rx) = transform_report_rx {
-            match report_rx.await {
-                Ok(report) => {
-                    if report.exit_code == 0 {
-                        let _ = self.telemetry.emit(EventKind::TransformCompleted {
-                            bead_id: bead_id.clone(),
-                            events_written: report.events_written,
-                            duration_ms: report.duration_ms,
-                        });
-                    } else {
-                        let _ = self.telemetry.emit(EventKind::TransformFailed {
-                            bead_id: bead_id.clone(),
-                            error: format!("exit code {}", report.exit_code),
-                            exit_code: report.exit_code,
-                        });
-                    }
-                }
-                Err(_) => {
-                    let _ = self.telemetry.emit(EventKind::TransformFailed {
-                        bead_id: bead_id.clone(),
-                        error: "transform task panicked or was cancelled".to_string(),
-                        exit_code: -1,
-                    });
-                }
+        // Kill transform after agent exits (requirement: transform is always
+        // killed when agent exits, regardless of exit code).  start_kill() is
+        // a no-op if the process has already exited.
+        if let Some(mut t_child) = transform_child_opt {
+            let _ = t_child.start_kill();
+            let transform_exit = t_child.wait().await.ok();
+            let t_exit_code = transform_exit.and_then(|s| s.code()).unwrap_or(-1);
+
+            // Await log writer: flushes and closes the file before we return
+            // (i.e., before HANDLING state begins).
+            let events_written = if let Some(task) = transform_log_task {
+                task.await.unwrap_or(0)
+            } else {
+                0
+            };
+
+            let duration_ms = transform_start.map_or(0, |s| s.elapsed().as_millis() as u64);
+
+            if t_exit_code == 0 {
+                let _ = self.telemetry.emit(EventKind::TransformCompleted {
+                    bead_id: bead_id.clone(),
+                    events_written,
+                    duration_ms,
+                });
+            } else {
+                let _ = self.telemetry.emit(EventKind::TransformFailed {
+                    bead_id: bead_id.clone(),
+                    error: format!("exit code {t_exit_code}"),
+                    exit_code: t_exit_code,
+                });
             }
         }
 
@@ -796,6 +807,77 @@ impl Dispatcher {
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Compute the per-bead agent log path: `~/.needle/logs/<worker>-<bead_id>.agent.jsonl`.
+///
+/// Returns `None` if `$HOME` is not set.
+fn agent_log_path(worker_id: &str, bead_id: &BeadId) -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join(".needle")
+            .join("logs")
+            .join(format!("{}-{}.agent.jsonl", worker_id, bead_id)),
+    )
+}
+
+/// Read transform stdout and write each line to the agent log file.
+///
+/// Returns the number of lines written.  If the log path is `None` or the file
+/// cannot be created, stdout is drained to avoid blocking the transform process.
+async fn write_transform_log(
+    stdout_pipe: Option<tokio::process::ChildStdout>,
+    log_path: Option<PathBuf>,
+) -> u64 {
+    let Some(pipe) = stdout_pipe else {
+        return 0;
+    };
+
+    let Some(path) = log_path else {
+        // No log path configured — drain to avoid blocking the transform.
+        let reader = tokio::io::BufReader::new(pipe);
+        let mut lines = reader.lines();
+        while let Ok(Some(_)) = lines.next_line().await {}
+        return 0;
+    };
+
+    // Ensure the log directory exists.
+    if let Some(parent) = path.parent() {
+        if tokio::fs::create_dir_all(parent).await.is_err() {
+            let reader = tokio::io::BufReader::new(pipe);
+            let mut lines = reader.lines();
+            while let Ok(Some(_)) = lines.next_line().await {}
+            return 0;
+        }
+    }
+
+    // Open (create/truncate) the log file.
+    let file = match tokio::fs::File::create(&path).await {
+        Ok(f) => f,
+        Err(_) => {
+            let reader = tokio::io::BufReader::new(pipe);
+            let mut lines = reader.lines();
+            while let Ok(Some(_)) = lines.next_line().await {}
+            return 0;
+        }
+    };
+
+    let mut writer = tokio::io::BufWriter::new(file);
+    let reader = tokio::io::BufReader::new(pipe);
+    let mut lines = reader.lines();
+    let mut count = 0u64;
+    while let Ok(Some(line)) = lines.next_line().await {
+        if writer.write_all(line.as_bytes()).await.is_err() {
+            break;
+        }
+        if writer.write_all(b"\n").await.is_err() {
+            break;
+        }
+        count += 1;
+    }
+    let _ = writer.flush().await;
+    count
+}
 
 /// Write prompt content to a temp file, returning the file path.
 ///
@@ -1288,6 +1370,10 @@ input_method:
             .contains("--approval-mode full-auto"));
         assert_eq!(adapter.model, Some("gpt-4".to_string()));
         assert_eq!(adapter.provider, Some("openai".to_string()));
+        assert_eq!(
+            adapter.output_transform,
+            Some("needle-transform-codex".to_string())
+        );
     }
 
     #[test]

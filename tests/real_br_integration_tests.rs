@@ -497,6 +497,8 @@ async fn real_br_mend_cleans_crashed_peer() {
         "mend-worker".to_string(),
         registry,
         telemetry,
+        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        0,
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -558,6 +560,8 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
         "mend-worker".to_string(),
         registry,
         telemetry,
+        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        0,
     );
 
     let result = mend.evaluate(store.as_ref()).await;

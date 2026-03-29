@@ -465,6 +465,8 @@ async fn mend_strand_cleans_crashed_peer_returns_work_created() {
         "mend-worker".to_string(),
         registry,
         telemetry,
+        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        0,
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -507,6 +509,8 @@ async fn mend_strand_no_stale_peers_returns_no_work() {
         "mend-worker".to_string(),
         registry,
         telemetry,
+        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        0,
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -546,6 +550,8 @@ async fn mend_strand_removes_orphaned_lock_files() {
         "mend-worker".to_string(),
         registry,
         telemetry,
+        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        0,
     );
 
     let result = mend.evaluate(store.as_ref()).await;

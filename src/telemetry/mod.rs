@@ -191,6 +191,7 @@ pub enum EventKind {
         deps_cleaned: u32,
         db_repaired: bool,
         db_rebuilt: bool,
+        agent_logs_cleaned: u32,
     },
 
     // ── Effort tracking ──
@@ -648,6 +649,7 @@ impl EventKind {
                 deps_cleaned,
                 db_repaired,
                 db_rebuilt,
+                agent_logs_cleaned,
             } => {
                 serde_json::json!({
                     "beads_released": beads_released,
@@ -655,6 +657,7 @@ impl EventKind {
                     "deps_cleaned": deps_cleaned,
                     "db_repaired": db_repaired,
                     "db_rebuilt": db_rebuilt,
+                    "agent_logs_cleaned": agent_logs_cleaned,
                 })
             }
             EventKind::EffortRecorded {

@@ -29,6 +29,7 @@ struct MendSummary {
     deps_cleaned: u32,
     db_repaired: bool,
     db_rebuilt: bool,
+    agent_logs_cleaned: u32,
 }
 
 impl MendSummary {
@@ -39,6 +40,7 @@ impl MendSummary {
             || self.deps_cleaned > 0
             || self.db_repaired
             || self.db_rebuilt
+            || self.agent_logs_cleaned > 0
     }
 }
 
@@ -51,6 +53,8 @@ pub struct MendStrand {
     worker_id: String,
     registry: Registry,
     telemetry: Telemetry,
+    log_dir: PathBuf,
+    retention_days: u32,
 }
 
 impl MendStrand {
@@ -63,6 +67,9 @@ impl MendStrand {
     /// - `worker_id`: this worker's ID (excluded from peer checks)
     /// - `registry`: worker state registry
     /// - `telemetry`: telemetry emitter
+    /// - `log_dir`: directory where agent log files live
+    /// - `retention_days`: number of days to retain agent log files (0 = disabled)
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: MendConfig,
         heartbeat_dir: PathBuf,
@@ -71,6 +78,8 @@ impl MendStrand {
         worker_id: String,
         registry: Registry,
         telemetry: Telemetry,
+        log_dir: PathBuf,
+        retention_days: u32,
     ) -> Self {
         MendStrand {
             config,
@@ -80,6 +89,8 @@ impl MendStrand {
             worker_id,
             registry,
             telemetry,
+            log_dir,
+            retention_days,
         }
     }
 
@@ -317,7 +328,117 @@ impl MendStrand {
         Ok(())
     }
 
-    // ── Step 4: Database health check with auto-recovery ────────────────────
+    // ── Step 4: Agent log file cleanup ──────────────────────────────────────
+
+    /// Delete `.agent.jsonl` files in `log_dir` that are older than
+    /// `retention_days` and do not belong to a currently-executing bead.
+    ///
+    /// Files are matched by the `.agent.jsonl` suffix. The bead ID is parsed
+    /// from the stem (`<worker>-<bead>`): a file is considered active if the
+    /// stem ends with `-<bead_id>` for any in-progress bead.
+    async fn cleanup_old_agent_logs(
+        &self,
+        store: &dyn BeadStore,
+        summary: &mut MendSummary,
+    ) -> Result<()> {
+        if self.retention_days == 0 {
+            return Ok(());
+        }
+
+        let entries = match std::fs::read_dir(&self.log_dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    dir = %self.log_dir.display(),
+                    error = %e,
+                    "mend: failed to read log directory for agent log cleanup"
+                );
+                return Ok(());
+            }
+        };
+
+        // Collect all .agent.jsonl paths first so we can bail early if none.
+        let agent_log_paths: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with(".agent.jsonl"))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        if agent_log_paths.is_empty() {
+            return Ok(());
+        }
+
+        let cutoff = Duration::from_secs(u64::from(self.retention_days) * 86400);
+
+        // Build the set of currently in-progress bead IDs.
+        let in_progress_ids: std::collections::HashSet<String> = store
+            .list_all()
+            .await?
+            .into_iter()
+            .filter(|b| b.status == BeadStatus::InProgress)
+            .map(|b| b.id.as_ref().to_string())
+            .collect();
+
+        for path in &agent_log_paths {
+            // Check file age.
+            let age = match file_age(path) {
+                Some(a) => a,
+                None => continue,
+            };
+
+            if age <= cutoff {
+                continue;
+            }
+
+            // Skip if this log belongs to an in-progress bead.
+            let stem = match path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".agent.jsonl"))
+            {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+
+            let is_active = in_progress_ids
+                .iter()
+                .any(|bead_id| stem == *bead_id || stem.ends_with(&format!("-{bead_id}")));
+
+            if is_active {
+                tracing::debug!(
+                    path = %path.display(),
+                    "skipping agent log for in-progress bead"
+                );
+                continue;
+            }
+
+            if let Err(e) = std::fs::remove_file(path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "mend: failed to remove stale agent log"
+                );
+                continue;
+            }
+
+            tracing::info!(
+                path = %path.display(),
+                age_secs = age.as_secs(),
+                "mend: removed stale agent log"
+            );
+            summary.agent_logs_cleaned += 1;
+        }
+
+        Ok(())
+    }
+
+    // ── Step 5: Database health check with auto-recovery ────────────────────
 
     /// Run `br doctor` to check database health. If issues are found,
     /// escalate through the recovery pipeline:
@@ -433,7 +554,13 @@ impl super::Strand for MendStrand {
             return StrandResult::Error(StrandError::StoreError(e));
         }
 
-        // Step 4: Database health check.
+        // Step 4: Agent log file cleanup.
+        if let Err(e) = self.cleanup_old_agent_logs(store, &mut summary).await {
+            tracing::warn!(error = %e, "mend: agent log cleanup failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
+        // Step 5: Database health check.
         if let Err(e) = self.check_db_health(store, &mut summary).await {
             tracing::warn!(error = %e, "mend: database health check failed");
             // DB check failure is non-fatal — continue with the summary.
@@ -446,6 +573,7 @@ impl super::Strand for MendStrand {
             deps_cleaned: summary.deps_cleaned,
             db_repaired: summary.db_repaired,
             db_rebuilt: summary.db_rebuilt,
+            agent_logs_cleaned: summary.agent_logs_cleaned,
         });
 
         if summary.did_work() {
@@ -455,6 +583,7 @@ impl super::Strand for MendStrand {
                 deps_cleaned = summary.deps_cleaned,
                 db_repaired = summary.db_repaired,
                 db_rebuilt = summary.db_rebuilt,
+                agent_logs_cleaned = summary.agent_logs_cleaned,
                 "mend performed cleanup — restarting waterfall"
             );
             StrandResult::WorkCreated
@@ -682,6 +811,8 @@ mod tests {
             "test-worker".to_string(),
             Registry::new(reg_dir),
             Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
         )
     }
 
@@ -849,6 +980,8 @@ mod tests {
             "test-worker".to_string(),
             registry,
             Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
         );
 
         let result = mend.evaluate(&store).await;
@@ -912,6 +1045,8 @@ mod tests {
             "test-worker".to_string(),
             registry,
             Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
         );
 
         let result = mend.evaluate(&store).await;
@@ -947,6 +1082,8 @@ mod tests {
             "test-worker".to_string(),
             Registry::new(reg_dir.path()),
             Telemetry::new("test-worker".to_string()),
+            hb_dir.path().to_path_buf(),
+            0,
         );
 
         let result = mend.evaluate(&store).await;
@@ -982,6 +1119,8 @@ mod tests {
             "test-worker".to_string(),
             Registry::new(reg_dir.path()),
             Telemetry::new("test-worker".to_string()),
+            hb_dir.path().to_path_buf(),
+            0,
         );
 
         let result = mend.evaluate(&store).await;

@@ -153,10 +153,29 @@ impl Worker {
     ///
     /// The main loop is a match on `self.state`. Every state has a handler
     /// that performs its actions and sets `self.state` to the next state.
+    ///
+    /// Guarantees that the telemetry BufWriter is flushed before returning,
+    /// even when the inner state machine exits early via `?`.
     pub async fn run(&mut self) -> Result<WorkerState> {
         // Start the telemetry writer now that we are inside the tokio runtime.
         self.telemetry.start();
 
+        let result = self.run_inner().await;
+
+        // Safety-net flush: shutdown() is idempotent. Normal terminal paths
+        // (stop, handle_exhausted, Errored) already call it; this catches
+        // any early-exit via `?` (boot failure, state handler panic, etc.)
+        // so the BufWriter is always flushed before the tokio Runtime drops.
+        self.telemetry.shutdown().await;
+
+        result
+    }
+
+    /// Inner state machine — called only from [`run()`](Self::run).
+    ///
+    /// May return early via `?` without calling `telemetry.shutdown()`;
+    /// `run()` handles the safety-net flush.
+    async fn run_inner(&mut self) -> Result<WorkerState> {
         // Boot: validate config and initialize.
         self.boot()?;
 

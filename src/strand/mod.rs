@@ -65,6 +65,13 @@ impl StrandRunner {
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
         let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
         let lock_dir = std::path::PathBuf::from("/tmp");
+        let log_dir = config
+            .telemetry
+            .file_sink
+            .log_dir
+            .clone()
+            .unwrap_or_else(|| config.workspace.home.join("logs"));
+        let retention_days = config.telemetry.file_sink.retention_days;
         let mend = MendStrand::new(
             config.strands.mend.clone(),
             heartbeat_dir,
@@ -73,6 +80,8 @@ impl StrandRunner {
             worker_id.to_string(),
             registry,
             telemetry.clone(),
+            log_dir,
+            retention_days,
         );
 
         let explore = ExploreStrand::new(

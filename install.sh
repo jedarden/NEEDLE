@@ -148,6 +148,24 @@ main() {
     info "Installing to $INSTALL_PATH..."
     mv "$temp_binary" "$INSTALL_PATH"
 
+    # Download and install transform binaries alongside needle.
+    local transforms=("needle-transform-claude" "needle-transform-codex")
+    for transform in "${transforms[@]}"; do
+        local transform_asset="${transform}-${arch}-${os}"
+        local transform_url="https://github.com/${REPO}/releases/download/${version}/${transform_asset}"
+        local transform_dest="${install_dir}/${transform}"
+        local temp_transform="$temp_dir/${transform}"
+
+        info "Installing ${transform}..."
+        if download_file "$transform_url" "$temp_transform" 2>/dev/null; then
+            chmod +x "$temp_transform"
+            mv "$temp_transform" "$transform_dest"
+            success "${transform} installed to ${transform_dest}"
+        else
+            warn "${transform} not found in release assets — skipping (needle doctor will warn if referenced by an adapter)"
+        fi
+    done
+
     # Check if install dir is in PATH
     local path_has_dir=false
     if [[ ":$PATH:" == *":$install_dir:"* ]]; then
