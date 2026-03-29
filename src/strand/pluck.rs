@@ -72,16 +72,25 @@ impl super::Strand for PluckStrand {
             }
         };
 
-        // 2. Filter: remove beads that are actively in_progress (claimed by another worker).
+        // 2. Filter: remove beads with excluded labels.
+        //    Defensive guard — store.ready() passes exclude_labels in its Filters,
+        //    but the backing CLI may not include label data in every query type.
+        //    Filtering here guarantees excluded-label beads are never presented as
+        //    candidates regardless of backend behaviour, preventing the
+        //    SELECTING→CLAIMING→RETRYING spin loop observed when br ready --json
+        //    omits label fields for some beads.
+        candidates.retain(|b| !b.labels.iter().any(|l| self.exclude_labels.contains(l)));
+
+        // 3. Filter: remove beads that are actively in_progress (claimed by another worker).
         //    br ready returns open/claimable beads, but an open bead may have a stale
         //    assignee string from a previous claim that was released. We only exclude
         //    beads whose status is in_progress — not beads with a leftover assignee field.
         candidates.retain(|b| !matches!(b.status, crate::types::BeadStatus::InProgress));
 
-        // 3. Sort: deterministic (priority, created_at, id).
+        // 4. Sort: deterministic (priority, created_at, id).
         Self::sort_candidates(&mut candidates);
 
-        // 4. Return result.
+        // 5. Return result.
         if candidates.is_empty() {
             StrandResult::NoWork
         } else {
@@ -132,6 +141,75 @@ mod tests {
                 .cloned()
                 .collect();
             Ok(result)
+        }
+
+        async fn show(&self, id: &BeadId) -> Result<Bead> {
+            self.beads
+                .iter()
+                .find(|b| b.id == *id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))
+        }
+
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+            let bead = self.show(id).await?;
+            Ok(bead.labels)
+        }
+
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
+
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A store that returns all beads from `ready()` without any label filtering,
+    /// simulating a backend that omits label data from its ready listing.
+    struct UnfilteredStore {
+        beads: Vec<Bead>,
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for UnfilteredStore {
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(self.beads.clone())
+        }
+
+        /// Returns all beads regardless of filters — simulates a backend that
+        /// does not apply label exclusion (e.g. br ready --json omitting labels).
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            Ok(self.beads.clone())
         }
 
         async fn show(&self, id: &BeadId) -> Result<Bead> {
@@ -374,6 +452,55 @@ mod tests {
                 assert!(!ids.contains(&"custom-excluded"));
             }
             other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
+
+    // These tests use UnfilteredStore, which returns all beads from ready()
+    // without applying label exclusion — simulating a backend (e.g. br ready
+    // --json) that omits label data.  They verify that the strand's own
+    // defensive retain catches excluded-label beads regardless of what the
+    // store returns, preventing the SELECTING→CLAIMING→RETRYING spin loop.
+
+    #[tokio::test]
+    async fn strand_filters_excluded_labels_when_store_does_not() {
+        let store = UnfilteredStore {
+            beads: vec![
+                make_bead_with_labels("deferred-bead", 1, vec!["deferred"]),
+                make_bead_with_labels("normal-bead", 1, vec![]),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![]);
+        let result = strand.evaluate(&store).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                assert_eq!(beads.len(), 1);
+                assert_eq!(beads[0].id.as_ref(), "normal-bead");
+            }
+            other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn all_excluded_labels_returns_no_work_via_strand_filter() {
+        // When every candidate has an excluded label and the store doesn't
+        // filter them, the strand's own retain must produce an empty list
+        // and return NoWork — not BeadFound([]).  NoWork causes the worker
+        // to move to Exhausted rather than spinning the claim-retry loop.
+        let store = UnfilteredStore {
+            beads: vec![
+                make_bead_with_labels("deferred-1", 1, vec!["deferred"]),
+                make_bead_with_labels("deferred-2", 2, vec!["deferred", "human"]),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![]);
+        let result = strand.evaluate(&store).await;
+
+        match result {
+            StrandResult::NoWork => {}
+            other => panic!("expected NoWork, got: {other:?}"),
         }
     }
 
