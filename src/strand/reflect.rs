@@ -34,7 +34,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::bead_store::BeadStore;
 use crate::config::ReflectConfig;
-use crate::learning::{BeadType, Confidence, LearningEntry, LearningsFile, Retrospective};
+use crate::learning::{
+    BeadType, Confidence, GlobalLearningsFile, LearningEntry, LearningsFile, Retrospective,
+};
 use crate::skill::{render_skill_file, SkillFrontmatter, SkillLibrary};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{StrandError, StrandResult};
@@ -103,6 +105,8 @@ pub struct ReflectSummary {
     pub learnings_added: usize,
     pub learnings_pruned: usize,
     pub skills_promoted: usize,
+    /// Number of learnings promoted to the global learnings file.
+    pub global_learnings_promoted: usize,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -115,6 +119,12 @@ pub struct ReflectStrand {
     workspace: PathBuf,
     state_dir: PathBuf,
     telemetry: Telemetry,
+    /// Other workspaces to scan for cross-workspace patterns.
+    known_workspaces: Vec<PathBuf>,
+    /// Path to the global learnings file.
+    global_learnings_path: PathBuf,
+    /// Maximum entries in the global learnings file.
+    max_global_learnings: usize,
 }
 
 impl ReflectStrand {
@@ -135,7 +145,27 @@ impl ReflectStrand {
             workspace,
             state_dir,
             telemetry,
+            known_workspaces: Vec::new(),
+            global_learnings_path: PathBuf::new(),
+            max_global_learnings: 40,
         }
+    }
+
+    /// Configure cross-workspace detection and global learnings promotion.
+    ///
+    /// - `known_workspaces`: other workspace paths to check for matching patterns
+    /// - `global_learnings_path`: path to `~/.config/needle/global-learnings.md`
+    /// - `max_global_learnings`: cap on total entries in the global file (default: 40)
+    pub fn with_global(
+        mut self,
+        known_workspaces: Vec<PathBuf>,
+        global_learnings_path: PathBuf,
+        max_global_learnings: usize,
+    ) -> Self {
+        self.known_workspaces = known_workspaces;
+        self.global_learnings_path = global_learnings_path;
+        self.max_global_learnings = max_global_learnings;
+        self
     }
 
     /// Run the four-phase consolidation cycle.
@@ -320,6 +350,10 @@ impl ReflectStrand {
         let promoted = self.promote_to_skills(learnings.entries())?;
         summary.skills_promoted = promoted;
 
+        // Promote cross-workspace patterns to global learnings.
+        let global_promoted = self.promote_cross_workspace_patterns(&learnings)?;
+        summary.global_learnings_promoted = global_promoted;
+
         // ── Phase 4: Prune ────────────────────────────────────────────────────
         let pruned = learnings.prune_stale()?;
         summary.learnings_pruned = pruned;
@@ -441,6 +475,68 @@ impl ReflectStrand {
                 std::collections::HashSet::new()
             }
         }
+    }
+
+    /// Scan known workspaces for learnings that match entries in the current workspace,
+    /// promoting matches (cross-workspace patterns) to the global learnings file.
+    ///
+    /// An entry is promoted when a similar observation appears in at least one other
+    /// known workspace. Returns the number of entries promoted this run.
+    fn promote_cross_workspace_patterns(&self, learnings: &LearningsFile) -> Result<usize> {
+        // Skip when not configured.
+        if self.global_learnings_path.as_os_str().is_empty() || self.known_workspaces.is_empty() {
+            return Ok(0);
+        }
+
+        let mut global = GlobalLearningsFile::load(&self.global_learnings_path)?;
+
+        // Load learnings files for all known workspaces, skipping failures.
+        let mut other_learnings: Vec<LearningsFile> = Vec::new();
+        for ws in &self.known_workspaces {
+            match LearningsFile::load(ws) {
+                Ok(lf) if !lf.entries().is_empty() => other_learnings.push(lf),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        workspace = %ws.display(),
+                        error = %e,
+                        "reflect: failed to load learnings for cross-workspace scan"
+                    );
+                }
+            }
+        }
+
+        if other_learnings.is_empty() {
+            return Ok(0);
+        }
+
+        let mut promoted = 0usize;
+
+        for entry in learnings.entries() {
+            // Check if any other workspace has a similar observation.
+            let appears_in_other = other_learnings
+                .iter()
+                .any(|other| !other.find_similar(&entry.observation).is_empty());
+
+            if !appears_in_other {
+                continue;
+            }
+
+            if global.promote(entry.clone(), self.max_global_learnings) {
+                promoted += 1;
+                tracing::info!(
+                    bead_id = %entry.bead_id,
+                    observation = %entry.observation,
+                    "reflect: promoted cross-workspace learning to global"
+                );
+            }
+        }
+
+        if promoted > 0 {
+            global.write()?;
+        }
+
+        Ok(promoted)
     }
 
     /// Write a skill file for a promoted learning entry (YAML frontmatter format).
@@ -732,5 +828,225 @@ mod tests {
 
         let loaded = ReflectState::load(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.beads_at_last_consolidation, 42);
+    }
+
+    fn make_strand_with_global(
+        workspace: &std::path::Path,
+        known_workspaces: Vec<std::path::PathBuf>,
+        global_path: std::path::PathBuf,
+        max_global: usize,
+    ) -> ReflectStrand {
+        let config = ReflectConfig {
+            enabled: true,
+            min_beads_since_last: 100,
+            cooldown_hours: 9999,
+            ..Default::default()
+        };
+        let tel = Telemetry::new("test".to_string());
+        ReflectStrand::new(
+            config,
+            workspace.to_path_buf(),
+            workspace.join("state"),
+            tel,
+        )
+        .with_global(known_workspaces, global_path, max_global)
+    }
+
+    fn write_learnings(workspace: &std::path::Path, entries: &[(&str, &str)]) {
+        // entries: (bead_id, observation)
+        let beads_dir = workspace.join(".beads");
+        std::fs::create_dir_all(&beads_dir).unwrap();
+        let mut content = String::from("# Workspace Learnings\n\n");
+        for (bead_id, observation) in entries {
+            content.push_str(&format!(
+                "### 2026-04-04 | bead: {} | worker: alpha | type: other | reinforced: 0\n\
+                 - **Observation:** {}\n\
+                 - **Confidence:** high\n\
+                 - **Source:** test\n\n",
+                bead_id, observation
+            ));
+        }
+        std::fs::write(beads_dir.join("learnings.md"), content).unwrap();
+    }
+
+    #[test]
+    fn cross_workspace_no_known_workspaces_returns_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let global_path = dir.path().join("global-learnings.md");
+
+        let strand = make_strand_with_global(dir.path(), vec![], global_path, 40);
+        let learnings = crate::learning::LearningsFile::load(dir.path()).unwrap();
+
+        let promoted = strand.promote_cross_workspace_patterns(&learnings).unwrap();
+        assert_eq!(promoted, 0);
+    }
+
+    #[test]
+    fn cross_workspace_empty_path_returns_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        write_learnings(
+            other.path(),
+            &[("nd-0001", "use existing pattern from modules")],
+        );
+
+        let strand = make_strand_with_global(
+            dir.path(),
+            vec![other.path().to_path_buf()],
+            PathBuf::new(), // empty path
+            40,
+        );
+        let learnings = crate::learning::LearningsFile::load(dir.path()).unwrap();
+
+        let promoted = strand.promote_cross_workspace_patterns(&learnings).unwrap();
+        assert_eq!(promoted, 0);
+    }
+
+    #[test]
+    fn cross_workspace_promotes_matching_entry() {
+        let ws1 = tempfile::tempdir().unwrap();
+        let ws2 = tempfile::tempdir().unwrap();
+        let global_dir = tempfile::tempdir().unwrap();
+
+        // Both workspaces have a similar observation.
+        write_learnings(
+            ws1.path(),
+            &[("nd-0001", "use existing pattern from modules")],
+        );
+        write_learnings(
+            ws2.path(),
+            &[("nd-0002", "use existing pattern from modules")],
+        );
+
+        let global_path = global_dir.path().join("global-learnings.md");
+        let strand = make_strand_with_global(
+            ws1.path(),
+            vec![ws2.path().to_path_buf()],
+            global_path.clone(),
+            40,
+        );
+
+        let learnings = crate::learning::LearningsFile::load(ws1.path()).unwrap();
+        let promoted = strand.promote_cross_workspace_patterns(&learnings).unwrap();
+
+        assert_eq!(promoted, 1);
+        assert!(global_path.exists());
+
+        let global = crate::learning::GlobalLearningsFile::load(&global_path).unwrap();
+        assert_eq!(global.entries().len(), 1);
+        assert!(global.entries()[0]
+            .observation
+            .contains("use existing pattern"));
+    }
+
+    #[test]
+    fn cross_workspace_no_match_promotes_nothing() {
+        let ws1 = tempfile::tempdir().unwrap();
+        let ws2 = tempfile::tempdir().unwrap();
+        let global_dir = tempfile::tempdir().unwrap();
+
+        write_learnings(
+            ws1.path(),
+            &[("nd-0001", "use existing pattern from modules")],
+        );
+        write_learnings(
+            ws2.path(),
+            &[("nd-0002", "completely unrelated observation here")],
+        );
+
+        let global_path = global_dir.path().join("global-learnings.md");
+        let strand = make_strand_with_global(
+            ws1.path(),
+            vec![ws2.path().to_path_buf()],
+            global_path.clone(),
+            40,
+        );
+
+        let learnings = crate::learning::LearningsFile::load(ws1.path()).unwrap();
+        let promoted = strand.promote_cross_workspace_patterns(&learnings).unwrap();
+
+        assert_eq!(promoted, 0);
+        assert!(!global_path.exists());
+    }
+
+    #[test]
+    fn cross_workspace_respects_max_global_learnings() {
+        let ws1 = tempfile::tempdir().unwrap();
+        let ws2 = tempfile::tempdir().unwrap();
+        let global_dir = tempfile::tempdir().unwrap();
+
+        // Three matching entries in each workspace.
+        write_learnings(
+            ws1.path(),
+            &[
+                ("nd-0001", "use existing pattern from modules"),
+                ("nd-0002", "copy strand template for new strands"),
+                ("nd-0003", "run cargo clippy before committing code"),
+            ],
+        );
+        write_learnings(
+            ws2.path(),
+            &[
+                ("nd-0004", "use existing pattern from modules"),
+                ("nd-0005", "copy strand template for new strands"),
+                ("nd-0006", "run cargo clippy before committing code"),
+            ],
+        );
+
+        let global_path = global_dir.path().join("global-learnings.md");
+        // Cap at 2 entries.
+        let strand = make_strand_with_global(
+            ws1.path(),
+            vec![ws2.path().to_path_buf()],
+            global_path.clone(),
+            2,
+        );
+
+        let learnings = crate::learning::LearningsFile::load(ws1.path()).unwrap();
+        let promoted = strand.promote_cross_workspace_patterns(&learnings).unwrap();
+
+        assert_eq!(promoted, 2);
+        let global = crate::learning::GlobalLearningsFile::load(&global_path).unwrap();
+        assert_eq!(global.entries().len(), 2);
+    }
+
+    #[test]
+    fn cross_workspace_deduplicates_existing_global() {
+        let ws1 = tempfile::tempdir().unwrap();
+        let ws2 = tempfile::tempdir().unwrap();
+        let global_dir = tempfile::tempdir().unwrap();
+
+        let observation = "use existing pattern from modules";
+        write_learnings(ws1.path(), &[("nd-0001", observation)]);
+        write_learnings(ws2.path(), &[("nd-0002", observation)]);
+
+        // Pre-populate the global file with the same observation.
+        let global_path = global_dir.path().join("global-learnings.md");
+        let mut global = crate::learning::GlobalLearningsFile::load(&global_path).unwrap();
+        let entry = crate::learning::LearningEntry::new(
+            "nd-0000".to_string(),
+            "alpha".to_string(),
+            crate::learning::BeadType::Other,
+            observation.to_string(),
+            crate::learning::Confidence::High,
+            "pre-existing".to_string(),
+        );
+        global.promote(entry, 40);
+        global.write().unwrap();
+
+        let strand = make_strand_with_global(
+            ws1.path(),
+            vec![ws2.path().to_path_buf()],
+            global_path.clone(),
+            40,
+        );
+
+        let learnings = crate::learning::LearningsFile::load(ws1.path()).unwrap();
+        let promoted = strand.promote_cross_workspace_patterns(&learnings).unwrap();
+
+        // Already in global — should not be added again.
+        assert_eq!(promoted, 0);
+        let global = crate::learning::GlobalLearningsFile::load(&global_path).unwrap();
+        assert_eq!(global.entries().len(), 1);
     }
 }
