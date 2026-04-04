@@ -11,6 +11,15 @@
 #   {prompt_file} - Path to the temp file containing the rendered prompt
 #   {bead_id}     - The bead identifier (e.g., needle-abc123)
 #   {model}       - Model name from adapter config (default: "default")
+#
+# Optional fields:
+#   output_transform: <binary>
+#     Binary/script that reads raw agent stdout on stdin and writes normalized
+#     JSONL to stdout.  Used to convert agent-specific output formats into the
+#     universal NEEDLE event format.  The binary must be on PATH; `needle
+#     test-agent <name>` reports an error if it cannot be found.
+#     Example:
+#       output_transform: "needle-transform-claude"
 
 name: test-echo
 agent_cli: bash

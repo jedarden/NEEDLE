@@ -1402,6 +1402,28 @@ input_method:
         );
     }
 
+    #[test]
+    fn adapter_yaml_output_transform_deserialized() {
+        let yaml = r#"
+name: transform-agent
+agent_cli: my-agent
+invoke_template: "my-agent < {prompt_file}"
+output_transform: "needle-transform-custom"
+"#;
+        let adapter: AgentAdapter = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            adapter.output_transform,
+            Some("needle-transform-custom".to_string())
+        );
+    }
+
+    #[test]
+    fn adapter_yaml_output_transform_absent_is_none() {
+        let yaml = "name: no-transform\nagent_cli: agent\ninvoke_template: \"echo test\"\n";
+        let adapter: AgentAdapter = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(adapter.output_transform, None);
+    }
+
     // ── Effective timeout ──
 
     #[test]
