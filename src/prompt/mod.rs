@@ -17,6 +17,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::PromptConfig;
 use crate::learning::LearningsFile;
+use crate::skill::SkillLibrary;
 use crate::types::Bead;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -240,6 +241,8 @@ pub struct PromptBuilder {
     workspace_instructions: Option<String>,
     /// Cached learnings content for the workspace (if exists).
     learnings_content: Option<String>,
+    /// Skill library for matching and injecting relevant skills into prompts.
+    skill_library: Option<SkillLibrary>,
 }
 
 impl PromptBuilder {
@@ -265,6 +268,7 @@ impl PromptBuilder {
             context_file_paths: config.context_files.clone(),
             workspace_instructions: config.instructions.clone(),
             learnings_content: None,
+            skill_library: None,
         }
     }
 
@@ -275,11 +279,18 @@ impl PromptBuilder {
     pub fn with_workspace(config: &PromptConfig, workspace: &Path) -> Result<Self> {
         let mut builder = Self::new(config);
 
-        // Load learnings if the file exists
+        // Load learnings if the file exists.
         let learnings = LearningsFile::load(workspace);
         if let Ok(learnings_file) = learnings {
             if !learnings_file.entries().is_empty() {
                 builder.learnings_content = Some(learnings_file.to_prompt_content());
+            }
+        }
+
+        // Load skill library (missing directory is silently ignored).
+        if let Ok(lib) = SkillLibrary::load(workspace) {
+            if !lib.is_empty() {
+                builder.skill_library = Some(lib);
             }
         }
 
@@ -351,7 +362,21 @@ impl PromptBuilder {
             .get(template_name)
             .with_context(|| format!("unknown prompt template: {template_name}"))?;
 
-        let context_file_contents = self.load_context_files(workspace);
+        // Build context section: files + learnings + matching skills (in that order).
+        let mut context_parts = vec![self.load_context_files(workspace)];
+        if let Some(ref lib) = self.skill_library {
+            let matching = lib.matching_skills(&bead.labels, &bead.title);
+            if !matching.is_empty() {
+                let skill_content = SkillLibrary::to_prompt_content(&matching);
+                context_parts.push(skill_content);
+            }
+        }
+        let context_file_contents = context_parts
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
         let instructions = self
             .workspace_instructions
             .as_deref()

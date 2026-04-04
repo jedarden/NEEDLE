@@ -26,7 +26,6 @@
 //!
 //! Depends on: `config`, `learning`, `telemetry`, `types`.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -36,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::bead_store::BeadStore;
 use crate::config::ReflectConfig;
 use crate::learning::{BeadType, Confidence, LearningEntry, LearningsFile, Retrospective};
+use crate::skill::{render_skill_file, SkillFrontmatter, SkillLibrary};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{StrandError, StrandResult};
 
@@ -433,33 +433,17 @@ impl ReflectStrand {
     }
 
     /// Read the set of bead IDs that have already been promoted to skills.
-    fn read_promoted_ids(&self, skills_dir: &Path) -> HashSet<String> {
-        let mut ids = HashSet::new();
-        if !skills_dir.exists() {
-            return ids;
-        }
-        let Ok(entries) = std::fs::read_dir(skills_dir) else {
-            return ids;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                // Look for "Source bead:" line to extract bead ID.
-                for line in content.lines() {
-                    if let Some(rest) = line.strip_prefix("**Source bead:**") {
-                        ids.insert(rest.trim().to_string());
-                        break;
-                    }
-                }
+    fn read_promoted_ids(&self, _skills_dir: &Path) -> std::collections::HashSet<String> {
+        match SkillLibrary::load(&self.workspace) {
+            Ok(lib) => lib.promoted_source_beads(),
+            Err(e) => {
+                tracing::warn!(error = %e, "reflect: failed to load skill library for promoted IDs");
+                std::collections::HashSet::new()
             }
         }
-        ids
     }
 
-    /// Write a skill file for a promoted learning entry.
+    /// Write a skill file for a promoted learning entry (YAML frontmatter format).
     fn write_skill_file(&self, skills_dir: &Path, entry: &LearningEntry) -> Result<()> {
         std::fs::create_dir_all(skills_dir)
             .with_context(|| format!("failed to create skills dir: {}", skills_dir.display()))?;
@@ -468,28 +452,24 @@ impl ReflectStrand {
         let filename = format!("{}-{}.md", &slug[..slug.len().min(40)], &entry.bead_id);
         let path = skills_dir.join(&filename);
 
-        let content = format!(
-            "# Skill: {}\n\n\
-             **Promoted:** {}\n\
-             **Reinforcement count:** {}\n\
-             **Confidence:** {}\n\
-             **Source bead:** {}\n\
-             **Bead type:** {}\n\n\
-             ## Pattern\n\n\
-             {}\n\n\
-             ## Context\n\n\
-             Worker: {}\n\
-             Promoted from source: {}\n",
+        let frontmatter = SkillFrontmatter {
+            task_types: vec![entry.bead_type.as_str().to_string()],
+            labels: vec![],
+            success_count: 0,
+            last_used: None,
+            source_beads: vec![entry.bead_id.clone()],
+        };
+
+        let body = format!(
+            "## {}\n\n{}\n\n**Worker:** {}\n**Source:** {}\n",
             truncate(&entry.observation, 60),
-            Utc::now().format("%Y-%m-%d"),
-            entry.reinforcement_count,
-            entry.confidence.as_str(),
-            entry.bead_id,
-            entry.bead_type.as_str(),
             entry.observation,
             entry.worker,
             entry.source,
         );
+
+        let content = render_skill_file(&frontmatter, &body)
+            .with_context(|| format!("failed to render skill file: {filename}"))?;
 
         std::fs::write(&path, content)
             .with_context(|| format!("failed to write skill file: {}", path.display()))?;

@@ -164,6 +164,18 @@ impl OutcomeHandler {
                     bead_id: bead.id.clone(),
                     duration_ms: 0,
                 });
+                // Increment success_count for any skills that matched this bead.
+                if !bead.workspace.as_os_str().is_empty() {
+                    if let Ok(lib) = crate::skill::SkillLibrary::load(&bead.workspace) {
+                        if let Err(e) = lib.increment_success_for_bead(&bead.labels, &bead.title) {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                error = %e,
+                                "failed to increment skill success counts"
+                            );
+                        }
+                    }
+                }
             }
             Ok(current) => {
                 tracing::warn!(
