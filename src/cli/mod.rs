@@ -3063,4 +3063,285 @@ mod tests {
             .unwrap();
         assert_eq!(worker_id, "bravo");
     }
+
+    // ── Doctor check function unit tests ──────────────────────────────────────
+
+    #[test]
+    fn check_result_display_pass() {
+        let r = CheckResult::pass("Config", "valid");
+        let d = r.display();
+        assert!(d.contains("[PASS]"), "display should show PASS");
+        assert!(d.contains("Config"), "display should show name");
+        assert!(d.contains("valid"), "display should show message");
+    }
+
+    #[test]
+    fn check_result_display_warn() {
+        let r = CheckResult::warn("SQLite integrity", "sqlite3 not on PATH");
+        assert!(r.display().contains("[WARN]"));
+    }
+
+    #[test]
+    fn check_result_display_fail() {
+        let r = CheckResult::fail("Workspace", "not found");
+        assert!(r.display().contains("[FAIL]"));
+    }
+
+    #[test]
+    fn check_result_with_detail() {
+        let r = CheckResult::fail("JSONL", "2 invalid of 10 records")
+            .with_detail(vec!["line 3".to_string(), "line 7".to_string()]);
+        assert_eq!(r.detail.len(), 2);
+        assert_eq!(r.detail[0], "line 3");
+    }
+
+    #[test]
+    fn doctor_check_workspace_missing() {
+        let r = doctor_check_workspace(Path::new("/nonexistent/path/xyz"));
+        assert_eq!(r.status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn doctor_check_workspace_no_beads_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Dir exists but no .beads/ subdirectory.
+        let r = doctor_check_workspace(tmp.path());
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.message.contains(".beads/"), "should mention .beads/");
+    }
+
+    #[test]
+    fn doctor_check_workspace_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".beads")).unwrap();
+        let r = doctor_check_workspace(tmp.path());
+        assert_eq!(r.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn doctor_check_jsonl_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = doctor_check_jsonl(tmp.path());
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.message.contains("issues.jsonl"));
+    }
+
+    #[test]
+    fn doctor_check_jsonl_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("issues.jsonl");
+        std::fs::write(
+            &jsonl,
+            "{\"id\":\"nd-1\",\"title\":\"test\"}\n{\"id\":\"nd-2\"}\n",
+        )
+        .unwrap();
+        let r = doctor_check_jsonl(tmp.path());
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.message.contains("2 records"));
+    }
+
+    #[test]
+    fn doctor_check_jsonl_invalid_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let jsonl = tmp.path().join("issues.jsonl");
+        // Two valid, one invalid.
+        std::fs::write(&jsonl, "{\"id\":\"nd-1\"}\nNOT JSON\n{\"id\":\"nd-3\"}\n").unwrap();
+        let r = doctor_check_jsonl(tmp.path());
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.message.contains("1 invalid"), "got: {}", r.message);
+    }
+
+    #[test]
+    fn doctor_check_jsonl_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("issues.jsonl"), "").unwrap();
+        let r = doctor_check_jsonl(tmp.path());
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.message.contains("0 records"));
+    }
+
+    #[test]
+    fn doctor_check_lock_files_no_locks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = doctor_check_lock_files(tmp.path(), 3600, false);
+        assert_eq!(r.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn doctor_check_lock_files_fresh_not_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a fresh .lock file (mtime = now).
+        std::fs::write(tmp.path().join("workspace.lock"), b"").unwrap();
+        // TTL of 1 hour — newly written file is not stale.
+        let r = doctor_check_lock_files(tmp.path(), 3600, false);
+        assert_eq!(r.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn doctor_check_lock_files_stale_warns_without_repair() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = tmp.path().join("workspace.lock");
+        std::fs::write(&lock, b"").unwrap();
+        // Set mtime to 2 hours ago using filetime manipulation via set_file_times.
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        let ft = filetime::FileTime::from_system_time(past);
+        filetime::set_file_mtime(&lock, ft).unwrap();
+
+        let r = doctor_check_lock_files(tmp.path(), 3600, false);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.message.contains("stale"));
+    }
+
+    #[test]
+    fn doctor_check_lock_files_stale_repair_removes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock = tmp.path().join("workspace.lock");
+        std::fs::write(&lock, b"").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        let ft = filetime::FileTime::from_system_time(past);
+        filetime::set_file_mtime(&lock, ft).unwrap();
+
+        let r = doctor_check_lock_files(tmp.path(), 3600, true);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(!lock.exists(), "stale lock should be removed by repair");
+    }
+
+    #[test]
+    fn doctor_check_heartbeat_dir_missing_no_repair() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hb_dir = tmp.path().join("heartbeats");
+        let r = doctor_check_heartbeat_dir(&hb_dir, false);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.message.contains("missing"));
+    }
+
+    #[test]
+    fn doctor_check_heartbeat_dir_missing_with_repair() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hb_dir = tmp.path().join("heartbeats");
+        let r = doctor_check_heartbeat_dir(&hb_dir, true);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(hb_dir.exists(), "repair should create the directory");
+    }
+
+    #[test]
+    fn doctor_check_heartbeat_dir_existing_writable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = doctor_check_heartbeat_dir(tmp.path(), false);
+        assert_eq!(r.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn doctor_check_heartbeats_no_dir() {
+        let r = doctor_check_heartbeats(Path::new("/nonexistent/hb"), 300, false);
+        assert_eq!(r.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn doctor_check_heartbeats_no_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = doctor_check_heartbeats(tmp.path(), 300, false);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.message.contains("0 file(s)"));
+    }
+
+    #[test]
+    fn doctor_check_heartbeats_stale_file_warns() {
+        use crate::health::HeartbeatData;
+        use crate::types::WorkerState;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let hb = HeartbeatData {
+            worker_id: "test-w".to_string(),
+            pid: 999_999,
+            state: WorkerState::Selecting,
+            current_bead: None,
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: chrono::Utc::now() - chrono::Duration::seconds(600),
+            started_at: chrono::Utc::now(),
+            beads_processed: 0,
+            session: "test-w".to_string(),
+        };
+        std::fs::write(
+            tmp.path().join("test-w.json"),
+            serde_json::to_string(&hb).unwrap(),
+        )
+        .unwrap();
+
+        let r = doctor_check_heartbeats(tmp.path(), 300, false);
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.message.contains("stale"));
+    }
+
+    #[test]
+    fn doctor_check_heartbeats_stale_file_repair() {
+        use crate::health::HeartbeatData;
+        use crate::types::WorkerState;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let hb = HeartbeatData {
+            worker_id: "test-rm".to_string(),
+            pid: 999_999,
+            state: WorkerState::Selecting,
+            current_bead: None,
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: chrono::Utc::now() - chrono::Duration::seconds(600),
+            started_at: chrono::Utc::now(),
+            beads_processed: 0,
+            session: "test-rm".to_string(),
+        };
+        let hb_path = tmp.path().join("test-rm.json");
+        std::fs::write(&hb_path, serde_json::to_string(&hb).unwrap()).unwrap();
+
+        let r = doctor_check_heartbeats(tmp.path(), 300, true);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(
+            !hb_path.exists(),
+            "repair should remove stale heartbeat file"
+        );
+    }
+
+    #[test]
+    fn doctor_check_telemetry_logs_no_dir() {
+        let config = crate::config::Config::default();
+        let tmp = tempfile::tempdir().unwrap();
+        // Log dir doesn't exist — should pass (no logs yet).
+        let needle_home = tmp.path().to_path_buf();
+        let r = doctor_check_telemetry_logs(&config, &needle_home, false);
+        assert_eq!(r.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn doctor_check_telemetry_logs_existing_files() {
+        let mut config = crate::config::Config::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let log_dir = tmp.path().join("logs");
+        std::fs::create_dir(&log_dir).unwrap();
+        std::fs::write(log_dir.join("session-1.jsonl"), b"{}").unwrap();
+        std::fs::write(log_dir.join("session-2.jsonl"), b"{}").unwrap();
+        config.telemetry.file_sink.log_dir = Some(log_dir);
+        config.telemetry.file_sink.retention_days = 0; // No retention = no expiry.
+
+        let r = doctor_check_telemetry_logs(&config, tmp.path(), false);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.message.contains("2 file(s)"));
+    }
+
+    #[test]
+    fn doctor_check_peers_no_heartbeats() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("heartbeats")).unwrap();
+        let r = doctor_check_peers(&tmp.path().join("heartbeats"), 300);
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.message.contains("no workers running"));
+    }
+
+    #[test]
+    fn doctor_check_sqlite_no_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No beads.db present — should pass with "JSONL-only mode" message.
+        let r = doctor_check_sqlite(tmp.path());
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.message.contains("no database"));
+    }
 }
