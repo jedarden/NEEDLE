@@ -1582,4 +1582,197 @@ mod tests {
             "expected NoWork when db is clean, got: {result:?}"
         );
     }
+
+    // ── Agent log cleanup tests ──────────────────────────────────────────────
+
+    /// Set a file's mtime to `days_ago` days in the past.
+    fn set_mtime_days_ago(path: &Path, days_ago: u64) {
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(days_ago * 86400);
+        filetime::set_file_mtime(path, filetime::FileTime::from_system_time(past)).unwrap();
+    }
+
+    fn make_mend_strand_with_logs(
+        hb_dir: &Path,
+        lock_dir: &Path,
+        reg_dir: &Path,
+        log_dir: &Path,
+        retention_days: u32,
+    ) -> MendStrand {
+        MendStrand::new(
+            MendConfig::default(),
+            hb_dir.to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(reg_dir),
+            Telemetry::new("test-worker".to_string()),
+            log_dir.to_path_buf(),
+            retention_days,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+        )
+    }
+
+    #[tokio::test]
+    async fn agent_log_cleanup_deletes_old_file() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+
+        // Create a stale agent log (2 days old, retention = 1 day).
+        let log_path = log_dir.path().join("worker-abc-nd-bead1.agent.jsonl");
+        std::fs::write(&log_path, b"{}").unwrap();
+        set_mtime_days_ago(&log_path, 2);
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand_with_logs(
+            hb_dir.path(),
+            lock_dir.path(),
+            reg_dir.path(),
+            log_dir.path(),
+            1,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after cleaning old agent log, got: {result:?}"
+        );
+        assert!(
+            !log_path.exists(),
+            "stale agent log should have been deleted"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_log_cleanup_skips_recent_file() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+
+        // Create a fresh agent log (0 days old, retention = 1 day).
+        let log_path = log_dir.path().join("worker-abc-nd-fresh.agent.jsonl");
+        std::fs::write(&log_path, b"{}").unwrap();
+        // No mtime change — file is brand-new.
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand_with_logs(
+            hb_dir.path(),
+            lock_dir.path(),
+            reg_dir.path(),
+            log_dir.path(),
+            1,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork for recent log, got: {result:?}"
+        );
+        assert!(log_path.exists(), "recent agent log should not be deleted");
+    }
+
+    #[tokio::test]
+    async fn agent_log_cleanup_skips_in_progress_bead() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+
+        // Create an old log for a bead that is still in-progress.
+        let active_bead_id = "nd-active1";
+        let log_path = log_dir
+            .path()
+            .join(format!("worker-abc-{active_bead_id}.agent.jsonl"));
+        std::fs::write(&log_path, b"{}").unwrap();
+        set_mtime_days_ago(&log_path, 5);
+
+        let bead = make_in_progress_bead(active_bead_id, "some-worker");
+        let (store, _) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand_with_logs(
+            hb_dir.path(),
+            lock_dir.path(),
+            reg_dir.path(),
+            log_dir.path(),
+            1,
+        );
+
+        let result = mend.evaluate(&store).await;
+        // The in-progress bead is also "orphaned" by our mock (some-worker isn't
+        // registered), so mend will release it. The log must survive though.
+        assert!(
+            log_path.exists(),
+            "agent log for in-progress bead must not be deleted"
+        );
+        let _ = result; // outcome depends on whether orphan cleanup fires
+    }
+
+    #[tokio::test]
+    async fn agent_log_cleanup_disabled_when_retention_zero() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+
+        // Old file, but retention_days = 0 means cleanup is disabled.
+        let log_path = log_dir.path().join("worker-abc-nd-old.agent.jsonl");
+        std::fs::write(&log_path, b"{}").unwrap();
+        set_mtime_days_ago(&log_path, 60);
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand_with_logs(
+            hb_dir.path(),
+            lock_dir.path(),
+            reg_dir.path(),
+            log_dir.path(),
+            0, // disabled
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when retention is disabled, got: {result:?}"
+        );
+        assert!(
+            log_path.exists(),
+            "agent log should not be deleted when retention is disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_log_cleanup_no_files_skips_scan() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+
+        // Log dir exists but has no .agent.jsonl files.
+        let unrelated = log_dir.path().join("worker.orchestration.jsonl");
+        std::fs::write(&unrelated, b"{}").unwrap();
+        set_mtime_days_ago(&unrelated, 5);
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand_with_logs(
+            hb_dir.path(),
+            lock_dir.path(),
+            reg_dir.path(),
+            log_dir.path(),
+            1,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when no agent log files present, got: {result:?}"
+        );
+        assert!(
+            unrelated.exists(),
+            "non-agent log files must not be touched"
+        );
+    }
 }
