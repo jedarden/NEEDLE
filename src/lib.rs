@@ -20,6 +20,7 @@ pub mod rate_limit;
 pub mod registry;
 pub mod strand;
 pub mod telemetry;
+pub mod trace;
 pub mod types;
 pub mod upgrade;
 pub mod validation;

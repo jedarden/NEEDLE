@@ -31,6 +31,7 @@ pub enum Confidence {
 
 impl Confidence {
     /// Parse from string (case-insensitive).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "high" => Some(Confidence::High),
@@ -64,6 +65,7 @@ pub enum BeadType {
 
 impl BeadType {
     /// Parse from string (case-insensitive, supports various formats).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().replace('_', "-").as_str() {
             "bug-fix" | "bugfix" | "bug" => Some(BeadType::BugFix),

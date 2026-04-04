@@ -6,7 +6,7 @@
 //! waterfall restarts from Pluck (released beads may now be claimable).
 //!
 //! Depends on: `bead_store`, `config`, `health`, `peer`, `registry`,
-//!             `telemetry`, `types`.
+//!             `telemetry`, `types`, `trace`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -16,9 +16,11 @@ use anyhow::Result;
 use crate::bead_store::BeadStore;
 use crate::config::MendConfig;
 use crate::health::HealthMonitor;
+use crate::learning::LearningsFile;
 use crate::peer::PeerMonitor;
 use crate::registry::Registry;
 use crate::telemetry::{EventKind, Telemetry};
+use crate::trace::cleanup_traces;
 use crate::types::{BeadStatus, StrandError, StrandResult};
 
 /// Summary of work performed during one Mend evaluation cycle.
@@ -30,6 +32,10 @@ struct MendSummary {
     db_repaired: bool,
     db_rebuilt: bool,
     agent_logs_cleaned: u32,
+    traces_pruned: u32,
+    traces_cleaned: u32,
+    learnings_pruned: u32,
+    learnings_consolidated: u32,
 }
 
 impl MendSummary {
@@ -41,6 +47,10 @@ impl MendSummary {
             || self.db_repaired
             || self.db_rebuilt
             || self.agent_logs_cleaned > 0
+            || self.traces_pruned > 0
+            || self.traces_cleaned > 0
+            || self.learnings_pruned > 0
+            || self.learnings_consolidated > 0
     }
 }
 
@@ -55,6 +65,11 @@ pub struct MendStrand {
     telemetry: Telemetry,
     log_dir: PathBuf,
     retention_days: u32,
+    traces_dir: PathBuf,
+    trace_retention_failed_days: u32,
+    trace_retention_success_days: u32,
+    workspace: PathBuf,
+    max_learnings: usize,
 }
 
 impl MendStrand {
@@ -69,6 +84,11 @@ impl MendStrand {
     /// - `telemetry`: telemetry emitter
     /// - `log_dir`: directory where agent log files live
     /// - `retention_days`: number of days to retain agent log files (0 = disabled)
+    /// - `traces_dir`: directory where trace files live (`.beads/traces`)
+    /// - `trace_retention_failed_days`: retention days for failed bead traces
+    /// - `trace_retention_success_days`: retention days for successful bead traces
+    /// - `workspace`: workspace root path for learning consolidation
+    /// - `max_learnings`: maximum number of learning entries before consolidation
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: MendConfig,
@@ -80,6 +100,11 @@ impl MendStrand {
         telemetry: Telemetry,
         log_dir: PathBuf,
         retention_days: u32,
+        traces_dir: PathBuf,
+        trace_retention_failed_days: u32,
+        trace_retention_success_days: u32,
+        workspace: PathBuf,
+        max_learnings: usize,
     ) -> Self {
         MendStrand {
             config,
@@ -91,6 +116,11 @@ impl MendStrand {
             telemetry,
             log_dir,
             retention_days,
+            traces_dir,
+            trace_retention_failed_days,
+            trace_retention_success_days,
+            workspace,
+            max_learnings,
         }
     }
 
@@ -438,6 +468,106 @@ impl MendStrand {
         Ok(())
     }
 
+    // ── Step 4.5: Trace retention cleanup ───────────────────────────────────────
+
+    /// Clean up old traces based on retention policy.
+    ///
+    /// - Failed beads (non-zero exit): delete after trace_retention_failed_days
+    /// - Successful beads (exit 0): prune data after trace_retention_success_days, keep metadata only
+    fn cleanup_old_traces(&self, summary: &mut MendSummary) -> Result<()> {
+        if !self.traces_dir.exists() {
+            return Ok(());
+        }
+
+        match cleanup_traces(
+            &self.traces_dir,
+            self.trace_retention_failed_days,
+            self.trace_retention_success_days,
+        ) {
+            Ok(cleanup_summary) => {
+                summary.traces_pruned = cleanup_summary.traces_pruned;
+                summary.traces_cleaned = cleanup_summary.traces_deleted;
+
+                if cleanup_summary.traces_pruned > 0 || cleanup_summary.traces_deleted > 0 {
+                    let _ = self.telemetry.emit(EventKind::MendTraceCleanup {
+                        traces_pruned: cleanup_summary.traces_pruned,
+                        traces_deleted: cleanup_summary.traces_deleted,
+                    });
+
+                    tracing::info!(
+                        traces_pruned = cleanup_summary.traces_pruned,
+                        traces_deleted = cleanup_summary.traces_deleted,
+                        "mend: cleaned up old traces"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "mend: trace cleanup failed");
+            }
+        }
+
+        Ok(())
+    }
+
+    // ── Step 4.75: Learning consolidation ───────────────────────────────────────
+
+    /// Clean up and consolidate workspace learnings.
+    ///
+    /// 1. Prune stale entries (>90 days without reinforcement)
+    /// 2. Consolidate if entries exceed max_learnings
+    fn cleanup_learnings(&self, summary: &mut MendSummary) -> Result<()> {
+        let mut learnings = match LearningsFile::load(&self.workspace) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::debug!(error = %e, "mend: no learnings file to clean up");
+                return Ok(());
+            }
+        };
+
+        let _original_count = learnings.entries().len();
+
+        // Step 1: Prune stale entries
+        match learnings.prune_stale() {
+            Ok(pruned) => {
+                if pruned > 0 {
+                    tracing::info!(pruned, "mend: pruned stale learning entries");
+                    summary.learnings_pruned = pruned as u32;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "mend: failed to prune stale learnings");
+            }
+        }
+
+        // Step 2: Consolidate if over limit
+        if learnings.entries().len() > self.max_learnings {
+            match learnings.consolidate(self.max_learnings) {
+                Ok(removed) => {
+                    if removed > 0 {
+                        tracing::info!(
+                            removed,
+                            max_count = self.max_learnings,
+                            "mend: consolidated learning entries"
+                        );
+                        summary.learnings_consolidated = removed as u32;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "mend: failed to consolidate learnings");
+                }
+            }
+        }
+
+        if summary.learnings_pruned > 0 || summary.learnings_consolidated > 0 {
+            let _ = self.telemetry.emit(EventKind::MendLearningCleanup {
+                pruned: summary.learnings_pruned,
+                consolidated: summary.learnings_consolidated,
+            });
+        }
+
+        Ok(())
+    }
+
     // ── Step 5: Database health check with auto-recovery ────────────────────
 
     /// Run `br doctor` to check database health. If issues are found,
@@ -560,6 +690,18 @@ impl super::Strand for MendStrand {
             // Non-fatal — continue with remaining steps.
         }
 
+        // Step 4.5: Trace retention cleanup.
+        if let Err(e) = self.cleanup_old_traces(&mut summary) {
+            tracing::warn!(error = %e, "mend: trace cleanup failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
+        // Step 4.75: Learning consolidation.
+        if let Err(e) = self.cleanup_learnings(&mut summary) {
+            tracing::warn!(error = %e, "mend: learning cleanup failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
         // Step 5: Database health check.
         if let Err(e) = self.check_db_health(store, &mut summary).await {
             tracing::warn!(error = %e, "mend: database health check failed");
@@ -574,6 +716,8 @@ impl super::Strand for MendStrand {
             db_repaired: summary.db_repaired,
             db_rebuilt: summary.db_rebuilt,
             agent_logs_cleaned: summary.agent_logs_cleaned,
+            traces_pruned: summary.traces_pruned,
+            traces_deleted: summary.traces_cleaned,
         });
 
         if summary.did_work() {
@@ -584,6 +728,8 @@ impl super::Strand for MendStrand {
                 db_repaired = summary.db_repaired,
                 db_rebuilt = summary.db_rebuilt,
                 agent_logs_cleaned = summary.agent_logs_cleaned,
+                traces_pruned = summary.traces_pruned,
+                traces_deleted = summary.traces_cleaned,
                 "mend performed cleanup — restarting waterfall"
             );
             StrandResult::WorkCreated
@@ -813,6 +959,11 @@ mod tests {
             Telemetry::new("test-worker".to_string()),
             PathBuf::from("/tmp/needle-test-logs"),
             0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
         )
     }
 
@@ -982,6 +1133,11 @@ mod tests {
             Telemetry::new("test-worker".to_string()),
             PathBuf::from("/tmp/needle-test-logs"),
             0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
         );
 
         let result = mend.evaluate(&store).await;
@@ -1047,6 +1203,11 @@ mod tests {
             Telemetry::new("test-worker".to_string()),
             PathBuf::from("/tmp/needle-test-logs"),
             0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
         );
 
         let result = mend.evaluate(&store).await;
@@ -1084,6 +1245,11 @@ mod tests {
             Telemetry::new("test-worker".to_string()),
             hb_dir.path().to_path_buf(),
             0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
         );
 
         let result = mend.evaluate(&store).await;
@@ -1121,6 +1287,11 @@ mod tests {
             Telemetry::new("test-worker".to_string()),
             hb_dir.path().to_path_buf(),
             0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
         );
 
         let result = mend.evaluate(&store).await;

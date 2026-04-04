@@ -589,6 +589,7 @@ fn hook_sink_dispatches_matching_events() {
     let hooks = vec![HookConfig {
         event_filter: "outcome.*".to_string(),
         command: format!("cat >> {output_path}"),
+        url: None,
     }];
 
     let sink = HookSink::new(&hooks).unwrap();
@@ -628,6 +629,7 @@ fn hook_sink_skips_non_matching_events() {
     let hooks = vec![HookConfig {
         event_filter: "outcome.*".to_string(),
         command: "echo should-not-run".to_string(),
+        url: None,
     }];
 
     let sink = HookSink::new(&hooks).unwrap();
@@ -657,6 +659,7 @@ fn hook_sink_prevents_recursion_on_sink_errors() {
     let hooks = vec![HookConfig {
         event_filter: "*".to_string(),
         command: "cat".to_string(),
+        url: None,
     }];
 
     let sink = HookSink::new(&hooks).unwrap();

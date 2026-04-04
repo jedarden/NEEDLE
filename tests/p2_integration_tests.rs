@@ -467,6 +467,11 @@ async fn mend_strand_cleans_crashed_peer_returns_work_created() {
         telemetry,
         std::path::PathBuf::from("/tmp/needle-test-logs"),
         0,
+        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        30,
+        7,
+        std::path::PathBuf::from("/tmp"),
+        100,
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -511,6 +516,11 @@ async fn mend_strand_no_stale_peers_returns_no_work() {
         telemetry,
         std::path::PathBuf::from("/tmp/needle-test-logs"),
         0,
+        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        30,
+        7,
+        std::path::PathBuf::from("/tmp"),
+        100,
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -552,6 +562,11 @@ async fn mend_strand_removes_orphaned_lock_files() {
         telemetry,
         std::path::PathBuf::from("/tmp/needle-test-logs"),
         0,
+        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        30,
+        7,
+        std::path::PathBuf::from("/tmp"),
+        100,
     );
 
     let result = mend.evaluate(store.as_ref()).await;

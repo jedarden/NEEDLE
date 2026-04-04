@@ -274,16 +274,22 @@ fn cmd_run(
     timeout: Option<u64>,
     resume: bool,
 ) -> Result<()> {
-    // Load and configure.
-    let mut config = ConfigLoader::load_global()?;
+    // Determine workspace root (CLI arg → canonicalized, else global default).
+    let workspace_root = if let Some(ref ws) = workspace {
+        ws.canonicalize().unwrap_or_else(|_| ws.clone())
+    } else {
+        let global = ConfigLoader::load_global()?;
+        global.workspace.default.clone()
+    };
 
-    let overrides = CliOverrides {
-        workspace: workspace.clone(),
+    // Load full resolved config (global → workspace .needle.yaml → env → CLI).
+    let cli_overrides = CliOverrides {
+        workspace: Some(workspace_root.clone()),
         agent_binary: agent.clone(),
         max_workers: None,
         ..Default::default()
     };
-    ConfigLoader::apply_overrides(&mut config, overrides);
+    let (mut config, _) = ConfigLoader::load_resolved(&workspace_root, cli_overrides)?;
 
     if let Some(t) = timeout {
         config.agent.timeout = t;

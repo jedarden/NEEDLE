@@ -499,6 +499,11 @@ async fn real_br_mend_cleans_crashed_peer() {
         telemetry,
         std::path::PathBuf::from("/tmp/needle-test-logs"),
         0,
+        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        30,
+        7,
+        std::path::PathBuf::from("/tmp"),
+        100,
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -562,6 +567,11 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
         telemetry,
         std::path::PathBuf::from("/tmp/needle-test-logs"),
         0,
+        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        30,
+        7,
+        workspace.path().to_path_buf(),
+        100,
     );
 
     let result = mend.evaluate(store.as_ref()).await;

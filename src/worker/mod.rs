@@ -88,7 +88,14 @@ impl Worker {
             100,
             telemetry.clone(),
         );
-        let prompt_builder = PromptBuilder::new(&config.prompt);
+        let prompt_builder = PromptBuilder::with_workspace(
+            &config.prompt,
+            &config.workspace.default,
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to load workspace learnings, using default prompt builder");
+            PromptBuilder::new(&config.prompt)
+        });
         let dispatcher = match Dispatcher::new(&config, telemetry.clone()) {
             Ok(d) => d,
             Err(e) => {

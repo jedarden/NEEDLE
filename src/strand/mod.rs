@@ -72,6 +72,9 @@ impl StrandRunner {
             .clone()
             .unwrap_or_else(|| config.workspace.home.join("logs"));
         let retention_days = config.telemetry.file_sink.retention_days;
+        let traces_dir = config.workspace.default.join(".beads").join("traces");
+        let trace_retention_failed_days = config.strands.learning.trace_retention_failed_days;
+        let trace_retention_success_days = config.strands.learning.trace_retention_success_days;
         let mend = MendStrand::new(
             config.strands.mend.clone(),
             heartbeat_dir,
@@ -82,6 +85,11 @@ impl StrandRunner {
             telemetry.clone(),
             log_dir,
             retention_days,
+            traces_dir,
+            trace_retention_failed_days,
+            trace_retention_success_days,
+            config.workspace.default.clone(),
+            config.strands.learning.max_learnings,
         );
 
         let explore = ExploreStrand::new(

@@ -4,7 +4,7 @@
 //! adapter file. It renders an invoke template, starts a process, waits (with
 //! timeout enforcement), and captures the raw result.
 //!
-//! Depends on: `types`, `config`, `telemetry`, `prompt`.
+//! Depends on: `types`, `config`, `telemetry`, `prompt`, `trace`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use crate::config::Config;
 use crate::prompt::BuiltPrompt;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{BeadId, InputMethod};
+use crate::trace::{detect_trace_format, TraceCapture, TraceMetadata};
+use crate::types::{BeadId, InputMethod, Outcome};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // ExecutionResult
@@ -38,6 +39,8 @@ pub struct ExecutionResult {
     pub elapsed: Duration,
     /// OS process ID.
     pub pid: u32,
+    /// Path to trace directory if trace capture was enabled.
+    pub trace_path: Option<std::path::PathBuf>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -570,6 +573,9 @@ impl Dispatcher {
         workspace: &Path,
         prompt_file: &Path,
     ) -> Result<ExecutionResult> {
+        // Create trace capture for this bead execution.
+        let trace_capture = TraceCapture::new(bead_id, workspace);
+
         let model = adapter.model.as_deref().unwrap_or("default");
         let rendered = render_template(
             &adapter.invoke_template,
@@ -794,12 +800,60 @@ impl Dispatcher {
             }
         }
 
+        // Finalize trace capture.
+        let trace_path = if let Some(capture) = trace_capture {
+            // Write stdout and stderr to trace files.
+            let _ = capture.write_stdout(&stdout);
+            let _ = capture.write_stderr(&stderr);
+
+            // Read normalized trace from agent log file (if transform was configured).
+            let trace_lines = if adapter.output_transform.is_some() {
+                agent_log_path(self.telemetry.worker_id(), bead_id).and_then(|path| {
+                    std::fs::read_to_string(&path)
+                        .ok()
+                        .map(|content| content.lines().map(|s| s.to_string()).collect::<Vec<_>>())
+                })
+            } else {
+                None
+            };
+
+            // Write trace JSONL if available.
+            if let Some(ref lines) = trace_lines {
+                let _ = capture.write_trace_jsonl(lines);
+            }
+
+            // Create and write metadata.
+            let outcome = Outcome::classify(exit_code, false);
+            let metadata = TraceMetadata {
+                bead_id: bead_id.clone(),
+                agent: adapter.name.clone(),
+                provider: adapter.provider.clone(),
+                model: adapter.model.clone(),
+                exit_code,
+                outcome: outcome.as_str().to_string(),
+                duration_ms: elapsed.as_millis() as u64,
+                input_tokens: None, // Token extraction happens later in outcome handling
+                output_tokens: None,
+                cost_usd: None,
+                captured_at: chrono::Utc::now(),
+                trace_format: detect_trace_format(&adapter.name),
+                pruned: false,
+                template_version: None,
+            };
+            let _ = capture.write_metadata(&metadata);
+
+            capture.finalize()
+        } else {
+            None
+        };
+
         Ok(ExecutionResult {
             exit_code,
             stdout,
             stderr,
             elapsed,
             pid,
+            trace_path,
         })
     }
 }

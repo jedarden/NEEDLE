@@ -509,6 +509,80 @@ impl PulseConfig {
     }
 }
 
+/// Reflect strand configuration (meta-analysis and learning consolidation).
+///
+/// Reflect runs after all other strands return NoWork. It reads bead close
+/// bodies since the last consolidation, extracts retrospective patterns, merges
+/// them into learnings.md, and promotes high-frequency patterns to skill files.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReflectConfig {
+    /// Whether the Reflect strand is enabled (default: true).
+    #[serde(default = "ReflectConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Minimum beads closed since last consolidation before running (default: 10).
+    #[serde(default = "ReflectConfig::default_min_beads_since_last")]
+    pub min_beads_since_last: usize,
+
+    /// Minimum hours between reflect runs (default: 24).
+    #[serde(default = "ReflectConfig::default_cooldown_hours")]
+    pub cooldown_hours: u64,
+
+    /// Maximum learnings to add per run (default: 10).
+    #[serde(default = "ReflectConfig::default_max_learnings_per_run")]
+    pub max_learnings_per_run: usize,
+
+    /// Maximum skill files to create or update per run (default: 3).
+    #[serde(default = "ReflectConfig::default_max_skills_per_run")]
+    pub max_skills_per_run: usize,
+
+    /// Days before unreinforced entries are pruned (default: 90).
+    #[serde(default = "ReflectConfig::default_learning_retention_days")]
+    pub learning_retention_days: u32,
+
+    /// Maximum total learning entries before forced pruning (default: 80).
+    #[serde(default = "ReflectConfig::default_max_learnings")]
+    pub max_learnings: usize,
+}
+
+impl Default for ReflectConfig {
+    fn default() -> Self {
+        ReflectConfig {
+            enabled: Self::default_enabled(),
+            min_beads_since_last: Self::default_min_beads_since_last(),
+            cooldown_hours: Self::default_cooldown_hours(),
+            max_learnings_per_run: Self::default_max_learnings_per_run(),
+            max_skills_per_run: Self::default_max_skills_per_run(),
+            learning_retention_days: Self::default_learning_retention_days(),
+            max_learnings: Self::default_max_learnings(),
+        }
+    }
+}
+
+impl ReflectConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_min_beads_since_last() -> usize {
+        10
+    }
+    fn default_cooldown_hours() -> u64 {
+        24
+    }
+    fn default_max_learnings_per_run() -> usize {
+        10
+    }
+    fn default_max_skills_per_run() -> usize {
+        3
+    }
+    fn default_learning_retention_days() -> u32 {
+        90
+    }
+    fn default_max_learnings() -> usize {
+        80
+    }
+}
+
 /// Strand waterfall configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StrandsConfig {
@@ -528,6 +602,8 @@ pub struct StrandsConfig {
     pub unravel: UnravelConfig,
     #[serde(default)]
     pub pulse: PulseConfig,
+    #[serde(default)]
+    pub reflect: ReflectConfig,
     /// Learning and trace retention configuration.
     #[serde(default)]
     pub learning: LearningConfig,
@@ -664,18 +740,39 @@ impl Default for StdoutSinkConfig {
     }
 }
 
-/// A single hook definition: an event filter glob and a shell command.
+/// A single hook definition: an event filter glob and a dispatch target.
 ///
-/// Events whose `event_type` matches the glob are piped as JSON to the
-/// command's stdin. Hooks are fire-and-forget — failures are logged but
-/// never block the worker.
+/// Events whose `event_type` matches the glob are dispatched to the
+/// configured `command` and/or `url`. At least one must be set.
+/// Hooks are fire-and-forget — failures are logged but never block the worker.
+///
+/// # Example
+/// ```yaml
+/// telemetry:
+///   hooks:
+///     - event_filter: "outcome.*"
+///       command: "/path/to/alert.sh"
+///     - event_filter: "worker.errored"
+///       url: "https://hooks.slack.com/services/..."
+///     - event_filter: "effort.recorded"
+///       command: "/path/to/cost-tracker.sh"
+///       url: "https://dashboard.example.com/ingest"
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookConfig {
     /// Glob pattern matched against `event_type` (e.g. `"outcome.*"`).
     pub event_filter: String,
 
     /// Shell command to execute. The event JSON is written to stdin.
+    /// Leave empty or omit when dispatching only to `url`.
+    #[serde(default)]
     pub command: String,
+
+    /// HTTP(S) URL to POST the event JSON to (native webhook support).
+    /// `Content-Type: application/json` is set automatically.
+    /// Omit when dispatching only to `command`.
+    #[serde(default)]
+    pub url: Option<String>,
 }
 
 /// Telemetry configuration.

@@ -192,6 +192,16 @@ pub enum EventKind {
         db_repaired: bool,
         db_rebuilt: bool,
         agent_logs_cleaned: u32,
+        traces_pruned: u32,
+        traces_deleted: u32,
+    },
+    MendTraceCleanup {
+        traces_pruned: u32,
+        traces_deleted: u32,
+    },
+    MendLearningCleanup {
+        pruned: u32,
+        consolidated: u32,
     },
 
     // ── Effort tracking ──
@@ -263,6 +273,20 @@ pub enum EventKind {
         reason: String,
     },
 
+    // ── Reflect ──
+    ReflectStarted {
+        beads_since_last: usize,
+    },
+    ReflectConsolidated {
+        learnings_added: usize,
+        learnings_pruned: usize,
+        skills_promoted: usize,
+        beads_processed: usize,
+    },
+    ReflectSkipped {
+        reason: String,
+    },
+
     // ── Pulse ──
     PulseScannerStarted {
         scanner_name: String,
@@ -295,6 +319,22 @@ pub enum EventKind {
     RollbackCompleted {
         rolled_back_hash: String,
         restored_hash: String,
+    },
+
+    // ── Canary testing ──
+    CanaryStarted {
+        suite: String,
+    },
+    CanarySuiteCompleted {
+        suite: String,
+        passed: u32,
+        failed: u32,
+    },
+    CanaryPromoted {
+        hash: String,
+    },
+    CanaryRejected {
+        reason: String,
     },
 
     // ── Output transform ──
@@ -372,6 +412,8 @@ impl EventKind {
             EventKind::MendDbRepaired { .. } => "mend.db_repaired",
             EventKind::MendDbRebuilt => "mend.db_rebuilt",
             EventKind::MendCycleSummary { .. } => "mend.cycle_summary",
+            EventKind::MendTraceCleanup { .. } => "mend.trace_cleanup",
+            EventKind::MendLearningCleanup { .. } => "mend.learning_cleanup",
             EventKind::EffortRecorded { .. } => "effort.recorded",
             EventKind::BudgetWarning { .. } => "budget.warning",
             EventKind::BudgetStop { .. } => "budget.stop",
@@ -384,6 +426,9 @@ impl EventKind {
             EventKind::VerificationPassed { .. } => "verification.passed",
             EventKind::UnravelAnalyzed { .. } => "bead.unravel.analyzed",
             EventKind::UnravelSkipped { .. } => "bead.unravel.skipped",
+            EventKind::ReflectStarted { .. } => "reflect.started",
+            EventKind::ReflectConsolidated { .. } => "reflect.consolidated",
+            EventKind::ReflectSkipped { .. } => "reflect.skipped",
             EventKind::PulseScannerStarted { .. } => "pulse.scanner_started",
             EventKind::PulseScannerCompleted { .. } => "pulse.scanner_completed",
             EventKind::PulseScannerFailed { .. } => "pulse.scanner_failed",
@@ -392,6 +437,10 @@ impl EventKind {
             EventKind::UpgradeDetected { .. } => "worker.upgrade.detected",
             EventKind::UpgradeCompleted { .. } => "worker.upgrade.completed",
             EventKind::RollbackCompleted { .. } => "rollback.completed",
+            EventKind::CanaryStarted { .. } => "canary.started",
+            EventKind::CanarySuiteCompleted { .. } => "canary.suite_completed",
+            EventKind::CanaryPromoted { .. } => "canary.promoted",
+            EventKind::CanaryRejected { .. } => "canary.rejected",
             EventKind::OutputTransformSpawned { .. } => "agent.transform.spawned",
             EventKind::OutputTransformExited { .. } => "agent.transform.exited",
             EventKind::OutputTransformSkipped { .. } => "agent.transform.skipped",
@@ -450,10 +499,15 @@ impl EventKind {
             | EventKind::MendDbRepaired { .. }
             | EventKind::MendDbRebuilt
             | EventKind::MendCycleSummary { .. }
+            | EventKind::MendTraceCleanup { .. }
+            | EventKind::MendLearningCleanup { .. }
             | EventKind::BudgetWarning { .. }
             | EventKind::BudgetStop { .. }
             | EventKind::RateLimitWait { .. }
             | EventKind::RateLimitAllowed { .. }
+            | EventKind::ReflectStarted { .. }
+            | EventKind::ReflectConsolidated { .. }
+            | EventKind::ReflectSkipped { .. }
             | EventKind::PulseScannerStarted { .. }
             | EventKind::PulseScannerCompleted { .. }
             | EventKind::PulseScannerFailed { .. }
@@ -461,6 +515,10 @@ impl EventKind {
             | EventKind::UpgradeDetected { .. }
             | EventKind::UpgradeCompleted { .. }
             | EventKind::RollbackCompleted { .. }
+            | EventKind::CanaryStarted { .. }
+            | EventKind::CanarySuiteCompleted { .. }
+            | EventKind::CanaryPromoted { .. }
+            | EventKind::CanaryRejected { .. }
             | EventKind::SinkError { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
@@ -650,6 +708,8 @@ impl EventKind {
                 db_repaired,
                 db_rebuilt,
                 agent_logs_cleaned,
+                traces_pruned,
+                traces_deleted,
             } => {
                 serde_json::json!({
                     "beads_released": beads_released,
@@ -658,6 +718,8 @@ impl EventKind {
                     "db_repaired": db_repaired,
                     "db_rebuilt": db_rebuilt,
                     "agent_logs_cleaned": agent_logs_cleaned,
+                    "traces_pruned": traces_pruned,
+                    "traces_deleted": traces_deleted,
                 })
             }
             EventKind::EffortRecorded {
@@ -877,6 +939,60 @@ impl EventKind {
             EventKind::TransformSkipped { bead_id, reason } => {
                 serde_json::json!({ "bead_id": bead_id, "reason": reason })
             }
+            EventKind::MendTraceCleanup {
+                traces_pruned,
+                traces_deleted,
+            } => {
+                serde_json::json!({
+                    "traces_pruned": traces_pruned,
+                    "traces_deleted": traces_deleted,
+                })
+            }
+            EventKind::MendLearningCleanup { pruned, consolidated } => {
+                serde_json::json!({
+                    "pruned": pruned,
+                    "consolidated": consolidated,
+                })
+            }
+            EventKind::CanaryStarted { suite } => {
+                serde_json::json!({ "suite": suite })
+            }
+            EventKind::CanarySuiteCompleted {
+                suite,
+                passed,
+                failed,
+            } => {
+                serde_json::json!({
+                    "suite": suite,
+                    "passed": passed,
+                    "failed": failed,
+                })
+            }
+            EventKind::CanaryPromoted { hash } => {
+                serde_json::json!({ "hash": hash })
+            }
+            EventKind::CanaryRejected { reason } => {
+                serde_json::json!({ "reason": reason })
+            }
+            EventKind::ReflectStarted { beads_since_last } => {
+                serde_json::json!({ "beads_since_last": beads_since_last })
+            }
+            EventKind::ReflectConsolidated {
+                learnings_added,
+                learnings_pruned,
+                skills_promoted,
+                beads_processed,
+            } => {
+                serde_json::json!({
+                    "learnings_added": learnings_added,
+                    "learnings_pruned": learnings_pruned,
+                    "skills_promoted": skills_promoted,
+                    "beads_processed": beads_processed,
+                })
+            }
+            EventKind::ReflectSkipped { reason } => {
+                serde_json::json!({ "reason": reason })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
         }
     }
@@ -936,12 +1052,21 @@ impl EventKind {
             | EventKind::UpgradeDetected { .. }
             | EventKind::UpgradeCompleted { .. }
             | EventKind::RollbackCompleted { .. }
+            | EventKind::MendTraceCleanup { .. }
+            | EventKind::MendLearningCleanup { .. }
+            | EventKind::CanaryStarted { .. }
+            | EventKind::CanarySuiteCompleted { .. }
+            | EventKind::CanaryPromoted { .. }
+            | EventKind::CanaryRejected { .. }
             | EventKind::OutputTransformSpawned { .. }
             | EventKind::OutputTransformExited { .. }
             | EventKind::OutputTransformSkipped { .. }
             | EventKind::TransformStarted { .. }
             | EventKind::TransformFailed { .. }
             | EventKind::TransformSkipped { .. }
+            | EventKind::ReflectStarted { .. }
+            | EventKind::ReflectConsolidated { .. }
+            | EventKind::ReflectSkipped { .. }
             | EventKind::SinkError { .. } => None,
             EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
         }
@@ -1305,18 +1430,21 @@ pub fn generate_session_id() -> String {
 
 // ─── HookSink ─────────────────────────────────────────────────────────────────
 
-/// A compiled hook: a pre-compiled regex filter + the shell command to run.
+/// A compiled hook: a pre-compiled regex filter + dispatch target(s).
 struct CompiledHook {
     filter: regex::Regex,
+    /// Shell command (empty = disabled).
     command: String,
+    /// Webhook URL (None = disabled).
+    url: Option<String>,
 }
 
-/// Dispatches matching telemetry events to external commands via stdin.
+/// Dispatches matching telemetry events to external commands and/or URLs.
 ///
 /// Each hook has a glob pattern matched against `event_type`. When an event
-/// matches, the event JSON is piped to the command's stdin. Execution is
-/// fire-and-forget — failed hooks emit `SinkError` to the file sink but
-/// never block the worker or recurse into other hooks.
+/// matches, the event JSON is piped to `command`'s stdin and/or HTTP-POSTed
+/// to `url`. Execution is fire-and-forget — failed hooks emit `SinkError`
+/// events to the file sink but never block the worker or recurse into hooks.
 pub struct HookSink {
     hooks: Vec<CompiledHook>,
 }
@@ -1333,6 +1461,7 @@ impl HookSink {
             hooks.push(CompiledHook {
                 filter,
                 command: cfg.command.clone(),
+                url: cfg.url.clone(),
             });
         }
         Ok(HookSink { hooks })
@@ -1364,26 +1493,53 @@ impl HookSink {
                 continue;
             }
 
-            match Self::run_hook(&hook.command, &json) {
-                Ok(()) => {}
-                Err(e) => {
-                    let fail_event = TelemetryEvent {
-                        timestamp: Utc::now(),
-                        event_type: "telemetry.sink_error".to_string(),
-                        worker_id: event.worker_id.clone(),
-                        session_id: event.session_id.clone(),
-                        sequence: 0, // sequence is set by the emitter, not here
-                        bead_id: None,
-                        workspace: None,
-                        data: serde_json::json!({
-                            "hook_command": hook.command,
-                            "event_filter": hook.filter.as_str(),
-                            "original_event_type": event.event_type,
-                            "error": e.to_string(),
-                        }),
-                        duration_ms: None,
-                    };
-                    failures.push(fail_event);
+            // Dispatch to command if configured.
+            if !hook.command.is_empty() {
+                match Self::run_hook(&hook.command, &json) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        failures.push(TelemetryEvent {
+                            timestamp: Utc::now(),
+                            event_type: "telemetry.sink_error".to_string(),
+                            worker_id: event.worker_id.clone(),
+                            session_id: event.session_id.clone(),
+                            sequence: 0, // sequence is set by the emitter, not here
+                            bead_id: None,
+                            workspace: None,
+                            data: serde_json::json!({
+                                "hook_command": hook.command,
+                                "event_filter": hook.filter.as_str(),
+                                "original_event_type": event.event_type,
+                                "error": e.to_string(),
+                            }),
+                            duration_ms: None,
+                        });
+                    }
+                }
+            }
+
+            // Dispatch to URL if configured.
+            if let Some(ref url) = hook.url {
+                match Self::post_url(url, &json) {
+                    Ok(()) => {}
+                    Err(e) => {
+                        failures.push(TelemetryEvent {
+                            timestamp: Utc::now(),
+                            event_type: "telemetry.sink_error".to_string(),
+                            worker_id: event.worker_id.clone(),
+                            session_id: event.session_id.clone(),
+                            sequence: 0,
+                            bead_id: None,
+                            workspace: None,
+                            data: serde_json::json!({
+                                "hook_url": url,
+                                "event_filter": hook.filter.as_str(),
+                                "original_event_type": event.event_type,
+                                "error": e.to_string(),
+                            }),
+                            duration_ms: None,
+                        });
+                    }
                 }
             }
         }
@@ -1425,6 +1581,21 @@ impl HookSink {
             );
         }
 
+        Ok(())
+    }
+
+    /// HTTP POST the event JSON to a webhook URL.
+    ///
+    /// Sets `Content-Type: application/json` and applies a 10-second timeout.
+    /// Returns an error if the request fails or the server returns a non-2xx
+    /// status. This runs inside the background writer task so blocking is
+    /// acceptable.
+    fn post_url(url: &str, json: &str) -> Result<()> {
+        ureq::post(url)
+            .set("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(10))
+            .send_string(json)
+            .map_err(|e| anyhow::anyhow!("webhook POST to {url} failed: {e}"))?;
         Ok(())
     }
 }
@@ -2795,10 +2966,12 @@ mod tests {
             HookConfig {
                 event_filter: "outcome.*".to_string(),
                 command: "cat".to_string(),
+                url: None,
             },
             HookConfig {
                 event_filter: "worker.errored".to_string(),
                 command: "cat".to_string(),
+                url: None,
             },
         ];
         let sink = HookSink::new(&configs);
@@ -2817,6 +2990,7 @@ mod tests {
         let configs = vec![HookConfig {
             event_filter: "[invalid".to_string(),
             command: "cat".to_string(),
+            url: None,
         }];
         assert!(HookSink::new(&configs).is_err());
     }
@@ -2826,6 +3000,7 @@ mod tests {
         let configs = vec![HookConfig {
             event_filter: "outcome.*".to_string(),
             command: "true".to_string(), // always succeeds
+            url: None,
         }];
         let sink = HookSink::new(&configs).unwrap();
 
@@ -2840,6 +3015,7 @@ mod tests {
         let configs = vec![HookConfig {
             event_filter: "outcome.*".to_string(),
             command: "false".to_string(), // would fail if dispatched
+            url: None,
         }];
         let sink = HookSink::new(&configs).unwrap();
 
@@ -2855,6 +3031,7 @@ mod tests {
         let configs = vec![HookConfig {
             event_filter: "telemetry.*".to_string(),
             command: "true".to_string(),
+            url: None,
         }];
         let sink = HookSink::new(&configs).unwrap();
 
@@ -2869,6 +3046,7 @@ mod tests {
         let configs = vec![HookConfig {
             event_filter: "bead.*".to_string(),
             command: "/nonexistent/command/that/does/not/exist".to_string(),
+            url: None,
         }];
         let sink = HookSink::new(&configs).unwrap();
 
@@ -2888,10 +3066,12 @@ mod tests {
             HookConfig {
                 event_filter: "outcome.*".to_string(),
                 command: "true".to_string(),
+                url: None,
             },
             HookConfig {
                 event_filter: "outcome.handled".to_string(),
                 command: "true".to_string(),
+                url: None,
             },
         ];
         let sink = HookSink::new(&configs).unwrap();
@@ -2911,6 +3091,7 @@ mod tests {
         let configs = vec![HookConfig {
             event_filter: "worker.*".to_string(),
             command: cmd,
+            url: None,
         }];
         let sink = HookSink::new(&configs).unwrap();
 
