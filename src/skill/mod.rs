@@ -308,6 +308,88 @@ impl SkillLibrary {
     pub fn skills_dir(&self) -> &Path {
         &self.skills_dir
     }
+
+    /// Create an empty skill library with no backing directory.
+    pub fn new_empty() -> Self {
+        SkillLibrary {
+            skills: Vec::new(),
+            skills_dir: PathBuf::new(),
+        }
+    }
+
+    /// Load skills from another workspace and merge those whose labels overlap
+    /// with `workspace_labels` into this library.
+    ///
+    /// This enables cross-workspace skill sharing: skills tagged with generic
+    /// labels (e.g., `rust`, `api`) are made available to any workspace whose
+    /// `workspace.labels` list contains a matching label.
+    ///
+    /// Skills already present (by path) are skipped to avoid duplicates.
+    pub fn extend_from_workspace(&mut self, workspace: &Path, workspace_labels: &[String]) {
+        if workspace_labels.is_empty() {
+            return;
+        }
+
+        let skills_dir = workspace.join(".beads").join("skills");
+        if !skills_dir.exists() {
+            return;
+        }
+
+        let entries = match std::fs::read_dir(&skills_dir) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    path = %skills_dir.display(),
+                    error = %e,
+                    "failed to read cross-workspace skills dir"
+                );
+                return;
+            }
+        };
+
+        let ws_labels_lower: HashSet<String> =
+            workspace_labels.iter().map(|l| l.to_lowercase()).collect();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            // Skip if already loaded (e.g., same path already in local skills).
+            if self.skills.iter().any(|s| s.path == path) {
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(content) => match SkillFile::parse(path.clone(), &content) {
+                    Ok(skill) => {
+                        // Include only if any skill label matches a workspace label.
+                        let matches = skill
+                            .frontmatter
+                            .labels
+                            .iter()
+                            .any(|l| ws_labels_lower.contains(&l.to_lowercase()));
+                        if matches {
+                            self.skills.push(skill);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "failed to parse cross-workspace skill file"
+                        );
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "failed to read cross-workspace skill file"
+                    );
+                }
+            }
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -557,5 +639,92 @@ mod tests {
         let ids = lib.promoted_source_beads();
         assert!(ids.contains("nd-abc1"));
         assert!(ids.contains("nd-def2"));
+    }
+
+    #[test]
+    fn extend_from_workspace_adds_matching_skills() {
+        let _local_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+
+        // Remote workspace has two skills: one matching [rust], one not.
+        let remote_skills = remote_dir.path().join(".beads").join("skills");
+        std::fs::create_dir_all(&remote_skills).unwrap();
+
+        let rust_skill = make_skill_content(&["feature"], &["rust", "api"], 5, "## Rust Skill\n");
+        let go_skill = make_skill_content(&["feature"], &["go"], 3, "## Go Skill\n");
+        std::fs::write(remote_skills.join("rust.md"), &rust_skill).unwrap();
+        std::fs::write(remote_skills.join("go.md"), &go_skill).unwrap();
+
+        // Local library is initially empty.
+        let mut lib = SkillLibrary::new_empty();
+
+        // Workspace labels include "rust" — should import the rust skill only.
+        let workspace_labels = vec!["rust".to_string(), "trading".to_string()];
+        lib.extend_from_workspace(remote_dir.path(), &workspace_labels);
+
+        assert_eq!(lib.len(), 1);
+        assert_eq!(
+            lib.matching_skills(&["rust".to_string()], "add feature")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn extend_from_workspace_no_labels_is_noop() {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let remote_skills = remote_dir.path().join(".beads").join("skills");
+        std::fs::create_dir_all(&remote_skills).unwrap();
+        let skill = make_skill_content(&["feature"], &["rust"], 1, "## S\n");
+        std::fs::write(remote_skills.join("s.md"), skill).unwrap();
+
+        let mut lib = SkillLibrary::new_empty();
+        lib.extend_from_workspace(remote_dir.path(), &[]);
+        assert!(lib.is_empty());
+    }
+
+    #[test]
+    fn extend_from_workspace_skips_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let skills_dir = dir.path().join(".beads").join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        let skill = make_skill_content(&["feature"], &["rust"], 2, "## S\n");
+        std::fs::write(skills_dir.join("s.md"), &skill).unwrap();
+
+        // Load local skills, then extend from the same workspace — no duplicates.
+        let mut lib = SkillLibrary::load(dir.path()).unwrap();
+        assert_eq!(lib.len(), 1);
+
+        lib.extend_from_workspace(dir.path(), &["rust".to_string()]);
+        assert_eq!(lib.len(), 1); // still 1, not 2
+    }
+
+    #[test]
+    fn extend_from_workspace_cross_workspace_ranking() {
+        let local_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+
+        let local_skills = local_dir.path().join(".beads").join("skills");
+        let remote_skills = remote_dir.path().join(".beads").join("skills");
+        std::fs::create_dir_all(&local_skills).unwrap();
+        std::fs::create_dir_all(&remote_skills).unwrap();
+
+        // Local skill: success_count=2
+        let local = make_skill_content(&["feature"], &["rust"], 2, "## Local\n");
+        std::fs::write(local_skills.join("local.md"), local).unwrap();
+
+        // Remote skill: success_count=9 (higher — should rank first)
+        let remote = make_skill_content(&["feature"], &["rust"], 9, "## Remote\n");
+        std::fs::write(remote_skills.join("remote.md"), remote).unwrap();
+
+        let mut lib = SkillLibrary::load(local_dir.path()).unwrap();
+        lib.extend_from_workspace(remote_dir.path(), &["rust".to_string()]);
+        assert_eq!(lib.len(), 2);
+
+        let matches = lib.matching_skills(&["rust".to_string()], "add feature");
+        assert_eq!(matches.len(), 2);
+        // Remote skill ranks first due to higher success_count.
+        assert_eq!(matches[0].frontmatter.success_count, 9);
+        assert_eq!(matches[1].frontmatter.success_count, 2);
     }
 }

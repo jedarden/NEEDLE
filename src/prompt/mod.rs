@@ -308,6 +308,40 @@ impl PromptBuilder {
         Ok(builder)
     }
 
+    /// Load skills from additional workspaces whose skill labels match the given
+    /// workspace labels, merging them with any locally-loaded skills.
+    ///
+    /// This implements cross-workspace skill sharing: a skill tagged `[rust, api]`
+    /// in another workspace is made available here if this workspace's labels
+    /// include `rust` or `api`. All skills (local + cross-workspace) are ranked
+    /// together by `match_score` and `success_count` at prompt-build time.
+    ///
+    /// Silently ignores workspaces with no skills directory.
+    pub fn with_cross_workspace_skills(
+        mut self,
+        workspaces: &[std::path::PathBuf],
+        workspace_labels: &[String],
+    ) -> Self {
+        if workspace_labels.is_empty() || workspaces.is_empty() {
+            return self;
+        }
+
+        let mut lib = self
+            .skill_library
+            .take()
+            .unwrap_or_else(crate::skill::SkillLibrary::new_empty);
+
+        for workspace in workspaces {
+            lib.extend_from_workspace(workspace, workspace_labels);
+        }
+
+        if !lib.is_empty() {
+            self.skill_library = Some(lib);
+        }
+
+        self
+    }
+
     /// Load global learnings from the given path into this builder.
     ///
     /// Global learnings are cross-workspace patterns promoted by the consolidator.

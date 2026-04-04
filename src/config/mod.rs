@@ -150,6 +150,14 @@ pub struct WorkspaceConfig {
     /// NEEDLE home directory (heartbeat files, log output).
     #[serde(default = "WorkspaceConfig::default_home")]
     pub home: PathBuf,
+
+    /// Labels describing this workspace's domain (e.g., `rust`, `api`, `trading`).
+    ///
+    /// Used for cross-workspace skill sharing: skills from other workspaces whose
+    /// labels overlap with this workspace's labels are made available during prompt
+    /// building. Configure per-workspace in `.needle.yaml` under `workspace.labels`.
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 impl Default for WorkspaceConfig {
@@ -157,6 +165,7 @@ impl Default for WorkspaceConfig {
         WorkspaceConfig {
             default: Self::default_workspace(),
             home: Self::default_home(),
+            labels: Vec::new(),
         }
     }
 }
@@ -168,6 +177,17 @@ impl WorkspaceConfig {
     fn default_home() -> PathBuf {
         dirs_or_home(".needle")
     }
+}
+
+/// Workspace-level labels override (`.needle.yaml` `workspace:` section).
+///
+/// Only `labels` is overridable at the workspace level; the path fields
+/// (`default`, `home`) are resolved globally and cannot be set per-workspace.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkspaceLabelsOverride {
+    /// Domain labels for this workspace (e.g., `[rust, api, trading]`).
+    #[serde(default)]
+    pub labels: Vec<String>,
 }
 
 /// Pluck strand configuration (primary bead selection).
@@ -1096,6 +1116,13 @@ pub struct WorkspaceOverrides {
     /// Pluggable validation gates.
     #[serde(default)]
     pub gates: Option<Vec<GateConfig>>,
+    /// Workspace identity labels (overridable per-workspace).
+    ///
+    /// Set in `.needle.yaml` under `workspace.labels`. Used for cross-workspace
+    /// skill sharing: skills from Explore workspaces whose labels overlap with
+    /// these labels are injected into prompts alongside local skills.
+    #[serde(default)]
+    pub workspace: Option<WorkspaceLabelsOverride>,
 }
 
 /// Agent fields overridable at the workspace level.
@@ -1117,7 +1144,10 @@ pub struct WorkspaceStrandsOverrides {
 }
 
 /// Non-overridable top-level keys in workspace config.
-const NON_OVERRIDABLE_KEYS: &[&str] = &["worker", "limits", "health", "telemetry", "workspace"];
+///
+/// Note: `workspace` is intentionally absent — `workspace.labels` IS overridable
+/// per-workspace. The path fields (`default`, `home`) are simply ignored if set.
+const NON_OVERRIDABLE_KEYS: &[&str] = &["worker", "limits", "health", "telemetry"];
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Top-level Config
@@ -1314,7 +1344,14 @@ impl ConfigLoader {
 
         if let Some(ref gates) = overrides.gates {
             config.gates = gates.clone();
-            sources.insert("gates".to_string(), source);
+            sources.insert("gates".to_string(), source.clone());
+        }
+
+        if let Some(ref ws) = overrides.workspace {
+            if !ws.labels.is_empty() {
+                config.workspace.labels = ws.labels.clone();
+                sources.insert("workspace.labels".to_string(), source);
+            }
         }
     }
 
@@ -1830,6 +1867,53 @@ mod tests {
             Some("opus")
         );
         // WorkspaceOverrides doesn't have a worker field, so it's silently ignored.
+    }
+
+    #[test]
+    fn workspace_labels_parsed_from_needle_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "workspace:\n  labels: [rust, api, trading]\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert_eq!(
+            config.workspace.labels,
+            vec!["rust".to_string(), "api".to_string(), "trading".to_string()]
+        );
+        assert!(
+            matches!(
+                sources.get("workspace.labels"),
+                Some(ConfigSource::WorkspaceFile(_))
+            ),
+            "workspace.labels source should be WorkspaceFile"
+        );
+    }
+
+    #[test]
+    fn workspace_labels_default_empty() {
+        let config = Config::default();
+        assert!(config.workspace.labels.is_empty());
+    }
+
+    #[test]
+    fn workspace_labels_not_set_leaves_default() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".needle.yaml"), "agent:\n  default: opus\n").unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert!(config.workspace.labels.is_empty());
+        assert!(!sources.contains_key("workspace.labels"));
     }
 
     // ── Environment variable tests ──

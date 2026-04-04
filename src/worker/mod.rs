@@ -97,6 +97,10 @@ impl Worker {
             tracing::warn!(error = %e, "failed to load workspace learnings, using default prompt builder");
             PromptBuilder::new(&config.prompt)
         })
+        .with_cross_workspace_skills(
+            &config.strands.explore.workspaces,
+            &config.workspace.labels,
+        )
         .with_global_learnings(&config.strands.learning.global_learnings_file);
         let dispatcher = match Dispatcher::new(&config, telemetry.clone()) {
             Ok(d) => d,
