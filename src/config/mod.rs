@@ -528,6 +528,52 @@ pub struct StrandsConfig {
     pub unravel: UnravelConfig,
     #[serde(default)]
     pub pulse: PulseConfig,
+    /// Learning and trace retention configuration.
+    #[serde(default)]
+    pub learning: LearningConfig,
+}
+
+/// Learning and trace retention configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearningConfig {
+    /// Retention days for failed bead traces (default: 30).
+    #[serde(default = "LearningConfig::default_trace_retention_failed")]
+    pub trace_retention_failed_days: u32,
+
+    /// Retention days for successful bead traces (default: 7).
+    #[serde(default = "LearningConfig::default_trace_retention_success")]
+    pub trace_retention_success_days: u32,
+
+    /// Maximum number of active learning entries (default: 80).
+    ///
+    /// When exceeded, the consolidator prunes stale entries (>90 days)
+    /// and consolidates redundant entries.
+    #[serde(default = "LearningConfig::default_max_learnings")]
+    pub max_learnings: usize,
+}
+
+impl Default for LearningConfig {
+    fn default() -> Self {
+        LearningConfig {
+            trace_retention_failed_days: Self::default_trace_retention_failed(),
+            trace_retention_success_days: Self::default_trace_retention_success(),
+            max_learnings: Self::default_max_learnings(),
+        }
+    }
+}
+
+impl LearningConfig {
+    fn default_trace_retention_failed() -> u32 {
+        30
+    }
+
+    fn default_trace_retention_success() -> u32 {
+        7
+    }
+
+    fn default_max_learnings() -> usize {
+        80
+    }
 }
 
 /// File sink configuration for telemetry.

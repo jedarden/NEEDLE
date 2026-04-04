@@ -16,6 +16,7 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::config::PromptConfig;
+use crate::learning::LearningsFile;
 use crate::types::Bead;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -237,6 +238,8 @@ pub struct PromptBuilder {
     context_file_paths: Vec<std::path::PathBuf>,
     /// Free-form workspace instructions appended to prompts.
     workspace_instructions: Option<String>,
+    /// Cached learnings content for the workspace (if exists).
+    learnings_content: Option<String>,
 }
 
 impl PromptBuilder {
@@ -261,7 +264,26 @@ impl PromptBuilder {
             templates,
             context_file_paths: config.context_files.clone(),
             workspace_instructions: config.instructions.clone(),
+            learnings_content: None,
         }
+    }
+
+    /// Create a new `PromptBuilder` with workspace-specific learnings.
+    ///
+    /// This variant loads the `.beads/learnings.md` file if it exists,
+    /// automatically injecting workspace learnings into all prompts.
+    pub fn with_workspace(config: &PromptConfig, workspace: &Path) -> Result<Self> {
+        let mut builder = Self::new(config);
+
+        // Load learnings if the file exists
+        let learnings = LearningsFile::load(workspace);
+        if let Ok(learnings_file) = learnings {
+            if !learnings_file.entries().is_empty() {
+                builder.learnings_content = Some(learnings_file.to_prompt_content());
+            }
+        }
+
+        Ok(builder)
     }
 
     /// Validate all templates at boot time.
@@ -467,11 +489,9 @@ impl PromptBuilder {
     /// Each file is prefixed with a header showing the file path.
     /// Missing files are silently skipped.
     fn load_context_files(&self, workspace: &Path) -> String {
-        if self.context_file_paths.is_empty() {
-            return "(no context files configured)".to_string();
-        }
-
         let mut sections = Vec::new();
+
+        // Load configured context files
         for rel_path in &self.context_file_paths {
             let abs_path = workspace.join(rel_path);
             match std::fs::read_to_string(&abs_path) {
@@ -486,6 +506,11 @@ impl PromptBuilder {
                     // Silently omit missing files per spec.
                 }
             }
+        }
+
+        // Append learnings content if available
+        if let Some(ref learnings) = self.learnings_content {
+            sections.push(learnings.clone());
         }
 
         if sections.is_empty() {
