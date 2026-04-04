@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cost::{BudgetConfig, PricingConfig};
 use crate::types::{IdentifierScheme, IdleAction};
+use crate::validation::GateConfig;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Sub-structs
@@ -609,6 +610,47 @@ pub struct StrandsConfig {
     pub learning: LearningConfig,
 }
 
+/// A workspace-specific custom sanitization pattern.
+///
+/// Configured under `learning.trace_sanitization.custom_patterns` in `.needle.yaml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomSanitizationPattern {
+    /// Rule identifier (used in `[REDACTED:<id>]` output).
+    pub id: String,
+    /// Regex pattern. Capture group 1 is the secret; whole match used if absent.
+    pub pattern: String,
+    /// Optional minimum Shannon entropy threshold.
+    #[serde(default)]
+    pub entropy: Option<f64>,
+}
+
+/// Trace sanitization configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceSanitizationConfig {
+    /// Enable trace sanitization (default: true).
+    #[serde(default = "TraceSanitizationConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Workspace-specific patterns applied alongside gitleaks rules.
+    #[serde(default)]
+    pub custom_patterns: Vec<CustomSanitizationPattern>,
+}
+
+impl Default for TraceSanitizationConfig {
+    fn default() -> Self {
+        TraceSanitizationConfig {
+            enabled: Self::default_enabled(),
+            custom_patterns: Vec::new(),
+        }
+    }
+}
+
+impl TraceSanitizationConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+}
+
 /// Learning and trace retention configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningConfig {
@@ -626,6 +668,10 @@ pub struct LearningConfig {
     /// and consolidates redundant entries.
     #[serde(default = "LearningConfig::default_max_learnings")]
     pub max_learnings: usize,
+
+    /// Trace sanitization settings (gitleaks rules + custom patterns).
+    #[serde(default)]
+    pub trace_sanitization: TraceSanitizationConfig,
 }
 
 impl Default for LearningConfig {
@@ -634,6 +680,7 @@ impl Default for LearningConfig {
             trace_retention_failed_days: Self::default_trace_retention_failed(),
             trace_retention_success_days: Self::default_trace_retention_success(),
             max_learnings: Self::default_max_learnings(),
+            trace_sanitization: TraceSanitizationConfig::default(),
         }
     }
 }
@@ -972,6 +1019,7 @@ pub type SourceMap = BTreeMap<String, ConfigSource>;
 /// - `agent.default`, `agent.timeout`
 /// - `strands` (weave, pulse, unravel)
 /// - `prompt.*`
+/// - `verification` (legacy) or `gates` (new pluggable system)
 ///
 /// Non-overridable sections (worker, limits, health, telemetry) are detected
 /// and produce warnings.
@@ -984,8 +1032,12 @@ pub struct WorkspaceOverrides {
     #[serde(default)]
     pub prompt: Option<PromptConfig>,
     /// Verification commands run after agent success, before accepting closure.
+    /// Legacy format — prefer `gates` for new configurations.
     #[serde(default)]
     pub verification: Option<Vec<String>>,
+    /// Pluggable validation gates.
+    #[serde(default)]
+    pub gates: Option<Vec<GateConfig>>,
 }
 
 /// Agent fields overridable at the workspace level.
@@ -1042,8 +1094,12 @@ pub struct Config {
     #[serde(default)]
     pub budget: BudgetConfig,
     /// Verification commands run after agent success, before accepting closure.
+    /// Legacy format — prefer `gates` for new configurations.
     #[serde(default)]
     pub verification: Vec<String>,
+    /// Pluggable validation gates.
+    #[serde(default)]
+    pub gates: Vec<GateConfig>,
     /// Self-modification (hot-reload) configuration.
     #[serde(default)]
     pub self_modification: SelfModificationConfig,
@@ -1195,7 +1251,12 @@ impl ConfigLoader {
 
         if let Some(ref verification) = overrides.verification {
             config.verification = verification.clone();
-            sources.insert("verification".to_string(), source);
+            sources.insert("verification".to_string(), source.clone());
+        }
+
+        if let Some(ref gates) = overrides.gates {
+            config.gates = gates.clone();
+            sources.insert("gates".to_string(), source);
         }
     }
 

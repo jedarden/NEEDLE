@@ -18,6 +18,7 @@ pub mod peer;
 pub mod prompt;
 pub mod rate_limit;
 pub mod registry;
+pub mod sanitize;
 pub mod strand;
 pub mod telemetry;
 pub mod trace;

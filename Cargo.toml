@@ -67,6 +67,12 @@ glob = "0.3"
 # HTTP client (self-update)
 ureq = "2"
 
+# Multi-pattern string search (sanitizer keyword pre-filter)
+aho-corasick = "1"
+
+# TOML parsing (gitleaks config)
+toml = "0.8"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"

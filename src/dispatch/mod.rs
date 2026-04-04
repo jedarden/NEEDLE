@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -18,6 +19,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::config::Config;
 use crate::prompt::BuiltPrompt;
+use crate::sanitize::{CustomPattern, Sanitizer};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::trace::{detect_trace_format, TraceCapture, TraceMetadata};
 use crate::types::{BeadId, InputMethod, Outcome};
@@ -462,16 +464,21 @@ pub struct Dispatcher {
     adapters: HashMap<String, AgentAdapter>,
     telemetry: Telemetry,
     global_timeout_secs: u64,
+    /// Sanitizer applied to all trace content before writing to disk.
+    /// `None` when trace sanitization is disabled in config.
+    sanitizer: Option<Arc<Sanitizer>>,
 }
 
 impl Dispatcher {
     /// Create a new dispatcher, loading adapters from config.
     pub fn new(config: &Config, telemetry: Telemetry) -> Result<Self> {
         let adapters = load_adapters(&config.agent.adapters_dir, &builtin_adapters())?;
+        let sanitizer = build_sanitizer(config);
         Ok(Dispatcher {
             adapters,
             telemetry,
             global_timeout_secs: config.agent.timeout,
+            sanitizer,
         })
     }
 
@@ -485,6 +492,7 @@ impl Dispatcher {
             adapters,
             telemetry,
             global_timeout_secs,
+            sanitizer: None,
         }
     }
 
@@ -574,7 +582,9 @@ impl Dispatcher {
         prompt_file: &Path,
     ) -> Result<ExecutionResult> {
         // Create trace capture for this bead execution.
-        let trace_capture = TraceCapture::new(bead_id, workspace);
+        // Sanitizer is cloned (Arc clone — cheap) and applied before every disk write.
+        let trace_capture =
+            TraceCapture::new_with_sanitizer(bead_id, workspace, self.sanitizer.clone());
 
         let model = adapter.model.as_deref().unwrap_or("default");
         let rendered = render_template(
@@ -864,6 +874,48 @@ impl Dispatcher {
 
 /// Compute the per-bead agent log path: `~/.needle/logs/<worker>-<bead_id>.agent.jsonl`.
 ///
+/// Build a trace sanitizer from the workspace config.
+///
+/// Returns `None` if sanitization is disabled or if rule compilation fails
+/// (failing open keeps traces writable even when the sanitizer has issues).
+fn build_sanitizer(config: &Config) -> Option<Arc<Sanitizer>> {
+    if !config.strands.learning.trace_sanitization.enabled {
+        tracing::debug!("trace sanitization disabled in config");
+        return None;
+    }
+
+    let custom_patterns: Vec<CustomPattern> = config
+        .strands
+        .learning
+        .trace_sanitization
+        .custom_patterns
+        .iter()
+        .map(|p| CustomPattern {
+            id: p.id.clone(),
+            pattern: p.pattern.clone(),
+            entropy: p.entropy,
+        })
+        .collect();
+
+    match Sanitizer::new(&custom_patterns) {
+        Ok(s) => {
+            tracing::info!(
+                rule_count = s.rule_count(),
+                custom_count = custom_patterns.len(),
+                "trace sanitizer initialized"
+            );
+            Some(Arc::new(s))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to build trace sanitizer; traces will not be sanitized"
+            );
+            None
+        }
+    }
+}
+
 /// Returns `None` if `$HOME` is not set.
 fn agent_log_path(worker_id: &str, bead_id: &BeadId) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;

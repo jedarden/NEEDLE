@@ -191,6 +191,33 @@ pub enum CliCommand {
 
     /// Rollback to the previous :stable binary.
     Rollback,
+
+    /// Run learning consolidation on demand.
+    ///
+    /// Reads bead close bodies since the last consolidation, extracts
+    /// retrospective patterns, merges them into learnings.md, and promotes
+    /// high-frequency learnings to skill files.
+    Reflect {
+        /// Workspace to consolidate (defaults to config workspace).
+        #[arg(short = 'w', long)]
+        workspace: Option<PathBuf>,
+
+        /// Skip cooldown and minimum bead threshold checks.
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Fetch the latest gitleaks rules and update the vendored config.
+    ///
+    /// Downloads gitleaks.toml from the upstream GitHub repository, validates
+    /// it by compiling all rules, and writes it to the output path.
+    /// Rebuild needle after running this command to embed the new rules.
+    #[command(name = "update-rules")]
+    UpdateRules {
+        /// Destination path for the downloaded config (default: config/gitleaks.toml).
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+    },
 }
 
 /// Output format for the list command.
@@ -253,6 +280,8 @@ pub fn run() -> Result<()> {
         CliCommand::Canary { status } => cmd_canary(status),
         CliCommand::Upgrade { check } => cmd_upgrade(check),
         CliCommand::Rollback => cmd_rollback(),
+        CliCommand::Reflect { workspace, force } => cmd_reflect(workspace, force),
+        CliCommand::UpdateRules { output } => cmd_update_rules(output),
     }
 }
 
@@ -1781,6 +1810,114 @@ fn cmd_rollback() -> Result<()> {
     })?;
 
     println!("Rollback complete. Fleet will hot-reload on next cycle.");
+    Ok(())
+}
+
+/// `needle reflect` — run learning consolidation on demand.
+fn cmd_reflect(workspace: Option<PathBuf>, force: bool) -> Result<()> {
+    let workspace_root = if let Some(ref ws) = workspace {
+        ws.canonicalize().unwrap_or_else(|_| ws.clone())
+    } else {
+        let global = ConfigLoader::load_global()?;
+        global.workspace.default.clone()
+    };
+
+    let cli_overrides = crate::config::CliOverrides {
+        workspace: Some(workspace_root.clone()),
+        ..Default::default()
+    };
+    let (config, _) = crate::config::ConfigLoader::load_resolved(&workspace_root, cli_overrides)?;
+
+    let tel = crate::telemetry::Telemetry::from_config("reflect".to_string(), &config.telemetry)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "hook telemetry init failed, falling back");
+            crate::telemetry::Telemetry::new("reflect".to_string())
+        });
+
+    let state_dir = config.workspace.home.join("state").join("reflect");
+
+    let strand = crate::strand::ReflectStrand::new(
+        config.strands.reflect.clone(),
+        workspace_root.clone(),
+        state_dir,
+        tel,
+    );
+
+    let summary = strand.consolidate(force)?;
+
+    if summary.beads_processed == 0 && summary.learnings_added == 0 {
+        println!(
+            "No consolidation performed (below threshold or on cooldown). Use --force to override."
+        );
+    } else {
+        println!(
+            "Reflect complete: {} beads processed, {} learnings added, {} pruned, {} skills promoted",
+            summary.beads_processed,
+            summary.learnings_added,
+            summary.learnings_pruned,
+            summary.skills_promoted,
+        );
+    }
+
+    Ok(())
+}
+
+/// `needle update-rules` — download the latest gitleaks rules and update the
+/// vendored `config/gitleaks.toml`.
+///
+/// Downloads from upstream, validates by compiling all rules, and writes to
+/// the output path. Rebuild needle after running this to embed the new rules.
+fn cmd_update_rules(output: Option<PathBuf>) -> Result<()> {
+    use crate::sanitize::{Sanitizer, GITLEAKS_UPSTREAM_URL};
+
+    let out_path = output.unwrap_or_else(|| PathBuf::from("config/gitleaks.toml"));
+
+    println!("Fetching latest gitleaks rules from upstream...");
+    println!("  URL: {GITLEAKS_UPSTREAM_URL}");
+
+    let response = ureq::get(GITLEAKS_UPSTREAM_URL)
+        .call()
+        .context("failed to fetch gitleaks.toml from upstream")?;
+
+    if response.status() >= 400 {
+        anyhow::bail!(
+            "upstream returned HTTP {} when fetching gitleaks.toml",
+            response.status()
+        );
+    }
+
+    let content = response
+        .into_string()
+        .context("failed to read upstream response body")?;
+
+    // Validate by parsing and compiling all rules.
+    let sanitizer = Sanitizer::from_toml(&content, &[])
+        .context("downloaded gitleaks.toml failed validation")?;
+
+    println!(
+        "  Validated: {} rules compiled successfully.",
+        sanitizer.rule_count()
+    );
+
+    // Create output directory if needed.
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create output directory: {}", parent.display())
+            })?;
+        }
+    }
+
+    std::fs::write(&out_path, &content)
+        .with_context(|| format!("failed to write {}", out_path.display()))?;
+
+    println!(
+        "  Written: {} ({} bytes)",
+        out_path.display(),
+        content.len()
+    );
+    println!("Rebuild needle to embed the updated rules.");
+
     Ok(())
 }
 

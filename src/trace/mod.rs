@@ -20,12 +20,14 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::sanitize::Sanitizer;
 use crate::types::BeadId;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -89,15 +91,32 @@ pub struct TraceCapture {
     trace_dir: PathBuf,
     /// Whether trace capture is enabled.
     enabled: bool,
+    /// Optional sanitizer applied to all content before writing to disk.
+    sanitizer: Option<Arc<Sanitizer>>,
 }
 
 impl TraceCapture {
-    /// Create a new trace capture for a bead.
+    /// Create a new trace capture for a bead without sanitization.
     ///
     /// `beads_root` is the workspace directory containing `.beads/`.
     /// Returns `None` if trace capture is disabled.
     pub fn new(bead_id: &BeadId, beads_root: &Path) -> Option<Self> {
-        let trace_dir = beads_root.join(".beads").join("traces").join(bead_id.as_ref());
+        Self::new_with_sanitizer(bead_id, beads_root, None)
+    }
+
+    /// Create a new trace capture for a bead with an optional sanitizer.
+    ///
+    /// When `sanitizer` is `Some`, all trace content is sanitized synchronously
+    /// before writing to disk (no unsanitized window on disk).
+    pub fn new_with_sanitizer(
+        bead_id: &BeadId,
+        beads_root: &Path,
+        sanitizer: Option<Arc<Sanitizer>>,
+    ) -> Option<Self> {
+        let trace_dir = beads_root
+            .join(".beads")
+            .join("traces")
+            .join(bead_id.as_ref());
 
         // Create the trace directory.
         if let Err(e) = std::fs::create_dir_all(&trace_dir) {
@@ -113,6 +132,7 @@ impl TraceCapture {
         Some(TraceCapture {
             trace_dir,
             enabled: true,
+            sanitizer,
         })
     }
 
@@ -122,36 +142,52 @@ impl TraceCapture {
     }
 
     /// Write stdout to `stdout.txt`.
+    ///
+    /// Content is sanitized before writing if a sanitizer is configured.
     pub fn write_stdout(&self, stdout: &str) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
+        let content = self.sanitize(stdout);
         let path = self.trace_dir.join("stdout.txt");
-        std::fs::write(&path, stdout)
+        std::fs::write(&path, content.as_bytes())
             .with_context(|| format!("failed to write stdout trace: {}", path.display()))
     }
 
     /// Write stderr to `stderr.txt`.
+    ///
+    /// Content is sanitized before writing if a sanitizer is configured.
     pub fn write_stderr(&self, stderr: &str) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
+        let content = self.sanitize(stderr);
         let path = self.trace_dir.join("stderr.txt");
-        std::fs::write(&path, stderr)
+        std::fs::write(&path, content.as_bytes())
             .with_context(|| format!("failed to write stderr trace: {}", path.display()))
     }
 
     /// Write structured trace JSONL to `trace.jsonl`.
     ///
-    /// Each line should be a valid JSON object.
+    /// Each line should be a valid JSON object. Lines are sanitized before
+    /// writing if a sanitizer is configured.
     pub fn write_trace_jsonl(&self, trace_lines: &[String]) -> Result<()> {
         if !self.enabled || trace_lines.is_empty() {
             return Ok(());
         }
         let path = self.trace_dir.join("trace.jsonl");
-        let content = trace_lines.join("\n");
-        std::fs::write(&path, content)
+        let joined = trace_lines.join("\n");
+        let content = self.sanitize(&joined);
+        std::fs::write(&path, content.as_bytes())
             .with_context(|| format!("failed to write trace JSONL: {}", path.display()))
+    }
+
+    /// Sanitize text if a sanitizer is configured; otherwise return as-is.
+    fn sanitize<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        match &self.sanitizer {
+            Some(s) => std::borrow::Cow::Owned(s.sanitize(text)),
+            None => std::borrow::Cow::Borrowed(text),
+        }
     }
 
     /// Write metadata to `metadata.json`.
