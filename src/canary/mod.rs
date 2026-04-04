@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -355,6 +355,9 @@ impl CanaryRunner {
     }
 
     /// Run a single canary test.
+    ///
+    /// Spawns the testing binary and polls for completion, killing the process
+    /// and returning [`CanaryTestResult::TimedOut`] if it exceeds `test_timeout`.
     fn run_test(
         &self,
         bead_id: &str,
@@ -362,9 +365,10 @@ impl CanaryRunner {
         testing_binary: &Path,
     ) -> CanaryTestResult {
         let start = Instant::now();
+        let timeout = Duration::from_secs(self.test_timeout);
 
-        // Run the testing binary against the canary workspace.
-        let output = Command::new(testing_binary)
+        // Spawn the testing binary against the canary workspace.
+        let mut child = match Command::new(testing_binary)
             .args([
                 "run",
                 "--workspace",
@@ -374,51 +378,64 @@ impl CanaryRunner {
                 "--count",
                 "1",
             ])
-            .output();
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return CanaryTestResult::Error {
+                    bead_id: bead_id.to_string(),
+                    message: format!("failed to spawn testing binary: {e}"),
+                };
+            }
+        };
 
-        match output {
-            Ok(output) => {
-                let exit_code = output.status.code();
-                let actual = match self.get_actual_outcome(bead_id, exit_code) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        return CanaryTestResult::Error {
+        // Poll for completion, enforcing the timeout.
+        let exit_code = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status.code(),
+                Ok(None) => {
+                    if start.elapsed() >= timeout {
+                        child.kill().ok();
+                        return CanaryTestResult::TimedOut {
                             bead_id: bead_id.to_string(),
-                            message: format!("failed to get actual outcome: {e}"),
+                            elapsed_secs: start.elapsed().as_secs(),
                         };
                     }
-                };
-
-                // Compare actual vs expected.
-                if self.outcomes_match(expected, &actual) {
-                    CanaryTestResult::Passed {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                Err(e) => {
+                    return CanaryTestResult::Error {
                         bead_id: bead_id.to_string(),
-                        expected: expected.clone(),
-                        actual,
-                    }
-                } else {
-                    let reason = self.mismatch_reason(expected, &actual);
-                    CanaryTestResult::Failed {
-                        bead_id: bead_id.to_string(),
-                        expected: expected.clone(),
-                        actual,
-                        reason,
-                    }
+                        message: format!("failed to wait for testing binary: {e}"),
+                    };
                 }
             }
+        };
+
+        let actual = match self.get_actual_outcome(bead_id, exit_code) {
+            Ok(a) => a,
             Err(e) => {
-                let elapsed = start.elapsed().as_secs();
-                if elapsed >= self.test_timeout {
-                    CanaryTestResult::TimedOut {
-                        bead_id: bead_id.to_string(),
-                        elapsed_secs: elapsed,
-                    }
-                } else {
-                    CanaryTestResult::Error {
-                        bead_id: bead_id.to_string(),
-                        message: format!("failed to execute testing binary: {e}"),
-                    }
-                }
+                return CanaryTestResult::Error {
+                    bead_id: bead_id.to_string(),
+                    message: format!("failed to get actual outcome: {e}"),
+                };
+            }
+        };
+
+        // Compare actual vs expected.
+        if self.outcomes_match(expected, &actual) {
+            CanaryTestResult::Passed {
+                bead_id: bead_id.to_string(),
+                expected: expected.clone(),
+                actual,
+            }
+        } else {
+            let reason = self.mismatch_reason(expected, &actual);
+            CanaryTestResult::Failed {
+                bead_id: bead_id.to_string(),
+                expected: expected.clone(),
+                actual,
+                reason,
             }
         }
     }

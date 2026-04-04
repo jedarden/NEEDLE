@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::bead_store::{BeadStore, BrCliBeadStore};
 use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
 use crate::dispatch;
-use crate::health::HeartbeatData;
+use crate::health::{HealthMonitor, HeartbeatData};
 use crate::registry::{Registry, WorkerEntry};
 use crate::telemetry;
 use crate::worker::Worker;
@@ -1026,261 +1026,499 @@ fn config_dump(config: &Config) -> Vec<String> {
     ]
 }
 
-/// `needle doctor` — check system health and optionally repair.
-fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
-    let config = ConfigLoader::load_global()?;
-    let needle_home = config.workspace.home.clone();
+// ──────────────────────────────────────────────────────────────────────────────
+// Doctor: structured check result types
+// ──────────────────────────────────────────────────────────────────────────────
 
-    let workspace_root = workspace.unwrap_or_else(|| config.workspace.default.clone());
+#[derive(Debug, Clone, PartialEq)]
+enum CheckStatus {
+    Pass,
+    Warn,
+    Fail,
+}
 
-    println!("NEEDLE Doctor");
-    println!("{}", "-".repeat(50));
-    let mut issues_found = 0;
+struct CheckResult {
+    name: String,
+    status: CheckStatus,
+    message: String,
+    /// Extra lines printed indented below the main line.
+    detail: Vec<String>,
+}
 
-    // 1. Check workspace exists and has .beads/.
-    print!("Workspace ({})... ", workspace_root.display());
-    let beads_dir = workspace_root.join(".beads");
-    if beads_dir.is_dir() {
-        println!("OK");
-    } else {
-        println!("MISSING .beads/ directory");
-        issues_found += 1;
+impl CheckResult {
+    fn pass(name: impl Into<String>, msg: impl Into<String>) -> Self {
+        CheckResult {
+            name: name.into(),
+            status: CheckStatus::Pass,
+            message: msg.into(),
+            detail: vec![],
+        }
     }
+    fn warn(name: impl Into<String>, msg: impl Into<String>) -> Self {
+        CheckResult {
+            name: name.into(),
+            status: CheckStatus::Warn,
+            message: msg.into(),
+            detail: vec![],
+        }
+    }
+    fn fail(name: impl Into<String>, msg: impl Into<String>) -> Self {
+        CheckResult {
+            name: name.into(),
+            status: CheckStatus::Fail,
+            message: msg.into(),
+            detail: vec![],
+        }
+    }
+    fn with_detail(mut self, lines: Vec<String>) -> Self {
+        self.detail = lines;
+        self
+    }
+    fn display(&self) -> String {
+        let label = match self.status {
+            CheckStatus::Pass => "PASS",
+            CheckStatus::Warn => "WARN",
+            CheckStatus::Fail => "FAIL",
+        };
+        format!("[{label}]  {:<28}  {}", self.name, self.message)
+    }
+}
 
-    // 2. Check registry health.
-    print!("Worker registry... ");
-    let registry = Registry::default_location(&needle_home);
+// ──────────────────────────────────────────────────────────────────────────────
+// Doctor: individual check functions
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn doctor_check_config(workspace: &Path) -> CheckResult {
+    match ConfigLoader::load_resolved(workspace, CliOverrides::default()) {
+        Ok(_) => CheckResult::pass("Config", "valid"),
+        Err(e) => CheckResult::fail("Config", format!("{e:#}")),
+    }
+}
+
+fn doctor_check_workspace(workspace: &Path) -> CheckResult {
+    if !workspace.exists() {
+        return CheckResult::fail(
+            "Workspace",
+            format!("directory not found: {}", workspace.display()),
+        );
+    }
+    if !workspace.is_dir() {
+        return CheckResult::fail(
+            "Workspace",
+            format!("not a directory: {}", workspace.display()),
+        );
+    }
+    if std::fs::read_dir(workspace).is_err() {
+        return CheckResult::fail("Workspace", "not readable");
+    }
+    let beads_dir = workspace.join(".beads");
+    if !beads_dir.is_dir() {
+        return CheckResult::fail(
+            "Workspace",
+            format!(".beads/ missing in {}", workspace.display()),
+        );
+    }
+    // Probe write access.
+    let probe = workspace.join(".needle_doctor_probe");
+    match std::fs::write(&probe, b"") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            CheckResult::pass("Workspace", workspace.display().to_string())
+        }
+        Err(e) => CheckResult::warn("Workspace", format!("not writable: {e}")),
+    }
+}
+
+fn doctor_check_jsonl(beads_dir: &Path) -> CheckResult {
+    let jsonl = beads_dir.join("issues.jsonl");
+    if !jsonl.exists() {
+        return CheckResult::fail("JSONL", "issues.jsonl not found");
+    }
+    let content = match std::fs::read_to_string(&jsonl) {
+        Ok(c) => c,
+        Err(e) => return CheckResult::fail("JSONL", format!("unreadable: {e}")),
+    };
+    let total = content.lines().filter(|l| !l.trim().is_empty()).count();
+    let bad: Vec<usize> = content
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            !l.trim().is_empty() && serde_json::from_str::<serde_json::Value>(l).is_err()
+        })
+        .map(|(i, _)| i + 1)
+        .collect();
+    if bad.is_empty() {
+        CheckResult::pass("JSONL", format!("{total} records"))
+    } else {
+        let examples: Vec<String> = bad.iter().take(5).map(|n| format!("line {n}")).collect();
+        CheckResult::fail("JSONL", format!("{} invalid of {total} records", bad.len()))
+            .with_detail(vec![format!("Invalid lines: {}", examples.join(", "))])
+    }
+}
+
+fn doctor_check_sqlite(beads_dir: &Path) -> CheckResult {
+    let db = beads_dir.join("beads.db");
+    if !db.exists() {
+        return CheckResult::pass("SQLite integrity", "no database (JSONL-only mode)");
+    }
+    match std::process::Command::new("sqlite3")
+        .arg(&db)
+        .arg("PRAGMA integrity_check;")
+        .output()
+    {
+        Err(_) => CheckResult::warn("SQLite integrity", "sqlite3 not on PATH — skipped"),
+        Ok(out) if !out.status.success() => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            CheckResult::fail(
+                "SQLite integrity",
+                format!("sqlite3 error: {}", stderr.trim()),
+            )
+        }
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let trimmed = stdout.trim();
+            if trimmed == "ok" {
+                CheckResult::pass("SQLite integrity", "ok")
+            } else {
+                let first = trimmed.lines().next().unwrap_or(trimmed);
+                CheckResult::fail("SQLite integrity", format!("corrupt: {first}")).with_detail(
+                    trimmed
+                        .lines()
+                        .skip(1)
+                        .take(10)
+                        .map(str::to_owned)
+                        .collect(),
+                )
+            }
+        }
+    }
+}
+
+fn doctor_check_lock_files(beads_dir: &Path, lock_ttl_secs: u64, repair: bool) -> CheckResult {
+    let entries = match std::fs::read_dir(beads_dir) {
+        Ok(e) => e,
+        Err(e) => return CheckResult::warn("Lock files", format!("cannot read .beads/: {e}")),
+    };
+    let ttl = std::time::Duration::from_secs(lock_ttl_secs);
+    let now = std::time::SystemTime::now();
+    let mut total = 0usize;
+    let mut stale: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("lock") {
+            continue;
+        }
+        total += 1;
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if let Ok(modified) = meta.modified() {
+                if now.duration_since(modified).unwrap_or_default() > ttl {
+                    stale.push(path);
+                }
+            }
+        }
+    }
+    if stale.is_empty() {
+        return CheckResult::pass(
+            "Lock files",
+            if total == 0 {
+                "none".to_string()
+            } else {
+                format!("{total} total, none stale")
+            },
+        );
+    }
+    if repair {
+        let mut removed = 0usize;
+        let mut failed_names: Vec<String> = Vec::new();
+        for p in &stale {
+            match std::fs::remove_file(p) {
+                Ok(_) => removed += 1,
+                Err(_) => failed_names.push(p.display().to_string()),
+            }
+        }
+        if failed_names.is_empty() {
+            CheckResult::pass("Lock files", format!("removed {removed} stale lock(s)"))
+        } else {
+            CheckResult::warn(
+                "Lock files",
+                format!("removed {removed}, failed to remove {}", failed_names.len()),
+            )
+            .with_detail(failed_names)
+        }
+    } else {
+        let names: Vec<String> = stale
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+            .collect();
+        CheckResult::warn(
+            "Lock files",
+            format!("{} stale of {total} (TTL {lock_ttl_secs}s)", stale.len()),
+        )
+        .with_detail(names)
+    }
+}
+
+fn doctor_check_bead_store(
+    workspace: &Path,
+    beads_dir: &Path,
+    repair: bool,
+) -> Result<CheckResult> {
+    if !beads_dir.is_dir() {
+        return Ok(CheckResult::pass("Bead store", "skipped (no .beads/)"));
+    }
+    let store = match BrCliBeadStore::discover(workspace.to_path_buf()) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(CheckResult::fail(
+                "Bead store",
+                format!("br CLI not found: {e}"),
+            ))
+        }
+    };
+    let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    if repair {
+        match rt.block_on(store.doctor_repair()) {
+            Err(e) => Ok(CheckResult::fail(
+                "Bead store",
+                format!("repair failed: {e}"),
+            )),
+            Ok(report) if report.warnings.is_empty() && report.fixed.is_empty() => {
+                Ok(CheckResult::pass("Bead store", "ok (no issues found)"))
+            }
+            Ok(report) => {
+                let mut detail = Vec::new();
+                for w in &report.warnings {
+                    detail.push(format!("warn: {w}"));
+                }
+                for f in &report.fixed {
+                    detail.push(format!("fixed: {f}"));
+                }
+                Ok(
+                    CheckResult::pass("Bead store", format!("{} fixed", report.fixed.len()))
+                        .with_detail(detail),
+                )
+            }
+        }
+    } else {
+        match rt.block_on(store.doctor_check()) {
+            Err(e) => Ok(CheckResult::fail("Bead store", format!("{e}"))),
+            Ok(report) if report.warnings.is_empty() => Ok(CheckResult::pass("Bead store", "ok")),
+            Ok(report) => Ok(CheckResult::warn(
+                "Bead store",
+                format!("{} warning(s)", report.warnings.len()),
+            )
+            .with_detail(report.warnings)),
+        }
+    }
+}
+
+fn doctor_check_registry(needle_home: &Path, repair: bool) -> CheckResult {
+    let registry = Registry::default_location(needle_home);
     match registry.list() {
+        Err(e) => CheckResult::fail("Worker registry", format!("{e}")),
         Ok(workers) => {
             let stale: Vec<&WorkerEntry> =
                 workers.iter().filter(|w| !is_pid_alive(w.pid)).collect();
             if stale.is_empty() {
-                println!("OK ({} workers registered)", workers.len());
-            } else {
-                println!(
-                    "WARNING: {} stale entries (dead PIDs: {})",
-                    stale.len(),
-                    stale
-                        .iter()
-                        .map(|w| format!("{}(pid={})", w.id, w.pid))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                issues_found += stale.len();
-
-                if repair {
-                    for w in &stale {
-                        if let Err(e) = registry.deregister(&w.id) {
-                            println!("  Failed to deregister {}: {e}", w.id);
-                        } else {
-                            println!("  Deregistered stale worker: {}", w.id);
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            println!("ERROR: {e}");
-            issues_found += 1;
-        }
-    }
-
-    // 3. Check heartbeat files for staleness.
-    print!("Heartbeats... ");
-    let heartbeat_dir = needle_home.join("state").join("heartbeats");
-    if heartbeat_dir.is_dir() {
-        let mut stale_heartbeats = 0;
-        let mut total_heartbeats = 0;
-
-        if let Ok(entries) = std::fs::read_dir(&heartbeat_dir) {
-            for entry in entries.flatten() {
-                if entry.path().extension().is_some_and(|e| e == "json") {
-                    total_heartbeats += 1;
-                    if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                        let is_stale = if let Ok(hb) =
-                            serde_json::from_str::<HeartbeatData>(&content)
-                        {
-                            // New-format heartbeat: check age against TTL.
-                            let age = Utc::now()
-                                .signed_duration_since(hb.last_heartbeat)
-                                .num_seconds();
-                            age > config.health.heartbeat_ttl_secs as i64
-                        } else if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content)
-                        {
-                            // Old-format heartbeat (pre-Rust worker): extract PID
-                            // and check if the process is still alive.
-                            raw.get("pid")
-                                .and_then(|v| v.as_u64())
-                                .map(|pid| !is_pid_alive(pid as u32))
-                                .unwrap_or(true)
-                        } else {
-                            // Unparseable file — treat as stale.
-                            true
-                        };
-
-                        if is_stale {
-                            stale_heartbeats += 1;
-                            if repair {
-                                if let Err(e) = std::fs::remove_file(entry.path()) {
-                                    println!(
-                                        "\n  Failed to remove stale heartbeat {}: {e}",
-                                        entry.path().display()
-                                    );
-                                } else {
-                                    println!(
-                                        "\n  Removed stale heartbeat: {}",
-                                        entry.path().display()
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if stale_heartbeats == 0 {
-            println!("OK ({total_heartbeats} files)");
-        } else {
-            println!("WARNING: {stale_heartbeats} stale of {total_heartbeats}");
-            issues_found += stale_heartbeats;
-        }
-    } else {
-        println!("OK (no heartbeat directory)");
-    }
-
-    // 4. Run br doctor on the workspace.
-    if beads_dir.is_dir() {
-        print!("Bead database... ");
-        let store = BrCliBeadStore::discover(workspace_root.clone());
-        match store {
-            Ok(s) => {
-                let rt =
-                    tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-
-                if repair {
-                    match rt.block_on(s.doctor_repair()) {
-                        Ok(report) => {
-                            if report.warnings.is_empty() && report.fixed.is_empty() {
-                                println!("OK (repaired)");
-                            } else {
-                                if !report.warnings.is_empty() {
-                                    println!("WARNINGS:");
-                                    for w in &report.warnings {
-                                        println!("  {w}");
-                                    }
-                                }
-                                if !report.fixed.is_empty() {
-                                    println!("  Fixed:");
-                                    for f in &report.fixed {
-                                        println!("    {f}");
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            println!("REPAIR FAILED: {e}");
-                            issues_found += 1;
-                        }
-                    }
-                } else {
-                    match rt.block_on(s.doctor_check()) {
-                        Ok(report) => {
-                            if report.warnings.is_empty() {
-                                println!("OK");
-                            } else {
-                                println!("WARNINGS:");
-                                for w in &report.warnings {
-                                    println!("  {w}");
-                                }
-                                issues_found += report.warnings.len();
-                            }
-                        }
-                        Err(e) => {
-                            println!("ERROR: {e}");
-                            issues_found += 1;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                println!("ERROR: could not locate br CLI: {e}");
-                issues_found += 1;
-            }
-        }
-    }
-
-    // 5. Check telemetry log directory.
-    print!("Telemetry logs... ");
-    let log_dir = config
-        .telemetry
-        .file_sink
-        .log_dir
-        .clone()
-        .unwrap_or_else(|| needle_home.join("logs"));
-    if log_dir.is_dir() {
-        let retention_days = config.telemetry.file_sink.retention_days;
-        let mut total_logs = 0u64;
-        let mut expired_logs = 0u64;
-
-        if let Ok(entries) = std::fs::read_dir(&log_dir) {
-            let cutoff = if retention_days > 0 {
-                Some(
-                    std::time::SystemTime::now()
-                        - std::time::Duration::from_secs(u64::from(retention_days) * 86400),
+                CheckResult::pass(
+                    "Worker registry",
+                    if workers.is_empty() {
+                        "empty".to_string()
+                    } else {
+                        format!("{} registered, all alive", workers.len())
+                    },
                 )
             } else {
-                None
-            };
-
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-                    continue;
-                }
-                total_logs += 1;
-
-                if let Some(cutoff) = cutoff {
-                    if let Ok(meta) = std::fs::metadata(&path) {
-                        if let Ok(modified) = meta.modified() {
-                            if modified < cutoff {
-                                expired_logs += 1;
-                                if repair {
-                                    if let Err(e) = std::fs::remove_file(&path) {
-                                        println!(
-                                            "\n  Failed to remove expired log {}: {e}",
-                                            path.display()
-                                        );
-                                    }
-                                }
-                            }
+                let names: Vec<String> = stale
+                    .iter()
+                    .map(|w| format!("{}(pid={})", w.id, w.pid))
+                    .collect();
+                if repair {
+                    let mut removed = 0usize;
+                    let mut failed = 0usize;
+                    for w in &stale {
+                        match registry.deregister(&w.id) {
+                            Ok(_) => removed += 1,
+                            Err(_) => failed += 1,
                         }
                     }
+                    if failed == 0 {
+                        CheckResult::pass(
+                            "Worker registry",
+                            format!("deregistered {removed} stale worker(s)"),
+                        )
+                    } else {
+                        CheckResult::warn(
+                            "Worker registry",
+                            format!("deregistered {removed}, failed {failed}"),
+                        )
+                    }
+                } else {
+                    CheckResult::warn(
+                        "Worker registry",
+                        format!("{} stale of {}", stale.len(), workers.len()),
+                    )
+                    .with_detail(names)
                 }
             }
         }
+    }
+}
 
-        if expired_logs > 0 {
-            if repair {
-                println!(
-                    "cleaned {expired_logs} expired of {total_logs} files (retention: {retention_days}d)"
-                );
-            } else {
-                println!(
-                    "WARNING: {expired_logs} expired of {total_logs} files (retention: {retention_days}d)"
-                );
+fn doctor_check_heartbeat_dir(heartbeat_dir: &Path, repair: bool) -> CheckResult {
+    if !heartbeat_dir.exists() {
+        if repair {
+            match std::fs::create_dir_all(heartbeat_dir) {
+                Ok(_) => {
+                    return CheckResult::pass(
+                        "Heartbeat dir",
+                        format!("created {}", heartbeat_dir.display()),
+                    )
+                }
+                Err(e) => return CheckResult::fail("Heartbeat dir", format!("cannot create: {e}")),
             }
-            issues_found += expired_logs as usize;
+        }
+        return CheckResult::warn(
+            "Heartbeat dir",
+            format!("missing: {}", heartbeat_dir.display()),
+        );
+    }
+    // Probe write access.
+    let probe = heartbeat_dir.join(".needle_doctor_probe");
+    match std::fs::write(&probe, b"") {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            CheckResult::pass("Heartbeat dir", "writable")
+        }
+        Err(e) => CheckResult::fail("Heartbeat dir", format!("not writable: {e}")),
+    }
+}
+
+fn doctor_check_heartbeats(heartbeat_dir: &Path, ttl_secs: u64, repair: bool) -> CheckResult {
+    if !heartbeat_dir.is_dir() {
+        return CheckResult::pass("Heartbeat files", "no heartbeat directory");
+    }
+    let entries = match std::fs::read_dir(heartbeat_dir) {
+        Ok(e) => e,
+        Err(e) => return CheckResult::warn("Heartbeat files", format!("cannot read dir: {e}")),
+    };
+    let mut total = 0usize;
+    let mut stale_paths: Vec<PathBuf> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        total += 1;
+        let is_stale = if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(hb) = serde_json::from_str::<HeartbeatData>(&content) {
+                let age = Utc::now()
+                    .signed_duration_since(hb.last_heartbeat)
+                    .num_seconds();
+                age > ttl_secs as i64
+            } else if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&content) {
+                raw.get("pid")
+                    .and_then(|v| v.as_u64())
+                    .map(|pid| !is_pid_alive(pid as u32))
+                    .unwrap_or(true)
+            } else {
+                true
+            }
         } else {
-            println!("OK ({total_logs} files in {})", log_dir.display());
+            true
+        };
+        if is_stale {
+            stale_paths.push(path);
+        }
+    }
+    if stale_paths.is_empty() {
+        return CheckResult::pass("Heartbeat files", format!("{total} file(s), none stale"));
+    }
+    if repair {
+        let mut removed = 0usize;
+        let mut failed = 0usize;
+        for p in &stale_paths {
+            match std::fs::remove_file(p) {
+                Ok(_) => removed += 1,
+                Err(_) => failed += 1,
+            }
+        }
+        if failed == 0 {
+            CheckResult::pass(
+                "Heartbeat files",
+                format!("removed {removed} stale of {total}"),
+            )
+        } else {
+            CheckResult::warn(
+                "Heartbeat files",
+                format!("removed {removed}, failed {failed}"),
+            )
         }
     } else {
-        println!("OK (no log directory yet)");
+        CheckResult::warn(
+            "Heartbeat files",
+            format!("{} stale of {total}", stale_paths.len()),
+        )
     }
+}
 
-    // 6. Check that output_transform binaries referenced by adapters are on PATH.
-    print!("Adapter transforms... ");
+fn doctor_check_peers(heartbeat_dir: &Path, ttl_secs: u64) -> CheckResult {
+    let ttl = std::time::Duration::from_secs(ttl_secs);
+    let heartbeats = match HealthMonitor::read_all_heartbeats(heartbeat_dir) {
+        Ok(hbs) => hbs,
+        Err(e) => return CheckResult::warn("Peers", format!("cannot read heartbeats: {e}")),
+    };
+    if heartbeats.is_empty() {
+        return CheckResult::pass("Peers", "no workers running");
+    }
+    let (active, stale): (Vec<_>, Vec<_>) = heartbeats
+        .iter()
+        .partition(|hb| !HealthMonitor::is_stale(hb, ttl));
+    let msg = format!("{} active, {} stale", active.len(), stale.len());
+    let mut detail: Vec<String> = active
+        .iter()
+        .map(|hb| {
+            let bead = hb
+                .current_bead
+                .as_ref()
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "–".to_string());
+            format!(
+                "{} pid={} state={:?} bead={}",
+                hb.worker_id, hb.pid, hb.state, bead
+            )
+        })
+        .collect();
+    for hb in &stale {
+        detail.push(format!(
+            "[stale] {} pid={} last={}",
+            hb.worker_id, hb.pid, hb.last_heartbeat
+        ));
+    }
+    CheckResult::pass("Peers", msg).with_detail(detail)
+}
+
+fn doctor_check_agent_binary(config: &Config) -> CheckResult {
+    let agent = &config.agent.default;
+    let br_ok = which::which("br").is_ok();
+    let agent_ok = which::which(agent).is_ok();
+    match (br_ok, agent_ok) {
+        (true, true) => CheckResult::pass("Agent binary", format!("br + {agent} on PATH")),
+        (false, _) => CheckResult::fail("Agent binary", "br CLI not found on PATH"),
+        (true, false) => CheckResult::warn(
+            "Agent binary",
+            format!("{agent} not found on PATH — workers cannot dispatch"),
+        ),
+    }
+}
+
+fn doctor_check_adapter_transforms(config: &Config) -> CheckResult {
     match dispatch::load_adapters(&config.agent.adapters_dir, &dispatch::builtin_adapters()) {
+        Err(e) => CheckResult::fail("Adapter transforms", format!("cannot load adapters: {e}")),
         Ok(adapters) => {
             let mut missing: Vec<String> = adapters
                 .values()
@@ -1291,29 +1529,216 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
             missing.sort();
             missing.dedup();
             if missing.is_empty() {
-                println!("OK");
+                CheckResult::pass("Adapter transforms", "ok")
             } else {
-                println!(
-                    "WARNING: transform binary not on PATH: {}",
-                    missing.join(", ")
-                );
-                issues_found += missing.len();
+                CheckResult::warn(
+                    "Adapter transforms",
+                    format!("{} binary/binaries not on PATH", missing.len()),
+                )
+                .with_detail(missing)
             }
         }
-        Err(e) => {
-            println!("ERROR: could not load adapters: {e}");
-            issues_found += 1;
+    }
+}
+
+fn doctor_check_disk_space(path: &Path) -> CheckResult {
+    // df --block-size=1M --output=avail <path> prints a header + one value.
+    let output = std::process::Command::new("df")
+        .args(["--block-size=1M", "--output=avail"])
+        .arg(path)
+        .output();
+    match output {
+        Err(_) => CheckResult::warn("Disk space", "df not available — skipped"),
+        Ok(out) if !out.status.success() => CheckResult::warn("Disk space", "df command failed"),
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let avail_mb = stdout
+                .lines()
+                .nth(1)
+                .and_then(|l| l.trim().parse::<u64>().ok())
+                .unwrap_or(0);
+            if avail_mb < 100 {
+                CheckResult::fail(
+                    "Disk space",
+                    format!("{avail_mb} MB available — critically low"),
+                )
+            } else if avail_mb < 500 {
+                CheckResult::warn("Disk space", format!("{avail_mb} MB available — low"))
+            } else {
+                CheckResult::pass("Disk space", format!("{avail_mb} MB available"))
+            }
+        }
+    }
+}
+
+fn doctor_check_telemetry_logs(config: &Config, needle_home: &Path, repair: bool) -> CheckResult {
+    let log_dir = config
+        .telemetry
+        .file_sink
+        .log_dir
+        .clone()
+        .unwrap_or_else(|| needle_home.join("logs"));
+    if !log_dir.is_dir() {
+        return CheckResult::pass("Telemetry logs", "no log directory yet");
+    }
+    let retention_days = config.telemetry.file_sink.retention_days;
+    let mut total = 0u64;
+    let mut expired = 0u64;
+    let cutoff = if retention_days > 0 {
+        Some(
+            std::time::SystemTime::now()
+                - std::time::Duration::from_secs(u64::from(retention_days) * 86400),
+        )
+    } else {
+        None
+    };
+    if let Ok(entries) = std::fs::read_dir(&log_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            total += 1;
+            if let Some(cutoff) = cutoff {
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    if let Ok(modified) = meta.modified() {
+                        if modified < cutoff {
+                            expired += 1;
+                            if repair {
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if expired == 0 {
+        CheckResult::pass("Telemetry logs", format!("{total} file(s)"))
+    } else if repair {
+        CheckResult::pass(
+            "Telemetry logs",
+            format!("removed {expired} expired of {total} (retention: {retention_days}d)"),
+        )
+    } else {
+        CheckResult::warn(
+            "Telemetry logs",
+            format!("{expired} expired of {total} (retention: {retention_days}d) — use --repair to clean"),
+        )
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// `needle doctor` — comprehensive system health check
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// `needle doctor` — check system health and optionally repair.
+fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
+    let config = ConfigLoader::load_global()?;
+    let needle_home = config.workspace.home.clone();
+    let workspace_root = workspace.unwrap_or_else(|| config.workspace.default.clone());
+    let beads_dir = workspace_root.join(".beads");
+    let heartbeat_dir = needle_home.join("state").join("heartbeats");
+
+    let width = 60;
+    println!("NEEDLE Doctor");
+    println!("{}", "─".repeat(width));
+
+    let mut results: Vec<CheckResult> = Vec::new();
+
+    // Config
+    results.push(doctor_check_config(&workspace_root));
+
+    // Workspace accessibility + .beads/ presence
+    results.push(doctor_check_workspace(&workspace_root));
+
+    // JSONL consistency
+    if beads_dir.is_dir() {
+        results.push(doctor_check_jsonl(&beads_dir));
+    }
+
+    // SQLite integrity (raw PRAGMA — independent of br)
+    if beads_dir.is_dir() {
+        results.push(doctor_check_sqlite(&beads_dir));
+    }
+
+    // Stale lock files
+    if beads_dir.is_dir() {
+        results.push(doctor_check_lock_files(
+            &beads_dir,
+            config.strands.mend.lock_ttl_secs,
+            repair,
+        ));
+    }
+
+    // Bead store connectivity (br doctor)
+    results.push(doctor_check_bead_store(
+        &workspace_root,
+        &beads_dir,
+        repair,
+    )?);
+
+    // Worker registry
+    results.push(doctor_check_registry(&needle_home, repair));
+
+    // Heartbeat directory permissions
+    results.push(doctor_check_heartbeat_dir(&heartbeat_dir, repair));
+
+    // Heartbeat file staleness
+    results.push(doctor_check_heartbeats(
+        &heartbeat_dir,
+        config.health.heartbeat_ttl_secs,
+        repair,
+    ));
+
+    // Peer status
+    results.push(doctor_check_peers(
+        &heartbeat_dir,
+        config.health.heartbeat_ttl_secs,
+    ));
+
+    // Agent binary availability
+    results.push(doctor_check_agent_binary(&config));
+
+    // Adapter transform binaries
+    results.push(doctor_check_adapter_transforms(&config));
+
+    // Disk space
+    results.push(doctor_check_disk_space(&workspace_root));
+
+    // Telemetry logs
+    results.push(doctor_check_telemetry_logs(&config, &needle_home, repair));
+
+    // Print results.
+    for r in &results {
+        println!("{}", r.display());
+        for line in &r.detail {
+            println!("         └─ {line}");
         }
     }
 
     // Summary.
-    println!();
-    if issues_found == 0 {
-        println!("All checks passed.");
-    } else if repair {
-        println!("{issues_found} issue(s) found and repair attempted.");
+    let fails = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Fail)
+        .count();
+    let warns = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Warn)
+        .count();
+    let passed = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Pass)
+        .count();
+
+    println!("{}", "─".repeat(width));
+    if fails == 0 && warns == 0 {
+        println!("{passed} check(s) passed.");
     } else {
-        println!("{issues_found} issue(s) found. Run with --repair to fix.");
+        println!("{passed} passed, {warns} warning(s), {fails} failure(s).");
+        if !repair && (fails > 0 || warns > 0) {
+            println!("Run `needle doctor --repair` to attempt automatic fixes.");
+        }
     }
 
     Ok(())
@@ -1691,8 +2116,25 @@ fn cmd_canary(show_status: bool) -> Result<()> {
         bail!("self-modification is disabled — set self_modification.enabled = true in config");
     }
 
+    let tel = crate::telemetry::Telemetry::from_config("canary".to_string(), &config.telemetry)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "hook telemetry init failed, falling back");
+            crate::telemetry::Telemetry::new("canary".to_string())
+        });
+
+    let suite_id = runner.testing_binary().display().to_string();
+    tel.emit(crate::telemetry::EventKind::CanaryStarted {
+        suite: suite_id.clone(),
+    })?;
+
     println!("Running canary tests...");
     let report = runner.run()?;
+
+    tel.emit(crate::telemetry::EventKind::CanarySuiteCompleted {
+        suite: suite_id,
+        passed: report.passed as u32,
+        failed: (report.failed + report.timed_out + report.errors) as u32,
+    })?;
 
     println!("\nCanary Report");
     println!("─────────────");
@@ -1731,7 +2173,11 @@ fn cmd_canary(show_status: bool) -> Result<()> {
     if report.can_promote() {
         if config.self_modification.auto_promote {
             println!("\nAll tests passed — auto-promoting :testing to :stable...");
+            // Capture hash before promote moves the file.
+            let hash = crate::upgrade::file_hash(&report.testing_binary)
+                .unwrap_or_else(|_| "unknown".to_string());
             runner.promote()?;
+            tel.emit(crate::telemetry::EventKind::CanaryPromoted { hash })?;
             println!("Promotion complete. Fleet will hot-reload on next cycle.");
         } else {
             println!("\nAll tests passed. Run `needle canary --status` to verify, then promote manually.");
@@ -1741,8 +2187,13 @@ fn cmd_canary(show_status: bool) -> Result<()> {
             );
         }
     } else {
+        let reason = format!(
+            "{} failed, {} timed out, {} errors",
+            report.failed, report.timed_out, report.errors
+        );
         println!("\nCanary tests FAILED. :testing will NOT be promoted.");
         runner.reject()?;
+        tel.emit(crate::telemetry::EventKind::CanaryRejected { reason })?;
         println!("Testing binary discarded.");
     }
 
