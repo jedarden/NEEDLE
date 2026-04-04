@@ -16,7 +16,7 @@ use crate::telemetry::{EventKind, Telemetry};
 #[cfg(test)]
 use crate::types::BeadStatus;
 use crate::types::{AgentOutcome, Bead, BeadAction, HandlerResult, Outcome};
-use crate::validation::ValidationGate;
+use crate::validation::{GateConfig, ValidationGate};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // classify (convenience re-export)
@@ -102,7 +102,7 @@ impl OutcomeHandler {
     /// Success: run validation gates (if configured), then verify bead closure.
     ///
     /// Flow:
-    /// 1. If verification commands are configured, run them in the workspace.
+    /// 1. If validation gates are configured (new or legacy format), run them.
     /// 2. If any gate fails: reopen the bead (if agent closed it) and release it.
     /// 3. If all gates pass (or none configured): check if agent closed the bead.
     ///    - Closed → emit BeadCompleted.
@@ -116,20 +116,33 @@ impl OutcomeHandler {
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::info!(bead_id = %bead.id, "agent completed successfully");
 
-        // Run validation gates if configured.
-        if let Some(gate) =
-            ValidationGate::new(self.config.verification.clone(), bead.workspace.clone())
-        {
-            let gate_result = gate.run().await?;
+        // Try pluggable gates first, fall back to legacy verification commands.
+        let gate = if !self.config.gates.is_empty() {
+            // New pluggable gate system.
+            let gate_configs: Vec<(String, GateConfig)> = self
+                .config
+                .gates
+                .iter()
+                .enumerate()
+                .map(|(i, config)| (format!("gate_{}", i), config.clone()))
+                .collect();
+            ValidationGate::new(gate_configs, bead.workspace.clone())
+        } else if !self.config.verification.is_empty() {
+            // Legacy verification command format.
+            ValidationGate::from_commands(self.config.verification.clone(), bead.workspace.clone())
+        } else {
+            None
+        };
 
-            if !gate_result.passed {
-                return self
-                    .handle_verification_failure(store, bead, &gate_result.failures)
-                    .await;
+        if let Some(gate) = gate {
+            let report = gate.run(bead).await?;
+
+            if !report.all_passed {
+                return self.handle_gate_failure(store, bead, &report).await;
             }
 
             // All gates passed — emit telemetry.
-            let gates_run = self.config.verification.len() as u32;
+            let gates_run = report.results.len() as u32;
             self.telemetry.emit(EventKind::VerificationPassed {
                 bead_id: bead.id.clone(),
                 gates_run,
@@ -174,28 +187,34 @@ impl OutcomeHandler {
         Ok((BeadAction::None, events))
     }
 
-    /// Handle verification failure: reopen the bead if it was closed, then release it.
-    async fn handle_verification_failure(
+    /// Handle gate failure: reopen the bead if it was closed, then release it.
+    async fn handle_gate_failure(
         &self,
         store: &dyn BeadStore,
         bead: &Bead,
-        failures: &[crate::validation::GateFailure],
+        report: &crate::validation::GateReport,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
-        let failure = &failures[0];
+        // Find the first failing gate for telemetry.
+        let (failed_gate, reason) = report
+            .results
+            .iter()
+            .find(|(_, r)| !r.passed())
+            .map(|(name, r)| (name.clone(), r.failure_reason().unwrap_or("").to_string()))
+            .unwrap_or_else(|| ("unknown".to_string(), "unknown error".to_string()));
 
         tracing::warn!(
             bead_id = %bead.id,
-            command = %failure.command,
-            exit_code = ?failure.exit_code,
+            gate = %failed_gate,
+            reason = %reason,
             "validation gate failed — releasing bead"
         );
 
         // Emit verification failure telemetry.
         self.telemetry.emit(EventKind::VerificationFailed {
             bead_id: bead.id.clone(),
-            command: failure.command.clone(),
-            exit_code: failure.exit_code,
-            output: failure.output.clone(),
+            command: failed_gate.clone(),
+            exit_code: None,
+            output: reason,
         })?;
 
         // If the agent already closed the bead, reopen it before releasing.
@@ -231,7 +250,7 @@ impl OutcomeHandler {
 
         let event = EventKind::BeadReleased {
             bead_id: bead.id.clone(),
-            reason: format!("verification_failed: {}", failure.command),
+            reason: format!("verification_failed: {}", failed_gate),
         };
         self.telemetry.emit(event.clone())?;
 
