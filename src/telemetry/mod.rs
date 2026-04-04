@@ -1783,6 +1783,42 @@ impl Telemetry {
         }
     }
 
+    /// Create a telemetry emitter backed by a real `FileSink` in a custom
+    /// directory (for testing the `start()`/`shutdown()` lifecycle).
+    ///
+    /// Returns `(Telemetry, log_file_path)`. Call `start()` from inside a
+    /// tokio runtime, emit events, then `shutdown().await` — the BufWriter
+    /// will be flushed before `shutdown()` returns.
+    #[cfg(test)]
+    pub fn with_log_dir_and_path(
+        worker_id: WorkerId,
+        log_dir: &std::path::Path,
+    ) -> Result<(Self, std::path::PathBuf)> {
+        // Fixed session ID so the caller knows the exact file path.
+        let session_id = "testbeef".to_string();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let file_sink = FileSink::with_dir(log_dir, &worker_id, &session_id)?;
+        let path = file_sink.path().to_path_buf();
+        let sequence = Arc::new(AtomicU64::new(0));
+        let pending = PendingWriter {
+            receiver,
+            file_sink: Some(file_sink),
+            stdout_sink: None,
+            hook_sink: None,
+        };
+        Ok((
+            Telemetry {
+                worker_id,
+                session_id,
+                sequence,
+                sender: Arc::new(std::sync::Mutex::new(Some(sender))),
+                pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
+                writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            },
+            path,
+        ))
+    }
+
     /// Create a telemetry emitter with a custom sink (for testing).
     #[cfg(test)]
     pub fn with_sink(worker_id: WorkerId, sink: impl TelemetrySink + 'static) -> Self {
@@ -3606,5 +3642,59 @@ mod tests {
         let received = events.lock().unwrap();
         assert_eq!(received.len(), 1);
         assert_eq!(received[0].event_type, "worker.started");
+    }
+
+    /// Regression test: BufWriter never flushed on short-lived sessions.
+    ///
+    /// When a worker hits EXHAUSTED quickly the total telemetry is only a few
+    /// hundred bytes — well below BufWriter's 8 KB auto-flush threshold.
+    /// `shutdown()` must drop the sender (closing the channel) and *await* the
+    /// writer task's JoinHandle so the flush runs before the tokio Runtime drops.
+    #[tokio::test]
+    async fn shutdown_flushes_bufwriter_on_short_lived_session() {
+        let dir = std::env::temp_dir().join("needle-test-shutdown-flush");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (telemetry, path) = Telemetry::with_log_dir_and_path("test-worker".to_string(), &dir)
+            .expect("should create");
+
+        // start() must be called from inside the runtime.
+        telemetry.start();
+
+        // Emit a handful of small events — total << 8 KB BufWriter threshold.
+        telemetry
+            .emit(EventKind::WorkerStarted {
+                worker_name: "test-worker".to_string(),
+                version: "0.1.0".to_string(),
+            })
+            .unwrap();
+        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry
+            .emit(EventKind::WorkerStopped {
+                reason: "exhausted".to_string(),
+                beads_processed: 0,
+                uptime_secs: 0,
+            })
+            .unwrap();
+
+        // shutdown() closes the channel, awaits the writer task, and guarantees
+        // the BufWriter is flushed before returning — no sleep required.
+        telemetry.shutdown().await;
+
+        // The file must contain the 3 events.  If the BufWriter was never
+        // flushed the file would be 0 bytes and this assertion would fail.
+        let content = std::fs::read_to_string(&path).expect("log file must exist");
+        let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 3, "expected 3 JSONL lines after shutdown");
+        for line in &lines {
+            let v: serde_json::Value =
+                serde_json::from_str(line).expect("each line must be valid JSON");
+            assert!(
+                v.get("event_type").is_some(),
+                "event_type field must be present"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
