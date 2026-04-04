@@ -809,6 +809,8 @@ async fn dispatcher_captures_stdout_and_stderr() {
         content: "test".to_string(),
         hash: "abc123".to_string(),
         token_estimate: 1,
+        template_name: "pluck".to_string(),
+        template_version: "pluck-default".to_string(),
     };
 
     let result = dispatcher
@@ -839,6 +841,8 @@ async fn dispatcher_timeout_kills_process() {
         content: "test".to_string(),
         hash: "abc123".to_string(),
         token_estimate: 1,
+        template_name: "pluck".to_string(),
+        template_version: "pluck-default".to_string(),
     };
 
     let result = dispatcher

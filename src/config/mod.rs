@@ -894,6 +894,23 @@ pub struct LimitsConfig {
     pub models: BTreeMap<String, ModelLimits>,
 }
 
+/// A/B test variant for a prompt template.
+///
+/// Configured under `prompt.variants.<template_name>` in `.needle.yaml`.
+/// Workers are assigned to variants deterministically by `hash(worker_id) % 100`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VariantConfig {
+    /// Variant name (e.g., `"control"`, `"v2"`).
+    pub name: String,
+
+    /// Percentage of workers assigned to this variant (0–100).
+    pub weight: u8,
+
+    /// Path to the file containing the variant template content.
+    /// Resolved relative to the workspace root.
+    pub content_file: PathBuf,
+}
+
 /// Prompt construction configuration.
 ///
 /// Loaded from the `prompt` section of workspace config (`.needle.yaml`).
@@ -913,6 +930,24 @@ pub struct PromptConfig {
     /// specified here are overridden; others use built-in defaults.
     #[serde(default)]
     pub templates: std::collections::BTreeMap<String, String>,
+
+    /// A/B test variants per template name.
+    ///
+    /// Keys are template names; values are ordered lists of variants.
+    /// Workers are assigned to variants based on `hash(worker_id) % 100`
+    /// compared against cumulative variant weights.
+    ///
+    /// Example `.needle.yaml`:
+    /// ```yaml
+    /// prompt:
+    ///   variants:
+    ///     pluck:
+    ///       - name: v2
+    ///         weight: 50
+    ///         content_file: prompts/pluck-v2.txt
+    /// ```
+    #[serde(default)]
+    pub variants: std::collections::BTreeMap<String, Vec<VariantConfig>>,
 }
 
 /// Self-modification (hot-reload) configuration.

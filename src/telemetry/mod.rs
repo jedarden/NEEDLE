@@ -133,6 +133,12 @@ pub enum EventKind {
         bead_id: BeadId,
         agent: String,
         prompt_len: usize,
+        /// Template name used to build the prompt (e.g., `"pluck"`).
+        template_name: String,
+        /// Version tag identifying which variant was used (e.g., `"pluck-default"`, `"pluck-v2"`).
+        template_version: String,
+        /// SHA-256 hex digest of the rendered prompt content.
+        prompt_hash: String,
     },
     DispatchCompleted {
         bead_id: BeadId,
@@ -616,11 +622,17 @@ impl EventKind {
                 bead_id,
                 agent,
                 prompt_len,
+                template_name,
+                template_version,
+                prompt_hash,
             } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
                     "agent": agent,
                     "prompt_len": prompt_len,
+                    "template_name": template_name,
+                    "template_version": template_version,
+                    "prompt_hash": format!("sha256:{prompt_hash}"),
                 })
             }
             EventKind::DispatchCompleted {
@@ -2389,6 +2401,9 @@ mod tests {
                 bead_id: BeadId::from("nd-x"),
                 agent: "claude".to_string(),
                 prompt_len: 100,
+                template_name: "pluck".to_string(),
+                template_version: "pluck-default".to_string(),
+                prompt_hash: "abc123".to_string(),
             }
             .event_type(),
             "agent.dispatched"
@@ -2787,6 +2802,9 @@ mod tests {
                 bead_id: id.clone(),
                 agent: "claude".to_string(),
                 prompt_len: 100,
+                template_name: "pluck".to_string(),
+                template_version: "pluck-default".to_string(),
+                prompt_hash: "abc123".to_string(),
             },
             EventKind::DispatchCompleted {
                 bead_id: id.clone(),

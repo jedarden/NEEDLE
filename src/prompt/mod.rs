@@ -15,7 +15,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::config::PromptConfig;
+use crate::config::{PromptConfig, VariantConfig};
 use crate::learning::LearningsFile;
 use crate::skill::SkillLibrary;
 use crate::types::Bead;
@@ -221,6 +221,11 @@ pub struct BuiltPrompt {
     pub hash: String,
     /// Rough token estimate (chars / 4).
     pub token_estimate: u64,
+    /// Name of the template used to build this prompt (e.g., `"pluck"`).
+    pub template_name: String,
+    /// Version tag identifying which variant/version was used
+    /// (e.g., `"pluck-default"`, `"pluck-v2"`).
+    pub template_version: String,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -243,6 +248,8 @@ pub struct PromptBuilder {
     learnings_content: Option<String>,
     /// Skill library for matching and injecting relevant skills into prompts.
     skill_library: Option<SkillLibrary>,
+    /// A/B test variant configurations per template name.
+    variants: BTreeMap<String, Vec<VariantConfig>>,
 }
 
 impl PromptBuilder {
@@ -269,6 +276,7 @@ impl PromptBuilder {
             workspace_instructions: config.instructions.clone(),
             learnings_content: None,
             skill_library: None,
+            variants: config.variants.clone(),
         }
     }
 
@@ -357,10 +365,17 @@ impl PromptBuilder {
         template_name: &str,
         extra_vars: &[(&str, &str)],
     ) -> Result<BuiltPrompt> {
-        let template = self
-            .templates
-            .get(template_name)
-            .with_context(|| format!("unknown prompt template: {template_name}"))?;
+        // Resolve template: variant takes precedence over built-in.
+        let (template_version, variant_content) =
+            self.select_variant(worker_id, template_name, workspace);
+        let template_content: &str = match variant_content {
+            Some(ref c) => c.as_str(),
+            None => self
+                .templates
+                .get(template_name)
+                .with_context(|| format!("unknown prompt template: {template_name}"))?
+                .as_str(),
+        };
 
         // Build context section: files + learnings + matching skills (in that order).
         let mut context_parts = vec![self.load_context_files(workspace)];
@@ -384,7 +399,7 @@ impl PromptBuilder {
         let body = bead.body.as_deref().unwrap_or("(no description)");
 
         // Substitute common variables.
-        let mut content = template
+        let mut content = template_content
             .replace("{bead_id}", bead.id.as_ref())
             .replace("{bead_title}", &bead.title)
             .replace("{bead_body}", body)
@@ -405,6 +420,8 @@ impl PromptBuilder {
             content,
             hash,
             token_estimate,
+            template_name: template_name.to_string(),
+            template_version,
         })
     }
 
@@ -544,11 +561,68 @@ impl PromptBuilder {
             sections.join("\n\n")
         }
     }
+
+    /// Select the variant version for a given template and worker.
+    ///
+    /// Returns `(template_version, variant_content)`:
+    /// - `template_version`: e.g. `"pluck-default"` or `"pluck-v2"`
+    /// - `variant_content`: `Some(String)` if a variant file was loaded, `None` for the default
+    ///
+    /// Assignment is deterministic: `worker_bucket(worker_id)` in `[0, 99]` is compared
+    /// against cumulative variant weights.  Same `worker_id` always produces the same result.
+    fn select_variant(
+        &self,
+        worker_id: &str,
+        template_name: &str,
+        workspace: &Path,
+    ) -> (String, Option<String>) {
+        let Some(variants) = self.variants.get(template_name) else {
+            return (format!("{template_name}-default"), None);
+        };
+
+        if variants.is_empty() {
+            return (format!("{template_name}-default"), None);
+        }
+
+        let bucket = worker_bucket(worker_id);
+        let mut cumulative: u32 = 0;
+
+        for variant in variants {
+            cumulative += u32::from(variant.weight);
+            if u32::from(bucket) < cumulative {
+                let abs_path = workspace.join(&variant.content_file);
+                match std::fs::read_to_string(&abs_path) {
+                    Ok(content) => {
+                        return (format!("{template_name}-{}", variant.name), Some(content));
+                    }
+                    Err(_) => {
+                        // Content file missing — fall back to the built-in default.
+                        return (format!("{template_name}-default"), None);
+                    }
+                }
+            }
+        }
+
+        // Cumulative weights < 100: worker falls outside all variant ranges.
+        (format!("{template_name}-default"), None)
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Compute the worker's variant bucket: `hash(worker_id) % 100` in `[0, 99]`.
+///
+/// Uses the first 8 bytes of the SHA-256 digest of `worker_id` as a `u64`,
+/// then takes modulo 100.  The result is deterministic and stable.
+fn worker_bucket(worker_id: &str) -> u8 {
+    let mut hasher = Sha256::new();
+    hasher.update(worker_id.as_bytes());
+    let result = hasher.finalize();
+    let n = u64::from_le_bytes(result[..8].try_into().expect("sha256 is at least 8 bytes"));
+    (n % 100) as u8
+}
 
 /// Compute the SHA-256 hex digest of a string.
 fn hex_sha256(s: &str) -> String {
@@ -772,6 +846,7 @@ mod tests {
             ],
             instructions: None,
             templates: BTreeMap::new(),
+            variants: BTreeMap::new(),
         };
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
@@ -797,6 +872,7 @@ mod tests {
             context_files: vec![PathBuf::from("AGENTS.md")],
             instructions: Some("Always run tests.".to_string()),
             templates: BTreeMap::new(),
+            variants: BTreeMap::new(),
         };
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
@@ -969,6 +1045,7 @@ mod tests {
             context_files: vec![],
             instructions: None,
             templates,
+            variants: BTreeMap::new(),
         };
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
@@ -988,6 +1065,7 @@ mod tests {
             context_files: vec![],
             instructions: None,
             templates,
+            variants: BTreeMap::new(),
         };
         let builder = PromptBuilder::new(&config);
 
@@ -1024,6 +1102,7 @@ mod tests {
             context_files: vec![],
             instructions: None,
             templates,
+            variants: BTreeMap::new(),
         };
         let builder = PromptBuilder::new(&config);
         let err = builder.validate();
@@ -1048,6 +1127,7 @@ mod tests {
             context_files: vec![],
             instructions: None,
             templates,
+            variants: BTreeMap::new(),
         };
         let builder = PromptBuilder::new(&config);
         builder
@@ -1065,6 +1145,7 @@ mod tests {
             context_files: vec![],
             instructions: None,
             templates,
+            variants: BTreeMap::new(),
         };
         let builder = PromptBuilder::new(&config);
         let err = builder.validate();

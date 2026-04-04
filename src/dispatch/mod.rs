@@ -526,6 +526,9 @@ impl Dispatcher {
             bead_id: bead_id.clone(),
             agent: adapter.name.clone(),
             prompt_len: prompt.content.len(),
+            template_name: prompt.template_name.clone(),
+            template_version: prompt.template_version.clone(),
+            prompt_hash: prompt.hash.clone(),
         })?;
 
         let result = self
@@ -1280,6 +1283,8 @@ mod tests {
             content: content.to_string(),
             hash: "testhash".to_string(),
             token_estimate: content.len() as u64 / 4,
+            template_name: "pluck".to_string(),
+            template_version: "pluck-default".to_string(),
         }
     }
 
