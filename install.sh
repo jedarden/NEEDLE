@@ -130,6 +130,52 @@ main() {
     # Download the binary
     download_file "$download_url" "$temp_binary"
 
+    # Download and verify checksums
+    local checksums_url="https://github.com/${REPO}/releases/download/${version}/checksums.txt"
+    local checksums_file="$temp_dir/checksums.txt"
+    info "Downloading checksums..."
+    if download_file "$checksums_url" "$checksums_file" 2>/dev/null; then
+        info "Verifying checksum..."
+        local expected_hash
+        expected_hash=$(grep "  ${asset_name}$\| ${asset_name}$" "$checksums_file" | awk '{print $1}')
+        if [[ -z "$expected_hash" ]]; then
+            warn "Could not find checksum for ${asset_name} in checksums.txt — skipping"
+        else
+            local actual_hash=""
+            if command -v sha256sum &>/dev/null; then
+                actual_hash=$(sha256sum "$temp_binary" | awk '{print $1}')
+            elif command -v shasum &>/dev/null; then
+                actual_hash=$(shasum -a 256 "$temp_binary" | awk '{print $1}')
+            else
+                warn "Neither sha256sum nor shasum found — skipping checksum verification"
+            fi
+            if [[ -n "$actual_hash" ]]; then
+                if [[ "$actual_hash" != "$expected_hash" ]]; then
+                    error "Checksum mismatch for ${asset_name}!
+  expected: ${expected_hash}
+  got:      ${actual_hash}"
+                fi
+                success "Checksum verified."
+            fi
+        fi
+
+        # Optional GPG signature verification
+        if command -v gpg &>/dev/null; then
+            local sig_url="https://github.com/${REPO}/releases/download/${version}/checksums.txt.asc"
+            local sig_file="$temp_dir/checksums.txt.asc"
+            if download_file "$sig_url" "$sig_file" 2>/dev/null; then
+                info "Verifying GPG signature..."
+                if gpg --verify "$sig_file" "$checksums_file" 2>/dev/null; then
+                    success "GPG signature verified."
+                else
+                    warn "GPG signature verification failed (signing key may not be in your keyring)."
+                fi
+            fi
+        fi
+    else
+        warn "Could not download checksums.txt — skipping integrity check"
+    fi
+
     # Make it executable
     chmod +x "$temp_binary"
 

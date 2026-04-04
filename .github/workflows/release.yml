@@ -36,20 +36,26 @@ jobs:
           key: ${{ runner.os }}-cargo-musl-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-musl-
 
-      - name: Build static binary
+      - name: Build static binaries
         run: cargo build --release --target x86_64-unknown-linux-musl
 
-      - name: Strip binary
-        run: strip target/x86_64-unknown-linux-musl/release/needle
+      - name: Strip and rename binaries
+        run: |
+          SUFFIX="x86_64-unknown-linux-gnu"
+          for bin in needle needle-transform-claude needle-transform-codex; do
+            src="target/x86_64-unknown-linux-musl/release/${bin}"
+            strip "${src}"
+            mv "${src}" "${bin}-${SUFFIX}"
+          done
 
-      - name: Rename binary
-        run: mv target/x86_64-unknown-linux-musl/release/needle needle-x86_64-unknown-linux-gnu
-
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: needle-linux-x86_64
-          path: needle-x86_64-unknown-linux-gnu
+          path: |
+            needle-x86_64-unknown-linux-gnu
+            needle-transform-claude-x86_64-unknown-linux-gnu
+            needle-transform-codex-x86_64-unknown-linux-gnu
 
   build-macos:
     name: Build macOS ARM64
@@ -74,20 +80,26 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build release binary
+      - name: Build release binaries
         run: cargo build --release --target aarch64-apple-darwin
 
-      - name: Strip binary
-        run: strip target/aarch64-apple-darwin/release/needle
+      - name: Strip and rename binaries
+        run: |
+          SUFFIX="aarch64-apple-darwin"
+          for bin in needle needle-transform-claude needle-transform-codex; do
+            src="target/aarch64-apple-darwin/release/${bin}"
+            strip "${src}"
+            mv "${src}" "${bin}-${SUFFIX}"
+          done
 
-      - name: Rename binary
-        run: mv target/aarch64-apple-darwin/release/needle needle-aarch64-apple-darwin
-
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: needle-macos-aarch64
-          path: needle-aarch64-apple-darwin
+          path: |
+            needle-aarch64-apple-darwin
+            needle-transform-claude-aarch64-apple-darwin
+            needle-transform-codex-aarch64-apple-darwin
 
   release:
     name: Create Release
@@ -95,26 +107,56 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+      GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Linux binary
+      - name: Download Linux binaries
         uses: actions/download-artifact@v4
         with:
           name: needle-linux-x86_64
 
-      - name: Download macOS binary
+      - name: Download macOS binaries
         uses: actions/download-artifact@v4
         with:
           name: needle-macos-aarch64
 
       - name: Make binaries executable
-        run: chmod +x needle-*
+        run: chmod +x needle-* needle-transform-claude-* needle-transform-codex-*
 
       - name: Get version from tag
         id: get_version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Generate SHA256 checksums
+        run: |
+          sha256sum \
+            needle-x86_64-unknown-linux-gnu \
+            needle-aarch64-apple-darwin \
+            needle-transform-claude-x86_64-unknown-linux-gnu \
+            needle-transform-claude-aarch64-apple-darwin \
+            needle-transform-codex-x86_64-unknown-linux-gnu \
+            needle-transform-codex-aarch64-apple-darwin \
+            install.sh \
+            > checksums.txt
+          cat checksums.txt
+
+      - name: Sign checksums with GPG
+        if: env.GPG_PRIVATE_KEY != ''
+        run: |
+          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "$GPG_PASSPHRASE" | gpg \
+            --batch \
+            --passphrase-fd 0 \
+            --pinentry-mode loopback \
+            --detach-sign \
+            --armor \
+            --output checksums.txt.asc \
+            checksums.txt
+          gpg --verify checksums.txt.asc checksums.txt
 
       - name: Generate release notes
         id: notes
@@ -131,8 +173,16 @@ jobs:
 
           Or download the binary directly for your platform:
 
-          - **Linux x86_64**: [needle-x86_64-unknown-linux-gnu](https://github.com/jedarden/NEEDLE/releases/download/${VERSION}/needle-x86_64-unknown-linux-gnu)
-          - **macOS ARM64**: [needle-aarch64-apple-darwin](https://github.com/jedarden/NEEDLE/releases/download/${VERSION}/needle-aarch64-apple-darwin)
+          | Platform | Binary |
+          |---|---|
+          | Linux x86_64 | [needle-x86_64-unknown-linux-gnu](https://github.com/jedarden/NEEDLE/releases/download/${VERSION}/needle-x86_64-unknown-linux-gnu) |
+          | macOS ARM64  | [needle-aarch64-apple-darwin](https://github.com/jedarden/NEEDLE/releases/download/${VERSION}/needle-aarch64-apple-darwin) |
+
+          ### Verify checksums
+
+          \`\`\`bash
+          curl -fsSL https://github.com/jedarden/NEEDLE/releases/download/${VERSION}/checksums.txt | sha256sum --check --ignore-missing
+          \`\`\`
 
           ### Upgrading
 
@@ -154,9 +204,16 @@ jobs:
         with:
           name: NEEDLE ${{ steps.get_version.outputs.VERSION }}
           body_path: release_notes.md
+          fail_on_unmatched_files: false
           files: |
             needle-x86_64-unknown-linux-gnu
             needle-aarch64-apple-darwin
+            needle-transform-claude-x86_64-unknown-linux-gnu
+            needle-transform-claude-aarch64-apple-darwin
+            needle-transform-codex-x86_64-unknown-linux-gnu
+            needle-transform-codex-aarch64-apple-darwin
             install.sh
+            checksums.txt
+            checksums.txt.asc
           draft: false
           prerelease: false
