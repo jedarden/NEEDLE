@@ -5,6 +5,9 @@ agent:
   default: claude
   timeout: 3600
 
+workspace:
+  labels: [rust, api]
+
 strands:
   explore:
     enabled: true
