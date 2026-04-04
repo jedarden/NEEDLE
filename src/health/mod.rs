@@ -347,6 +347,13 @@ impl HealthMonitor {
         let path = self.heartbeat_path();
         let tmp_path = path.with_extension("json.tmp");
 
+        // Auto-create parent directory so that heartbeats self-recover if the
+        // directory is deleted while a worker is running.
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create heartbeat dir: {}", parent.display()))?;
+        }
+
         let json = serde_json::to_string_pretty(&data).context("failed to serialize heartbeat")?;
         std::fs::write(&tmp_path, json.as_bytes()).with_context(|| {
             format!(
@@ -402,6 +409,16 @@ fn emitter_loop(
     started_at: DateTime<Utc>,
     interval: Duration,
 ) {
+    // Ensure the heartbeat directory exists before entering the write loop so
+    // that workers self-recover if ~/.needle/state/heartbeats/ is deleted.
+    if let Err(e) = std::fs::create_dir_all(&heartbeat_dir) {
+        tracing::error!(
+            error = %e,
+            dir = %heartbeat_dir.display(),
+            "failed to create heartbeat directory"
+        );
+    }
+
     loop {
         std::thread::sleep(interval);
 
