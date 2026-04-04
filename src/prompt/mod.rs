@@ -46,7 +46,15 @@ const DEFAULT_PLUCK_TEMPLATE: &str = "\
 
 Complete the task described above. When finished:
 - Commit your changes with a descriptive message
-- Close the bead: `br close {bead_id} --body \"Summary of what was done\"`
+- Close the bead with a structured retrospective:
+
+`br close {bead_id} --body \"Summary of work completed.
+
+## Retrospective
+- **What worked:** [approach that succeeded]
+- **What didn't:** [approach that failed and why]
+- **Surprise:** [anything unexpected about the codebase/tooling]
+- **Reusable pattern:** [if this task type recurs, do X]\"`
 
 If you cannot complete the task:
 - Do NOT close the bead

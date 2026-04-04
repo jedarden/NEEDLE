@@ -11,6 +11,7 @@ pub mod config;
 pub mod cost;
 pub mod dispatch;
 pub mod health;
+pub mod learning;
 pub mod mitosis;
 pub mod outcome;
 pub mod peer;
