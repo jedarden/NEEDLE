@@ -461,6 +461,8 @@ fn emitter_loop(
         if let Err(e) = std::fs::rename(&tmp_path, &path) {
             tracing::error!(
                 error = %e,
+                src = %tmp_path.display(),
+                dst = %path.display(),
                 "failed to rename heartbeat file"
             );
         }
