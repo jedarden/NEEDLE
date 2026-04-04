@@ -120,20 +120,94 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
     latest_parts.len() > current_parts.len()
 }
 
-/// Get the asset name for the current platform.
-fn get_asset_name() -> Result<String> {
+/// Get the platform-specific suffix for release asset names (e.g. "x86_64-unknown-linux-gnu").
+fn get_platform_suffix() -> Result<&'static str> {
     let os = env::consts::OS;
     let arch = env::consts::ARCH;
 
-    let asset_name = match (os, arch) {
-        ("linux", "x86_64") => "needle-x86_64-unknown-linux-gnu",
-        ("linux", "aarch64") => "needle-aarch64-unknown-linux-gnu",
-        ("macos", "x86_64") => "needle-x86_64-apple-darwin",
-        ("macos", "aarch64") => "needle-aarch64-apple-darwin",
+    let suffix = match (os, arch) {
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
         _ => bail!("unsupported platform: {os} {arch}"),
     };
 
-    Ok(asset_name.to_string())
+    Ok(suffix)
+}
+
+/// Get the asset name for the current platform.
+fn get_asset_name() -> Result<String> {
+    Ok(format!("needle-{}", get_platform_suffix()?))
+}
+
+/// Transform binaries shipped alongside needle.
+const TRANSFORM_BINARIES: &[&str] = &["needle-transform-claude", "needle-transform-codex"];
+
+/// Download and install transform binaries next to the needle binary.
+///
+/// Missing assets are skipped with a warning — the main upgrade is not aborted.
+/// After upgrade, `needle doctor` will report any transform that is not on PATH.
+fn install_transform_binaries(install_dir: &Path, platform_suffix: &str) {
+    for transform in TRANSFORM_BINARIES {
+        let asset_name = format!("{transform}-{platform_suffix}");
+        let url = asset_download_url(&asset_name);
+        let dest = install_dir.join(transform);
+
+        println!("Installing {transform}...");
+
+        let response = match ureq::agent()
+            .get(&url)
+            .set("User-Agent", &format!("needle/{CURRENT_VERSION}"))
+            .call()
+        {
+            Ok(r) if r.status() < 400 => r,
+            Ok(r) => {
+                println!(
+                    "  Warning: {transform} not in release (HTTP {}), skipping.",
+                    r.status()
+                );
+                continue;
+            }
+            Err(e) => {
+                println!("  Warning: failed to download {transform}: {e}. Skipping.");
+                continue;
+            }
+        };
+
+        let mut content = Vec::new();
+        if let Err(e) = response.into_reader().read_to_end(&mut content) {
+            println!("  Warning: failed to read {transform}: {e}. Skipping.");
+            continue;
+        }
+
+        let temp_path = dest.with_extension("tmp");
+        if let Err(e) = fs::write(&temp_path, &content) {
+            println!(
+                "  Warning: failed to write {transform} to {}: {e}. Skipping.",
+                temp_path.display()
+            );
+            continue;
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o755)) {
+                println!("  Warning: failed to chmod {transform}: {e}. Skipping.");
+                let _ = fs::remove_file(&temp_path);
+                continue;
+            }
+        }
+
+        if let Err(e) = fs::rename(&temp_path, &dest) {
+            println!("  Warning: failed to install {transform}: {e}. Skipping.");
+            let _ = fs::remove_file(&temp_path);
+            continue;
+        }
+
+        println!("  {transform} installed to {}.", dest.display());
+    }
 }
 
 /// Download and install the latest version of needle.
@@ -219,6 +293,12 @@ pub fn perform_upgrade() -> Result<PathBuf> {
     }
 
     println!("Successfully upgraded to version {}!", check.latest_version);
+
+    // Install companion transform binaries to the same directory as needle.
+    let install_dir = current_binary.parent().unwrap_or_else(|| Path::new("."));
+    if let Ok(suffix) = get_platform_suffix() {
+        install_transform_binaries(install_dir, suffix);
+    }
 
     if let Some(notes) = &check.release_notes {
         println!("\nRelease notes:\n{}", notes);
