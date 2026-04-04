@@ -18,6 +18,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 
 use crate::bead_store::BeadStore;
+use crate::canary::CanaryRunner;
 use crate::claim::Claimer;
 use crate::config::{Config, ConfigLoader};
 use crate::cost::{self, BudgetCheck, EffortData};
@@ -789,12 +790,96 @@ impl Worker {
             tracing::warn!(error = %e, "failed to update registry beads_processed");
         }
 
+        // Auto-canary: when self_modification is enabled with auto_promote, detect a
+        // :testing binary, run the canary suite, and promote or reject. A successful
+        // promotion puts a new :stable in place, which the hot-reload check below
+        // picks up in the same cycle.
+        if self.config.self_modification.enabled && self.config.self_modification.auto_promote {
+            self.check_auto_canary()?;
+        }
+
         // Hot-reload check: detect new :stable binary between cycles.
         if self.config.self_modification.hot_reload {
             self.check_hot_reload()?;
         }
 
         self.set_state(WorkerState::Selecting)?;
+        Ok(())
+    }
+
+    /// Auto-canary promotion: detect a :testing binary and run the canary suite.
+    ///
+    /// Called between LOGGING and the hot-reload check. If a :testing binary
+    /// is present:
+    /// 1. Run canary tests against :testing in the canary workspace
+    /// 2. If all pass → promote :testing to :stable, emit `canary.promoted`
+    /// 3. If any fail → reject :testing (delete it), emit `canary.rejected`
+    ///
+    /// Errors are non-fatal: logged as warnings, worker continues unchanged.
+    fn check_auto_canary(&mut self) -> Result<()> {
+        if !self.config.self_modification.enabled {
+            return Ok(());
+        }
+        if !self.config.self_modification.auto_promote {
+            return Ok(());
+        }
+
+        let runner = CanaryRunner::new(
+            self.config.workspace.home.clone(),
+            self.config.self_modification.canary_workspace.clone(),
+            self.config.self_modification.canary_timeout,
+        );
+
+        // Only proceed if a :testing binary is present.
+        if !runner.testing_binary().exists() {
+            return Ok(());
+        }
+
+        let suite_id = runner.testing_binary().display().to_string();
+        tracing::info!(suite = %suite_id, "testing binary detected — running canary suite");
+
+        if let Err(e) = self.telemetry.emit(EventKind::CanaryStarted {
+            suite: suite_id.clone(),
+        }) {
+            tracing::warn!(error = %e, "failed to emit CanaryStarted telemetry");
+        }
+
+        let report = match runner.run() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "canary run failed, skipping auto-promotion");
+                return Ok(());
+            }
+        };
+
+        let _ = self.telemetry.emit(EventKind::CanarySuiteCompleted {
+            suite: suite_id.clone(),
+            passed: report.passed as u32,
+            failed: (report.failed + report.timed_out + report.errors) as u32,
+        });
+
+        if report.can_promote() {
+            tracing::info!("canary passed — promoting :testing to :stable");
+            let hash = upgrade::file_hash(&report.testing_binary)
+                .unwrap_or_else(|_| "unknown".to_string());
+            if let Err(e) = runner.promote() {
+                tracing::warn!(error = %e, "canary promotion failed");
+                return Ok(());
+            }
+            let _ = self.telemetry.emit(EventKind::CanaryPromoted { hash });
+            tracing::info!("promotion complete — fleet will hot-reload on next cycle");
+        } else {
+            let reason = format!(
+                "{} failed, {} timed out, {} errors",
+                report.failed, report.timed_out, report.errors
+            );
+            tracing::warn!(reason = %reason, "canary failed — rejecting :testing");
+            if let Err(e) = runner.reject() {
+                tracing::warn!(error = %e, "canary reject failed");
+            }
+            let _ = self.telemetry.emit(EventKind::CanaryRejected { reason });
+        }
+
         Ok(())
     }
 
@@ -1906,5 +1991,57 @@ mod tests {
             "expected at least 1 bead processed, got {}",
             worker.beads_processed()
         );
+    }
+
+    // ── check_auto_canary tests ──
+
+    #[tokio::test]
+    async fn check_auto_canary_no_op_when_self_modification_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create bin/ so the path exists but needle-testing is absent.
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        let store = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.enabled = false;
+        config.self_modification.auto_promote = true;
+        config.self_modification.hot_reload = false;
+        config.workspace.home = dir.path().to_path_buf();
+        let mut worker = Worker::new(config, "test-canary-disabled".to_string(), store);
+        worker.boot().unwrap();
+        // Must not fail even though canary workspace and binary are absent.
+        assert!(worker.check_auto_canary().is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_auto_canary_no_op_when_auto_promote_false() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        let store = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.enabled = true;
+        config.self_modification.auto_promote = false;
+        config.self_modification.hot_reload = false;
+        config.workspace.home = dir.path().to_path_buf();
+        let mut worker = Worker::new(config, "test-canary-no-promote".to_string(), store);
+        worker.boot().unwrap();
+        assert!(worker.check_auto_canary().is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_auto_canary_no_op_when_no_testing_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        // bin/ exists but needle-testing does not.
+        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+        let store = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.enabled = true;
+        config.self_modification.auto_promote = true;
+        config.self_modification.hot_reload = false;
+        config.workspace.home = dir.path().to_path_buf();
+        config.self_modification.canary_workspace = dir.path().join("canary");
+        let mut worker = Worker::new(config, "test-canary-no-binary".to_string(), store);
+        worker.boot().unwrap();
+        // No :testing binary → returns Ok without touching canary workspace.
+        assert!(worker.check_auto_canary().is_ok());
     }
 }
