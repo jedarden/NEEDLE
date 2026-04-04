@@ -299,27 +299,7 @@ impl LearningsFile {
 
     /// Parse entries from markdown content.
     fn parse_entries(content: &str) -> Result<Vec<LearningEntry>> {
-        let mut entries = Vec::new();
-
-        // Split by "### " to find each entry
-        for chunk in content.split("### ") {
-            let chunk = chunk.trim();
-            if chunk.is_empty() {
-                continue;
-            }
-
-            // Re-add the "### " for proper parsing
-            let full_entry = format!("### {}", chunk);
-
-            match LearningEntry::from_markdown(&full_entry) {
-                Ok(entry) => entries.push(entry),
-                Err(e) => {
-                    tracing::warn!("failed to parse learning entry: {}, skipping", e);
-                }
-            }
-        }
-
-        Ok(entries)
+        parse_learning_entries(content)
     }
 
     /// Get all entries.
@@ -464,6 +444,148 @@ impl LearningsFile {
                     obs_lower.split_whitespace().collect();
 
                 // Count shared words
+                let shared = entry_words.intersection(&obs_words).count();
+                shared >= 2 || entry_lower.contains(&obs_lower)
+            })
+            .collect()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Global Learnings File
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Shared parsing helper for both `LearningsFile` and `GlobalLearningsFile`.
+fn parse_learning_entries(content: &str) -> Result<Vec<LearningEntry>> {
+    let mut entries = Vec::new();
+
+    for chunk in content.split("### ") {
+        let chunk = chunk.trim();
+        if chunk.is_empty() {
+            continue;
+        }
+        let full_entry = format!("### {}", chunk);
+        match LearningEntry::from_markdown(&full_entry) {
+            Ok(entry) => entries.push(entry),
+            Err(e) => {
+                tracing::warn!("failed to parse learning entry: {}, skipping", e);
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Manages `~/.config/needle/global-learnings.md` for cross-workspace patterns.
+///
+/// Populated by the consolidator when a learning appears across 2+ workspaces.
+/// Loaded into all workspace prompts after workspace learnings, before skills.
+#[derive(Debug, Clone)]
+pub struct GlobalLearningsFile {
+    /// Path to the global learnings file.
+    path: PathBuf,
+    /// Loaded entries.
+    entries: Vec<LearningEntry>,
+}
+
+impl GlobalLearningsFile {
+    /// Load the global learnings file from the given path.
+    ///
+    /// Returns an empty file (not an error) if the path doesn't exist.
+    pub fn load(path: &Path) -> Result<Self> {
+        let entries = if path.exists() {
+            let content = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read global learnings: {}", path.display()))?;
+            parse_learning_entries(&content)?
+        } else {
+            Vec::new()
+        };
+
+        Ok(GlobalLearningsFile {
+            path: path.to_path_buf(),
+            entries,
+        })
+    }
+
+    /// Get all entries.
+    pub fn entries(&self) -> &[LearningEntry] {
+        &self.entries
+    }
+
+    /// Try to promote an entry into the global file.
+    ///
+    /// Skips if:
+    /// - The file is already at `max_entries` capacity.
+    /// - A similar entry already exists (word-overlap dedup).
+    ///
+    /// Returns `true` if the entry was added.
+    pub fn promote(&mut self, entry: LearningEntry, max_entries: usize) -> bool {
+        if self.entries.len() >= max_entries {
+            return false;
+        }
+        if !self.find_similar(&entry.observation).is_empty() {
+            return false;
+        }
+        self.entries.push(entry);
+        true
+    }
+
+    /// Write the global learnings file to disk, creating parent directories as needed.
+    pub fn write(&self) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory: {}", parent.display()))?;
+        }
+
+        let mut content = String::from("# Global Learnings\n\n");
+        content.push_str("This file is automatically managed by NEEDLE. Cross-workspace patterns are promoted here.\n\n");
+
+        for entry in &self.entries {
+            content.push_str(&entry.to_markdown());
+            content.push('\n');
+        }
+
+        std::fs::write(&self.path, content).with_context(|| {
+            format!("failed to write global learnings: {}", self.path.display())
+        })?;
+
+        Ok(())
+    }
+
+    /// Get entries as formatted string for prompt injection.
+    ///
+    /// Returns an empty string when there are no entries.
+    pub fn to_prompt_content(&self) -> String {
+        if self.entries.is_empty() {
+            return String::new();
+        }
+
+        let mut content = String::from("## Global Learnings\n\n");
+
+        for entry in &self.entries {
+            content.push_str(&format!(
+                "- **{}** (confidence: {}): {}\n",
+                entry.bead_type.as_str(),
+                entry.confidence.as_str(),
+                entry.observation
+            ));
+        }
+
+        content
+    }
+
+    /// Find similar entries based on observation text (same word-overlap as LearningsFile).
+    pub fn find_similar(&self, observation: &str) -> Vec<&LearningEntry> {
+        let obs_lower = observation.to_lowercase();
+
+        self.entries
+            .iter()
+            .filter(|e| {
+                let entry_lower = e.observation.to_lowercase();
+                let entry_words: std::collections::HashSet<&str> =
+                    entry_lower.split_whitespace().collect();
+                let obs_words: std::collections::HashSet<&str> =
+                    obs_lower.split_whitespace().collect();
                 let shared = entry_words.intersection(&obs_words).count();
                 shared >= 2 || entry_lower.contains(&obs_lower)
             })

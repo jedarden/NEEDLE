@@ -16,7 +16,7 @@ use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::config::{PromptConfig, VariantConfig};
-use crate::learning::LearningsFile;
+use crate::learning::{GlobalLearningsFile, LearningsFile};
 use crate::skill::SkillLibrary;
 use crate::types::Bead;
 
@@ -246,6 +246,8 @@ pub struct PromptBuilder {
     workspace_instructions: Option<String>,
     /// Cached learnings content for the workspace (if exists).
     learnings_content: Option<String>,
+    /// Cached global learnings content (cross-workspace patterns, if exists).
+    global_learnings_content: Option<String>,
     /// Skill library for matching and injecting relevant skills into prompts.
     skill_library: Option<SkillLibrary>,
     /// A/B test variant configurations per template name.
@@ -275,6 +277,7 @@ impl PromptBuilder {
             context_file_paths: config.context_files.clone(),
             workspace_instructions: config.instructions.clone(),
             learnings_content: None,
+            global_learnings_content: None,
             skill_library: None,
             variants: config.variants.clone(),
         }
@@ -303,6 +306,21 @@ impl PromptBuilder {
         }
 
         Ok(builder)
+    }
+
+    /// Load global learnings from the given path into this builder.
+    ///
+    /// Global learnings are cross-workspace patterns promoted by the consolidator.
+    /// They are injected after workspace learnings, before skills.
+    /// Missing or empty files are silently ignored.
+    pub fn with_global_learnings(mut self, path: &Path) -> Self {
+        if let Ok(file) = GlobalLearningsFile::load(path) {
+            let content = file.to_prompt_content();
+            if !content.is_empty() {
+                self.global_learnings_content = Some(content);
+            }
+        }
+        self
     }
 
     /// Validate all templates at boot time.
@@ -550,9 +568,14 @@ impl PromptBuilder {
             }
         }
 
-        // Append learnings content if available
+        // Append workspace learnings if available
         if let Some(ref learnings) = self.learnings_content {
             sections.push(learnings.clone());
+        }
+
+        // Append global learnings after workspace learnings (cross-workspace patterns)
+        if let Some(ref global) = self.global_learnings_content {
+            sections.push(global.clone());
         }
 
         if sections.is_empty() {

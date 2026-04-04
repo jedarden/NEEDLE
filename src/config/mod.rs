@@ -672,6 +672,19 @@ pub struct LearningConfig {
     /// Trace sanitization settings (gitleaks rules + custom patterns).
     #[serde(default)]
     pub trace_sanitization: TraceSanitizationConfig,
+
+    /// Path to the global learnings file (default: ~/.config/needle/global-learnings.md).
+    ///
+    /// This file stores cross-workspace learnings detected by the consolidator.
+    /// It is loaded into all workspace prompts as supplementary context.
+    #[serde(default = "LearningConfig::default_global_learnings_file")]
+    pub global_learnings_file: PathBuf,
+
+    /// Maximum entries in the global learnings file (default: 40).
+    ///
+    /// Cross-cutting lessons should be distilled; this cap keeps the file focused.
+    #[serde(default = "LearningConfig::default_max_global_learnings")]
+    pub max_global_learnings: usize,
 }
 
 impl Default for LearningConfig {
@@ -681,6 +694,8 @@ impl Default for LearningConfig {
             trace_retention_success_days: Self::default_trace_retention_success(),
             max_learnings: Self::default_max_learnings(),
             trace_sanitization: TraceSanitizationConfig::default(),
+            global_learnings_file: Self::default_global_learnings_file(),
+            max_global_learnings: Self::default_max_global_learnings(),
         }
     }
 }
@@ -696,6 +711,14 @@ impl LearningConfig {
 
     fn default_max_learnings() -> usize {
         80
+    }
+
+    fn default_global_learnings_file() -> PathBuf {
+        dirs_or_home(".config/needle/global-learnings.md")
+    }
+
+    fn default_max_global_learnings() -> usize {
+        40
     }
 }
 
