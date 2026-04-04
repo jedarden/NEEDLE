@@ -20,6 +20,7 @@ pub mod rate_limit;
 pub mod registry;
 pub mod sanitize;
 pub mod skill;
+pub mod stats;
 pub mod strand;
 pub mod telemetry;
 pub mod trace;

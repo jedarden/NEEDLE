@@ -231,6 +231,33 @@ pub enum CliCommand {
         #[arg(short = 'o', long)]
         output: Option<PathBuf>,
     },
+
+    /// Show outcome statistics aggregated from telemetry logs.
+    ///
+    /// Reads JSONL telemetry files, correlates dispatch/outcome/effort events
+    /// by bead ID, and prints per-group statistics.
+    ///
+    /// Examples:
+    ///   needle stats --by template_version --since 7d
+    ///   needle stats --by task_type --since 30d
+    ///   needle stats --by worker --since 7d --format json
+    Stats {
+        /// Dimension to group results by.
+        #[arg(long, value_enum)]
+        by: StatsBy,
+
+        /// Include only events since this time (e.g., 1h, 24h, 7d, 2026-03-20).
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Include only events until this time (e.g., 1h, 24h, 7d, 2026-03-20T15:00:00Z).
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value = "table")]
+        format: ListFormat,
+    },
 }
 
 /// Output format for the list command.
@@ -251,6 +278,20 @@ pub enum LogFormat {
     Human,
     /// Alias for json (JSON Lines).
     Jsonl,
+}
+
+/// Grouping dimension for the `needle stats` command.
+#[derive(Debug, Clone, ValueEnum)]
+pub enum StatsBy {
+    /// Group by template version tag (e.g., `"pluck-v2"`).
+    #[value(name = "template_version")]
+    TemplateVersion,
+    /// Group by template name / task type (e.g., `"pluck"`).
+    #[value(name = "task_type")]
+    TaskType,
+    /// Group by worker identifier (e.g., `"needle-alpha"`).
+    #[value(name = "worker")]
+    Worker,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -303,6 +344,12 @@ pub fn run() -> Result<()> {
         CliCommand::Rollback => cmd_rollback(),
         CliCommand::Reflect { workspace, force } => cmd_reflect(workspace, force),
         CliCommand::UpdateRules { output } => cmd_update_rules(output),
+        CliCommand::Stats {
+            by,
+            since,
+            until,
+            format,
+        } => cmd_stats(by, since, until, format),
     }
 }
 
@@ -997,6 +1044,115 @@ fn cmd_status(
                         .context("failed to serialize cost summary")?
                 );
             }
+        }
+    }
+
+    Ok(())
+}
+
+/// `needle stats` — show outcome statistics from telemetry logs.
+fn cmd_stats(
+    by: StatsBy,
+    since: Option<String>,
+    until: Option<String>,
+    format: ListFormat,
+) -> Result<()> {
+    use crate::stats::{compute_stats, StatsDimension};
+
+    let config = ConfigLoader::load_global()?;
+    let log_dir = config.workspace.home.join("logs");
+
+    let since_dt = since.as_deref().map(telemetry::parse_since).transpose()?;
+    let until_dt = until.as_deref().map(telemetry::parse_until).transpose()?;
+    let events = telemetry::read_logs(&log_dir, since_dt, until_dt, None)?;
+
+    let dimension = match by {
+        StatsBy::TemplateVersion => StatsDimension::TemplateVersion,
+        StatsBy::TaskType => StatsDimension::TaskType,
+        StatsBy::Worker => StatsDimension::Worker,
+    };
+
+    let mut rows = compute_stats(&events, dimension);
+    // Sort by beads descending so most active groups appear first.
+    rows.sort_by(|a, b| b.beads.cmp(&a.beads).then(a.key.cmp(&b.key)));
+
+    let dim_label = match by {
+        StatsBy::TemplateVersion => "TEMPLATE VERSION",
+        StatsBy::TaskType => "TASK TYPE",
+        StatsBy::Worker => "WORKER",
+    };
+
+    match format {
+        ListFormat::Table => {
+            if rows.is_empty() {
+                println!("No telemetry data found.");
+                return Ok(());
+            }
+            let key_width = rows.iter().map(|r| r.key.len()).max().unwrap_or(16).max(16);
+            println!(
+                "{:<width$} {:>6} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                dim_label,
+                "BEADS",
+                "PASS",
+                "FAIL",
+                "TIMEOUT",
+                "PASS RATE",
+                "AVG TOK",
+                "AVG COST",
+                width = key_width,
+            );
+            println!(
+                "{}",
+                "-".repeat(key_width + 6 + 6 + 6 + 8 + 9 + 10 + 12 + 7)
+            );
+            for row in &rows {
+                let pass_rate = row
+                    .pass_rate()
+                    .map(|r| format!("{:.1}%", r * 100.0))
+                    .unwrap_or_else(|| "-".to_string());
+                let avg_tok = row
+                    .avg_tokens()
+                    .map(|t| format!("{:.0}", t))
+                    .unwrap_or_else(|| "-".to_string());
+                let avg_cost = row
+                    .avg_cost_usd()
+                    .map(|c| format!("${:.5}", c))
+                    .unwrap_or_else(|| "-".to_string());
+                println!(
+                    "{:<width$} {:>6} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                    row.key,
+                    row.beads,
+                    row.pass,
+                    row.fail,
+                    row.timeout,
+                    pass_rate,
+                    avg_tok,
+                    avg_cost,
+                    width = key_width,
+                );
+            }
+        }
+        ListFormat::Json => {
+            let json_rows: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "key": row.key,
+                        "beads": row.beads,
+                        "pass": row.pass,
+                        "fail": row.fail,
+                        "timeout": row.timeout,
+                        "pass_rate": row.pass_rate(),
+                        "avg_tokens": row.avg_tokens(),
+                        "avg_cost_usd": row.avg_cost_usd(),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json_rows)
+                    .context("failed to serialize stats to JSON")?
+            );
         }
     }
 

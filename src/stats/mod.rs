@@ -89,14 +89,12 @@ impl VariantComparison {
     /// Returns the variant with the highest success rate among ready variants,
     /// or `None` if no variants are ready.
     pub fn best_variant(&self) -> Option<&VariantStats> {
-        self.ready_variants()
-            .into_iter()
-            .max_by(|a, b| {
-                a.success_rate()
-                    .unwrap_or(0.0)
-                    .partial_cmp(&b.success_rate().unwrap_or(0.0))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        self.ready_variants().into_iter().max_by(|a, b| {
+            a.success_rate()
+                .unwrap_or(0.0)
+                .partial_cmp(&b.success_rate().unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 }
 
@@ -223,13 +221,9 @@ impl StatsAggregator {
                 let duration_ms = data.get("duration_ms").and_then(|v| v.as_u64());
 
                 if let (Some(bead_id), Some(duration)) = (bead_id, duration_ms) {
-                    if let Some((name, version)) =
-                        self.pending_dispatch_start.remove(bead_id)
-                    {
-                        if let Some(entry) = self
-                            .stats
-                            .get_mut(&name)
-                            .and_then(|m| m.get_mut(&version))
+                    if let Some((name, version)) = self.pending_dispatch_start.remove(bead_id) {
+                        if let Some(entry) =
+                            self.stats.get_mut(&name).and_then(|m| m.get_mut(&version))
                         {
                             entry.total_duration_ms += duration;
                         }
@@ -243,10 +237,8 @@ impl StatsAggregator {
 
                 if let (Some(bead_id), Some(outcome)) = (bead_id, outcome) {
                     if let Some((name, version)) = self.pending.remove(bead_id) {
-                        if let Some(entry) = self
-                            .stats
-                            .get_mut(&name)
-                            .and_then(|m| m.get_mut(&version))
+                        if let Some(entry) =
+                            self.stats.get_mut(&name).and_then(|m| m.get_mut(&version))
                         {
                             match outcome {
                                 "Success" => entry.successes += 1,
@@ -281,12 +273,179 @@ impl StatsAggregator {
     /// Produce a comparison for a specific template name, or `None` if no
     /// events have been observed for that template.
     pub fn comparison_for(&self, template_name: &str) -> Option<VariantComparison> {
-        self.stats.get(template_name).map(|by_version| VariantComparison {
-            template_name: template_name.to_string(),
-            min_dispatches: self.min_dispatches,
-            variants: by_version.clone(),
-        })
+        self.stats
+            .get(template_name)
+            .map(|by_version| VariantComparison {
+                template_name: template_name.to_string(),
+                min_dispatches: self.min_dispatches,
+                variants: by_version.clone(),
+            })
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Stats engine — multi-dimensional outcome aggregation
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Grouping dimension for the `needle stats` command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatsDimension {
+    /// Group by template version tag (e.g., `"pluck-v2"`).
+    TemplateVersion,
+    /// Group by template name / task type (e.g., `"pluck"`).
+    TaskType,
+    /// Group by worker identifier (e.g., `"needle-alpha"`).
+    Worker,
+}
+
+/// Aggregated statistics row for one value of a grouping dimension.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct StatsRow {
+    /// The dimension value (version, task type, or worker id).
+    pub key: String,
+    /// Total number of beads dispatched in this group.
+    pub beads: u64,
+    /// Number of beads that completed with `"Success"` outcome.
+    pub pass: u64,
+    /// Number of beads that completed with `"Failure"` outcome.
+    pub fail: u64,
+    /// Number of beads that completed with `"Timeout"` outcome.
+    pub timeout: u64,
+    /// Sum of (tokens_in + tokens_out) across all effort events in this group.
+    pub total_tokens: u64,
+    /// Sum of `estimated_cost_usd` across all effort events in this group.
+    pub total_cost_usd: f64,
+    /// Number of effort events with token/cost data (denominator for averages).
+    pub effort_events: u64,
+}
+
+impl StatsRow {
+    /// Pass rate as a fraction in `[0.0, 1.0]`. `None` when `beads == 0`.
+    pub fn pass_rate(&self) -> Option<f64> {
+        if self.beads == 0 {
+            None
+        } else {
+            Some(self.pass as f64 / self.beads as f64)
+        }
+    }
+
+    /// Average total tokens (in + out) per effort event. `None` when no effort data.
+    pub fn avg_tokens(&self) -> Option<f64> {
+        if self.effort_events == 0 {
+            None
+        } else {
+            Some(self.total_tokens as f64 / self.effort_events as f64)
+        }
+    }
+
+    /// Average cost in USD per effort event. `None` when no effort data.
+    pub fn avg_cost_usd(&self) -> Option<f64> {
+        if self.effort_events == 0 {
+            None
+        } else {
+            Some(self.total_cost_usd / self.effort_events as f64)
+        }
+    }
+}
+
+/// Compute per-group statistics from a pre-filtered slice of telemetry events.
+///
+/// Correlates `agent.dispatched`, `outcome.classified`, and `effort.recorded`
+/// events by `bead_id`, grouping each bead under the chosen `dimension`.
+///
+/// Pass the result of [`telemetry::read_logs`] (already time-filtered) here.
+pub fn compute_stats(
+    events: &[crate::telemetry::TelemetryEvent],
+    dimension: StatsDimension,
+) -> Vec<StatsRow> {
+    use std::collections::HashMap;
+
+    // bead_id → dimension key (populated from agent.dispatched events)
+    let mut bead_key: HashMap<String, String> = HashMap::new();
+    let mut rows: BTreeMap<String, StatsRow> = BTreeMap::new();
+
+    for event in events {
+        match event.event_type.as_str() {
+            "agent.dispatched" => {
+                let bead_id = match event.bead_id.as_ref() {
+                    Some(b) => b.as_ref().to_string(),
+                    None => continue,
+                };
+                let key = match dimension {
+                    StatsDimension::TemplateVersion => event
+                        .data
+                        .get("template_version")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    StatsDimension::TaskType => event
+                        .data
+                        .get("template_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    StatsDimension::Worker => event.worker_id.clone(),
+                };
+                bead_key.insert(bead_id, key.clone());
+                let row = rows.entry(key.clone()).or_insert_with(|| StatsRow {
+                    key: key.clone(),
+                    ..Default::default()
+                });
+                row.beads += 1;
+            }
+
+            "outcome.classified" => {
+                let bead_id = match event.bead_id.as_ref() {
+                    Some(b) => b.as_ref().to_string(),
+                    None => continue,
+                };
+                if let Some(key) = bead_key.get(&bead_id) {
+                    if let Some(row) = rows.get_mut(key) {
+                        match event.data.get("outcome").and_then(|v| v.as_str()) {
+                            Some("Success") => row.pass += 1,
+                            Some("Failure") => row.fail += 1,
+                            Some("Timeout") => row.timeout += 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+
+            "effort.recorded" => {
+                let bead_id = match event.bead_id.as_ref() {
+                    Some(b) => b.as_ref().to_string(),
+                    None => continue,
+                };
+                if let Some(key) = bead_key.get(&bead_id) {
+                    if let Some(row) = rows.get_mut(key) {
+                        let tokens_in = event
+                            .data
+                            .get("tokens_in")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let tokens_out = event
+                            .data
+                            .get("tokens_out")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        row.total_tokens += tokens_in + tokens_out;
+                        if let Some(cost) = event
+                            .data
+                            .get("estimated_cost_usd")
+                            .and_then(|v| v.as_f64())
+                        {
+                            row.total_cost_usd += cost;
+                        }
+                        row.effort_events += 1;
+                    }
+                }
+            }
+
+            _ => {}
+        }
+    }
+
+    rows.into_values().collect()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -402,19 +561,13 @@ mod tests {
         agg.process_event(
             &serde_json::from_str(&make_dispatch_event("nd-1", "pluck", "pluck-default")).unwrap(),
         );
-        agg.process_event(
-            &serde_json::from_str(&make_completed_event("nd-1", 5000)).unwrap(),
-        );
-        agg.process_event(
-            &serde_json::from_str(&make_outcome_event("nd-1", "Success")).unwrap(),
-        );
+        agg.process_event(&serde_json::from_str(&make_completed_event("nd-1", 5000)).unwrap());
+        agg.process_event(&serde_json::from_str(&make_outcome_event("nd-1", "Success")).unwrap());
 
         agg.process_event(
             &serde_json::from_str(&make_dispatch_event("nd-2", "pluck", "pluck-default")).unwrap(),
         );
-        agg.process_event(
-            &serde_json::from_str(&make_outcome_event("nd-2", "Failure")).unwrap(),
-        );
+        agg.process_event(&serde_json::from_str(&make_outcome_event("nd-2", "Failure")).unwrap());
 
         let cmp = agg.comparison_for("pluck").unwrap();
         let stats = cmp.variants.get("pluck-default").unwrap();
@@ -431,16 +584,12 @@ mod tests {
         agg.process_event(
             &serde_json::from_str(&make_dispatch_event("nd-a", "pluck", "pluck-default")).unwrap(),
         );
-        agg.process_event(
-            &serde_json::from_str(&make_outcome_event("nd-a", "Success")).unwrap(),
-        );
+        agg.process_event(&serde_json::from_str(&make_outcome_event("nd-a", "Success")).unwrap());
 
         agg.process_event(
             &serde_json::from_str(&make_dispatch_event("nd-b", "pluck", "pluck-v2")).unwrap(),
         );
-        agg.process_event(
-            &serde_json::from_str(&make_outcome_event("nd-b", "Failure")).unwrap(),
-        );
+        agg.process_event(&serde_json::from_str(&make_outcome_event("nd-b", "Failure")).unwrap());
 
         let cmp = agg.comparison_for("pluck").unwrap();
         assert_eq!(cmp.variants.len(), 2);
@@ -454,7 +603,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let log_path = dir.path().join("telemetry.jsonl");
 
-        let lines = vec![
+        let lines = [
             make_dispatch_event("nd-1", "pluck", "pluck-default"),
             make_completed_event("nd-1", 3000),
             make_outcome_event("nd-1", "Success"),
@@ -475,13 +624,13 @@ mod tests {
     fn aggregator_load_logs_scans_directory() {
         let dir = TempDir::new().unwrap();
 
-        let lines_a = vec![
+        let lines_a = [
             make_dispatch_event("nd-1", "pluck", "pluck-default"),
             make_outcome_event("nd-1", "Success"),
         ];
         std::fs::write(dir.path().join("2026-01-01.jsonl"), lines_a.join("\n")).unwrap();
 
-        let lines_b = vec![
+        let lines_b = [
             make_dispatch_event("nd-2", "pluck", "pluck-default"),
             make_outcome_event("nd-2", "Failure"),
         ];
@@ -529,5 +678,180 @@ mod tests {
         let ready = cmp.ready_variants();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].version, "pluck-v2");
+    }
+
+    // ── compute_stats tests ──────────────────────────────────────────────────
+
+    fn make_tel_event(
+        event_type: &str,
+        worker_id: &str,
+        bead_id: Option<&str>,
+        data: serde_json::Value,
+    ) -> crate::telemetry::TelemetryEvent {
+        crate::telemetry::TelemetryEvent {
+            timestamp: chrono::Utc::now(),
+            event_type: event_type.to_string(),
+            worker_id: worker_id.to_string(),
+            session_id: "test0000".to_string(),
+            sequence: 0,
+            bead_id: bead_id.map(crate::types::BeadId::from),
+            workspace: None,
+            data,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn compute_stats_by_template_version() {
+        let events = vec![
+            make_tel_event(
+                "agent.dispatched",
+                "needle-alpha",
+                Some("nd-1"),
+                serde_json::json!({"template_name": "pluck", "template_version": "pluck-v1"}),
+            ),
+            make_tel_event(
+                "outcome.classified",
+                "needle-alpha",
+                Some("nd-1"),
+                serde_json::json!({"outcome": "Success"}),
+            ),
+            make_tel_event(
+                "effort.recorded",
+                "needle-alpha",
+                Some("nd-1"),
+                serde_json::json!({"tokens_in": 100, "tokens_out": 50, "estimated_cost_usd": 0.01}),
+            ),
+            make_tel_event(
+                "agent.dispatched",
+                "needle-alpha",
+                Some("nd-2"),
+                serde_json::json!({"template_name": "pluck", "template_version": "pluck-v2"}),
+            ),
+            make_tel_event(
+                "outcome.classified",
+                "needle-alpha",
+                Some("nd-2"),
+                serde_json::json!({"outcome": "Failure"}),
+            ),
+        ];
+
+        let mut rows = compute_stats(&events, StatsDimension::TemplateVersion);
+        rows.sort_by(|a, b| a.key.cmp(&b.key));
+
+        assert_eq!(rows.len(), 2);
+
+        let v1 = rows.iter().find(|r| r.key == "pluck-v1").unwrap();
+        assert_eq!(v1.beads, 1);
+        assert_eq!(v1.pass, 1);
+        assert_eq!(v1.fail, 0);
+        assert_eq!(v1.total_tokens, 150);
+        assert!((v1.avg_cost_usd().unwrap() - 0.01).abs() < f64::EPSILON);
+
+        let v2 = rows.iter().find(|r| r.key == "pluck-v2").unwrap();
+        assert_eq!(v2.beads, 1);
+        assert_eq!(v2.pass, 0);
+        assert_eq!(v2.fail, 1);
+        assert_eq!(v2.effort_events, 0);
+    }
+
+    #[test]
+    fn compute_stats_by_task_type() {
+        let events = vec![
+            make_tel_event(
+                "agent.dispatched",
+                "needle-alpha",
+                Some("nd-a"),
+                serde_json::json!({"template_name": "pluck", "template_version": "pluck-v1"}),
+            ),
+            make_tel_event(
+                "outcome.classified",
+                "needle-alpha",
+                Some("nd-a"),
+                serde_json::json!({"outcome": "Timeout"}),
+            ),
+            make_tel_event(
+                "agent.dispatched",
+                "needle-alpha",
+                Some("nd-b"),
+                serde_json::json!({"template_name": "strand", "template_version": "strand-v1"}),
+            ),
+            make_tel_event(
+                "outcome.classified",
+                "needle-alpha",
+                Some("nd-b"),
+                serde_json::json!({"outcome": "Success"}),
+            ),
+        ];
+
+        let rows = compute_stats(&events, StatsDimension::TaskType);
+        let pluck = rows.iter().find(|r| r.key == "pluck").unwrap();
+        assert_eq!(pluck.timeout, 1);
+        assert_eq!(pluck.pass, 0);
+
+        let strand = rows.iter().find(|r| r.key == "strand").unwrap();
+        assert_eq!(strand.pass, 1);
+    }
+
+    #[test]
+    fn compute_stats_by_worker() {
+        let events = vec![
+            make_tel_event(
+                "agent.dispatched",
+                "needle-alpha",
+                Some("nd-1"),
+                serde_json::json!({"template_name": "pluck", "template_version": "pluck-v1"}),
+            ),
+            make_tel_event(
+                "outcome.classified",
+                "needle-alpha",
+                Some("nd-1"),
+                serde_json::json!({"outcome": "Success"}),
+            ),
+            make_tel_event(
+                "agent.dispatched",
+                "needle-bravo",
+                Some("nd-2"),
+                serde_json::json!({"template_name": "pluck", "template_version": "pluck-v1"}),
+            ),
+            make_tel_event(
+                "outcome.classified",
+                "needle-bravo",
+                Some("nd-2"),
+                serde_json::json!({"outcome": "Success"}),
+            ),
+            make_tel_event(
+                "agent.dispatched",
+                "needle-bravo",
+                Some("nd-3"),
+                serde_json::json!({"template_name": "pluck", "template_version": "pluck-v1"}),
+            ),
+            make_tel_event(
+                "outcome.classified",
+                "needle-bravo",
+                Some("nd-3"),
+                serde_json::json!({"outcome": "Failure"}),
+            ),
+        ];
+
+        let rows = compute_stats(&events, StatsDimension::Worker);
+        let alpha = rows.iter().find(|r| r.key == "needle-alpha").unwrap();
+        assert_eq!(alpha.beads, 1);
+        assert_eq!(alpha.pass, 1);
+        assert!((alpha.pass_rate().unwrap() - 1.0).abs() < f64::EPSILON);
+
+        let bravo = rows.iter().find(|r| r.key == "needle-bravo").unwrap();
+        assert_eq!(bravo.beads, 2);
+        assert_eq!(bravo.pass, 1);
+        assert_eq!(bravo.fail, 1);
+        assert!((bravo.pass_rate().unwrap() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn stats_row_defaults_give_none() {
+        let row = StatsRow::default();
+        assert!(row.pass_rate().is_none());
+        assert!(row.avg_tokens().is_none());
+        assert!(row.avg_cost_usd().is_none());
     }
 }
