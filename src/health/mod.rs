@@ -134,6 +134,7 @@ impl HealthMonitor {
                     workspace,
                     started_at,
                     interval,
+                    10,
                 );
             })
             .context("failed to spawn heartbeat emitter thread")?;
@@ -399,7 +400,18 @@ pub struct StalePeer {
 // Emitter loop (runs in a dedicated std::thread)
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Maximum sleep between heartbeat attempts when backing off on failure.
+const MAX_HEARTBEAT_BACKOFF: Duration = Duration::from_secs(5 * 60);
+
 /// Background emitter loop. Writes heartbeat at each interval.
+///
+/// Circuit breaker: after `max_consecutive_failures` consecutive write failures
+/// the loop sets the shutdown flag and exits so the worker terminates instead of
+/// spinning indefinitely.
+///
+/// Backoff: each consecutive failure doubles the inter-attempt sleep, capped at
+/// [`MAX_HEARTBEAT_BACKOFF`].
+#[allow(clippy::too_many_arguments)]
 fn emitter_loop(
     shared_state: Arc<Mutex<SharedHeartbeatState>>,
     shutdown: Arc<AtomicBool>,
@@ -408,6 +420,7 @@ fn emitter_loop(
     workspace: PathBuf,
     started_at: DateTime<Utc>,
     interval: Duration,
+    max_consecutive_failures: u32,
 ) {
     // Ensure the heartbeat directory exists before entering the write loop so
     // that workers self-recover if ~/.needle/state/heartbeats/ is deleted.
@@ -419,8 +432,11 @@ fn emitter_loop(
         );
     }
 
+    let mut consecutive_failures: u32 = 0;
+    let mut current_sleep = interval;
+
     loop {
-        std::thread::sleep(interval);
+        std::thread::sleep(current_sleep);
 
         if shutdown.load(Ordering::SeqCst) {
             tracing::debug!(worker = %worker_id, "heartbeat emitter shutting down");
@@ -458,30 +474,39 @@ fn emitter_loop(
         let path = heartbeat_dir.join(format!("{}.json", worker_id));
         let tmp_path = path.with_extension("json.tmp");
 
-        let json = match serde_json::to_string_pretty(&data) {
-            Ok(j) => j,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to serialize heartbeat");
-                continue;
+        let write_result: anyhow::Result<()> = (|| {
+            let json = serde_json::to_string_pretty(&data)?;
+            std::fs::write(&tmp_path, json.as_bytes())?;
+            std::fs::rename(&tmp_path, &path)?;
+            Ok(())
+        })();
+
+        match write_result {
+            Ok(()) => {
+                consecutive_failures = 0;
+                current_sleep = interval;
             }
-        };
-
-        if let Err(e) = std::fs::write(&tmp_path, json.as_bytes()) {
-            tracing::error!(
-                error = %e,
-                path = %tmp_path.display(),
-                "failed to write temp heartbeat file"
-            );
-            continue;
-        }
-
-        if let Err(e) = std::fs::rename(&tmp_path, &path) {
-            tracing::error!(
-                error = %e,
-                src = %tmp_path.display(),
-                dst = %path.display(),
-                "failed to rename heartbeat file"
-            );
+            Err(e) => {
+                consecutive_failures += 1;
+                tracing::error!(
+                    error = %e,
+                    worker = %worker_id,
+                    consecutive_failures,
+                    max = max_consecutive_failures,
+                    "heartbeat write failed"
+                );
+                if consecutive_failures >= max_consecutive_failures {
+                    tracing::error!(
+                        worker = %worker_id,
+                        consecutive_failures,
+                        "heartbeat emitter circuit breaker triggered — worker will shut down"
+                    );
+                    shutdown.store(true, Ordering::SeqCst);
+                    return;
+                }
+                // Exponential backoff to reduce log spam before the circuit breaker fires.
+                current_sleep = current_sleep.saturating_mul(2).min(MAX_HEARTBEAT_BACKOFF);
+            }
         }
     }
 }
@@ -759,5 +784,55 @@ mod tests {
 
         let stale = monitor.detect_stale_peers().unwrap();
         assert!(stale.is_empty(), "should not detect self as stale peer");
+    }
+
+    /// Verify that the circuit breaker fires after N consecutive write failures:
+    /// the emitter must set the shutdown flag and return rather than looping forever.
+    #[test]
+    fn emitter_exits_after_consecutive_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        // Make the heartbeat directory read-only so every write attempt fails.
+        std::fs::set_permissions(&hb_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let shared_state = Arc::new(Mutex::new(SharedHeartbeatState {
+            state: WorkerState::Selecting,
+            current_bead: None,
+            beads_processed: 0,
+        }));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let shutdown_clone = shutdown.clone();
+        let shared_state_clone = shared_state.clone();
+        let hb_dir_clone = hb_dir.clone();
+
+        // Use a tiny interval and a low failure threshold so the test completes quickly.
+        let handle = std::thread::spawn(move || {
+            emitter_loop(
+                shared_state_clone,
+                shutdown_clone,
+                hb_dir_clone,
+                "cb-test".to_string(),
+                PathBuf::from("/tmp"),
+                Utc::now(),
+                Duration::from_millis(1),
+                3, // trip after 3 consecutive failures
+            );
+        });
+
+        handle.join().expect("emitter thread panicked");
+
+        // The circuit breaker must have set the shutdown flag.
+        assert!(
+            shutdown.load(Ordering::SeqCst),
+            "shutdown flag must be set after circuit breaker trips"
+        );
+
+        // Restore permissions so the tempdir can be cleaned up.
+        let _ = std::fs::set_permissions(&hb_dir, std::fs::Permissions::from_mode(0o755));
     }
 }
