@@ -948,7 +948,10 @@ impl EventKind {
                     "traces_deleted": traces_deleted,
                 })
             }
-            EventKind::MendLearningCleanup { pruned, consolidated } => {
+            EventKind::MendLearningCleanup {
+                pruned,
+                consolidated,
+            } => {
                 serde_json::json!({
                     "pruned": pruned,
                     "consolidated": consolidated,

@@ -26,7 +26,7 @@ use needle::strand::unravel::UnravelStrand;
 use needle::strand::weave::WeaveStrand;
 use needle::strand::Strand;
 use needle::telemetry::{HookSink, Telemetry, TelemetryEvent};
-use needle::types::{BeadId, StrandResult};
+use needle::types::{Bead, BeadId, BeadStatus, StrandResult};
 use needle::upgrade::{check_hot_reload, file_hash, HotReloadCheck};
 use needle::validation::ValidationGate;
 
@@ -165,6 +165,24 @@ struct MockUnravelAgent {
 impl needle::strand::unravel::UnravelAgent for MockUnravelAgent {
     async fn propose_alternatives(&self, _prompt: &str, _workspace: &Path) -> Result<String> {
         Ok(self.response.clone())
+    }
+}
+
+/// Build a minimal `Bead` for tests that need one without a live store.
+fn make_test_bead(id: &str) -> Bead {
+    Bead {
+        id: BeadId::from(id.to_string()),
+        title: format!("Test bead {id}"),
+        body: Some("Do the thing".to_string()),
+        priority: 1,
+        status: BeadStatus::Open,
+        assignee: None,
+        labels: vec![],
+        workspace: std::path::PathBuf::from("/tmp/test"),
+        dependencies: vec![],
+        dependents: vec![],
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
     }
 }
 
@@ -505,7 +523,7 @@ async fn pulse_deduplicates_across_scans() {
 async fn validation_gate_passes_all_commands() {
     let workspace = tempfile::tempdir().unwrap();
 
-    let gate = ValidationGate::new(
+    let gate = ValidationGate::from_commands(
         vec![
             "true".to_string(),
             "echo ok".to_string(),
@@ -515,16 +533,17 @@ async fn validation_gate_passes_all_commands() {
     )
     .unwrap();
 
-    let result = gate.run().await.unwrap();
-    assert!(result.passed, "all gate commands should pass");
-    assert!(result.failures.is_empty());
+    let bead = make_test_bead("gate-test-pass");
+    let result = gate.run(&bead).await.unwrap();
+    assert!(result.all_passed, "all gate commands should pass");
+    assert!(result.results.values().all(|r| r.passed()));
 }
 
 #[tokio::test]
 async fn validation_gate_blocks_on_failure() {
     let workspace = tempfile::tempdir().unwrap();
 
-    let gate = ValidationGate::new(
+    let gate = ValidationGate::from_commands(
         vec![
             "true".to_string(),
             "exit 1".to_string(), // Fails
@@ -534,10 +553,11 @@ async fn validation_gate_blocks_on_failure() {
     )
     .unwrap();
 
-    let result = gate.run().await.unwrap();
-    assert!(!result.passed, "gate should fail on failing command");
-    assert_eq!(result.failures.len(), 1);
-    assert_eq!(result.failures[0].exit_code, Some(1));
+    let bead = make_test_bead("gate-test-fail");
+    let result = gate.run(&bead).await.unwrap();
+    assert!(!result.all_passed, "gate should fail on failing command");
+    let failures: Vec<_> = result.results.values().filter(|r| !r.passed()).collect();
+    assert_eq!(failures.len(), 1);
 }
 
 #[tokio::test]
@@ -546,15 +566,16 @@ async fn validation_gate_runs_in_workspace_directory() {
     // Create a marker file in the workspace.
     fs::write(workspace.path().join("marker.txt"), "exists").unwrap();
 
-    let gate = ValidationGate::new(
+    let gate = ValidationGate::from_commands(
         vec!["test -f marker.txt".to_string()],
         workspace.path().to_path_buf(),
     )
     .unwrap();
 
-    let result = gate.run().await.unwrap();
+    let bead = make_test_bead("gate-test-workspace");
+    let result = gate.run(&bead).await.unwrap();
     assert!(
-        result.passed,
+        result.all_passed,
         "gate should run in workspace directory and find marker.txt"
     );
 }
@@ -563,16 +584,24 @@ async fn validation_gate_runs_in_workspace_directory() {
 async fn validation_gate_captures_stderr() {
     let workspace = tempfile::tempdir().unwrap();
 
-    let gate = ValidationGate::new(
+    let gate = ValidationGate::from_commands(
         vec!["echo 'test failure detail' >&2; exit 1".to_string()],
         workspace.path().to_path_buf(),
     )
     .unwrap();
 
-    let result = gate.run().await.unwrap();
-    assert!(!result.passed);
+    let bead = make_test_bead("gate-test-stderr");
+    let result = gate.run(&bead).await.unwrap();
+    assert!(!result.all_passed);
+    let failure_reasons: Vec<_> = result
+        .results
+        .values()
+        .filter_map(|r| r.failure_reason())
+        .collect();
     assert!(
-        result.failures[0].output.contains("test failure detail"),
+        failure_reasons
+            .iter()
+            .any(|r| r.contains("test failure detail")),
         "gate should capture stderr output"
     );
 }

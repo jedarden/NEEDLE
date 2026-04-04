@@ -11,6 +11,7 @@ mod knot;
 mod mend;
 mod pluck;
 pub mod pulse;
+mod reflect;
 pub mod unravel;
 pub mod weave;
 
@@ -27,6 +28,7 @@ pub use knot::KnotStrand;
 pub use mend::MendStrand;
 pub use pluck::PluckStrand;
 pub use pulse::PulseStrand;
+pub use reflect::ReflectStrand;
 pub use unravel::{UnravelAgent, UnravelStrand};
 pub use weave::{CliWeaveAgent, WeaveAgent, WeaveStrand};
 
@@ -53,7 +55,7 @@ impl StrandRunner {
     /// Build the default strand waterfall from config.
     ///
     /// The waterfall order is:
-    /// Pluck → Mend → Explore → Weave → Unravel → Pulse → Knot.
+    /// Pluck → Mend → Explore → Weave → Unravel → Pulse → Reflect → Knot.
     pub fn from_config(
         config: &Config,
         worker_id: &str,
@@ -118,6 +120,13 @@ impl StrandRunner {
             config.strands.pulse.clone(),
             config.workspace.default.clone(),
             state_base.join("pulse"),
+            telemetry.clone(),
+        );
+
+        let reflect = ReflectStrand::new(
+            config.strands.reflect.clone(),
+            config.workspace.default.clone(),
+            state_base.join("reflect"),
             telemetry,
         );
 
@@ -130,6 +139,7 @@ impl StrandRunner {
                 Box::new(weave),
                 Box::new(unravel),
                 Box::new(pulse),
+                Box::new(reflect),
                 Box::new(knot),
             ],
         }
@@ -481,7 +491,7 @@ mod tests {
         let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
         assert_eq!(
             runner.strand_names(),
-            vec!["pluck", "mend", "explore", "weave", "unravel", "pulse", "knot"]
+            vec!["pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "knot"]
         );
     }
 }
