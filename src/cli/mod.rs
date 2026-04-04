@@ -111,13 +111,17 @@ pub enum CliCommand {
         #[arg(long)]
         by_worker: bool,
 
-        /// Show cost summary.
+        /// Show cost summary with per-worker and per-workspace breakdowns.
         #[arg(long)]
         cost: bool,
 
         /// Filter events since this time (e.g., 1h, 24h, 7d, 2026-03-20).
         #[arg(long)]
         since: Option<String>,
+
+        /// Filter events until this time (e.g., 1h, 24h, 7d, 2026-03-20T15:00:00Z).
+        #[arg(long)]
+        until: Option<String>,
     },
 
     /// View and query telemetry logs.
@@ -126,16 +130,25 @@ pub enum CliCommand {
         #[arg(long)]
         follow: bool,
 
-        /// Filter by event type (glob pattern, e.g., "bead.claim.*").
+        /// Filter expression(s). Supports:
+        ///   field=value    — exact match (e.g., event_type=bead.claim.succeeded)
+        ///   field~pattern  — regex match (e.g., event_type~bead\..*)
+        ///   field>number   — numeric greater-than (e.g., duration_ms>500)
+        ///   glob           — glob on event_type (e.g., bead.claim.*)
+        /// Multiple --filter flags are ANDed together.
         #[arg(long)]
-        filter: Option<String>,
+        filter: Vec<String>,
 
         /// Show events since this time (e.g., 1h, 24h, 7d, 2026-03-20).
         #[arg(long)]
         since: Option<String>,
 
-        /// Output format: human (default) or jsonl.
-        #[arg(long, value_enum, default_value = "human")]
+        /// Show events until this time (e.g., 1h, 24h, 7d, 2026-03-20T15:00:00Z).
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value = "table")]
         format: LogFormat,
     },
 
@@ -230,7 +243,13 @@ pub enum ListFormat {
 /// Output format for the logs command.
 #[derive(Debug, Clone, ValueEnum)]
 pub enum LogFormat {
+    /// Human-readable table format (default).
+    Table,
+    /// JSON Lines format (one JSON object per line).
+    Json,
+    /// Alias for table (human-readable).
     Human,
+    /// Alias for json (JSON Lines).
     Jsonl,
 }
 
@@ -259,13 +278,15 @@ pub fn run() -> Result<()> {
             by_worker,
             cost,
             since,
-        } => cmd_status(format, by_worker, cost, since),
+            until,
+        } => cmd_status(format, by_worker, cost, since, until),
         CliCommand::Logs {
             follow,
             filter,
             since,
+            until,
             format,
-        } => cmd_logs(follow, filter, since, format),
+        } => cmd_logs(follow, filter, since, until, format),
         CliCommand::ConfigCmd {
             get,
             dump,
@@ -768,6 +789,7 @@ fn cmd_status(
     by_worker: bool,
     cost: bool,
     since: Option<String>,
+    until: Option<String>,
 ) -> Result<()> {
     let config = ConfigLoader::load_global()?;
     let needle_home = config.workspace.home.clone();
@@ -877,9 +899,12 @@ fn cmd_status(
     // Cost summary (if requested).
     if cost {
         let log_dir = needle_home.join("logs");
-        let cutoff = since.as_deref().map(telemetry::parse_since).transpose()?;
-        let events = telemetry::read_logs(&log_dir, cutoff, None)?;
+        let since_dt = since.as_deref().map(telemetry::parse_since).transpose()?;
+        let until_dt = until.as_deref().map(telemetry::parse_until).transpose()?;
+        let events = telemetry::read_logs(&log_dir, since_dt, until_dt, None)?;
         let cs = telemetry::compute_cost_summary(&events);
+        let by_worker_costs = telemetry::compute_cost_by_worker(&events);
+        let by_workspace_costs = telemetry::compute_cost_by_workspace(&events);
 
         match format {
             ListFormat::Table => {
@@ -896,6 +921,51 @@ fn cmd_status(
                     "  Agent time:       {}",
                     telemetry::format_duration_ms_public(cs.total_elapsed_ms)
                 );
+
+                if !by_worker_costs.is_empty() {
+                    println!();
+                    println!("  Per Worker:");
+                    println!(
+                        "  {:<16} {:>8} {:>12} {:>14} {:>14}",
+                        "WORKER", "EVENTS", "COST (USD)", "TOKENS IN", "TOKENS OUT"
+                    );
+                    println!("  {}", "-".repeat(64));
+                    for w in &by_worker_costs {
+                        println!(
+                            "  {:<16} {:>8} {:>12.4} {:>14} {:>14}",
+                            w.worker_id,
+                            w.total_events,
+                            w.total_cost_usd,
+                            w.total_tokens_in,
+                            w.total_tokens_out,
+                        );
+                    }
+                }
+
+                if !by_workspace_costs.is_empty() {
+                    println!();
+                    println!("  Per Workspace:");
+                    println!(
+                        "  {:<40} {:>8} {:>12} {:>14} {:>14}",
+                        "WORKSPACE", "EVENTS", "COST (USD)", "TOKENS IN", "TOKENS OUT"
+                    );
+                    println!("  {}", "-".repeat(88));
+                    for w in &by_workspace_costs {
+                        let ws_display = if w.workspace.len() > 38 {
+                            format!("...{}", &w.workspace[w.workspace.len() - 35..])
+                        } else {
+                            w.workspace.clone()
+                        };
+                        println!(
+                            "  {:<40} {:>8} {:>12.4} {:>14} {:>14}",
+                            ws_display,
+                            w.total_events,
+                            w.total_cost_usd,
+                            w.total_tokens_in,
+                            w.total_tokens_out,
+                        );
+                    }
+                }
             }
             ListFormat::Json => {
                 let cost_json = serde_json::json!({
@@ -904,6 +974,22 @@ fn cmd_status(
                     "total_tokens_in": cs.total_tokens_in,
                     "total_tokens_out": cs.total_tokens_out,
                     "total_elapsed_ms": cs.total_elapsed_ms,
+                    "by_worker": by_worker_costs.iter().map(|w| serde_json::json!({
+                        "worker_id": w.worker_id,
+                        "total_events": w.total_events,
+                        "total_cost_usd": w.total_cost_usd,
+                        "total_tokens_in": w.total_tokens_in,
+                        "total_tokens_out": w.total_tokens_out,
+                        "total_elapsed_ms": w.total_elapsed_ms,
+                    })).collect::<Vec<_>>(),
+                    "by_workspace": by_workspace_costs.iter().map(|w| serde_json::json!({
+                        "workspace": w.workspace,
+                        "total_events": w.total_events,
+                        "total_cost_usd": w.total_cost_usd,
+                        "total_tokens_in": w.total_tokens_in,
+                        "total_tokens_out": w.total_tokens_out,
+                        "total_elapsed_ms": w.total_elapsed_ms,
+                    })).collect::<Vec<_>>(),
                 });
                 println!(
                     "{}",
@@ -1751,8 +1837,9 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
 /// `needle logs` — view and query telemetry logs.
 fn cmd_logs(
     follow: bool,
-    filter: Option<String>,
+    filter: Vec<String>,
     since: Option<String>,
+    until: Option<String>,
     format: LogFormat,
 ) -> Result<()> {
     let config = ConfigLoader::load_global()?;
@@ -1764,28 +1851,32 @@ fn cmd_logs(
         .clone()
         .unwrap_or_else(|| needle_home.join("logs"));
 
-    let filter_re = filter
-        .as_deref()
-        .map(telemetry::glob_to_regex)
-        .transpose()?;
+    let filter_exprs: Vec<&str> = filter.iter().map(|s| s.as_str()).collect();
+    let logs_filter = if filter_exprs.is_empty() {
+        None
+    } else {
+        Some(telemetry::LogsFilter::parse(&filter_exprs)?)
+    };
 
-    let cutoff = since.as_deref().map(telemetry::parse_since).transpose()?;
+    let since_dt = since.as_deref().map(telemetry::parse_since).transpose()?;
+    let until_dt = until.as_deref().map(telemetry::parse_until).transpose()?;
 
     if follow {
-        cmd_logs_follow(&log_dir, filter_re.as_ref(), cutoff, &format)
+        cmd_logs_follow(&log_dir, logs_filter.as_ref(), since_dt, until_dt, &format)
     } else {
-        cmd_logs_query(&log_dir, filter_re.as_ref(), cutoff, &format)
+        cmd_logs_query(&log_dir, logs_filter.as_ref(), since_dt, until_dt, &format)
     }
 }
 
 /// Non-follow mode: read all logs and print them.
 fn cmd_logs_query(
     log_dir: &Path,
-    filter: Option<&regex::Regex>,
+    filter: Option<&telemetry::LogsFilter>,
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     format: &LogFormat,
 ) -> Result<()> {
-    let events = telemetry::read_logs(log_dir, since, filter)?;
+    let events = telemetry::read_logs(log_dir, since, until, filter)?;
 
     if events.is_empty() {
         println!("No matching events found.");
@@ -1800,10 +1891,10 @@ fn cmd_logs_query(
 
     for event in &events {
         match format {
-            LogFormat::Human => {
+            LogFormat::Table | LogFormat::Human => {
                 println!("{}", stdout_sink.format_event(event));
             }
-            LogFormat::Jsonl => {
+            LogFormat::Json | LogFormat::Jsonl => {
                 let line = serde_json::to_string(event).context("failed to serialize event")?;
                 println!("{line}");
             }
@@ -1816,8 +1907,9 @@ fn cmd_logs_query(
 /// Follow mode: tail new events from all log files.
 fn cmd_logs_follow(
     log_dir: &Path,
-    filter: Option<&regex::Regex>,
+    filter: Option<&telemetry::LogsFilter>,
     since: Option<DateTime<Utc>>,
+    until: Option<DateTime<Utc>>,
     format: &LogFormat,
 ) -> Result<()> {
     use std::io::BufRead;
@@ -1837,17 +1929,10 @@ fn cmd_logs_follow(
         std::collections::HashMap::new();
 
     // Print existing events since cutoff first, then tail.
-    if let Some(ref cutoff) = since {
-        let events = telemetry::read_logs(log_dir, Some(*cutoff), filter)?;
+    if since.is_some() || filter.is_some() {
+        let events = telemetry::read_logs(log_dir, since, until, filter)?;
         for event in &events {
-            match format {
-                LogFormat::Human => println!("{}", stdout_sink.format_event(event)),
-                LogFormat::Jsonl => {
-                    if let Ok(line) = serde_json::to_string(event) {
-                        println!("{line}");
-                    }
-                }
-            }
+            print_log_event(event, format, &stdout_sink);
         }
     }
 
@@ -1905,20 +1990,10 @@ fn cmd_logs_follow(
                 let trimmed = line_buf.trim();
                 if !trimmed.is_empty() {
                     if let Ok(event) = serde_json::from_str::<telemetry::TelemetryEvent>(trimmed) {
-                        let passes_filter = filter
-                            .map(|re| re.is_match(&event.event_type))
-                            .unwrap_or(true);
-                        if passes_filter {
-                            match format {
-                                LogFormat::Human => {
-                                    println!("{}", stdout_sink.format_event(&event))
-                                }
-                                LogFormat::Jsonl => {
-                                    if let Ok(line) = serde_json::to_string(&event) {
-                                        println!("{line}");
-                                    }
-                                }
-                            }
+                        let passes = filter.map(|f| f.matches(&event)).unwrap_or(true);
+                        let passes_until = until.map(|u| event.timestamp <= u).unwrap_or(true);
+                        if passes && passes_until {
+                            print_log_event(&event, format, &stdout_sink);
                         }
                     }
                 }
@@ -1926,6 +2001,22 @@ fn cmd_logs_follow(
                 line_buf.clear();
             }
             file_positions.insert(path, new_pos);
+        }
+    }
+}
+
+/// Print a single telemetry event in the requested format.
+fn print_log_event(
+    event: &telemetry::TelemetryEvent,
+    format: &LogFormat,
+    sink: &telemetry::StdoutSink,
+) {
+    match format {
+        LogFormat::Table | LogFormat::Human => println!("{}", sink.format_event(event)),
+        LogFormat::Json | LogFormat::Jsonl => {
+            if let Ok(line) = serde_json::to_string(event) {
+                println!("{line}");
+            }
         }
     }
 }
@@ -2823,7 +2914,7 @@ mod tests {
         }) = cli
         {
             assert!(!follow);
-            assert!(filter.is_none());
+            assert!(filter.is_empty());
             assert!(since.is_none());
         }
     }
@@ -2848,8 +2939,61 @@ mod tests {
             command: CliCommand::Logs { filter, .. },
         }) = cli
         {
-            assert_eq!(filter.as_deref(), Some("bead.claim.*"));
+            assert_eq!(filter, vec!["bead.claim.*"]);
         }
+    }
+
+    #[test]
+    fn cli_parses_logs_multiple_filters() {
+        let cli = Cli::try_parse_from([
+            "needle",
+            "logs",
+            "--filter",
+            "event_type=bead.outcome",
+            "--filter",
+            "worker_id=alpha",
+        ]);
+        assert!(
+            cli.is_ok(),
+            "needle logs with multiple --filter should parse"
+        );
+        if let Ok(Cli {
+            command: CliCommand::Logs { filter, .. },
+        }) = cli
+        {
+            assert_eq!(filter.len(), 2);
+            assert_eq!(filter[0], "event_type=bead.outcome");
+            assert_eq!(filter[1], "worker_id=alpha");
+        }
+    }
+
+    #[test]
+    fn cli_parses_logs_filter_field_equals() {
+        let cli = Cli::try_parse_from([
+            "needle",
+            "logs",
+            "--filter",
+            "event_type=bead.claim.succeeded",
+        ]);
+        assert!(cli.is_ok());
+        if let Ok(Cli {
+            command: CliCommand::Logs { filter, .. },
+        }) = cli
+        {
+            assert_eq!(filter[0], "event_type=bead.claim.succeeded");
+        }
+    }
+
+    #[test]
+    fn cli_parses_logs_filter_field_regex() {
+        let cli = Cli::try_parse_from(["needle", "logs", "--filter", "event_type~bead\\..*"]);
+        assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn cli_parses_logs_filter_field_gt() {
+        let cli = Cli::try_parse_from(["needle", "logs", "--filter", "duration_ms>500"]);
+        assert!(cli.is_ok());
     }
 
     #[test]

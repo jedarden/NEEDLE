@@ -2002,14 +2002,147 @@ pub fn glob_to_regex(pattern: &str) -> Result<regex::Regex> {
     regex::Regex::new(&re).context("invalid filter pattern")
 }
 
+// ─── Rich filter expressions ──────────────────────────────────────────────────
+
+/// A single filter predicate applied to a telemetry event.
+enum FilterPredicate {
+    /// Glob pattern matched against `event_type` (backward-compatible).
+    EventTypeGlob(regex::Regex),
+    /// Exact case-sensitive match on a named field.
+    FieldEquals { field: String, value: String },
+    /// Regex match on a named field.
+    FieldRegex {
+        field: String,
+        pattern: regex::Regex,
+    },
+    /// Numeric greater-than on a named field.
+    FieldGt { field: String, threshold: f64 },
+}
+
+/// A conjunction (AND) of filter predicates for querying telemetry events.
+///
+/// Build from one or more expression strings with [`LogsFilter::parse`].
+pub struct LogsFilter {
+    predicates: Vec<FilterPredicate>,
+}
+
+impl LogsFilter {
+    /// Parse a list of filter expression strings into a `LogsFilter`.
+    ///
+    /// Each expression may be one of:
+    /// - `field=value`   — exact string match
+    /// - `field~pattern` — regex match
+    /// - `field>number`  — numeric greater-than
+    /// - `glob`          — glob pattern on `event_type` (no operator, backward compat)
+    ///
+    /// All predicates are ANDed together.
+    pub fn parse(exprs: &[&str]) -> Result<Self> {
+        let mut predicates = Vec::with_capacity(exprs.len());
+        for expr in exprs {
+            let expr = expr.trim();
+            if let Some(pos) = expr.find('=') {
+                let field = expr[..pos].to_string();
+                let value = expr[pos + 1..].to_string();
+                predicates.push(FilterPredicate::FieldEquals { field, value });
+            } else if let Some(pos) = expr.find('~') {
+                let field = expr[..pos].to_string();
+                let raw = &expr[pos + 1..];
+                let pattern = regex::Regex::new(raw)
+                    .with_context(|| format!("invalid regex in filter '{expr}': {raw}"))?;
+                predicates.push(FilterPredicate::FieldRegex { field, pattern });
+            } else if let Some(pos) = expr.find('>') {
+                let field = expr[..pos].to_string();
+                let raw = &expr[pos + 1..];
+                let threshold: f64 = raw
+                    .parse()
+                    .with_context(|| format!("invalid number in filter '{expr}': {raw}"))?;
+                predicates.push(FilterPredicate::FieldGt { field, threshold });
+            } else {
+                // Treat as glob pattern on event_type.
+                let re = glob_to_regex(expr)?;
+                predicates.push(FilterPredicate::EventTypeGlob(re));
+            }
+        }
+        Ok(LogsFilter { predicates })
+    }
+
+    /// Return `true` if the event satisfies all predicates.
+    pub fn matches(&self, event: &TelemetryEvent) -> bool {
+        self.predicates.iter().all(|p| predicate_matches(p, event))
+    }
+
+    /// Return `true` if the filter has no predicates (matches everything).
+    pub fn is_empty(&self) -> bool {
+        self.predicates.is_empty()
+    }
+}
+
+/// Evaluate a single predicate against an event.
+fn predicate_matches(pred: &FilterPredicate, event: &TelemetryEvent) -> bool {
+    match pred {
+        FilterPredicate::EventTypeGlob(re) => re.is_match(&event.event_type),
+        FilterPredicate::FieldEquals { field, value } => {
+            get_event_field_str(event, field).as_deref() == Some(value.as_str())
+        }
+        FilterPredicate::FieldRegex { field, pattern } => get_event_field_str(event, field)
+            .map(|v| pattern.is_match(&v))
+            .unwrap_or(false),
+        FilterPredicate::FieldGt { field, threshold } => get_event_field_f64(event, field)
+            .map(|v| v > *threshold)
+            .unwrap_or(false),
+    }
+}
+
+/// Extract a named field from a `TelemetryEvent` as a string.
+///
+/// Supported top-level fields: `event_type`, `worker_id`, `session_id`,
+/// `bead_id`, `workspace`. Data sub-fields can be accessed directly by
+/// name (matched against `event.data[field]`).
+fn get_event_field_str(event: &TelemetryEvent, field: &str) -> Option<String> {
+    match field {
+        "event_type" => Some(event.event_type.clone()),
+        "worker_id" => Some(event.worker_id.clone()),
+        "session_id" => Some(event.session_id.clone()),
+        "bead_id" => event.bead_id.as_ref().map(|b| b.as_ref().to_string()),
+        "workspace" => event.workspace.as_ref().map(|p| p.display().to_string()),
+        _ => {
+            // Check data sub-fields.
+            event.data.get(field).map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+        }
+    }
+}
+
+/// Extract a named field from a `TelemetryEvent` as a float.
+///
+/// Supported numeric fields: `duration_ms`, `sequence`, and any numeric key
+/// in `event.data`.
+fn get_event_field_f64(event: &TelemetryEvent, field: &str) -> Option<f64> {
+    match field {
+        "duration_ms" => event.duration_ms.map(|d| d as f64),
+        "sequence" => Some(event.sequence as f64),
+        _ => event.data.get(field).and_then(|v| v.as_f64()),
+    }
+}
+
+/// Parse a time-bound string (relative or absolute) into a UTC timestamp.
+///
+/// This is an alias for [`parse_since`] and accepts the same formats.
+pub fn parse_until(input: &str) -> Result<DateTime<Utc>> {
+    parse_since(input)
+}
+
 /// Read and parse JSONL log files from a directory.
 ///
-/// Returns events sorted by timestamp. Optionally filters by `since` and
-/// event type `filter` (glob pattern).
+/// Returns events sorted by timestamp. Optionally filters by `since`, `until`,
+/// and a [`LogsFilter`] predicate set.
 pub fn read_logs(
     log_dir: &Path,
     since: Option<DateTime<Utc>>,
-    filter: Option<&regex::Regex>,
+    until: Option<DateTime<Utc>>,
+    filter: Option<&LogsFilter>,
 ) -> Result<Vec<TelemetryEvent>> {
     let mut events = Vec::new();
 
@@ -2041,8 +2174,13 @@ pub fn read_logs(
                     continue;
                 }
             }
-            if let Some(re) = filter {
-                if !re.is_match(&event.event_type) {
+            if let Some(ref ceiling) = until {
+                if event.timestamp > *ceiling {
+                    continue;
+                }
+            }
+            if let Some(f) = filter {
+                if !f.matches(&event) {
                     continue;
                 }
             }
@@ -2085,6 +2223,113 @@ pub struct CostSummary {
     pub total_tokens_in: u64,
     pub total_tokens_out: u64,
     pub total_elapsed_ms: u64,
+}
+
+/// Per-worker cost breakdown from effort events.
+#[derive(Debug, Default)]
+pub struct WorkerCostSummary {
+    pub worker_id: String,
+    pub total_events: u64,
+    pub total_cost_usd: f64,
+    pub total_tokens_in: u64,
+    pub total_tokens_out: u64,
+    pub total_elapsed_ms: u64,
+}
+
+/// Compute per-worker cost breakdown from effort events.
+///
+/// Returns one entry per worker that has at least one effort event, sorted
+/// by descending total cost.
+pub fn compute_cost_by_worker(events: &[TelemetryEvent]) -> Vec<WorkerCostSummary> {
+    let mut map: std::collections::HashMap<String, WorkerCostSummary> =
+        std::collections::HashMap::new();
+    for event in events {
+        if event.event_type != "effort.recorded" {
+            continue;
+        }
+        let entry = map
+            .entry(event.worker_id.clone())
+            .or_insert_with(|| WorkerCostSummary {
+                worker_id: event.worker_id.clone(),
+                ..Default::default()
+            });
+        entry.total_events += 1;
+        if let Some(cost) = event.data["estimated_cost_usd"].as_f64() {
+            entry.total_cost_usd += cost;
+        }
+        if let Some(tokens_in) = event.data["tokens_in"].as_u64() {
+            entry.total_tokens_in += tokens_in;
+        }
+        if let Some(tokens_out) = event.data["tokens_out"].as_u64() {
+            entry.total_tokens_out += tokens_out;
+        }
+        if let Some(elapsed) = event.data["elapsed_ms"].as_u64() {
+            entry.total_elapsed_ms += elapsed;
+        }
+    }
+    let mut result: Vec<WorkerCostSummary> = map.into_values().collect();
+    result.sort_by(|a, b| {
+        b.total_cost_usd
+            .partial_cmp(&a.total_cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    result
+}
+
+/// Per-workspace cost breakdown from effort events.
+#[derive(Debug, Default)]
+pub struct WorkspaceCostSummary {
+    pub workspace: String,
+    pub total_events: u64,
+    pub total_cost_usd: f64,
+    pub total_tokens_in: u64,
+    pub total_tokens_out: u64,
+    pub total_elapsed_ms: u64,
+}
+
+/// Compute per-workspace cost breakdown from effort events.
+///
+/// Returns one entry per workspace that has at least one effort event, sorted
+/// by descending total cost.
+pub fn compute_cost_by_workspace(events: &[TelemetryEvent]) -> Vec<WorkspaceCostSummary> {
+    let mut map: std::collections::HashMap<String, WorkspaceCostSummary> =
+        std::collections::HashMap::new();
+    for event in events {
+        if event.event_type != "effort.recorded" {
+            continue;
+        }
+        let ws_key = event
+            .workspace
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let entry = map
+            .entry(ws_key.clone())
+            .or_insert_with(|| WorkspaceCostSummary {
+                workspace: ws_key,
+                ..Default::default()
+            });
+        entry.total_events += 1;
+        if let Some(cost) = event.data["estimated_cost_usd"].as_f64() {
+            entry.total_cost_usd += cost;
+        }
+        if let Some(tokens_in) = event.data["tokens_in"].as_u64() {
+            entry.total_tokens_in += tokens_in;
+        }
+        if let Some(tokens_out) = event.data["tokens_out"].as_u64() {
+            entry.total_tokens_out += tokens_out;
+        }
+        if let Some(elapsed) = event.data["elapsed_ms"].as_u64() {
+            entry.total_elapsed_ms += elapsed;
+        }
+    }
+    let mut result: Vec<WorkspaceCostSummary> = map.into_values().collect();
+    result.sort_by(|a, b| {
+        b.total_cost_usd
+            .partial_cmp(&a.total_cost_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    result
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────
@@ -2809,13 +3054,13 @@ mod tests {
         let dir = std::env::temp_dir().join("needle-test-logs-empty");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let events = read_logs(&dir, None, None).unwrap();
+        let events = read_logs(&dir, None, None, None).unwrap();
         assert!(events.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn read_logs_with_filter() {
+    fn read_logs_with_glob_filter() {
         let dir = std::env::temp_dir().join("needle-test-logs-filter");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2851,12 +3096,205 @@ mod tests {
         );
         std::fs::write(&log_file, content).unwrap();
 
-        let re = glob_to_regex("bead.claim.*").unwrap();
-        let events = read_logs(&dir, None, Some(&re)).unwrap();
+        let filter = LogsFilter::parse(&["bead.claim.*"]).unwrap();
+        let events = read_logs(&dir, None, None, Some(&filter)).unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "bead.claim.succeeded");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_logs_with_field_equals_filter() {
+        let dir = std::env::temp_dir().join("needle-test-logs-field-eq");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let event1 = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "bead.claim.succeeded".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 0,
+            bead_id: Some(BeadId::from("nd-abc")),
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: None,
+        };
+        let event2 = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "worker.started".to_string(),
+            worker_id: "bravo".to_string(),
+            session_id: "ccdd0022".to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: None,
+        };
+
+        let log_file = dir.join("test.jsonl");
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&event1).unwrap(),
+            serde_json::to_string(&event2).unwrap()
+        );
+        std::fs::write(&log_file, content).unwrap();
+
+        let filter = LogsFilter::parse(&["worker_id=alpha"]).unwrap();
+        let events = read_logs(&dir, None, None, Some(&filter)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].worker_id, "alpha");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_logs_with_field_gt_filter() {
+        let dir = std::env::temp_dir().join("needle-test-logs-field-gt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let event1 = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "agent.completed".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: Some(2000),
+        };
+        let event2 = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "agent.completed".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 1,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: Some(500),
+        };
+
+        let log_file = dir.join("test.jsonl");
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&event1).unwrap(),
+            serde_json::to_string(&event2).unwrap()
+        );
+        std::fs::write(&log_file, content).unwrap();
+
+        let filter = LogsFilter::parse(&["duration_ms>1000"]).unwrap();
+        let events = read_logs(&dir, None, None, Some(&filter)).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].duration_ms, Some(2000));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_logs_with_until_bound() {
+        let dir = std::env::temp_dir().join("needle-test-logs-until");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let past = Utc::now() - chrono::Duration::hours(2);
+        let recent = Utc::now() - chrono::Duration::minutes(5);
+
+        let event1 = TelemetryEvent {
+            timestamp: past,
+            event_type: "worker.started".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: None,
+        };
+        let event2 = TelemetryEvent {
+            timestamp: recent,
+            event_type: "worker.started".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 1,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: None,
+        };
+
+        let log_file = dir.join("test.jsonl");
+        let content = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&event1).unwrap(),
+            serde_json::to_string(&event2).unwrap()
+        );
+        std::fs::write(&log_file, content).unwrap();
+
+        // until 1 hour ago — only the 2h-old event should be included
+        let until = Utc::now() - chrono::Duration::hours(1);
+        let events = read_logs(&dir, None, Some(until), None).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sequence, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn logs_filter_parse_field_regex() {
+        let filter = LogsFilter::parse(&["event_type~bead\\..*"]).unwrap();
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "bead.claim.succeeded".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "aabb0011".to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: None,
+        };
+        assert!(filter.matches(&event));
+
+        let event2 = TelemetryEvent {
+            event_type: "worker.started".to_string(),
+            ..event.clone()
+        };
+        assert!(!filter.matches(&event2));
+    }
+
+    #[test]
+    fn logs_filter_parse_multiple_predicates_anded() {
+        // Both conditions must hold: worker_id=alpha AND event_type=worker.started
+        let filter = LogsFilter::parse(&["worker_id=alpha", "event_type=worker.started"]).unwrap();
+
+        let matching = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "worker.started".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "s1".to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: None,
+        };
+        assert!(filter.matches(&matching));
+
+        let wrong_worker = TelemetryEvent {
+            worker_id: "bravo".to_string(),
+            ..matching.clone()
+        };
+        assert!(!filter.matches(&wrong_worker));
+
+        let wrong_type = TelemetryEvent {
+            event_type: "worker.stopped".to_string(),
+            ..matching.clone()
+        };
+        assert!(!filter.matches(&wrong_type));
     }
 
     #[test]
