@@ -678,4 +678,74 @@ mod tests {
         // Smoke test: should not panic on any platform.
         RateLimiter::check_system_resources(0.8, 512);
     }
+
+    #[test]
+    fn provider_concurrency_ignores_dead_pids() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::new(dir.path());
+
+        // Register a live worker.
+        registry
+            .register(make_entry("live-worker", Some("anthropic"), Some("sonnet")))
+            .unwrap();
+
+        // Create an entry with a fake (dead) PID and write it directly to the file.
+        let mut dead_entry = make_entry("dead-worker", Some("anthropic"), Some("sonnet"));
+        dead_entry.pid = 9999999; // Nonexistent PID (well beyond typical ranges).
+
+        use crate::registry::RegistryFile;
+        let file_content = serde_json::to_string_pretty(&RegistryFile {
+            workers: vec![
+                make_entry("live-worker", Some("anthropic"), Some("sonnet")),
+                dead_entry,
+            ],
+            updated_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        std::fs::write(registry.path(), file_content).unwrap();
+
+        // Concurrency limit of 2: only the live worker should count.
+        let limits = make_limits(vec![("anthropic", Some(2), None)], vec![]);
+        let limiter = RateLimiter::new(limits, dir.path());
+
+        // Should be allowed because dead PIDs are filtered out.
+        let decision = limiter.check(Some("anthropic"), None, &registry).unwrap();
+        assert_eq!(decision, RateLimitDecision::Allowed);
+    }
+
+    #[test]
+    fn provider_conjunction_with_dead_pid_does_not_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::new(dir.path());
+
+        // Register one live worker.
+        registry
+            .register(make_entry("live-alpha", Some("anthropic"), Some("sonnet")))
+            .unwrap();
+
+        // Add 10 dead workers with fake PIDs (starting from 9999990 to avoid overflow).
+        use crate::registry::RegistryFile;
+        let mut dead_workers = Vec::new();
+        for i in 0..10 {
+            let mut dead_entry =
+                make_entry(&format!("dead-{i}"), Some("anthropic"), Some("sonnet"));
+            dead_entry.pid = 9999900 + i as u32; // Nonexistent PIDs.
+            dead_workers.push(dead_entry);
+        }
+
+        let file_content = serde_json::to_string_pretty(&RegistryFile {
+            workers: dead_workers,
+            updated_at: chrono::Utc::now(),
+        })
+        .unwrap();
+        std::fs::write(registry.path(), file_content).unwrap();
+
+        // Concurrency limit of 5: even with 11 total entries (1 live + 10 dead),
+        // only 1 should count after filtering.
+        let limits = make_limits(vec![("anthropic", Some(5), None)], vec![]);
+        let limiter = RateLimiter::new(limits, dir.path());
+
+        let decision = limiter.check(Some("anthropic"), None, &registry).unwrap();
+        assert_eq!(decision, RateLimitDecision::Allowed);
+    }
 }

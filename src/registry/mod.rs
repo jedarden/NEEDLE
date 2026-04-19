@@ -17,6 +17,57 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 // ──────────────────────────────────────────────────────────────────────────────
+// PID liveness checking (platform-specific)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Check if a process with the given PID is currently running.
+///
+/// Returns `false` if the PID does not exist or if we lack permission to signal it.
+/// This is best-effort: if we can't determine liveness, we assume the process is dead
+/// to avoid counting stale entries toward concurrency limits.
+pub fn is_pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // Use libc::kill with signal 0 to check if process exists.
+        // SAFETY: kill(pid, 0) only checks existence, doesn't send a signal.
+        unsafe {
+            let ret = libc::kill(pid as i32, 0);
+            if ret == 0 {
+                // kill succeeded: process exists and we have permission to signal it.
+                return true;
+            }
+            // kill failed: check errno to distinguish EPERM from ESRCH.
+            // We must read errno immediately after kill, before any other syscalls.
+            let errno = *libc::__errno_location();
+            match errno {
+                libc::ESRCH => {
+                    // No such process: PID is dead.
+                    false
+                }
+                libc::EPERM => {
+                    // Process exists but we don't have permission to signal it.
+                    // We treat this as "alive" since the process actually exists.
+                    true
+                }
+                _ => {
+                    // Other errors (e.g., EINVAL for invalid signal).
+                    // Conservatively treat as dead to avoid false positives.
+                    false
+                }
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms, conservatively return false (assume dead).
+        // This prevents false positives where dead PIDs are counted as live.
+        // TODO: Implement Windows liveness check via OpenProcess if needed.
+        false
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // WorkerEntry
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -121,10 +172,58 @@ impl Registry {
         })
     }
 
-    /// Read all registered workers.
+    /// Read all registered workers, filtering out entries for dead PIDs.
+    ///
+    /// This lazy cleanup ensures that workers killed via SIGKILL or crashes
+    /// don't accumulate in the registry and falsely count toward concurrency
+    /// limits.
     pub fn list(&self) -> Result<Vec<WorkerEntry>> {
         let reg = self.read()?;
-        Ok(reg.workers)
+        let total_count = reg.workers.len();
+        let live_workers: Vec<WorkerEntry> = reg
+            .workers
+            .into_iter()
+            .filter(|w| is_pid_alive(w.pid))
+            .collect();
+
+        // If we filtered out dead entries, persist the cleanup so we don't
+        // need to re-check their PIDs on every read. This is best-effort:
+        // if the write fails (disk full, race with another writer), we still
+        // return the correctly filtered list — we'll just re-filter next time.
+        let live_count = live_workers.len();
+        if live_count != total_count {
+            let dead_count = total_count - live_count;
+            tracing::debug!(dead_count, "filtered dead worker entries from registry");
+
+            let cleaned_reg = RegistryFile {
+                workers: live_workers.clone(),
+                updated_at: Utc::now(),
+            };
+            if let Err(e) = self.write_cleaned(cleaned_reg) {
+                tracing::warn!(
+                    error = %e,
+                    "failed to persist dead PID cleanup; will re-filter next read"
+                );
+            }
+        }
+
+        Ok(live_workers)
+    }
+
+    /// Write a cleaned registry file (used by list() to persist dead PID filtering).
+    ///
+    /// No file locking: read() already released its shared lock before returning.
+    /// The atomic rename ensures concurrent writers don't corrupt the file —
+    /// one write wins cleanly.
+    fn write_cleaned(&self, reg: RegistryFile) -> Result<()> {
+        let tmp_path = self.path.with_extension("json.tmp");
+        let json = serde_json::to_string_pretty(&reg).context("failed to serialize registry")?;
+        std::fs::write(&tmp_path, &json)
+            .with_context(|| format!("failed to write temp registry: {}", tmp_path.display()))?;
+        std::fs::rename(&tmp_path, &self.path).with_context(|| {
+            format!("failed to rename temp registry to: {}", self.path.display())
+        })?;
+        Ok(())
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -231,6 +330,15 @@ mod tests {
             beads_processed: 0,
         }
     }
+
+    /// A PID that is definitely not in use on any real system.
+    ///
+    /// This must be a value that:
+    /// 1. Is positive when cast to i32 (avoid -1 special case)
+    /// 2. Is unlikely to ever be assigned by the kernel
+    ///
+    /// We use 9999999 which is well beyond typical PID ranges.
+    const DEAD_PID: u32 = 9999999;
 
     #[test]
     fn register_and_list() {
@@ -371,5 +479,75 @@ mod tests {
         assert_eq!(parsed.workers[0].id, entry.id);
         assert_eq!(parsed.workers[0].pid, entry.pid);
         assert_eq!(parsed.workers[0].agent, entry.agent);
+    }
+
+    #[test]
+    fn list_filters_out_dead_pids() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+
+        // Register a live worker (current process).
+        reg.register(make_entry("live-alpha")).unwrap();
+
+        // Create an entry with a fake (dead) PID.
+        let mut dead_entry = make_entry("dead-worker");
+        dead_entry.pid = DEAD_PID;
+
+        // Write the dead entry directly to the file.
+        let file_content = serde_json::to_string_pretty(&RegistryFile {
+            workers: vec![make_entry("live-alpha"), dead_entry],
+            updated_at: Utc::now(),
+        })
+        .unwrap();
+        std::fs::write(reg.path(), file_content).unwrap();
+
+        // list() should filter out the dead PID.
+        let workers = reg.list().unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].id, "live-alpha");
+    }
+
+    #[test]
+    fn list_persists_cleanup_after_filtering_dead_pids() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+
+        // Register a live worker.
+        reg.register(make_entry("live-bravo")).unwrap();
+
+        // Create an entry with a fake (dead) PID.
+        let mut dead_entry = make_entry("dead-charlie");
+        dead_entry.pid = DEAD_PID;
+
+        // Write both entries to the file.
+        let file_content = serde_json::to_string_pretty(&RegistryFile {
+            workers: vec![make_entry("live-bravo"), dead_entry],
+            updated_at: Utc::now(),
+        })
+        .unwrap();
+        std::fs::write(reg.path(), file_content).unwrap();
+
+        // list() should filter and persist the cleanup.
+        let workers = reg.list().unwrap();
+        assert_eq!(workers.len(), 1);
+
+        // Read the file directly to verify cleanup was persisted.
+        let content = std::fs::read_to_string(reg.path()).unwrap();
+        let parsed: RegistryFile = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.workers.len(), 1);
+        assert_eq!(parsed.workers[0].id, "live-bravo");
+    }
+
+    #[test]
+    fn is_pid_alive_returns_true_for_current_process() {
+        // The current process's PID should be alive.
+        assert!(is_pid_alive(std::process::id()));
+    }
+
+    #[test]
+    fn is_pid_alive_returns_false_for_nonexistent_pid() {
+        // A PID that's unlikely to exist should be dead.
+        // DEAD_PID is well beyond any valid PID on real systems.
+        assert!(!is_pid_alive(DEAD_PID));
     }
 }

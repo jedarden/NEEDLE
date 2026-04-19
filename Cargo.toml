@@ -73,6 +73,9 @@ aho-corasick = "1"
 # TOML parsing (gitleaks config)
 toml = "0.8"
 
+# Unix process handling (PID liveness check)
+libc = "0.2"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"

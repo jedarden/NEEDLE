@@ -657,14 +657,20 @@ fn launch_in_tmux(
         inner_args.push(t.to_string());
     }
 
+    // Build stderr log path: ~/.needle/logs/<session_name>.stderr.log
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let stderr_log = format!("{home}/.needle/logs/{session_name}.stderr.log");
+
     let inner_cmd = format!(
-        "NEEDLE_INNER=1 {} {}",
+        "NEEDLE_INNER=1 {} {} 2>> {}; tmux kill-session -t {}",
         shell_escape(&self_exe.display().to_string()),
         inner_args
             .iter()
             .map(|a| shell_escape(a))
             .collect::<Vec<_>>()
-            .join(" ")
+            .join(" "),
+        shell_escape(&stderr_log),
+        shell_escape(session_name)
     );
 
     let status = ProcessCommand::new("tmux")
