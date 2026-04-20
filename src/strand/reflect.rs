@@ -210,6 +210,7 @@ impl ReflectState {
 #[derive(Debug, Deserialize)]
 struct ClosedBeadRecord {
     id: String,
+    title: Option<String>,
     status: String,
     close_reason: Option<String>,
     closed_at: Option<DateTime<Utc>>,
@@ -231,6 +232,8 @@ pub struct ReflectSummary {
     pub skills_promoted: usize,
     /// Number of learnings promoted to the global learnings file.
     pub global_learnings_promoted: usize,
+    /// Number of retrospectives extracted by the agent.
+    pub agent_extractions: usize,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -249,6 +252,8 @@ pub struct ReflectStrand {
     global_learnings_path: PathBuf,
     /// Maximum entries in the global learnings file.
     max_global_learnings: usize,
+    /// Optional agent for extracting retrospectives from close bodies.
+    agent: Option<Box<dyn ReflectAgent>>,
 }
 
 impl ReflectStrand {
@@ -258,11 +263,13 @@ impl ReflectStrand {
     /// - `workspace`: workspace root (where `.beads/` lives)
     /// - `state_dir`: directory for persisting reflect state (`~/.needle/state/reflect/`)
     /// - `telemetry`: telemetry emitter
+    /// - `agent`: optional agent for extracting retrospectives from close bodies
     pub fn new(
         config: ReflectConfig,
         workspace: PathBuf,
         state_dir: PathBuf,
         telemetry: Telemetry,
+        agent: Option<Box<dyn ReflectAgent>>,
     ) -> Self {
         ReflectStrand {
             config,
@@ -272,6 +279,7 @@ impl ReflectStrand {
             known_workspaces: Vec::new(),
             global_learnings_path: PathBuf::new(),
             max_global_learnings: 40,
+            agent,
         }
     }
 
@@ -296,7 +304,7 @@ impl ReflectStrand {
     ///
     /// `force` bypasses cooldown and minimum bead threshold checks (used by
     /// the `needle reflect` CLI command).
-    pub fn consolidate(&self, force: bool) -> Result<ReflectSummary> {
+    pub async fn consolidate(&self, force: bool) -> Result<ReflectSummary> {
         // ── Phase 1: Orient ───────────────────────────────────────────────────
         let state = ReflectState::load(&self.state_dir)?;
 
@@ -369,6 +377,7 @@ impl ReflectStrand {
 
         // ── Phase 2: Gather ───────────────────────────────────────────────────
         let mut retro_entries: Vec<(String, Retrospective)> = Vec::new();
+        let mut agent_extraction_count = 0usize;
 
         for bead in &since_last {
             if let Some(reason) = &bead.close_reason {
@@ -376,7 +385,31 @@ impl ReflectStrand {
                     Ok(Some(retro)) if retro.is_meaningful() => {
                         retro_entries.push((bead.id.clone(), retro));
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        // No explicit retrospective — try agent extraction
+                        if let Some(agent) = &self.agent {
+                            if agent_extraction_count < self.config.max_extraction_per_run {
+                                let title = bead.title.as_deref().unwrap_or(&bead.id);
+                                match agent
+                                    .extract_retrospective(title, reason, &self.workspace)
+                                    .await
+                                {
+                                    Ok(Some(retro)) if retro.is_meaningful() => {
+                                        retro_entries.push((bead.id.clone(), retro));
+                                        agent_extraction_count += 1;
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            bead_id = %bead.id,
+                                            error = %e,
+                                            "reflect: agent extraction failed"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!(bead_id = %bead.id, error = %e, "failed to parse retrospective");
                     }
@@ -386,6 +419,7 @@ impl ReflectStrand {
 
         tracing::debug!(
             retro_count = retro_entries.len(),
+            agent_extraction_count,
             "reflect: gathered retrospectives"
         );
 
@@ -477,6 +511,7 @@ impl ReflectStrand {
         // Promote cross-workspace patterns to global learnings.
         let global_promoted = self.promote_cross_workspace_patterns(&learnings)?;
         summary.global_learnings_promoted = global_promoted;
+        summary.agent_extractions = agent_extraction_count;
 
         // ── Phase 4: Prune ────────────────────────────────────────────────────
         let pruned = learnings.prune_stale()?;
@@ -715,7 +750,7 @@ impl super::Strand for ReflectStrand {
             return StrandResult::NoWork;
         }
 
-        match self.consolidate(false) {
+        match self.consolidate(false).await {
             Ok(_) => StrandResult::NoWork,
             Err(e) => StrandResult::Error(StrandError::ConfigError(format!(
                 "reflect consolidation failed: {e}"
@@ -803,6 +838,7 @@ mod tests {
             PathBuf::from("/tmp"),
             PathBuf::from("/tmp/state"),
             tel,
+            None,
         );
         assert_eq!(strand.name(), "reflect");
     }
@@ -887,14 +923,15 @@ mod tests {
             dir.path().to_path_buf(),
             dir.path().join("state"),
             tel,
+            None,
         );
         // When disabled, evaluate returns NoWork without touching the store.
         let result = strand.evaluate(&NoOpStore).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
-    #[test]
-    fn reflect_skips_below_threshold_when_no_state() {
+    #[tokio::test]
+    async fn reflect_skips_below_threshold_when_no_state() {
         let config = ReflectConfig {
             enabled: true,
             min_beads_since_last: 100, // very high threshold
@@ -916,15 +953,16 @@ mod tests {
             dir.path().to_path_buf(),
             dir.path().join("state"),
             tel,
+            None,
         );
 
-        let result = strand.consolidate(false).unwrap();
+        let result = strand.consolidate(false).await.unwrap();
         assert_eq!(result.beads_processed, 0);
         assert_eq!(result.learnings_added, 0);
     }
 
-    #[test]
-    fn reflect_consolidates_with_force() {
+    #[tokio::test]
+    async fn reflect_consolidates_with_force() {
         let config = ReflectConfig {
             enabled: true,
             min_beads_since_last: 100,
@@ -949,9 +987,10 @@ mod tests {
             dir.path().to_path_buf(),
             dir.path().join("state"),
             tel,
+            None,
         );
 
-        let result = strand.consolidate(true).unwrap();
+        let result = strand.consolidate(true).await.unwrap();
         assert_eq!(result.beads_processed, 1);
     }
 
@@ -986,6 +1025,7 @@ mod tests {
             workspace.to_path_buf(),
             workspace.join("state"),
             tel,
+            None,
         )
         .with_global(known_workspaces, global_path, max_global)
     }
@@ -1186,5 +1226,211 @@ mod tests {
         assert_eq!(promoted, 0);
         let global = crate::learning::GlobalLearningsFile::load(&global_path).unwrap();
         assert_eq!(global.entries().len(), 1);
+    }
+
+    // ── Agent extraction tests ──
+
+    /// Mock agent for testing retrospective extraction.
+    struct MockReflectAgent {
+        /// Fixed retrospective to return (if any).
+        retrospective: Option<Retrospective>,
+        /// Number of times extract_retrospective was called.
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ReflectAgent for MockReflectAgent {
+        async fn extract_retrospective(
+            &self,
+            _bead_title: &str,
+            _close_body: &str,
+            _workspace: &Path,
+        ) -> Result<Option<Retrospective>> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(self.retrospective.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn reflect_agent_called_when_no_retrospective() {
+        let config = ReflectConfig {
+            enabled: true,
+            min_beads_since_last: 1,
+            cooldown_hours: 0,
+            max_extraction_per_run: 10,
+            ..Default::default()
+        };
+        let tel = Telemetry::new("test".to_string());
+        let dir = tempfile::tempdir().unwrap();
+
+        let issues_dir = dir.path().join(".beads");
+        std::fs::create_dir_all(&issues_dir).unwrap();
+
+        // Bead with no retrospective block.
+        std::fs::write(
+            issues_dir.join("issues.jsonl"),
+            r#"{"id":"nd-0001","title":"Fix bug","status":"closed","close_reason":"Fixed the parsing bug.","closed_at":"2026-04-04T12:00:00Z","assignee":"alpha","labels":[]}"#,
+        ).unwrap();
+
+        let retro = Retrospective {
+            what_worked: Some("Used the existing pattern".to_string()),
+            what_didnt: Some("Nothing".to_string()),
+            surprise: Some("N/A".to_string()),
+            reusable_pattern: Some("Copy strand template".to_string()),
+        };
+
+        let agent = Box::new(MockReflectAgent {
+            retrospective: Some(retro),
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+
+        let strand = ReflectStrand::new(
+            config,
+            dir.path().to_path_buf(),
+            dir.path().join("state"),
+            tel,
+            Some(agent),
+        );
+
+        let result = strand.consolidate(true).await.unwrap();
+        assert_eq!(result.agent_extractions, 1);
+        assert_eq!(result.beads_processed, 1);
+    }
+
+    #[tokio::test]
+    async fn reflect_agent_not_called_when_retrospective_present() {
+        let config = ReflectConfig {
+            enabled: true,
+            min_beads_since_last: 1,
+            cooldown_hours: 0,
+            max_extraction_per_run: 10,
+            ..Default::default()
+        };
+        let tel = Telemetry::new("test".to_string());
+        let dir = tempfile::tempdir().unwrap();
+
+        let issues_dir = dir.path().join(".beads");
+        std::fs::create_dir_all(&issues_dir).unwrap();
+
+        // Bead WITH explicit retrospective block.
+        let body = r#"Done.\n\n## Retrospective\n- **What worked:** Used the existing pattern\n- **Reusable pattern:** Copy strand template"#;
+        let line = format!(
+            r#"{{"id":"nd-0001","title":"t","status":"closed","close_reason":{},"closed_at":"2026-04-04T12:00:00Z","assignee":"alpha","labels":[]}}"#,
+            serde_json::to_string(body).unwrap()
+        );
+        std::fs::write(issues_dir.join("issues.jsonl"), line).unwrap();
+
+        // Mock that panics if called (should not be called).
+        struct PanicMockAgent;
+        #[async_trait::async_trait]
+        impl ReflectAgent for PanicMockAgent {
+            async fn extract_retrospective(
+                &self,
+                _bead_title: &str,
+                _close_body: &str,
+                _workspace: &Path,
+            ) -> Result<Option<Retrospective>> {
+                panic!("agent should not be called when retrospective is present");
+            }
+        }
+
+        let strand = ReflectStrand::new(
+            config,
+            dir.path().to_path_buf(),
+            dir.path().join("state"),
+            tel,
+            Some(Box::new(PanicMockAgent)),
+        );
+
+        let result = strand.consolidate(true).await.unwrap();
+        assert_eq!(result.agent_extractions, 0);
+        assert_eq!(result.beads_processed, 1);
+    }
+
+    #[tokio::test]
+    async fn reflect_agent_not_called_when_none() {
+        let config = ReflectConfig {
+            enabled: true,
+            min_beads_since_last: 1,
+            cooldown_hours: 0,
+            max_extraction_per_run: 10,
+            ..Default::default()
+        };
+        let tel = Telemetry::new("test".to_string());
+        let dir = tempfile::tempdir().unwrap();
+
+        let issues_dir = dir.path().join(".beads");
+        std::fs::create_dir_all(&issues_dir).unwrap();
+
+        // Bead with no retrospective block.
+        std::fs::write(
+            issues_dir.join("issues.jsonl"),
+            r#"{"id":"nd-0001","title":"Fix bug","status":"closed","close_reason":"Fixed the parsing bug.","closed_at":"2026-04-04T12:00:00Z","assignee":"alpha","labels":[]}"#,
+        ).unwrap();
+
+        // No agent (None).
+        let strand = ReflectStrand::new(
+            config,
+            dir.path().to_path_buf(),
+            dir.path().join("state"),
+            tel,
+            None,
+        );
+
+        let result = strand.consolidate(true).await.unwrap();
+        assert_eq!(result.agent_extractions, 0);
+        assert_eq!(result.beads_processed, 1);
+    }
+
+    #[tokio::test]
+    async fn reflect_agent_respects_max_extraction_per_run() {
+        let config = ReflectConfig {
+            enabled: true,
+            min_beads_since_last: 1,
+            cooldown_hours: 0,
+            max_extraction_per_run: 2,
+            ..Default::default()
+        };
+        let tel = Telemetry::new("test".to_string());
+        let dir = tempfile::tempdir().unwrap();
+
+        let issues_dir = dir.path().join(".beads");
+        std::fs::create_dir_all(&issues_dir).unwrap();
+
+        // 5 beads, all without retrospectives.
+        let mut lines = Vec::new();
+        for i in 1..=5 {
+            lines.push(format!(
+                r#"{{"id":"nd-{:04}","title":"Fix bug {}","status":"closed","close_reason":"Fixed bug {}.","closed_at":"2026-04-04T12:00:00Z","assignee":"alpha","labels":[]}}"#,
+                i, i, i
+            ));
+        }
+        std::fs::write(issues_dir.join("issues.jsonl"), lines.join("\n")).unwrap();
+
+        let retro = Retrospective {
+            what_worked: Some("Used the existing pattern".to_string()),
+            what_didnt: Some("Nothing".to_string()),
+            surprise: Some("N/A".to_string()),
+            reusable_pattern: Some("Copy strand template".to_string()),
+        };
+
+        let agent = Box::new(MockReflectAgent {
+            retrospective: Some(retro),
+            call_count: std::sync::atomic::AtomicUsize::new(0),
+        });
+
+        let strand = ReflectStrand::new(
+            config,
+            dir.path().to_path_buf(),
+            dir.path().join("state"),
+            tel,
+            Some(agent),
+        );
+
+        let result = strand.consolidate(true).await.unwrap();
+        // Should only extract 2, not 5 (max_extraction_per_run = 2).
+        assert_eq!(result.agent_extractions, 2);
+        assert_eq!(result.beads_processed, 5);
     }
 }

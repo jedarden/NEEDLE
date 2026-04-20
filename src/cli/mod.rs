@@ -2540,14 +2540,26 @@ fn cmd_reflect(workspace: Option<PathBuf>, force: bool) -> Result<()> {
 
     let state_dir = config.workspace.home.join("state").join("reflect");
 
+    // Create the extraction agent if configured.
+    let agent = if let Some(ref agent_cmd) = config.strands.reflect.extraction_agent {
+        Some(Box::new(crate::strand::reflect::CliReflectAgent::new(
+            agent_cmd.clone(),
+            config.strands.reflect.extraction_prompt_template.clone(),
+        )) as Box<dyn crate::strand::reflect::ReflectAgent>)
+    } else {
+        None
+    };
+
     let strand = crate::strand::ReflectStrand::new(
         config.strands.reflect.clone(),
         workspace_root.clone(),
         state_dir,
         tel,
+        agent,
     );
 
-    let summary = strand.consolidate(force)?;
+    let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    let summary = rt.block_on(strand.consolidate(force))?;
 
     if summary.beads_processed == 0 && summary.learnings_added == 0 {
         println!(

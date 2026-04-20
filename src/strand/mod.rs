@@ -11,7 +11,7 @@ mod knot;
 mod mend;
 mod pluck;
 pub mod pulse;
-mod reflect;
+pub mod reflect;
 pub mod unravel;
 pub mod weave;
 
@@ -123,11 +123,25 @@ impl StrandRunner {
             telemetry.clone(),
         );
 
+        // Create the extraction agent if configured.
+        let reflect_agent = config
+            .strands
+            .reflect
+            .extraction_agent
+            .as_ref()
+            .map(|agent_cmd| {
+                Box::new(reflect::CliReflectAgent::new(
+                    agent_cmd.clone(),
+                    config.strands.reflect.extraction_prompt_template.clone(),
+                )) as Box<dyn reflect::ReflectAgent>
+            });
+
         let reflect = ReflectStrand::new(
             config.strands.reflect.clone(),
             config.workspace.default.clone(),
             state_base.join("reflect"),
             telemetry,
+            reflect_agent,
         );
 
         let knot = KnotStrand::new(config.strands.knot.clone());
