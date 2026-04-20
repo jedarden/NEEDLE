@@ -564,6 +564,22 @@ pub struct ReflectConfig {
     /// Maximum total learning entries before forced pruning (default: 80).
     #[serde(default = "ReflectConfig::default_max_learnings")]
     pub max_learnings: usize,
+
+    /// Agent command for automatic retrospective extraction (e.g. `claude --print`).
+    /// When set, beads closed without a `## Retrospective` block will be passed to
+    /// this agent to infer one. When `None`, only explicit retrospective blocks are used.
+    #[serde(default)]
+    pub extraction_agent: Option<String>,
+
+    /// Custom prompt template for retrospective extraction.
+    /// Template variables: `{title}`, `{close_body}`.
+    /// When `None`, the built-in default prompt is used.
+    #[serde(default)]
+    pub extraction_prompt_template: Option<String>,
+
+    /// Maximum beads to pass to the extraction agent per Reflect run (default: 5).
+    #[serde(default = "ReflectConfig::default_max_extraction_per_run")]
+    pub max_extraction_per_run: usize,
 }
 
 impl Default for ReflectConfig {
@@ -576,6 +592,9 @@ impl Default for ReflectConfig {
             max_skills_per_run: Self::default_max_skills_per_run(),
             learning_retention_days: Self::default_learning_retention_days(),
             max_learnings: Self::default_max_learnings(),
+            extraction_agent: None,
+            extraction_prompt_template: None,
+            max_extraction_per_run: Self::default_max_extraction_per_run(),
         }
     }
 }
@@ -601,6 +620,9 @@ impl ReflectConfig {
     }
     fn default_max_learnings() -> usize {
         80
+    }
+    fn default_max_extraction_per_run() -> usize {
+        5
     }
 }
 
@@ -2600,6 +2622,28 @@ strands:
         assert_eq!(config.cooldown_hours, 48);
         assert_eq!(config.severity_threshold, 3);
         assert!(config.prompt_template.is_none());
+    }
+
+    #[test]
+    fn default_reflect_config_values() {
+        let config = ReflectConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.min_beads_since_last, 10);
+        assert_eq!(config.cooldown_hours, 24);
+        assert_eq!(config.max_learnings_per_run, 10);
+        assert_eq!(config.max_skills_per_run, 3);
+        assert_eq!(config.learning_retention_days, 90);
+        assert_eq!(config.max_learnings, 80);
+        assert!(config.extraction_agent.is_none());
+        assert!(config.extraction_prompt_template.is_none());
+        assert_eq!(config.max_extraction_per_run, 5);
+    }
+
+    #[test]
+    fn reflect_config_default_extraction_agent_is_none() {
+        let config = ReflectConfig::default();
+        assert!(config.extraction_agent.is_none());
+        assert_eq!(config.max_extraction_per_run, 5);
     }
 
     #[test]
