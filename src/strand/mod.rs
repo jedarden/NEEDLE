@@ -28,7 +28,7 @@ pub use knot::KnotStrand;
 pub use mend::MendStrand;
 pub use pluck::PluckStrand;
 pub use pulse::PulseStrand;
-pub use reflect::ReflectStrand;
+pub use reflect::{CliReflectAgent, ReflectAgent, ReflectStrand};
 pub use unravel::{UnravelAgent, UnravelStrand};
 pub use weave::{CliWeaveAgent, WeaveAgent, WeaveStrand};
 
