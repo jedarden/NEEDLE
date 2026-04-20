@@ -42,6 +42,130 @@ use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{StrandError, StrandResult};
 
 // ──────────────────────────────────────────────────────────────────────────────
+// ReflectAgent trait
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Agent that infers a retrospective from an unstructured bead close body.
+#[async_trait::async_trait]
+#[allow(dead_code)]
+pub trait ReflectAgent: Send + Sync {
+    /// Extract a `Retrospective` from the given bead title and close body.
+    /// Returns `Ok(None)` if no meaningful retrospective can be inferred.
+    async fn extract_retrospective(
+        &self,
+        bead_title: &str,
+        close_body: &str,
+        workspace: &Path,
+    ) -> Result<Option<Retrospective>>;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Default prompt template
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Default prompt template for retrospective extraction.
+#[allow(dead_code)]
+const DEFAULT_EXTRACTION_PROMPT: &str = r#"You are analyzing a completed software task.
+Based on the title and close body below, write a concise retrospective section.
+
+Title: {title}
+Close body: {close_body}
+
+Write ONLY the following markdown block — nothing before or after it:
+
+## Retrospective
+- **What worked:** <approaches that succeeded>
+- **What didn't:** <approaches that failed or were harder than expected, or "N/A">
+- **Surprise:** <anything unexpected about the codebase, tooling, or problem, or "N/A">
+- **Reusable pattern:** <if this task type recurs, the key pattern to apply>
+"#;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CliReflectAgent
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Production `ReflectAgent` that shells out to a CLI agent (e.g., `claude`).
+///
+/// The agent is invoked with the prompt fed via stdin redirection. The prompt
+/// is built by substituting `{title}` and `{close_body}` in the template.
+#[allow(dead_code)]
+pub struct CliReflectAgent {
+    /// Agent binary name or path (e.g., `"claude"`).
+    agent_cmd: String,
+    /// Optional custom prompt template. Uses `DEFAULT_EXTRACTION_PROMPT` if None.
+    #[allow(dead_code)]
+    prompt_template: Option<String>,
+}
+
+impl CliReflectAgent {
+    /// Create a new `CliReflectAgent`.
+    ///
+    /// `agent_cmd` is the binary used for analysis (typically taken from
+    /// `config.agent.default`). `prompt_template` is optional; if None, the
+    /// built-in `DEFAULT_EXTRACTION_PROMPT` is used.
+    #[allow(dead_code)]
+    pub fn new(agent_cmd: String, prompt_template: Option<String>) -> Self {
+        CliReflectAgent {
+            agent_cmd,
+            prompt_template,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ReflectAgent for CliReflectAgent {
+    async fn extract_retrospective(
+        &self,
+        bead_title: &str,
+        close_body: &str,
+        workspace: &Path,
+    ) -> Result<Option<Retrospective>> {
+        // Build the prompt by substituting template variables.
+        let template = self
+            .prompt_template
+            .as_deref()
+            .unwrap_or(DEFAULT_EXTRACTION_PROMPT);
+        let prompt = template
+            .replace("{title}", bead_title)
+            .replace("{close_body}", close_body);
+
+        // Write the prompt to a temp file.
+        let tmp_path =
+            std::path::PathBuf::from(format!("/tmp/needle-reflect-{}.md", std::process::id()));
+        std::fs::write(&tmp_path, prompt)
+            .with_context(|| format!("failed to write reflect prompt to {}", tmp_path.display()))?;
+
+        // Run the agent: cd into workspace, pipe prompt to agent.
+        let cmd = format!(
+            "cd {} && {} < {}",
+            workspace.display(),
+            self.agent_cmd,
+            tmp_path.display()
+        );
+
+        let output = tokio::process::Command::new("bash")
+            .arg("-c")
+            .arg(&cmd)
+            .output()
+            .await
+            .with_context(|| format!("failed to spawn reflect agent: {}", self.agent_cmd))?;
+
+        // Always clean up the temp file.
+        let _ = std::fs::remove_file(&tmp_path);
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "reflect agent exited with code {}",
+                output.status.code().unwrap_or(-1)
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Retrospective::parse_from_close_body(&stdout)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // State persistence
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -654,6 +778,20 @@ mod tests {
     #[test]
     fn truncate_long() {
         assert_eq!(truncate("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn reflect_agent_default_prompt_contains_fields() {
+        assert!(DEFAULT_EXTRACTION_PROMPT.contains("What worked"));
+        assert!(DEFAULT_EXTRACTION_PROMPT.contains("What didn't"));
+        assert!(DEFAULT_EXTRACTION_PROMPT.contains("Surprise"));
+        assert!(DEFAULT_EXTRACTION_PROMPT.contains("Reusable pattern"));
+    }
+
+    #[test]
+    fn cli_reflect_agent_new_stores_cmd() {
+        let agent = CliReflectAgent::new("claude".to_string(), None);
+        assert_eq!(agent.agent_cmd, "claude");
     }
 
     #[test]
