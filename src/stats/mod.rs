@@ -698,6 +698,8 @@ mod tests {
             workspace: None,
             data,
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         }
     }
 

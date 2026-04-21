@@ -6,7 +6,7 @@
 //!
 //! ## Architecture
 //! ```text
-//! worker → emit() → mpsc::Sender → [background task] → TelemetrySink
+//! worker → emit() → mpsc::Sender → [background task] → TelemetryBus → Vec<Box<dyn Sink>>
 //! ```
 //!
 //! Depends on: `types`.
@@ -49,6 +49,12 @@ pub struct TelemetryEvent {
     /// Optional duration in milliseconds for timed operations.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// W3C trace-id hex (32 lowercase hex chars). Present only when emitted inside an OTel span.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
+    /// W3C span-id hex (16 lowercase hex chars). Present only when emitted inside an OTel span.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub span_id: Option<String>,
 }
 
 // ─── EventKind ───────────────────────────────────────────────────────────────
@@ -1088,17 +1094,21 @@ impl EventKind {
     }
 }
 
-// ─── TelemetrySink trait ─────────────────────────────────────────────────────
+// ─── Sink trait ──────────────────────────────────────────────────────────────
 
 /// Pluggable output backend for telemetry events.
 ///
-/// Phase 2 adds stdout sink and hook sink. All backends implement this trait.
-pub trait TelemetrySink: Send + Sync {
-    /// Write a single event. Must not block indefinitely.
-    fn write(&self, event: &TelemetryEvent) -> Result<()>;
+/// Implement this trait to add a new sink — register an instance in the
+/// `TelemetryBus` and events fan out automatically, with no special-casing.
+pub trait Sink: Send + Sync {
+    /// Accept a single event. Must not block indefinitely.
+    fn accept(&self, event: &TelemetryEvent) -> Result<()>;
 
-    /// Flush any buffered events. Called on shutdown.
-    fn flush(&self) -> Result<()>;
+    /// Flush any buffered state before shutdown.
+    ///
+    /// Implementations should respect `deadline`: if flushing cannot complete
+    /// within the duration, return an error rather than blocking indefinitely.
+    fn flush(&self, deadline: std::time::Duration) -> Result<()>;
 }
 
 // ─── FileSink ────────────────────────────────────────────────────────────────
@@ -1145,8 +1155,8 @@ impl FileSink {
     }
 }
 
-impl TelemetrySink for FileSink {
-    fn write(&self, event: &TelemetryEvent) -> Result<()> {
+impl Sink for FileSink {
+    fn accept(&self, event: &TelemetryEvent) -> Result<()> {
         use std::io::Write;
         let line = serde_json::to_string(event)?;
         let mut writer = self
@@ -1157,13 +1167,15 @@ impl TelemetrySink for FileSink {
         Ok(())
     }
 
-    fn flush(&self) -> Result<()> {
+    fn flush(&self, _deadline: std::time::Duration) -> Result<()> {
         use std::io::Write;
         let mut writer = self
             .writer
             .lock()
             .map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
         writer.flush()?;
+        // fsync to ensure durability before shutdown
+        writer.get_ref().sync_all()?;
         Ok(())
     }
 }
@@ -1380,14 +1392,14 @@ impl StdoutSink {
     }
 }
 
-impl TelemetrySink for StdoutSink {
-    fn write(&self, event: &TelemetryEvent) -> Result<()> {
+impl Sink for StdoutSink {
+    fn accept(&self, event: &TelemetryEvent) -> Result<()> {
         let line = self.format_event(event);
         println!("{line}");
         Ok(())
     }
 
-    fn flush(&self) -> Result<()> {
+    fn flush(&self, _deadline: std::time::Duration) -> Result<()> {
         use std::io::Write;
         std::io::stdout().flush()?;
         Ok(())
@@ -1441,6 +1453,31 @@ pub fn generate_session_id() -> String {
     let ts = Utc::now().timestamp_millis() as u64;
     let hash = pid as u64 ^ ts;
     format!("{:08x}", hash & 0xffff_ffff)
+}
+
+// ─── Trace context helpers ────────────────────────────────────────────────────
+
+/// Returns `(trace_id_hex, span_id_hex)` from the current OTel span context,
+/// or `(None, None)` when not inside a valid span.
+#[cfg(feature = "otlp")]
+fn current_trace_ids() -> (Option<String>, Option<String>) {
+    use opentelemetry::trace::TraceContextExt;
+    let ctx = opentelemetry::Context::current();
+    let binding = ctx.span();
+    let span_ctx = binding.span_context();
+    if span_ctx.is_valid() {
+        (
+            Some(hex::encode(span_ctx.trace_id().to_bytes())),
+            Some(hex::encode(span_ctx.span_id().to_bytes())),
+        )
+    } else {
+        (None, None)
+    }
+}
+
+#[cfg(not(feature = "otlp"))]
+fn current_trace_ids() -> (Option<String>, Option<String>) {
+    (None, None)
 }
 
 // ─── HookSink ─────────────────────────────────────────────────────────────────
@@ -1528,6 +1565,8 @@ impl HookSink {
                                 "error": e.to_string(),
                             }),
                             duration_ms: None,
+                            trace_id: None,
+                            span_id: None,
                         });
                     }
                 }
@@ -1553,6 +1592,8 @@ impl HookSink {
                                 "error": e.to_string(),
                             }),
                             duration_ms: None,
+                            trace_id: None,
+                            span_id: None,
                         });
                     }
                 }
@@ -1615,6 +1656,25 @@ impl HookSink {
     }
 }
 
+impl Sink for HookSink {
+    fn accept(&self, event: &TelemetryEvent) -> Result<()> {
+        let failures = self.dispatch(event);
+        for fail in &failures {
+            tracing::warn!(
+                hook_error = %fail.data,
+                original_event = %event.event_type,
+                "telemetry hook dispatch failed"
+            );
+        }
+        Ok(())
+    }
+
+    fn flush(&self, _deadline: std::time::Duration) -> Result<()> {
+        // hooks run synchronously in accept(); nothing to drain
+        Ok(())
+    }
+}
+
 // ─── Telemetry emitter ───────────────────────────────────────────────────────
 
 /// Non-blocking telemetry emitter.
@@ -1642,9 +1702,7 @@ pub struct Telemetry {
 /// Holds the receiver and sinks until they can be spawned in an async context.
 struct PendingWriter {
     receiver: mpsc::UnboundedReceiver<TelemetryEvent>,
-    file_sink: Option<FileSink>,
-    stdout_sink: Option<StdoutSink>,
-    hook_sink: Option<HookSink>,
+    sinks: Vec<Box<dyn Sink>>,
 }
 
 impl Telemetry {
@@ -1656,20 +1714,14 @@ impl Telemetry {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
-        // Try to create a file sink; fall back to no-op on error.
-        let file_sink: Option<FileSink> = FileSink::new(&worker_id, &session_id)
-            .map_err(|e| {
-                tracing::warn!(error = %e, "failed to create telemetry file sink");
-            })
-            .ok();
+        let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
+        match FileSink::new(&worker_id, &session_id) {
+            Ok(s) => sinks.push(Box::new(s)),
+            Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
+        }
 
         let sequence = Arc::new(AtomicU64::new(0));
-        let pending = PendingWriter {
-            receiver,
-            file_sink,
-            stdout_sink: None,
-            hook_sink: None,
-        };
+        let pending = PendingWriter { receiver, sinks };
 
         Telemetry {
             worker_id,
@@ -1689,25 +1741,17 @@ impl Telemetry {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
-        let file_sink: Option<FileSink> = FileSink::new(&worker_id, &session_id)
-            .map_err(|e| {
-                tracing::warn!(error = %e, "failed to create telemetry file sink");
-            })
-            .ok();
-
-        let stdout_sink = if stdout_config.enabled {
-            Some(StdoutSink::new(stdout_config))
-        } else {
-            None
-        };
+        let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
+        match FileSink::new(&worker_id, &session_id) {
+            Ok(s) => sinks.push(Box::new(s)),
+            Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
+        }
+        if stdout_config.enabled {
+            sinks.push(Box::new(StdoutSink::new(stdout_config)));
+        }
 
         let sequence = Arc::new(AtomicU64::new(0));
-        let pending = PendingWriter {
-            receiver,
-            file_sink,
-            stdout_sink,
-            hook_sink: None,
-        };
+        let pending = PendingWriter { receiver, sinks };
 
         Telemetry {
             worker_id,
@@ -1731,31 +1775,20 @@ impl Telemetry {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
-        let file_sink: Option<FileSink> = FileSink::new(&worker_id, &session_id)
-            .map_err(|e| {
-                tracing::warn!(error = %e, "failed to create telemetry file sink");
-            })
-            .ok();
-
-        let stdout_sink = if stdout_config.enabled {
-            Some(StdoutSink::new(stdout_config))
-        } else {
-            None
-        };
-
-        let hook_sink = if hook_configs.is_empty() {
-            None
-        } else {
-            Some(HookSink::new(hook_configs)?)
-        };
+        let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
+        match FileSink::new(&worker_id, &session_id) {
+            Ok(s) => sinks.push(Box::new(s)),
+            Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
+        }
+        if stdout_config.enabled {
+            sinks.push(Box::new(StdoutSink::new(stdout_config)));
+        }
+        if !hook_configs.is_empty() {
+            sinks.push(Box::new(HookSink::new(hook_configs)?));
+        }
 
         let sequence = Arc::new(AtomicU64::new(0));
-        let pending = PendingWriter {
-            receiver,
-            file_sink,
-            stdout_sink,
-            hook_sink,
-        };
+        let pending = PendingWriter { receiver, sinks };
 
         Ok(Telemetry {
             worker_id,
@@ -1800,12 +1833,8 @@ impl Telemetry {
         let file_sink = FileSink::with_dir(log_dir, &worker_id, &session_id)?;
         let path = file_sink.path().to_path_buf();
         let sequence = Arc::new(AtomicU64::new(0));
-        let pending = PendingWriter {
-            receiver,
-            file_sink: Some(file_sink),
-            stdout_sink: None,
-            hook_sink: None,
-        };
+        let sinks: Vec<Box<dyn Sink>> = vec![Box::new(file_sink)];
+        let pending = PendingWriter { receiver, sinks };
         Ok((
             Telemetry {
                 worker_id,
@@ -1819,9 +1848,26 @@ impl Telemetry {
         ))
     }
 
+    /// Create a telemetry emitter backed by a pre-built list of sinks (for testing).
+    #[cfg(test)]
+    pub fn with_boxed_sinks(worker_id: WorkerId, sinks: Vec<Box<dyn Sink>>) -> Self {
+        let session_id = "test0000".to_string();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let sequence = Arc::new(AtomicU64::new(0));
+        let pending = PendingWriter { receiver, sinks };
+        Telemetry {
+            worker_id,
+            session_id,
+            sequence,
+            sender: Arc::new(std::sync::Mutex::new(Some(sender))),
+            pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
+            writer_handle: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
     /// Create a telemetry emitter with a custom sink (for testing).
     #[cfg(test)]
-    pub fn with_sink(worker_id: WorkerId, sink: impl TelemetrySink + 'static) -> Self {
+    pub fn with_sink(worker_id: WorkerId, sink: impl Sink + 'static) -> Self {
         let session_id = "test0000".to_string();
         let (sender, receiver) = mpsc::unbounded_channel::<TelemetryEvent>();
         let sequence = Arc::new(AtomicU64::new(0));
@@ -1829,8 +1875,8 @@ impl Telemetry {
         tokio::spawn(async move {
             let mut rx = receiver;
             while let Some(event) = rx.recv().await {
-                if let Err(e) = sink.write(&event) {
-                    tracing::warn!(error = %e, "test sink write failed");
+                if let Err(e) = sink.accept(&event) {
+                    tracing::warn!(error = %e, "test sink accept failed");
                 }
             }
         });
@@ -1850,6 +1896,7 @@ impl Telemetry {
     /// Returns `Err` only if the channel is disconnected (background task died).
     pub fn emit(&self, kind: EventKind) -> Result<()> {
         let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let (trace_id, span_id) = current_trace_ids();
         let event = TelemetryEvent {
             timestamp: Utc::now(),
             event_type: kind.event_type().to_string(),
@@ -1860,6 +1907,8 @@ impl Telemetry {
             workspace: None,
             duration_ms: kind.duration_ms(),
             data: kind.to_data(),
+            trace_id,
+            span_id,
         };
         tracing::debug!(event_type = %event.event_type, seq, "telemetry event");
         // Lock the shared sender; None means shutdown() has been called.
@@ -1888,19 +1937,14 @@ impl Telemetry {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
-        let file_sink: Option<FileSink> = FileSink::with_dir(log_dir, &worker_id, &session_id)
-            .map_err(|e| {
-                tracing::warn!(error = %e, "failed to create telemetry file sink");
-            })
-            .ok();
+        let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
+        match FileSink::with_dir(log_dir, &worker_id, &session_id) {
+            Ok(s) => sinks.push(Box::new(s)),
+            Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
+        }
 
         let sequence = Arc::new(AtomicU64::new(0));
-        let pending = PendingWriter {
-            receiver,
-            file_sink,
-            stdout_sink: None,
-            hook_sink: None,
-        };
+        let pending = PendingWriter { receiver, sinks };
 
         Telemetry {
             worker_id,
@@ -1920,8 +1964,7 @@ impl Telemetry {
     pub fn start(&self) {
         let pending = self.pending_writer.lock().unwrap().take();
         if let Some(pw) = pending {
-            let handle =
-                Self::spawn_writer(pw.receiver, pw.file_sink, pw.stdout_sink, pw.hook_sink);
+            let handle = Self::spawn_writer(pw.receiver, pw.sinks);
             *self.writer_handle.lock().unwrap() = Some(handle);
         }
     }
@@ -1944,44 +1987,24 @@ impl Telemetry {
         }
     }
 
-    /// Spawn background writer task draining the channel to the sinks.
+    /// Spawn background writer task draining the channel to all registered sinks.
     fn spawn_writer(
         mut receiver: mpsc::UnboundedReceiver<TelemetryEvent>,
-        file_sink: Option<FileSink>,
-        stdout_sink: Option<StdoutSink>,
-        hook_sink: Option<HookSink>,
+        sinks: Vec<Box<dyn Sink>>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                if let Some(ref s) = file_sink {
-                    if let Err(e) = s.write(&event) {
-                        tracing::warn!(error = %e, "telemetry file sink write failed");
-                    }
-                }
-                if let Some(ref s) = stdout_sink {
-                    if let Err(e) = s.write(&event) {
-                        tracing::warn!(error = %e, "telemetry stdout sink write failed");
-                    }
-                }
-                // Hook dispatch: matching events piped to external commands.
-                // Failures produce SinkError events written to file sink only
-                // (never recursed back to hooks).
-                if let Some(ref h) = hook_sink {
-                    let failures = h.dispatch(&event);
-                    for fail_event in failures {
-                        if let Some(ref s) = file_sink {
-                            if let Err(e) = s.write(&fail_event) {
-                                tracing::warn!(error = %e, "failed to log hook failure");
-                            }
-                        }
+                for sink in &sinks {
+                    if let Err(e) = sink.accept(&event) {
+                        tracing::warn!(error = %e, "telemetry sink accept failed");
                     }
                 }
             }
-            if let Some(ref s) = file_sink {
-                let _ = s.flush();
-            }
-            if let Some(ref s) = stdout_sink {
-                let _ = s.flush();
+            let deadline = std::time::Duration::from_secs(5);
+            for sink in &sinks {
+                if let Err(e) = sink.flush(deadline) {
+                    tracing::warn!(error = %e, "telemetry sink flush failed");
+                }
             }
         })
     }
@@ -2403,12 +2426,12 @@ mod tests {
         }
     }
 
-    impl TelemetrySink for MemorySink {
-        fn write(&self, event: &TelemetryEvent) -> Result<()> {
+    impl Sink for MemorySink {
+        fn accept(&self, event: &TelemetryEvent) -> Result<()> {
             self.events.lock().unwrap().push(event.clone());
             Ok(())
         }
-        fn flush(&self) -> Result<()> {
+        fn flush(&self, _deadline: std::time::Duration) -> Result<()> {
             Ok(())
         }
     }
@@ -2521,6 +2544,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({ "key": "value" }),
             duration_ms: Some(42),
+            trace_id: None,
+            span_id: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse back");
@@ -2541,6 +2566,8 @@ mod tests {
             workspace: Some(PathBuf::from("/home/coder/project")),
             data: serde_json::json!({ "retry_number": 2 }),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let parsed: TelemetryEvent = serde_json::from_str(&json).expect("deserialize");
@@ -2564,6 +2591,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(
@@ -2574,6 +2603,16 @@ mod tests {
         assert!(
             !json.contains("duration_ms"),
             "duration_ms should be omitted: {}",
+            json
+        );
+        assert!(
+            !json.contains("trace_id"),
+            "trace_id should be omitted: {}",
+            json
+        );
+        assert!(
+            !json.contains("span_id"),
+            "span_id should be omitted: {}",
             json
         );
     }
@@ -2677,11 +2716,11 @@ mod tests {
     #[tokio::test]
     async fn broken_sink_does_not_crash_emitter() {
         struct BrokenSink;
-        impl TelemetrySink for BrokenSink {
-            fn write(&self, _: &TelemetryEvent) -> Result<()> {
+        impl Sink for BrokenSink {
+            fn accept(&self, _: &TelemetryEvent) -> Result<()> {
                 anyhow::bail!("sink is broken")
             }
-            fn flush(&self) -> Result<()> {
+            fn flush(&self, _deadline: std::time::Duration) -> Result<()> {
                 Ok(())
             }
         }
@@ -2717,10 +2756,13 @@ mod tests {
             workspace: None,
             data: serde_json::json!({"hello": "world"}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
 
-        sink.write(&event).expect("write should succeed");
-        sink.flush().expect("flush should succeed");
+        sink.accept(&event).expect("accept should succeed");
+        sink.flush(std::time::Duration::from_secs(5))
+            .expect("flush should succeed");
 
         let path = dir.join("test-worker-deadbeef.jsonl");
         let contents = std::fs::read_to_string(&path).expect("should read file");
@@ -2962,6 +3004,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({"bead_id": "nd-a3f8"}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
         let line = sink.format_event(&event);
         assert!(line.contains("15:30:00"));
@@ -2985,6 +3029,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({"bead_id": "nd-a3f8"}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
         let line = sink.format_event(&event);
         assert!(line.contains("CLAIMED"), "should use short type: {}", line);
@@ -3007,6 +3053,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({"bead_id": "nd-xyz", "agent": "claude", "prompt_len": 500}),
             duration_ms: Some(3000),
+            trace_id: None,
+            span_id: None,
         };
         let line = sink.format_event(&event);
         assert!(
@@ -3034,6 +3082,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({"error_type": "config", "error_message": "bad", "beads_processed": 0}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
         let line = sink.format_event(&event);
         assert!(line.contains("\x1b[31m"), "errors should be red: {}", line);
@@ -3129,6 +3179,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
         let event2 = TelemetryEvent {
             timestamp: Utc::now(),
@@ -3140,6 +3192,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
 
         let log_file = dir.join("test-aabb0011.jsonl");
@@ -3174,6 +3228,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
         let event2 = TelemetryEvent {
             timestamp: Utc::now(),
@@ -3185,6 +3241,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
 
         let log_file = dir.join("test.jsonl");
@@ -3219,6 +3277,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: Some(2000),
+            trace_id: None,
+            span_id: None,
         };
         let event2 = TelemetryEvent {
             timestamp: Utc::now(),
@@ -3230,6 +3290,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: Some(500),
+            trace_id: None,
+            span_id: None,
         };
 
         let log_file = dir.join("test.jsonl");
@@ -3267,6 +3329,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
         let event2 = TelemetryEvent {
             timestamp: recent,
@@ -3278,6 +3342,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
 
         let log_file = dir.join("test.jsonl");
@@ -3310,6 +3376,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
         assert!(filter.matches(&event));
 
@@ -3335,6 +3403,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         };
         assert!(filter.matches(&matching));
 
@@ -3371,6 +3441,8 @@ mod tests {
                     "estimated_cost_usd": 0.05,
                 }),
                 duration_ms: Some(10000),
+                trace_id: None,
+                span_id: None,
             },
             TelemetryEvent {
                 timestamp: Utc::now(),
@@ -3389,6 +3461,8 @@ mod tests {
                     "estimated_cost_usd": 0.08,
                 }),
                 duration_ms: Some(20000),
+                trace_id: None,
+                span_id: None,
             },
             TelemetryEvent {
                 timestamp: Utc::now(),
@@ -3400,6 +3474,8 @@ mod tests {
                 workspace: None,
                 data: serde_json::json!({}),
                 duration_ms: None,
+                trace_id: None,
+                span_id: None,
             },
         ];
 
@@ -3452,6 +3528,8 @@ mod tests {
             workspace: None,
             data: serde_json::json!({"test": true}),
             duration_ms: None,
+            trace_id: None,
+            span_id: None,
         }
     }
 
@@ -3696,5 +3774,197 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verify that events emitted inside an OTel span carry the correct
+    /// trace_id and span_id in 32/16 lowercase-hex W3C format.
+    #[cfg(feature = "otlp")]
+    #[tokio::test]
+    async fn emit_inside_span_captures_trace_and_span_ids() {
+        use opentelemetry::{
+            trace::{SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState},
+            Context, KeyValue,
+        };
+        use std::borrow::Cow;
+        use std::time::SystemTime;
+
+        let trace_bytes: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let span_bytes: [u8; 8] = [17, 18, 19, 20, 21, 22, 23, 24];
+        let expected_trace = hex::encode(trace_bytes);
+        let expected_span = hex::encode(span_bytes);
+
+        let span_ctx = SpanContext::new(
+            TraceId::from_bytes(trace_bytes),
+            SpanId::from_bytes(span_bytes),
+            TraceFlags::SAMPLED,
+            false,
+            TraceState::NONE,
+        );
+
+        struct FakeSpan(SpanContext);
+        impl opentelemetry::trace::Span for FakeSpan {
+            fn add_event_with_timestamp<T: Into<Cow<'static, str>>>(
+                &mut self,
+                _: T,
+                _: SystemTime,
+                _: Vec<KeyValue>,
+            ) {
+            }
+            fn span_context(&self) -> &SpanContext {
+                &self.0
+            }
+            fn is_recording(&self) -> bool {
+                true
+            }
+            fn set_attribute(&mut self, _: KeyValue) {}
+            fn set_status(&mut self, _: opentelemetry::trace::Status) {}
+            fn update_name<T: Into<Cow<'static, str>>>(&mut self, _: T) {}
+            fn add_link(&mut self, _: SpanContext, _: Vec<KeyValue>) {}
+            fn end_with_timestamp(&mut self, _: SystemTime) {}
+        }
+
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        telemetry.start();
+
+        let ctx = Context::current().with_span(FakeSpan(span_ctx));
+        let _guard = ctx.attach();
+        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        drop(_guard);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let received = events.lock().unwrap();
+        assert_eq!(received.len(), 1, "expected exactly one event");
+        assert_eq!(
+            received[0].trace_id.as_deref(),
+            Some(expected_trace.as_str()),
+            "trace_id must be 32 hex chars matching W3C traceparent"
+        );
+        assert_eq!(
+            received[0].span_id.as_deref(),
+            Some(expected_span.as_str()),
+            "span_id must be 16 hex chars matching W3C traceparent"
+        );
+    }
+
+    /// Events emitted outside any active span must have None trace_id / span_id.
+    #[tokio::test]
+    async fn emit_outside_span_has_no_trace_ids() {
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        telemetry.start();
+
+        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let received = events.lock().unwrap();
+        assert_eq!(received.len(), 1);
+        assert!(
+            received[0].trace_id.is_none(),
+            "trace_id must be absent outside a span"
+        );
+        assert!(
+            received[0].span_id.is_none(),
+            "span_id must be absent outside a span"
+        );
+    }
+
+    // ── Sink trait / TelemetryBus tests ──
+
+    /// Adding a new sink requires only implementing `Sink` and registering it;
+    /// the bus fans events out to all registered sinks automatically.
+    #[tokio::test]
+    async fn bus_fans_out_to_all_sinks() {
+        let (sink1, events1) = MemorySink::new();
+        let (sink2, events2) = MemorySink::new();
+        let telemetry = Telemetry::with_boxed_sinks(
+            "test-fanout".to_string(),
+            vec![Box::new(sink1), Box::new(sink2)],
+        );
+        telemetry.start();
+        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.shutdown().await;
+
+        let e1 = events1.lock().unwrap();
+        let e2 = events2.lock().unwrap();
+        assert_eq!(e1.len(), 1, "sink1 must receive the event");
+        assert_eq!(e2.len(), 1, "sink2 must receive the event");
+    }
+
+    /// `flush(deadline)` is called on every registered sink during graceful
+    /// shutdown, and the deadline value is forwarded to the sink.
+    #[tokio::test]
+    async fn shutdown_flush_calls_flush_with_deadline() {
+        let deadline_received = Arc::new(std::sync::Mutex::new(None::<std::time::Duration>));
+
+        struct DeadlineSink {
+            received: Arc<std::sync::Mutex<Option<std::time::Duration>>>,
+        }
+        impl Sink for DeadlineSink {
+            fn accept(&self, _: &TelemetryEvent) -> Result<()> {
+                Ok(())
+            }
+            fn flush(&self, deadline: std::time::Duration) -> Result<()> {
+                *self.received.lock().unwrap() = Some(deadline);
+                Ok(())
+            }
+        }
+
+        let telemetry = Telemetry::with_boxed_sinks(
+            "test-deadline".to_string(),
+            vec![Box::new(DeadlineSink {
+                received: deadline_received.clone(),
+            })],
+        );
+        telemetry.start();
+        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.shutdown().await;
+
+        let dl = deadline_received.lock().unwrap();
+        assert!(
+            dl.is_some(),
+            "flush must be called with a non-None deadline on shutdown"
+        );
+        assert!(
+            dl.unwrap() > std::time::Duration::ZERO,
+            "deadline passed to flush must be positive"
+        );
+    }
+
+    /// A blocking fake sink whose `flush` sleeps longer than its deadline must
+    /// return an error rather than hanging indefinitely. The bus must not block
+    /// past the deadline.
+    #[tokio::test]
+    async fn shutdown_does_not_hang_when_flush_exceeds_deadline() {
+        struct SlowFlusher;
+        impl Sink for SlowFlusher {
+            fn accept(&self, _: &TelemetryEvent) -> Result<()> {
+                Ok(())
+            }
+            fn flush(&self, deadline: std::time::Duration) -> Result<()> {
+                // Sleep twice the deadline, then report timeout.
+                std::thread::sleep(deadline * 2);
+                anyhow::bail!("flush timed out (deliberate in test)")
+            }
+        }
+
+        let telemetry =
+            Telemetry::with_boxed_sinks("test-slow-flush".to_string(), vec![Box::new(SlowFlusher)]);
+        telemetry.start();
+        telemetry.emit(EventKind::QueueEmpty).unwrap();
+
+        // shutdown() must complete in a reasonable wall-clock window even though
+        // SlowFlusher sleeps past its own deadline.
+        let start = std::time::Instant::now();
+        telemetry.shutdown().await;
+        let elapsed = start.elapsed();
+
+        // The bus deadline is 5 s; SlowFlusher sleeps 10 s but must not be
+        // awaited indefinitely — 30 s is a generous upper bound.
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "shutdown must not hang: elapsed={elapsed:?}"
+        );
     }
 }

@@ -12,7 +12,7 @@ These six principles are non-negotiable. Every design decision in this plan trac
 
 3. **Platform and model agnostic.** NEEDLE wraps any headless CLI that accepts a prompt and exits. It runs on any POSIX system. It does not depend on any specific AI provider, model, or API.
 
-4. **Observable by default.** Every state transition, claim attempt, dispatch, and outcome emits structured telemetry. A silent worker is a broken worker.
+4. **Observable by default.** Every state transition, claim attempt, dispatch, and outcome emits structured telemetry. A silent worker is a broken worker. Telemetry is structured from origin (JSONL) and exportable as OpenTelemetry (OTLP) so any compliant backend — Tempo, Jaeger, Grafana, Honeycomb, Datadog, FABRIC — can consume NEEDLE's signals without a custom adapter.
 
 5. **Self-healing.** Workers detect and recover from stuck states, stale claims, crashed peers, and corrupted databases without human intervention. Recovery paths are explicit, not heuristic.
 
@@ -696,7 +696,19 @@ struct TelemetryEvent {
     workspace: Option<PathBuf>,
     data: serde_json::Value,  // event-specific payload
     duration_ms: Option<u64>,
+    trace_id: Option<TraceId>,   // W3C trace ID of enclosing span, if OTLP sink enabled
+    span_id: Option<SpanId>,     // W3C span ID of enclosing span, if OTLP sink enabled
 }
+
+trait Sink: Send + Sync {
+    fn accept(&self, event: &TelemetryEvent) -> Result<()>;
+    fn flush(&self, deadline: Duration) -> Result<()>;
+}
+
+// Built-in sinks: FileSink, StdoutSink, HookSink, OtlpSink.
+// OtlpSink wraps the OpenTelemetry SDK (traces + metrics + logs providers)
+// and translates TelemetryEvent into the appropriate signal per the
+// Semantic Mapping table in the Telemetry chapter.
 ```
 
 ### health
@@ -1550,6 +1562,142 @@ telemetry:
 - Hook execution is fire-and-forget (non-blocking)
 - Failed hooks emit a `telemetry.hook.failed` event to the file sink (not recursively to hooks)
 
+### OTLP Sink (optional)
+
+Exports telemetry as OpenTelemetry signals (traces, metrics, logs) over OTLP to any compliant collector (OpenTelemetry Collector, Jaeger, Tempo, Grafana Alloy, Honeycomb, Datadog, etc.). This is the canonical integration point for FABRIC and any downstream observability plane.
+
+```yaml
+telemetry:
+  otlp:
+    enabled: true
+    endpoint: "http://otel-collector.tailnet:4317"    # gRPC default; use 4318 for HTTP
+    protocol: grpc                                     # grpc | http/protobuf
+    headers:
+      authorization: "Bearer ${OTEL_TOKEN}"            # env interpolation
+    timeout_ms: 5000
+    compression: gzip                                  # none | gzip
+    tls:
+      insecure: false
+      ca_file: ""
+    signals:
+      traces: true
+      metrics: true
+      logs: true
+    resource_attributes:
+      deployment.environment: "production"
+      service.namespace: "needle-fleet"
+```
+
+Design:
+
+- **Non-blocking.** Uses a batch span/log/metric processor. If the collector is unreachable, events are buffered up to a bounded queue, then dropped (same policy as file sink). Drops emit a `telemetry.otlp.dropped` event to the file sink (never recursively to OTLP).
+- **Additive.** The file sink is authoritative. OTLP is an export, not a replacement. If OTLP is disabled or misconfigured, NEEDLE behaves identically to a file-sink-only deployment.
+- **Stdlib deps.** Rust crates: `opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`, `opentelemetry-semantic-conventions`. All support OTLP/gRPC and OTLP/HTTP.
+- **W3C trace context.** Trace and span IDs are generated per the W3C Trace Context spec so they interop with any OTel backend.
+- **Graceful shutdown.** On `worker.stopped`, the exporter is flushed with a deadline before process exit. Failure to flush is logged but never blocks shutdown.
+
+## OpenTelemetry Semantic Mapping
+
+NEEDLE's existing event catalog maps cleanly to OpenTelemetry's three signal types. This mapping is **normative** — the OTLP sink implementation must conform to it so dashboards and alerts remain stable across NEEDLE versions.
+
+### Resource Attributes
+
+Every exported signal carries these resource attributes (per OTel semantic conventions):
+
+| Attribute | Value | Source |
+|-----------|-------|--------|
+| `service.name` | `"needle"` | Constant |
+| `service.version` | build version | `env!("CARGO_PKG_VERSION")` |
+| `service.instance.id` | `<worker_id>` | e.g., `needle-claude-anthropic-sonnet-alpha` |
+| `service.namespace` | `"needle-fleet"` (default, configurable) | Config |
+| `deployment.environment` | e.g., `"production"` | Config |
+| `host.name` | hostname | OS |
+| `process.pid` | worker PID | OS |
+| `needle.agent` | e.g., `"claude-anthropic-sonnet"` | Worker config |
+| `needle.model` | e.g., `"claude-sonnet-4-6"` | Worker config |
+| `needle.session_id` | session ID | Per-boot random |
+| `needle.workspace` | workspace path | Worker config |
+
+### Traces
+
+The NEEDLE state machine is naturally hierarchical, which maps directly to OTel spans.
+
+```
+worker.session                                          (root span, lifetime = worker process)
+├── strand.pluck                                        (one per strand evaluation)
+│   └── bead.lifecycle                                  (one per claimed bead)
+│       ├── bead.claim                                  (ATOMIC phase)
+│       ├── bead.prompt_build
+│       ├── agent.dispatch                              (DISPATCHING + EXECUTING)
+│       │   └── agent.execution                         (process alive; span.ok on exit 0)
+│       └── bead.outcome                                (HANDLING)
+│           └── bead.mitosis?                           (optional, if outcome = failure)
+├── strand.mend
+├── strand.explore
+├── strand.weave
+├── strand.unravel
+├── strand.pulse
+└── strand.knot                                         (terminal backoff / exhaustion)
+```
+
+Span naming follows OpenTelemetry conventions: lowercase dotted, verb-form where appropriate.
+
+**Span attributes** follow OTel semantic conventions where applicable, plus a `needle.*` namespace:
+
+| Span | Key Attributes |
+|------|----------------|
+| `worker.session` | `needle.beads_processed`, `needle.uptime_seconds`, `needle.exit_reason` |
+| `strand.*` | `needle.strand.name`, `needle.strand.result`, `needle.strand.duration_ms` |
+| `bead.lifecycle` | `needle.bead.id`, `needle.bead.priority`, `needle.bead.title_hash`, `needle.bead.outcome` |
+| `bead.claim` | `needle.claim.retry_number`, `needle.claim.result` (`succeeded` / `race_lost` / `failed`) |
+| `agent.dispatch` | `gen_ai.system` (e.g., `anthropic`), `gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `needle.agent.pid`, `needle.agent.exit_code` |
+| `bead.outcome` | `needle.outcome` (`success` / `failure` / `timeout` / `crash` / `agent_not_found` / `interrupted`), `needle.outcome.action` |
+
+**GenAI semantic conventions.** The `agent.dispatch` span uses OTel's `gen_ai.*` conventions so NEEDLE's token/cost data shows up in GenAI dashboards out-of-the-box (Grafana GenAI app, Langfuse, Honeycomb AI, etc.).
+
+**Span status.** Success outcomes set `Status::Ok`. All other outcomes set `Status::Error` with a description matching the `needle.outcome` value. This makes error-rate SLOs trivial.
+
+**Context propagation.** The trace ID from `worker.session` is recorded in the file-sink event envelope as a new optional field `trace_id`, enabling correlation between the JSONL file sink and the OTel backend without ambiguity.
+
+### Metrics
+
+Metrics are emitted via the OTel Meter API, one `Meter` per worker. All metrics are prefixed `needle.*`.
+
+| Metric | Instrument | Unit | Attributes | Description |
+|--------|-----------|------|------------|-------------|
+| `needle.workers.active` | UpDownCounter | `{worker}` | — | Current live worker count (incremented on `worker.started`, decremented on `worker.stopped`) |
+| `needle.beads.claimed` | Counter | `{bead}` | `strand`, `priority` | Successful bead claims |
+| `needle.beads.completed` | Counter | `{bead}` | `outcome` | Bead terminal outcomes (one per `bead.outcome`) |
+| `needle.beads.duration` | Histogram | `ms` | `outcome` | End-to-end bead lifecycle time |
+| `needle.claim.attempts` | Counter | `{attempt}` | `result` (`succeeded`/`race_lost`/`failed`) | Claim attempts |
+| `needle.strand.duration` | Histogram | `ms` | `strand`, `result` | Strand evaluation time |
+| `needle.agent.duration` | Histogram | `ms` | `agent`, `model`, `exit_code` | Agent process runtime |
+| `needle.agent.tokens.input` | Counter | `{token}` | `agent`, `model` | Input tokens consumed |
+| `needle.agent.tokens.output` | Counter | `{token}` | `agent`, `model` | Output tokens produced |
+| `needle.cost.usd` | Counter | `USD` | `agent`, `model` | Estimated cost accumulator |
+| `needle.heartbeat.age` | Gauge (observable) | `s` | `worker_id` | Seconds since last heartbeat emitted by this worker |
+| `needle.peers.stale` | UpDownCounter | `{peer}` | — | Currently-stale peers observed by this worker |
+| `needle.queue.depth` | Gauge (observable) | `{bead}` | `workspace`, `priority` | Open beads visible to this worker (sampled at strand evaluation) |
+| `needle.mitosis.children_created` | Counter | `{bead}` | `parent_id` | Mitosis child creations |
+| `needle.outcome.rate` | derived | — | — | Computed in the backend as `needle.beads.completed{outcome="success"} / needle.beads.completed` |
+
+Metric aggregation temporality is **delta** (standard OTel default); backends that require cumulative (Prometheus via prometheusreceiver) convert upstream.
+
+### Logs
+
+Every NEEDLE telemetry event that isn't already represented as a span event is exported as an OTel LogRecord with:
+
+- `severity_number` / `severity_text`: `INFO` for normal events, `WARN` for `peer.stale` / `telemetry.*.dropped`, `ERROR` for `worker.errored` / `bead.claim.failed` / `agent.timeout`.
+- `body`: the existing event `data` object.
+- `attributes`: flattened from the event envelope (`event_type`, `bead_id`, `workspace`, etc.).
+- `trace_id` / `span_id`: linked to the enclosing `bead.lifecycle` or `worker.session` span where applicable.
+
+Events that ARE spans (e.g., `bead.claim.attempted` → a span, not a log) do not double-export as logs.
+
+### Span Events vs. Logs
+
+Intra-span state changes (e.g., `agent.executing` heartbeats, `heartbeat.emitted`) are recorded as OTel **span events** on the nearest enclosing span, not as separate logs. This keeps the signal count manageable and makes timelines in Tempo/Jaeger readable.
+
 ## Token and Cost Tracking
 
 ### Token Extraction
@@ -2005,6 +2153,23 @@ telemetry:
     format: normal
     color: auto
   hooks: []
+  otlp:
+    enabled: false
+    endpoint: "http://localhost:4317"
+    protocol: grpc              # grpc | http/protobuf
+    headers: {}                 # e.g., authorization: "Bearer ${OTEL_TOKEN}"
+    timeout_ms: 5000
+    compression: gzip           # none | gzip
+    tls:
+      insecure: false
+      ca_file: ""
+    signals:
+      traces: true
+      metrics: true
+      logs: true
+    resource_attributes:
+      deployment.environment: "development"
+      service.namespace: "needle-fleet"
 
 # ── Cost Tracking ──
 pricing: {}
@@ -2520,6 +2685,7 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 - Multiple agent adapters
 - Cost tracking
 - Budget enforcement
+- OTLP sink (Phase 2; Phase 1 ships JSONL file sink only)
 - `needle attach`, `needle status`, `needle config`
 
 ### Success Criteria
@@ -2561,6 +2727,7 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 | **CLI extensions** | `needle attach`, `needle status`, `needle config` |
 | **Database recovery** | Auto-detect corruption, repair from JSONL |
 | **Mitosis** | Child-aware bead splitting on first failure, with dedup and flock serialization |
+| **OTLP sink** | OpenTelemetry exporter emitting traces, metrics, and logs per the semantic mapping in the Telemetry chapter. gRPC + HTTP/protobuf transports. Non-blocking batch processor. Graceful shutdown flush. |
 
 ### Success Criteria
 
@@ -2577,6 +2744,9 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 - [ ] Workspace `.needle.yaml` overrides global config correctly
 - [ ] Mitosis splits multi-task beads into children on first failure
 - [ ] Duplicate mitosis on same parent creates no new children (child-aware dedup verified)
+- [ ] With OTLP sink enabled against a local OpenTelemetry Collector, NEEDLE exports: a `worker.session` span per worker, `bead.lifecycle` child spans with `gen_ai.*` attributes, and `needle.beads.completed` / `needle.cost.usd` metrics
+- [ ] OTLP collector unreachable does not block or crash workers (drops are recorded via `telemetry.otlp.dropped` in the file sink)
+- [ ] `trace_id` in JSONL file-sink events matches the corresponding span in the OTel backend
 
 ### Estimated Scope
 

@@ -510,7 +510,7 @@ impl fmt::Display for Outcome {
 mod tests {
     use super::*;
     use crate::bead_store::Filters;
-    use crate::telemetry::TelemetrySink;
+    use crate::telemetry::Sink;
     use crate::types::{BeadId, ClaimResult};
     use async_trait::async_trait;
     use chrono::Utc;
@@ -654,11 +654,11 @@ mod tests {
 
     struct NopSink;
 
-    impl TelemetrySink for NopSink {
-        fn write(&self, _event: &crate::telemetry::TelemetryEvent) -> Result<()> {
+    impl Sink for NopSink {
+        fn accept(&self, _event: &crate::telemetry::TelemetryEvent) -> Result<()> {
             Ok(())
         }
-        fn flush(&self) -> Result<()> {
+        fn flush(&self, _deadline: std::time::Duration) -> Result<()> {
             Ok(())
         }
     }

@@ -635,6 +635,8 @@ fn hook_sink_dispatches_matching_events() {
         workspace: None,
         data: serde_json::json!({"bead_id": "test-123"}),
         duration_ms: None,
+        trace_id: None,
+        span_id: None,
     };
 
     let failures = sink.dispatch(&event);
@@ -674,6 +676,8 @@ fn hook_sink_skips_non_matching_events() {
         workspace: None,
         data: serde_json::json!({}),
         duration_ms: None,
+        trace_id: None,
+        span_id: None,
     };
 
     let failures = sink.dispatch(&event);
@@ -704,6 +708,8 @@ fn hook_sink_prevents_recursion_on_sink_errors() {
         workspace: None,
         data: serde_json::json!({"error": "hook failed"}),
         duration_ms: None,
+        trace_id: None,
+        span_id: None,
     };
 
     let failures = sink.dispatch(&error_event);
