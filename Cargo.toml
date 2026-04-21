@@ -22,6 +22,15 @@ path = "src/bin/needle_transform_claude.rs"
 name = "needle-transform-codex"
 path = "src/bin/needle_transform_codex.rs"
 
+[features]
+default = ["otlp"]
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry-semantic-conventions",
+]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -75,6 +84,12 @@ toml = "0.8"
 
 # Unix process handling (PID liveness check)
 libc = "0.2"
+
+# OpenTelemetry / OTLP (gated behind `otlp` feature)
+opentelemetry = { version = "0.31", optional = true }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto"], optional = true }
+opentelemetry-semantic-conventions = { version = "0.31", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
