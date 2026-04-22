@@ -64,6 +64,7 @@ pub struct Worker {
 
     // Transient fields — pass data between state handlers within a single cycle.
     built_prompt: Option<BuiltPrompt>,
+    current_strand: Option<String>,
     exec_output: Option<(AgentOutcome, bool)>,
     /// Effort tracking data for the current bead cycle.
     last_effort: Option<EffortData>,
@@ -157,6 +158,7 @@ impl Worker {
             last_error: None,
             boot_time: None,
             built_prompt: None,
+            current_strand: None,
             exec_output: None,
             last_effort: None,
         }
@@ -370,6 +372,7 @@ impl Worker {
         self.exclusion_set.clear();
         self.retry_count = 0;
         self.current_bead = None;
+        self.current_strand = None;
 
         // Restore home store if it was swapped for a remote workspace.
         self.restore_home_store();
@@ -379,8 +382,8 @@ impl Worker {
         let candidate = self.strands.select(self.store.as_ref()).await?;
 
         match candidate {
-            Some(bead) => {
-                tracing::debug!(bead_id = %bead.id, "candidate found");
+            Some((bead, strand_name)) => {
+                tracing::debug!(bead_id = %bead.id, strand = %strand_name, "candidate found");
 
                 // If the bead is from a remote workspace (found by Explore),
                 // swap the active store so claim/show/release operate on the
@@ -400,6 +403,7 @@ impl Worker {
                 }
 
                 self.current_bead = Some(bead);
+                self.current_strand = Some(strand_name);
                 self.set_state(WorkerState::Claiming)?;
             }
             None => {
@@ -531,9 +535,17 @@ impl Worker {
         } else {
             &bead.workspace
         };
-        let prompt = self
+        let mut prompt = self
             .prompt_builder
             .build_pluck(bead, build_ws, &self.worker_name)?;
+
+        // Prepend the HOOP dispatch tag so session tailers can join transcripts
+        // back to beads. Format: [needle:<worker>:<bead-id>:<strand>]
+        let strand = self.current_strand.as_deref().unwrap_or("pluck");
+        prompt.content = format!(
+            "[needle:{}:{}:{}]\n{}",
+            self.worker_name, bead.id, strand, prompt.content
+        );
 
         // Store the prompt for the dispatch phase. We use a transient field pattern:
         // the prompt is passed via self.built_prompt.

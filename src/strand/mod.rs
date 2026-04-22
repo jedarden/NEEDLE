@@ -159,15 +159,18 @@ impl StrandRunner {
         }
     }
 
-    /// Run the waterfall, returning the first candidate bead or None.
+    /// Run the waterfall, returning the first candidate bead (with the strand
+    /// name that found it) or None.
     ///
     /// Returns the full `Bead` (including its workspace path) so the caller
     /// can create the correct bead store for remote beads found by Explore.
+    /// The accompanying `String` is the name of the strand that produced the
+    /// candidate.
     ///
     /// When a strand returns `WorkCreated`, the waterfall restarts from Pluck.
     /// A restart cap prevents infinite loops (e.g. a strand that always creates
     /// work without producing a claimable bead).
-    pub async fn select(&self, store: &dyn BeadStore) -> Result<Option<Bead>> {
+    pub async fn select(&self, store: &dyn BeadStore) -> Result<Option<(Bead, String)>> {
         const MAX_RESTARTS: u32 = 3;
         let mut restarts = 0u32;
 
@@ -186,7 +189,7 @@ impl StrandRunner {
                             "strand found candidates"
                         );
                         if let Some(bead) = beads.into_iter().next() {
-                            return Ok(Some(bead));
+                            return Ok(Some((bead, strand.name().to_string())));
                         }
                         continue;
                     }
@@ -381,10 +384,9 @@ mod tests {
         ]);
         let store = EmptyStore;
         let result = runner.select(&store).await.unwrap();
-        assert_eq!(
-            result.map(|b| b.id),
-            Some(BeadId::from("test-001".to_string()))
-        );
+        let (bead, strand_name) = result.unwrap();
+        assert_eq!(bead.id, BeadId::from("test-001".to_string()));
+        assert_eq!(strand_name, "finder");
     }
 
     #[tokio::test]
@@ -401,7 +403,7 @@ mod tests {
         // returns NoWork (stub consumed) and "finder" yields the bead.
         let result = runner.select(&store).await.unwrap();
         assert_eq!(
-            result.map(|b| b.id),
+            result.map(|(b, _)| b.id),
             Some(BeadId::from("test-002".to_string()))
         );
     }
@@ -450,7 +452,7 @@ mod tests {
         let store = EmptyStore;
         let result = runner.select(&store).await.unwrap();
         assert_eq!(
-            result.map(|b| b.id),
+            result.map(|(b, _)| b.id),
             Some(BeadId::from("after-error".to_string()))
         );
     }
@@ -475,7 +477,7 @@ mod tests {
         let store = EmptyStore;
         let result = runner.select(&store).await.unwrap();
         assert_eq!(
-            result.map(|b| b.id),
+            result.map(|(b, _)| b.id),
             Some(BeadId::from("real-bead".to_string()))
         );
     }
@@ -491,7 +493,7 @@ mod tests {
         let store = EmptyStore;
         let result = runner.select(&store).await.unwrap();
         assert_eq!(
-            result.map(|b| b.id),
+            result.map(|(b, _)| b.id),
             Some(BeadId::from("first".to_string()))
         );
     }
