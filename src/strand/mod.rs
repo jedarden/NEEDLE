@@ -25,7 +25,7 @@ use crate::types::{Bead, StrandResult};
 
 pub use explore::ExploreStrand;
 pub use knot::KnotStrand;
-pub use mend::MendStrand;
+pub use mend::{cleanup_orphaned_in_progress, MendStrand};
 pub use pluck::PluckStrand;
 pub use pulse::PulseStrand;
 pub use reflect::{CliReflectAgent, ReflectAgent, ReflectStrand};
@@ -77,6 +77,13 @@ impl StrandRunner {
         let traces_dir = config.workspace.default.join(".beads").join("traces");
         let trace_retention_failed_days = config.strands.learning.trace_retention_failed_days;
         let trace_retention_success_days = config.strands.learning.trace_retention_success_days;
+
+        // Create a new Registry instance pointing to the same path for ExploreStrand.
+        // We need to get the state_dir_for_explore before moving registry to MendStrand.
+        let state_fallback = config.workspace.home.join("state");
+        let state_dir_for_explore = registry.path().parent().unwrap_or(&state_fallback);
+        let explore_registry = crate::registry::Registry::new(state_dir_for_explore);
+
         let mend = MendStrand::new(
             config.strands.mend.clone(),
             heartbeat_dir,
@@ -97,6 +104,9 @@ impl StrandRunner {
         let explore = ExploreStrand::new(
             config.strands.explore.clone(),
             config.workspace.default.clone(),
+            explore_registry,
+            telemetry.clone(),
+            worker_id.to_string(),
         );
 
         let state_base = config.workspace.home.join("state");

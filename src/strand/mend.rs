@@ -23,6 +23,95 @@ use crate::telemetry::{EventKind, Telemetry};
 use crate::trace::cleanup_traces;
 use crate::types::{BeadStatus, StrandError, StrandResult};
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Store-scoped orphan cleanup (shared between Mend and Explore)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Scan all in-progress beads in a store and release any whose assignee does
+/// not correspond to a live worker. This catches beads orphaned by workers
+/// that died without leaving a heartbeat file (or whose heartbeat was already
+/// cleaned up).
+///
+/// This is a store-scoped function that can be called against any BeadStore,
+/// not just the home workspace. Used by both MendStrand (for home) and
+/// ExploreStrand (for remote workspaces).
+///
+/// # Arguments
+/// * `store` - The bead store to scan (can be home or remote)
+/// * `registry` - Worker registry for live worker lookup
+/// * `telemetry` - Telemetry emitter for orphan release events
+/// * `worker_id` - This worker's ID (excluded from orphan detection)
+///
+/// # Returns
+/// * `Ok(u32)` - Number of orphans released
+/// * `Err(anyhow::Error)` - Store read failure
+pub async fn cleanup_orphaned_in_progress(
+    store: &dyn BeadStore,
+    registry: &Registry,
+    telemetry: &Telemetry,
+    worker_id: &str,
+) -> Result<u32> {
+    let all_beads = store.list_all().await?;
+    let workers = registry.list()?;
+
+    // Build a set of (worker_id, is_alive) for registered workers.
+    let live_worker_ids: std::collections::HashSet<String> = workers
+        .iter()
+        .filter(|w| HealthMonitor::check_pid_alive(w.pid))
+        .map(|w| w.id.clone())
+        .collect();
+
+    let mut released = 0u32;
+
+    for bead in &all_beads {
+        if bead.status != BeadStatus::InProgress {
+            continue;
+        }
+
+        let assignee = match &bead.assignee {
+            Some(a) if !a.is_empty() => a,
+            _ => continue,
+        };
+
+        // Skip if the assignee matches our own worker (we're running).
+        if assignee == worker_id {
+            continue;
+        }
+
+        // Skip if the assignee matches a registered, alive worker.
+        if live_worker_ids.contains(assignee.as_str()) {
+            continue;
+        }
+
+        // Orphaned: assignee is not a live registered worker. Release it.
+        tracing::info!(
+            bead_id = %bead.id,
+            assignee = %assignee,
+            workspace = %bead.workspace.display(),
+            "releasing orphaned in-progress bead (assignee has no live worker)"
+        );
+
+        match store.release(&bead.id).await {
+            Ok(()) => {
+                let _ = telemetry.emit(EventKind::StuckReleased {
+                    bead_id: bead.id.clone(),
+                    peer_worker: assignee.clone(),
+                });
+                released += 1;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to release orphaned in-progress bead"
+                );
+            }
+        }
+    }
+
+    Ok(released)
+}
+
 /// Summary of work performed during one Mend evaluation cycle.
 #[derive(Debug, Default)]
 struct MendSummary {
@@ -158,61 +247,14 @@ impl MendStrand {
         store: &dyn BeadStore,
         summary: &mut MendSummary,
     ) -> Result<()> {
-        let all_beads = store.list_all().await?;
-        let workers = self.registry.list()?;
-
-        // Build a set of (worker_id, is_alive) for registered workers.
-        let live_worker_ids: std::collections::HashSet<String> = workers
-            .iter()
-            .filter(|w| HealthMonitor::check_pid_alive(w.pid))
-            .map(|w| w.id.clone())
-            .collect();
-
-        for bead in &all_beads {
-            if bead.status != BeadStatus::InProgress {
-                continue;
-            }
-
-            let assignee = match &bead.assignee {
-                Some(a) if !a.is_empty() => a,
-                _ => continue,
-            };
-
-            // Skip if the assignee matches our own worker (we're running).
-            if assignee == &self.worker_id {
-                continue;
-            }
-
-            // Skip if the assignee matches a registered, alive worker.
-            if live_worker_ids.contains(assignee.as_str()) {
-                continue;
-            }
-
-            // Orphaned: assignee is not a live registered worker. Release it.
-            tracing::info!(
-                bead_id = %bead.id,
-                assignee = %assignee,
-                "releasing orphaned in-progress bead (assignee has no live worker)"
-            );
-
-            match store.release(&bead.id).await {
-                Ok(()) => {
-                    let _ = self.telemetry.emit(EventKind::StuckReleased {
-                        bead_id: bead.id.clone(),
-                        peer_worker: assignee.clone(),
-                    });
-                    summary.beads_released += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        error = %e,
-                        "failed to release orphaned in-progress bead"
-                    );
-                }
-            }
-        }
-
+        let released = super::mend::cleanup_orphaned_in_progress(
+            store,
+            &self.registry,
+            &self.telemetry,
+            &self.worker_id,
+        )
+        .await?;
+        summary.beads_released += released;
         Ok(())
     }
 

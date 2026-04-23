@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use crate::bead_store::{BeadStore, BrCliBeadStore, Filters};
 use crate::config::ExploreConfig;
+use crate::registry::Registry;
+use crate::telemetry::Telemetry;
 use crate::types::StrandResult;
 
 /// The Explore strand — discovers beads in other workspaces.
@@ -24,17 +26,32 @@ pub struct ExploreStrand {
     workspaces: Vec<PathBuf>,
     /// Home workspace path — excluded from exploration.
     home_workspace: PathBuf,
+    /// Worker registry for orphan detection.
+    registry: Registry,
+    /// Telemetry emitter for orphan release events.
+    telemetry: Telemetry,
+    /// This worker's ID (excluded from orphan detection).
+    worker_id: String,
 }
 
 impl ExploreStrand {
     /// Create a new ExploreStrand from config.
     ///
     /// The workspace list is captured at construction time and never re-read.
-    pub fn new(config: ExploreConfig, home_workspace: PathBuf) -> Self {
+    pub fn new(
+        config: ExploreConfig,
+        home_workspace: PathBuf,
+        registry: Registry,
+        telemetry: Telemetry,
+        worker_id: String,
+    ) -> Self {
         ExploreStrand {
             enabled: config.enabled,
             workspaces: config.workspaces,
             home_workspace,
+            registry,
+            telemetry,
+            worker_id,
         }
     }
 
@@ -107,10 +124,82 @@ impl super::Strand for ExploreStrand {
                     candidates.retain(|b| b.assignee.is_none());
 
                     if candidates.is_empty() {
+                        // No ready candidates. Run cross-workspace mend to release
+                        // orphaned in-progress beads, then re-query.
                         tracing::debug!(
                             workspace = %workspace.display(),
-                            "no candidates in workspace"
+                            "no ready candidates, running cross-workspace mend"
                         );
+
+                        match super::cleanup_orphaned_in_progress(
+                            &remote_store,
+                            &self.registry,
+                            &self.telemetry,
+                            &self.worker_id,
+                        )
+                        .await
+                        {
+                            Ok(released) if released > 0 => {
+                                tracing::info!(
+                                    workspace = %workspace.display(),
+                                    released,
+                                    "cross-workspace mend released orphans, re-querying"
+                                );
+
+                                // Re-query ready after cleanup.
+                                match remote_store.ready(&filters).await {
+                                    Ok(mut retry_candidates) => {
+                                        retry_candidates.retain(|b| b.assignee.is_none());
+
+                                        if !retry_candidates.is_empty() {
+                                            // Found candidates after releasing orphans.
+                                            // Sort and tag them.
+                                            retry_candidates.sort_by(|a, b| {
+                                                a.priority
+                                                    .cmp(&b.priority)
+                                                    .then_with(|| a.created_at.cmp(&b.created_at))
+                                                    .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
+                                            });
+
+                                            for bead in &mut retry_candidates {
+                                                bead.workspace = workspace.clone();
+                                            }
+
+                                            tracing::info!(
+                                                workspace = %workspace.display(),
+                                                candidates = retry_candidates.len(),
+                                                "explore found candidates in remote workspace after cross-workspace mend"
+                                            );
+
+                                            return StrandResult::BeadFound(retry_candidates);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            workspace = %workspace.display(),
+                                            error = %e,
+                                            "failed to re-query workspace after cross-workspace mend, skipping"
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(_) => {
+                                // No orphans released, workspace is truly empty.
+                                tracing::debug!(
+                                    workspace = %workspace.display(),
+                                    "cross-workspace mend found no orphans"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    workspace = %workspace.display(),
+                                    error = %e,
+                                    "cross-workspace mend failed, skipping workspace"
+                                );
+                            }
+                        }
+
+                        // Advance to next workspace (candidates empty after mend).
                         continue;
                     }
 
@@ -171,6 +260,20 @@ mod tests {
         }
     }
 
+    /// Helper to create ExploreStrand with test defaults for registry, telemetry, worker_id.
+    fn make_test_explore_strand(enabled: bool, workspaces: Vec<PathBuf>, home: PathBuf) -> ExploreStrand {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+        ExploreStrand::new(
+            make_explore_config(enabled, workspaces),
+            home,
+            registry,
+            telemetry,
+            "test-worker".to_string(),
+        )
+    }
+
     /// Stub BeadStore for the _store parameter (Explore ignores it).
     struct DummyStore;
 
@@ -226,17 +329,15 @@ mod tests {
 
     #[test]
     fn strand_name_is_explore() {
-        let strand = ExploreStrand::new(
-            make_explore_config(true, vec![]),
-            PathBuf::from("/home/test"),
-        );
+        let strand = make_test_explore_strand(true, vec![], PathBuf::from("/home/test"));
         assert_eq!(strand.name(), "explore");
     }
 
     #[tokio::test]
     async fn disabled_returns_no_work() {
-        let strand = ExploreStrand::new(
-            make_explore_config(false, vec![PathBuf::from("/some/path")]),
+        let strand = make_test_explore_strand(
+            false,
+            vec![PathBuf::from("/some/path")],
             PathBuf::from("/home/test"),
         );
         let store = DummyStore;
@@ -246,10 +347,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_workspace_list_returns_no_work() {
-        let strand = ExploreStrand::new(
-            make_explore_config(true, vec![]),
-            PathBuf::from("/home/test"),
-        );
+        let strand = make_test_explore_strand(true, vec![], PathBuf::from("/home/test"));
         let store = DummyStore;
         let result = strand.evaluate(&store).await;
         assert!(matches!(result, StrandResult::NoWork));
@@ -258,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn skips_home_workspace() {
         let home = PathBuf::from("/home/test/project");
-        let strand = ExploreStrand::new(make_explore_config(true, vec![home.clone()]), home);
+        let strand = make_test_explore_strand(true, vec![home.clone()], home);
         let store = DummyStore;
         let result = strand.evaluate(&store).await;
         assert!(matches!(result, StrandResult::NoWork));
@@ -269,8 +367,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().to_path_buf();
         // No .beads/ directory created.
-        let strand = ExploreStrand::new(
-            make_explore_config(true, vec![workspace]),
+        let strand = make_test_explore_strand(
+            true,
+            vec![workspace],
             PathBuf::from("/some/other/home"),
         );
         let store = DummyStore;
@@ -294,27 +393,22 @@ mod tests {
             PathBuf::from("/b"),
             PathBuf::from("/c"),
         ];
-        let strand = ExploreStrand::new(
-            make_explore_config(true, workspaces.clone()),
-            PathBuf::from("/home"),
-        );
+        let strand = make_test_explore_strand(true, workspaces.clone(), PathBuf::from("/home"));
         assert_eq!(strand.workspaces, workspaces);
     }
 
     #[test]
     fn home_workspace_is_captured() {
         let home = PathBuf::from("/my/home/workspace");
-        let strand = ExploreStrand::new(make_explore_config(true, vec![]), home.clone());
+        let strand = make_test_explore_strand(true, vec![], home.clone());
         assert_eq!(strand.home_workspace, home);
     }
 
     #[tokio::test]
     async fn nonexistent_workspace_path_returns_no_work() {
-        let strand = ExploreStrand::new(
-            make_explore_config(
-                true,
-                vec![PathBuf::from("/nonexistent/path/that/does/not/exist")],
-            ),
+        let strand = make_test_explore_strand(
+            true,
+            vec![PathBuf::from("/nonexistent/path/that/does/not/exist")],
             PathBuf::from("/home/test"),
         );
         let store = DummyStore;
