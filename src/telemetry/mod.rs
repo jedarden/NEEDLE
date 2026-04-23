@@ -1164,6 +1164,7 @@ impl Sink for FileSink {
             .lock()
             .map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
         writeln!(writer, "{line}")?;
+        writer.flush()?;
         Ok(())
     }
 
@@ -2788,6 +2789,32 @@ mod tests {
         assert!(sink.is_ok(), "should create nested directory");
 
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn file_sink_accept_is_visible_without_explicit_flush() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sink = FileSink::with_dir(tmp.path(), "test-worker", "test-session").unwrap();
+
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "test.flush".to_string(),
+            worker_id: "test-worker".to_string(),
+            session_id: "test-session".to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({"flushed": true}),
+            duration_ms: None,
+            trace_id: None,
+            span_id: None,
+        };
+        sink.accept(&event).unwrap();
+
+        // Read the file via an independent handle — no flush() or drop of sink.
+        let contents = std::fs::read_to_string(sink.path()).unwrap();
+        assert!(contents.contains("test-worker"));
+        assert!(contents.contains("\n"));
     }
 
     #[tokio::test]
