@@ -74,7 +74,7 @@ pub fn is_pid_alive(pid: u32) -> bool {
 /// A single worker entry in the registry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerEntry {
-    /// Worker identifier (e.g., `alpha`, `bravo`).
+    /// Fully-qualified worker identity (`{adapter}-{worker_id}`, e.g., `claude-foxtrot`).
     pub id: String,
     /// Process ID of the worker.
     pub pid: u32,

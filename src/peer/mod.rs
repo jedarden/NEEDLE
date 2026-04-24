@@ -226,7 +226,11 @@ impl<'a> PeerMonitor<'a> {
             // Emit peer.crashed telemetry.
             self.telemetry.emit(EventKind::StuckReleased {
                 bead_id: bead_id.clone(),
-                peer_worker: peer.worker_id.clone(),
+                peer_worker: peer
+                    .qualified_id
+                    .as_deref()
+                    .unwrap_or(&peer.worker_id)
+                    .to_string(),
             })?;
         }
 
@@ -354,7 +358,12 @@ mod tests {
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     fn write_heartbeat(dir: &Path, data: &HeartbeatData) {
-        let path = dir.join(format!("{}.json", data.worker_id));
+        let name = if data.qualified_id.is_empty() {
+            &data.worker_id
+        } else {
+            &data.qualified_id
+        };
+        let path = dir.join(format!("{}.json", name));
         let json = serde_json::to_string(data).unwrap();
         std::fs::write(path, json).unwrap();
     }
@@ -453,7 +462,7 @@ mod tests {
         assert_eq!(release_count.load(Ordering::Relaxed), 1);
 
         // Heartbeat file should be removed.
-        let hb_path = hb_dir.join("dead-worker.json");
+        let hb_path = hb_dir.join("claude-dead-worker.json");
         assert!(!hb_path.exists(), "heartbeat file should be removed");
     }
 
@@ -491,7 +500,7 @@ mod tests {
         assert_eq!(release_count.load(Ordering::Relaxed), 0);
 
         // Heartbeat file should NOT be removed for stuck workers.
-        let hb_path = hb_dir.join("stuck-worker.json");
+        let hb_path = hb_dir.join("claude-stuck-worker.json");
         assert!(
             hb_path.exists(),
             "heartbeat file should remain for stuck worker"
@@ -543,7 +552,7 @@ mod tests {
         let registry = Registry::new(reg_dir.path());
         registry
             .register(crate::registry::WorkerEntry {
-                id: "dead-idle".to_string(),
+                id: "claude-dead-idle".to_string(),
                 pid: 99_999_999,
                 workspace: PathBuf::from("/tmp"),
                 agent: "test".to_string(),
@@ -572,7 +581,7 @@ mod tests {
         assert_eq!(release_count.load(Ordering::Relaxed), 0);
 
         // Heartbeat file should be removed.
-        assert!(!hb_dir.join("dead-idle.json").exists());
+        assert!(!hb_dir.join("claude-dead-idle.json").exists());
 
         // Worker should be deregistered.
         let workers = registry.list().unwrap();
@@ -627,10 +636,10 @@ mod tests {
         assert_eq!(release_count.load(Ordering::Relaxed), 1);
 
         // Only the crashed peer's heartbeat should be removed.
-        assert!(hb_dir.join("healthy.json").exists());
-        assert!(hb_dir.join("stuck.json").exists());
-        assert!(!hb_dir.join("crashed.json").exists());
-        assert!(hb_dir.join("my-worker.json").exists());
+        assert!(hb_dir.join("claude-healthy.json").exists());
+        assert!(hb_dir.join("claude-stuck.json").exists());
+        assert!(!hb_dir.join("claude-crashed.json").exists());
+        assert!(hb_dir.join("claude-my-worker.json").exists());
     }
 
     #[tokio::test]
