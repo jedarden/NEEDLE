@@ -59,6 +59,17 @@ pub enum RecoveryOutcome {
     Failed(anyhow::Error),
 }
 
+/// Error returned when SYNC_CONFLICT recovery fails after retry.
+///
+/// This is a distinct error type so callers can detect when br sync
+/// recovery was attempted but the retry still failed. The caller may
+/// choose to emit a failure event and continue rather than blocking.
+#[derive(Debug, thiserror::Error)]
+#[error("SYNC_CONFLICT recovery failed: {reason}")]
+pub struct SyncRecoveryError {
+    pub reason: String,
+}
+
 // ─── Filters ─────────────────────────────────────────────────────────────────
 
 /// Filters applied when listing ready beads.
@@ -109,6 +120,13 @@ pub trait BeadStore: Send + Sync {
 
     /// Release a claimed bead back to open (e.g., after agent failure).
     async fn release(&self, id: &BeadId) -> Result<()>;
+
+    /// Flush local bead changes to JSONL before release.
+    ///
+    /// Runs `br sync --flush-only` to ensure any local writes are persisted
+    /// to JSONL before attempting to release a bead. This prevents SYNC_CONFLICT
+    /// errors when the JSONL has newer remote changes.
+    async fn flush(&self) -> Result<()>;
 
     /// Reopen a closed (Done) bead back to open status.
     ///
@@ -212,15 +230,29 @@ impl BrCliBeadStore {
     async fn run_br_in(&self, dir: &Path, args: &[&str], timeout_secs: u64) -> Result<String> {
         let timeout_duration = std::time::Duration::from_secs(timeout_secs);
 
-        let output = tokio::time::timeout(
-            timeout_duration,
-            tokio::process::Command::new(&self.br_path)
-                .args(args)
-                .current_dir(dir)
-                .output(),
-        )
-        .await
-        .with_context(|| format!("br subprocess timed out after {timeout_secs}s: {args:?}"))??;
+        // kill_on_drop ensures the process is killed if the wait_with_output
+        // future is dropped (e.g., on timeout), preventing orphaned br processes.
+        let mut cmd = tokio::process::Command::new(&self.br_path);
+        cmd.args(args).current_dir(dir).kill_on_drop(true);
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn br subprocess: {args:?}"))?;
+
+        // Wait for output with timeout. On timeout, kill_on_drop fires automatically.
+        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return Err(e).context(format!("br subprocess failed: {args:?}"));
+            }
+            Err(_) => {
+                tracing::error!(
+                    args = ?args,
+                    timeout_secs,
+                    "br subprocess timed out, killing process"
+                );
+                bail!("br subprocess timed out after {timeout_secs}s: {args:?}");
+            }
+        };
 
         let stdout = String::from_utf8(output.stdout).context("br stdout was not valid UTF-8")?;
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -249,16 +281,29 @@ impl BrCliBeadStore {
                     args = ?args,
                     "br hit SYNC_CONFLICT, running br sync and retrying"
                 );
-                let sync_output = tokio::time::timeout(
-                    std::time::Duration::from_secs(60), // sync may take longer
-                    tokio::process::Command::new(&self.br_path)
-                        .args(["sync"])
-                        .current_dir(dir)
-                        .output(),
+
+                let sync_timeout = std::time::Duration::from_secs(60);
+                let mut sync_cmd = tokio::process::Command::new(&self.br_path);
+                sync_cmd.args(["sync"]).current_dir(dir).kill_on_drop(true);
+                let sync_child = sync_cmd
+                    .spawn()
+                    .context("failed to spawn br sync during SYNC_CONFLICT recovery")?;
+
+                let sync_output = match tokio::time::timeout(
+                    sync_timeout,
+                    sync_child.wait_with_output(),
                 )
                 .await
-                .context("br sync timed out after 60s during SYNC_CONFLICT recovery")?
-                .context("failed to run br sync for SYNC_CONFLICT recovery")?;
+                {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(e)) => {
+                        return Err(e).context("br sync failed during SYNC_CONFLICT recovery");
+                    }
+                    Err(_) => {
+                        tracing::error!("br sync timed out after 60s during SYNC_CONFLICT recovery, killing process");
+                        bail!("br sync timed out after 60s during SYNC_CONFLICT recovery");
+                    }
+                };
 
                 if !sync_output.status.success() {
                     let sync_stderr = String::from_utf8_lossy(&sync_output.stderr);
@@ -266,18 +311,29 @@ impl BrCliBeadStore {
                 }
 
                 // Retry the original command once with timeout.
-                let retry = tokio::time::timeout(
-                    timeout_duration,
-                    tokio::process::Command::new(&self.br_path)
-                        .args(args)
-                        .current_dir(dir)
-                        .output(),
-                )
-                .await
-                .with_context(|| {
-                    format!("br retry subprocess timed out after {timeout_secs}s: {args:?}")
-                })?
-                .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
+                let mut retry_cmd = tokio::process::Command::new(&self.br_path);
+                retry_cmd.args(args).current_dir(dir).kill_on_drop(true);
+                let retry_child = retry_cmd
+                    .spawn()
+                    .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
+
+                let retry =
+                    match tokio::time::timeout(timeout_duration, retry_child.wait_with_output())
+                        .await
+                    {
+                        Ok(Ok(output)) => output,
+                        Ok(Err(e)) => {
+                            return Err(e).context(format!("br retry failed: {args:?}"));
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                args = ?args,
+                                timeout_secs,
+                                "br retry timed out, killing process"
+                            );
+                            bail!("br retry subprocess timed out after {timeout_secs}s: {args:?}");
+                        }
+                    };
 
                 let retry_stdout = String::from_utf8(retry.stdout)
                     .context("br retry stdout was not valid UTF-8")?;
@@ -285,10 +341,12 @@ impl BrCliBeadStore {
 
                 if !retry.status.success() {
                     let retry_code = retry.status.code().unwrap_or(-1);
-                    bail!(
-                        "br {args:?} exited with code {retry_code} after SYNC_CONFLICT recovery\n\
-                         stderr: {retry_stderr}\nstdout: {retry_stdout}"
-                    );
+                    return Err(anyhow::Error::new(SyncRecoveryError {
+                        reason: format!(
+                            "exit code {retry_code} after br sync retry\n\
+                             stderr: {retry_stderr}\nstdout: {retry_stdout}"
+                        ),
+                    }));
                 }
 
                 return Ok(retry_stdout);
@@ -307,20 +365,33 @@ impl BrCliBeadStore {
     async fn run_br_with_status(&self, args: &[&str]) -> Result<(i32, String)> {
         let timeout_duration = std::time::Duration::from_secs(Self::DEFAULT_BR_TIMEOUT_SECS);
 
-        let output = tokio::time::timeout(
-            timeout_duration,
-            tokio::process::Command::new(&self.br_path)
-                .args(args)
-                .current_dir(&self.workspace)
-                .output(),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "br subprocess timed out after {timeout_secs}s: {args:?}",
-                timeout_secs = Self::DEFAULT_BR_TIMEOUT_SECS
-            )
-        })??;
+        // kill_on_drop ensures the process is killed if the wait_with_output
+        // future is dropped (e.g., on timeout), preventing orphaned br processes.
+        let mut cmd = tokio::process::Command::new(&self.br_path);
+        cmd.args(args)
+            .current_dir(&self.workspace)
+            .kill_on_drop(true);
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn br subprocess: {args:?}"))?;
+
+        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return Err(e).context(format!("br subprocess failed: {args:?}"));
+            }
+            Err(_) => {
+                tracing::error!(
+                    args = ?args,
+                    timeout_secs = Self::DEFAULT_BR_TIMEOUT_SECS,
+                    "br subprocess timed out, killing process"
+                );
+                bail!(
+                    "br subprocess timed out after {timeout_secs}s: {args:?}",
+                    timeout_secs = Self::DEFAULT_BR_TIMEOUT_SECS
+                );
+            }
+        };
 
         let code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8(output.stdout).context("br stdout was not valid UTF-8")?;
@@ -475,6 +546,13 @@ impl BeadStore for BrCliBeadStore {
         self.run_br(&["update", id_str, "--status", "open", "--assignee", ""])
             .await
             .with_context(|| format!("br release {id_str} failed"))?;
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.run_br(&["sync", "--flush-only"])
+            .await
+            .context("br sync --flush-only failed")?;
         Ok(())
     }
 

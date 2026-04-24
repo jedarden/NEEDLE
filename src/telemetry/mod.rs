@@ -67,6 +67,10 @@ pub struct TelemetryEvent {
 #[non_exhaustive]
 pub enum EventKind {
     // ── Worker lifecycle ──
+    WorkerBooting {
+        worker_name: String,
+        version: String,
+    },
     WorkerStarted {
         worker_name: String,
         version: String,
@@ -91,6 +95,16 @@ pub enum EventKind {
     StateTransition {
         from: WorkerState,
         to: WorkerState,
+    },
+    InitStepStarted {
+        step: String,
+    },
+    InitStepCompleted {
+        step: String,
+        duration_ms: u64,
+    },
+    WorkerBootTimeout {
+        elapsed_ms: u64,
     },
 
     // ── Strand evaluation ──
@@ -127,6 +141,10 @@ pub enum EventKind {
 
     // ── Bead lifecycle ──
     BeadReleased {
+        bead_id: BeadId,
+        reason: String,
+    },
+    BeadReleaseFailed {
         bead_id: BeadId,
         reason: String,
     },
@@ -413,12 +431,16 @@ impl EventKind {
     /// Return the dotted event type string.
     pub fn event_type(&self) -> &'static str {
         match self {
+            EventKind::WorkerBooting { .. } => "worker.booting",
             EventKind::WorkerStarted { .. } => "worker.started",
             EventKind::WorkerStopped { .. } => "worker.stopped",
             EventKind::WorkerErrored { .. } => "worker.errored",
             EventKind::WorkerExhausted { .. } => "worker.exhausted",
             EventKind::WorkerIdle { .. } => "worker.idle",
             EventKind::StateTransition { .. } => "worker.state_transition",
+            EventKind::InitStepStarted { .. } => "init.step.started",
+            EventKind::InitStepCompleted { .. } => "init.step.completed",
+            EventKind::WorkerBootTimeout { .. } => "worker.boot.timeout",
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
             EventKind::StrandSkipped { .. } => "strand.skipped",
             EventKind::QueueEmpty => "worker.queue_empty",
@@ -428,6 +450,7 @@ impl EventKind {
             EventKind::ClaimRaceLostSkipped { .. } => "bead.claim.race_lost_skipped",
             EventKind::ClaimFailed { .. } => "bead.claim.failed",
             EventKind::BeadReleased { .. } => "bead.released",
+            EventKind::BeadReleaseFailed { .. } => "bead.release.failed",
             EventKind::BeadCompleted { .. } => "bead.completed",
             EventKind::BeadOrphaned { .. } => "bead.orphaned",
             EventKind::DispatchStarted { .. } => "agent.dispatched",
@@ -494,6 +517,7 @@ impl EventKind {
             | EventKind::ClaimRaceLost { bead_id }
             | EventKind::ClaimFailed { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
+            | EventKind::BeadReleaseFailed { bead_id, .. }
             | EventKind::BeadCompleted { bead_id, .. }
             | EventKind::BeadOrphaned { bead_id }
             | EventKind::DispatchStarted { bead_id, .. }
@@ -522,12 +546,16 @@ impl EventKind {
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
-            EventKind::WorkerStarted { .. }
+            EventKind::WorkerBooting { .. }
+            | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
             | EventKind::WorkerErrored { .. }
             | EventKind::WorkerExhausted { .. }
             | EventKind::WorkerIdle { .. }
             | EventKind::StateTransition { .. }
+            | EventKind::InitStepStarted { .. }
+            | EventKind::InitStepCompleted { .. }
+            | EventKind::WorkerBootTimeout { .. }
             | EventKind::StrandEvaluated { .. }
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
@@ -565,6 +593,12 @@ impl EventKind {
     /// Serialize event-specific payload to a JSON value.
     pub fn to_data(&self) -> serde_json::Value {
         match self {
+            EventKind::WorkerBooting {
+                worker_name,
+                version,
+            } => {
+                serde_json::json!({ "worker_name": worker_name, "version": version })
+            }
             EventKind::WorkerStarted {
                 worker_name,
                 version,
@@ -608,6 +642,15 @@ impl EventKind {
             EventKind::StateTransition { from, to } => {
                 serde_json::json!({ "from": format!("{from}"), "to": format!("{to}") })
             }
+            EventKind::InitStepStarted { step } => {
+                serde_json::json!({ "step": step })
+            }
+            EventKind::InitStepCompleted { step, duration_ms } => {
+                serde_json::json!({ "step": step, "duration_ms": duration_ms })
+            }
+            EventKind::WorkerBootTimeout { elapsed_ms } => {
+                serde_json::json!({ "elapsed_ms": elapsed_ms })
+            }
             EventKind::StrandEvaluated {
                 strand_name,
                 result,
@@ -648,6 +691,9 @@ impl EventKind {
                 serde_json::json!({ "bead_id": bead_id.as_ref(), "reason": reason })
             }
             EventKind::BeadReleased { bead_id, reason } => {
+                serde_json::json!({ "bead_id": bead_id.as_ref(), "reason": reason })
+            }
+            EventKind::BeadReleaseFailed { bead_id, reason } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref(), "reason": reason })
             }
             EventKind::BeadCompleted {
@@ -1090,16 +1136,20 @@ impl EventKind {
             EventKind::DispatchCompleted { duration_ms, .. }
             | EventKind::BeadCompleted { duration_ms, .. }
             | EventKind::StrandEvaluated { duration_ms, .. }
+            | EventKind::InitStepCompleted { duration_ms, .. }
             | EventKind::EffortRecorded {
                 elapsed_ms: duration_ms,
                 ..
             } => Some(*duration_ms),
-            EventKind::WorkerStarted { .. }
+            EventKind::WorkerBooting { .. }
+            | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
             | EventKind::WorkerErrored { .. }
             | EventKind::WorkerExhausted { .. }
             | EventKind::WorkerIdle { .. }
             | EventKind::StateTransition { .. }
+            | EventKind::InitStepStarted { .. }
+            | EventKind::WorkerBootTimeout { .. }
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
             | EventKind::ClaimAttempt { .. }
@@ -1108,6 +1158,7 @@ impl EventKind {
             | EventKind::ClaimRaceLostSkipped { .. }
             | EventKind::ClaimFailed { .. }
             | EventKind::BeadReleased { .. }
+            | EventKind::BeadReleaseFailed { .. }
             | EventKind::BeadOrphaned { .. }
             | EventKind::DispatchStarted { .. }
             | EventKind::BuildTimeout { .. }
