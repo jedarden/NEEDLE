@@ -57,6 +57,7 @@ pub struct Worker {
     current_bead: Option<Bead>,
     exclusion_set: HashSet<BeadId>,
     retry_count: u32,
+    consecutive_race_lost: u32,
     beads_processed: u64,
     shutdown: Arc<AtomicBool>,
     last_error: Option<anyhow::Error>,
@@ -81,8 +82,9 @@ impl Worker {
                 Telemetry::new(worker_name.clone())
             });
         let strand_registry = Registry::default_location(&config.workspace.home);
+        let qualified_id = format!("{}-{}", config.agent.default, worker_name);
         let strands =
-            StrandRunner::from_config(&config, &worker_name, strand_registry, telemetry.clone());
+            StrandRunner::from_config(&config, &qualified_id, strand_registry, telemetry.clone());
         let claimer = Claimer::new(
             store.clone(),
             std::path::PathBuf::from("/tmp"),
@@ -127,10 +129,12 @@ impl Worker {
 
         // Restore beads_processed from registry if this worker was previously registered
         // (e.g., hot-reload resume). New workers start at 0.
+        // Match by qualified identity ({adapter}-{worker_id}).
+        let qualified_id = format!("{}-{}", config.agent.default, worker_name);
         let beads_processed = registry
             .list()
             .ok()
-            .and_then(|workers| workers.into_iter().find(|w| w.id == worker_name))
+            .and_then(|workers| workers.into_iter().find(|w| w.id == qualified_id))
             .map(|entry| entry.beads_processed)
             .unwrap_or(0);
 
@@ -153,6 +157,7 @@ impl Worker {
             current_bead: None,
             exclusion_set: HashSet::new(),
             retry_count: 0,
+            consecutive_race_lost: 0,
             beads_processed,
             shutdown: Arc::new(AtomicBool::new(false)),
             last_error: None,
@@ -235,7 +240,7 @@ impl Worker {
             match self.state {
                 WorkerState::Selecting => self.do_select().await?,
                 WorkerState::Claiming => self.do_claim().await?,
-                WorkerState::Retrying => self.do_retry()?,
+                WorkerState::Retrying => self.do_retry().await?,
                 WorkerState::Building => self.do_build()?,
                 WorkerState::Dispatching => self.do_dispatch().await?,
                 WorkerState::Executing => self.do_execute().await?,
@@ -261,7 +266,7 @@ impl Worker {
                     // Best-effort stop heartbeat on error.
                     self.health.stop();
                     // Best-effort deregister on error.
-                    if let Err(e) = self.registry.deregister(&self.worker_name) {
+                    if let Err(e) = self.registry.deregister(&self.qualified_id()) {
                         tracing::warn!(error = %e, "failed to deregister from worker registry on error");
                     }
                     self.telemetry.shutdown().await;
@@ -298,8 +303,11 @@ impl Worker {
         })?;
 
         // Register in worker state registry.
+        // Use qualified identity ({adapter}-{worker_id}) to prevent collisions
+        // when workers from different adapter pools share a NATO name.
+        let qualified_id = format!("{}-{}", self.config.agent.default, self.worker_name);
         let entry = WorkerEntry {
-            id: self.worker_name.clone(),
+            id: qualified_id,
             pid: std::process::id(),
             workspace: self.config.workspace.default.clone(),
             agent: self.config.agent.default.clone(),
@@ -459,11 +467,15 @@ impl Worker {
             }
         };
 
-        let claim = self.claimer.claim_one(&bead_id, &self.worker_name).await?;
+        let claim = self
+            .claimer
+            .claim_one(&bead_id, &self.qualified_id())
+            .await?;
 
         match claim {
             ClaimResult::Claimed(mut bead) => {
                 tracing::info!(bead_id = %bead.id, title = %bead.title, "claimed bead");
+                self.consecutive_race_lost = 0;
                 // Preserve the workspace from the pre-claim bead (set by
                 // Explore for remote beads). The claimed bead from br's JSON
                 // returns source_repo as "." (cwd-relative), so we treat empty
@@ -490,10 +502,12 @@ impl Worker {
                 tracing::debug!(bead_id = %bead_id, %claimed_by, "claim race lost");
                 self.exclusion_set.insert(bead_id);
                 self.retry_count += 1;
+                self.consecutive_race_lost += 1;
                 self.set_state(WorkerState::Retrying)?;
             }
             ClaimResult::NotClaimable { reason } => {
                 tracing::debug!(bead_id = %bead_id, %reason, "bead not claimable");
+                self.consecutive_race_lost = 0;
                 self.exclusion_set.insert(bead_id);
                 self.current_bead = None;
                 self.set_state(WorkerState::Selecting)?;
@@ -504,9 +518,44 @@ impl Worker {
     }
 
     /// RETRYING: decide whether to retry claiming or move on.
-    fn do_retry(&mut self) -> Result<()> {
+    ///
+    /// Tracks consecutive race_lost across retry cycles. When the count
+    /// exceeds `claim_race_lost_skip`, the worker treats the ready queue
+    /// as effectively empty and transitions to Exhausted instead of
+    /// spinning indefinitely on the same bead.
+    async fn do_retry(&mut self) -> Result<()> {
+        let skip_threshold = self.config.worker.claim_race_lost_skip;
+
+        if self.consecutive_race_lost >= skip_threshold {
+            tracing::warn!(
+                consecutive_race_lost = self.consecutive_race_lost,
+                threshold = skip_threshold,
+                "consecutive race_lost exceeded skip threshold, treating queue as exhausted"
+            );
+            self.telemetry.emit(EventKind::ClaimRaceLostSkipped {
+                consecutive_losses: self.consecutive_race_lost,
+                threshold: skip_threshold,
+            })?;
+            self.consecutive_race_lost = 0;
+            self.retry_count = 0;
+            self.exclusion_set.clear();
+            self.current_bead = None;
+            self.set_state(WorkerState::Exhausted)?;
+            return Ok(());
+        }
+
+        // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s.
+        if self.consecutive_race_lost > 0 {
+            let backoff_secs = std::cmp::min(1u64 << (self.consecutive_race_lost - 1).min(4), 30);
+            tracing::debug!(
+                consecutive_race_lost = self.consecutive_race_lost,
+                backoff_secs,
+                "backing off before retry"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+        }
+
         if self.retry_count < self.config.worker.max_claim_retries {
-            // Try the next candidate from the same strand cycle.
             self.set_state(WorkerState::Selecting)?;
         } else {
             tracing::debug!(
@@ -802,7 +851,7 @@ impl Worker {
         // Update registry with current beads_processed count (best-effort).
         if let Err(e) = self
             .registry
-            .update_beads_processed(&self.worker_name, self.beads_processed)
+            .update_beads_processed(&self.qualified_id(), self.beads_processed)
         {
             tracing::warn!(error = %e, "failed to update registry beads_processed");
         }
@@ -1013,7 +1062,8 @@ impl Worker {
         self.health.stop();
 
         // Deregister from worker state registry (best-effort).
-        if let Err(e) = self.registry.deregister(&self.worker_name) {
+        let qualified_id = format!("{}-{}", self.config.agent.default, self.worker_name);
+        if let Err(e) = self.registry.deregister(&qualified_id) {
             tracing::warn!(error = %e, "failed to deregister from worker registry");
         }
 
@@ -1030,6 +1080,14 @@ impl Worker {
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
+
+    /// Fully-qualified worker identity (`{adapter}-{worker_id}`).
+    ///
+    /// Used as the claim actor, registry key, and strand identity to prevent
+    /// collisions when workers from different adapter pools share a NATO name.
+    fn qualified_id(&self) -> String {
+        format!("{}-{}", self.config.agent.default, self.worker_name)
+    }
 
     /// Transition to a new state, emitting telemetry and updating heartbeat.
     fn set_state(&mut self, to: WorkerState) -> Result<()> {
@@ -1579,7 +1637,7 @@ mod tests {
         worker.state = WorkerState::Retrying;
         worker.retry_count = 1; // Below default max (3)
 
-        worker.do_retry().unwrap();
+        worker.do_retry().await.unwrap();
 
         assert_eq!(*worker.state(), WorkerState::Selecting);
         // Retry count preserved — it's only reset when max is exceeded.
@@ -1595,12 +1653,99 @@ mod tests {
         worker.retry_count = worker.config.worker.max_claim_retries; // At max
         worker.exclusion_set.insert(BeadId::from("some-bead"));
 
-        worker.do_retry().unwrap();
+        worker.do_retry().await.unwrap();
 
         assert_eq!(*worker.state(), WorkerState::Selecting);
         assert_eq!(worker.retry_count, 0);
         assert!(worker.exclusion_set.is_empty());
         assert!(worker.current_bead.is_none());
+    }
+
+    #[tokio::test]
+    async fn do_retry_skip_threshold_transitions_to_exhausted() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Retrying;
+        worker.consecutive_race_lost = worker.config.worker.claim_race_lost_skip;
+        worker.retry_count = 2;
+        worker.exclusion_set.insert(BeadId::from("stuck-bead"));
+
+        worker.do_retry().await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Exhausted);
+        assert_eq!(worker.consecutive_race_lost, 0);
+        assert_eq!(worker.retry_count, 0);
+        assert!(worker.exclusion_set.is_empty());
+        assert!(worker.current_bead.is_none());
+    }
+
+    #[tokio::test]
+    async fn do_retry_below_skip_threshold_applies_backoff() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Retrying;
+        worker.consecutive_race_lost = 2;
+        worker.retry_count = 1;
+
+        let before = std::time::Instant::now();
+        worker.do_retry().await.unwrap();
+        let elapsed = before.elapsed();
+
+        // Backoff for consecutive_race_lost=2 is 1 << 1 = 2 seconds.
+        // We just verify it slept (at least 1s) and transitioned to Selecting.
+        assert!(elapsed >= std::time::Duration::from_secs(1));
+        assert_eq!(*worker.state(), WorkerState::Selecting);
+    }
+
+    #[tokio::test]
+    async fn do_claim_race_lost_increments_consecutive_counter() {
+        let bead = make_test_bead("needle-race-consecutive");
+        let store: Arc<dyn BeadStore> = Arc::new(RaceLostStore::new(vec![bead]));
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.current_bead = Some(make_test_bead("needle-race-consecutive"));
+        worker.state = WorkerState::Claiming;
+        worker.consecutive_race_lost = 3;
+
+        worker.do_claim().await.unwrap();
+
+        assert_eq!(worker.consecutive_race_lost, 4);
+    }
+
+    #[tokio::test]
+    async fn do_claim_success_resets_consecutive_counter() {
+        let bead = make_test_bead("needle-claim-ok");
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![bead]));
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.current_bead = Some(make_test_bead("needle-claim-ok"));
+        worker.state = WorkerState::Claiming;
+        worker.consecutive_race_lost = 4;
+
+        worker.do_claim().await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Building);
+        assert_eq!(worker.consecutive_race_lost, 0);
+    }
+
+    #[tokio::test]
+    async fn do_claim_not_claimable_increments_consecutive_counter() {
+        // NotClaimable from the store is wrapped by the Claimer into
+        // AllRaceLost → RaceLost, so the worker sees RaceLost and
+        // increments consecutive_race_lost (does NOT reset it).
+        let bead = make_test_bead("needle-not-claimable");
+        let store: Arc<dyn BeadStore> = Arc::new(NotClaimableStore::new(vec![bead]));
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.current_bead = Some(make_test_bead("needle-not-claimable"));
+        worker.state = WorkerState::Claiming;
+        worker.consecutive_race_lost = 4;
+
+        worker.do_claim().await.unwrap();
+
+        assert_eq!(worker.consecutive_race_lost, 5);
     }
 
     // ── do_build tests ──

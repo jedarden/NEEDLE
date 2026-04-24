@@ -105,8 +105,8 @@ impl<'a> PeerMonitor<'a> {
         };
 
         for hb in &heartbeats {
-            // Skip our own heartbeat.
-            if hb.worker_id == self.own_worker_id {
+            // Skip our own heartbeat (match by qualified identity).
+            if hb.qualified_id == self.own_worker_id {
                 continue;
             }
 
@@ -118,11 +118,14 @@ impl<'a> PeerMonitor<'a> {
             let pid_alive = HealthMonitor::check_pid_alive(hb.pid);
             let stale_peer = StalePeer {
                 worker_id: hb.worker_id.clone(),
+                qualified_id: Some(hb.qualified_id.clone()),
                 pid: hb.pid,
                 pid_alive,
                 current_bead: hb.current_bead.clone(),
                 last_heartbeat: hb.last_heartbeat,
-                heartbeat_file: self.heartbeat_dir.join(format!("{}.json", hb.worker_id)),
+                heartbeat_file: hb.heartbeat_file.clone().unwrap_or_else(|| {
+                    self.heartbeat_dir.join(format!("{}.json", hb.qualified_id))
+                }),
             };
 
             if pid_alive {
@@ -231,7 +234,8 @@ impl<'a> PeerMonitor<'a> {
         remove_heartbeat_file(&peer.heartbeat_file)?;
 
         // 3. Deregister from the worker registry.
-        if let Err(e) = self.registry.deregister(&peer.worker_id) {
+        let dereg_id = peer.qualified_id.as_deref().unwrap_or(&peer.worker_id);
+        if let Err(e) = self.registry.deregister(dereg_id) {
             tracing::warn!(
                 worker = %peer.worker_id,
                 error = %e,
@@ -370,6 +374,7 @@ mod tests {
 
         HeartbeatData {
             worker_id: worker_id.to_string(),
+            qualified_id: format!("claude-{}", worker_id),
             pid,
             state: WorkerState::Executing,
             current_bead: bead_id.map(BeadId::from),
@@ -378,6 +383,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(3600),
             beads_processed: 0,
             session: worker_id.to_string(),
+            heartbeat_file: None,
         }
     }
 
@@ -511,7 +517,7 @@ mod tests {
         let monitor = PeerMonitor::new(
             hb_dir.to_path_buf(),
             Duration::from_secs(300),
-            "my-worker".to_string(),
+            "claude-my-worker".to_string(),
             &store,
             &registry,
             telemetry,
@@ -607,7 +613,7 @@ mod tests {
         let monitor = PeerMonitor::new(
             hb_dir.to_path_buf(),
             Duration::from_secs(300),
-            "my-worker".to_string(),
+            "claude-my-worker".to_string(),
             &store,
             &registry,
             telemetry,

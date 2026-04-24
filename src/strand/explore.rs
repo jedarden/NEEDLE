@@ -261,7 +261,11 @@ mod tests {
     }
 
     /// Helper to create ExploreStrand with test defaults for registry, telemetry, worker_id.
-    fn make_test_explore_strand(enabled: bool, workspaces: Vec<PathBuf>, home: PathBuf) -> ExploreStrand {
+    fn make_test_explore_strand(
+        enabled: bool,
+        workspaces: Vec<PathBuf>,
+        home: PathBuf,
+    ) -> ExploreStrand {
         let temp_dir = tempfile::tempdir().unwrap();
         let registry = crate::registry::Registry::new(temp_dir.path());
         let telemetry = Telemetry::new("test-worker".to_string());
@@ -367,11 +371,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().to_path_buf();
         // No .beads/ directory created.
-        let strand = make_test_explore_strand(
-            true,
-            vec![workspace],
-            PathBuf::from("/some/other/home"),
-        );
+        let strand =
+            make_test_explore_strand(true, vec![workspace], PathBuf::from("/some/other/home"));
         let store = DummyStore;
         let result = strand.evaluate(&store).await;
         assert!(matches!(result, StrandResult::NoWork));

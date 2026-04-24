@@ -24,7 +24,8 @@ use needle::config::Config;
 use needle::dispatch::{AgentAdapter, Dispatcher};
 use needle::telemetry::Telemetry;
 use needle::types::{
-    Bead, BeadId, BeadStatus, ClaimResult, IdleAction, InputMethod, Outcome, StrandResult, WorkerState,
+    Bead, BeadId, BeadStatus, ClaimResult, IdleAction, InputMethod, Outcome, StrandResult,
+    WorkerState,
 };
 use needle::worker::Worker;
 
@@ -905,6 +906,7 @@ async fn worker_processes_high_priority_beads_first() {
 /// - In-progress beads don't appear in ready()
 /// - Released beads become Open and appear in subsequent ready() calls
 /// - This enables testing the "released beads returned in same pass" behavior
+#[allow(dead_code)]
 struct ZombieMockStore {
     /// All beads, mutable to support state transitions (release → open).
     beads: Mutex<Vec<Bead>>,
@@ -914,6 +916,7 @@ struct ZombieMockStore {
     released: Arc<Mutex<Vec<BeadId>>>,
 }
 
+#[allow(dead_code)]
 impl ZombieMockStore {
     fn new(all_beads: Vec<Bead>, workspace: PathBuf) -> (Self, Arc<Mutex<Vec<BeadId>>>) {
         let released = Arc::new(Mutex::new(Vec::new()));
@@ -1020,11 +1023,13 @@ impl BeadStore for ZombieMockStore {
 ///
 /// This allows ExploreStrand to query remote workspaces that have different
 /// mock behaviors (e.g., zombie scenarios).
+#[allow(dead_code)]
 struct MultiWorkspaceStore {
     home_store: Arc<dyn BeadStore>,
     remote_stores: std::collections::HashMap<PathBuf, Arc<dyn BeadStore>>,
 }
 
+#[allow(dead_code)]
 impl MultiWorkspaceStore {
     fn new(home_store: Arc<dyn BeadStore>) -> Self {
         MultiWorkspaceStore {
@@ -1099,8 +1104,8 @@ impl BeadStore for MultiWorkspaceStore {
 
 #[tokio::test]
 async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
-    use needle::strand::{ExploreStrand, Strand};
     use needle::config::ExploreConfig;
+    use needle::strand::{ExploreStrand, Strand};
     use std::fs;
 
     // Create real temporary directories for home and remote workspaces.
@@ -1124,7 +1129,11 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
         .output()
         .expect("br create command failed to execute");
     let create_result = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "br create failed: {}", create_result);
+    assert!(
+        output.status.success(),
+        "br create failed: {}",
+        create_result
+    );
 
     // Extract the bead ID from the create output (format: "✓ Created <ID>: <title>").
     let bead_id = create_result
@@ -1132,9 +1141,7 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
         .find(|l| l.contains("Created"))
         .and_then(|l| {
             // Parse "✓ Created <ID>: <title>" to extract the ID
-            l.split("Created ")
-                .nth(1)
-                .and_then(|s| s.split(':').next())
+            l.split("Created ").nth(1).and_then(|s| s.split(':').next())
         })
         .unwrap()
         .trim()
@@ -1144,23 +1151,34 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     // Claim the bead to a dead worker.
     let claim_output = std::process::Command::new("/home/coding/.local/bin/br")
         .arg("update")
-        .arg(&bead_id.as_ref())
+        .arg(bead_id.as_ref())
         .arg("--assignee=dead-worker-12345")
         .arg("--status=in_progress")
         .current_dir(&remote_workspace)
         .output()
         .expect("br update command failed to execute");
-    assert!(claim_output.status.success(), "br update failed: {}",
-            String::from_utf8_lossy(&claim_output.stderr));
+    assert!(
+        claim_output.status.success(),
+        "br update failed: {}",
+        String::from_utf8_lossy(&claim_output.stderr)
+    );
 
     // Verify the bead is now in-progress and not in ready().
-    let remote_store = needle::bead_store::BrCliBeadStore::discover(remote_workspace.clone()).unwrap();
+    let remote_store =
+        needle::bead_store::BrCliBeadStore::discover(remote_workspace.clone()).unwrap();
     let filters = Filters {
         assignee: None,
-        exclude_labels: vec!["deferred".to_string(), "human".to_string(), "blocked".to_string()],
+        exclude_labels: vec![
+            "deferred".to_string(),
+            "human".to_string(),
+            "blocked".to_string(),
+        ],
     };
     let ready_result = remote_store.ready(&filters).await.unwrap();
-    assert!(ready_result.is_empty(), "remote workspace should have no ready beads initially");
+    assert!(
+        ready_result.is_empty(),
+        "remote workspace should have no ready beads initially"
+    );
 
     // Create ExploreStrand with the remote workspace configured.
     let temp_dir = tempfile::tempdir().unwrap();
@@ -1186,12 +1204,28 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     // After cross-workspace mend, ExploreStrand should return BeadFound with the tagged bead.
     match result {
         StrandResult::BeadFound(beads) => {
-            assert!(!beads.is_empty(), "should return at least one bead after releasing orphan");
+            assert!(
+                !beads.is_empty(),
+                "should return at least one bead after releasing orphan"
+            );
             let bead = &beads[0];
-            assert_eq!(bead.workspace, remote_workspace, "bead should be tagged with remote workspace path");
-            assert_eq!(bead.id, bead_id, "should return the zombie bead after release");
-            assert_eq!(bead.status, BeadStatus::Open, "released bead should be Open");
-            assert!(bead.assignee.is_none(), "released bead should have no assignee");
+            assert_eq!(
+                bead.workspace, remote_workspace,
+                "bead should be tagged with remote workspace path"
+            );
+            assert_eq!(
+                bead.id, bead_id,
+                "should return the zombie bead after release"
+            );
+            assert_eq!(
+                bead.status,
+                BeadStatus::Open,
+                "released bead should be Open"
+            );
+            assert!(
+                bead.assignee.is_none(),
+                "released bead should have no assignee"
+            );
         }
         StrandResult::NoWork => {
             panic!("expected BeadFound after releasing orphan, got NoWork");
@@ -1202,8 +1236,8 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
 
 #[tokio::test]
 async fn cross_workspace_mend_skips_beads_with_live_assignees() {
-    use needle::strand::{ExploreStrand, Strand};
     use needle::config::ExploreConfig;
+    use needle::strand::{ExploreStrand, Strand};
     use std::fs;
 
     // Create real temporary directories.
@@ -1233,9 +1267,7 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
         .find(|l| l.contains("Created"))
         .and_then(|l| {
             // Parse "✓ Created <ID>: <title>" to extract the ID
-            l.split("Created ")
-                .nth(1)
-                .and_then(|s| s.split(':').next())
+            l.split("Created ").nth(1).and_then(|s| s.split(':').next())
         })
         .unwrap()
         .trim()
@@ -1263,14 +1295,17 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     // Claim the bead to the live worker.
     let claim_output = std::process::Command::new("/home/coding/.local/bin/br")
         .arg("update")
-        .arg(&bead_id.as_ref())
+        .arg(bead_id.as_ref())
         .arg("--assignee=live-worker")
         .arg("--status=in_progress")
         .current_dir(&remote_workspace)
         .output()
         .expect("br update command failed to execute");
-    assert!(claim_output.status.success(), "br update failed: {}",
-            String::from_utf8_lossy(&claim_output.stderr));
+    assert!(
+        claim_output.status.success(),
+        "br update failed: {}",
+        String::from_utf8_lossy(&claim_output.stderr)
+    );
 
     let telemetry = Telemetry::new("test-worker".to_string());
 
@@ -1297,7 +1332,10 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
             // Expected — bead not released, no ready beads available.
         }
         StrandResult::BeadFound(beads) => {
-            panic!("should not release beads with live assignees; got beads: {:?}", beads);
+            panic!(
+                "should not release beads with live assignees; got beads: {:?}",
+                beads
+            );
         }
         other => panic!("unexpected result: {:?}", other),
     }
@@ -1305,13 +1343,17 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     // Verify the bead is still assigned to the live worker.
     let remote_store = needle::bead_store::BrCliBeadStore::discover(remote_workspace).unwrap();
     let bead = remote_store.show(&bead_id).await.unwrap();
-    assert_eq!(bead.assignee, Some("live-worker".to_string()), "bead should still be assigned to live worker");
+    assert_eq!(
+        bead.assignee,
+        Some("live-worker".to_string()),
+        "bead should still be assigned to live worker"
+    );
 }
 
 #[tokio::test]
 async fn cross_workspace_mend_skips_own_worker_beads() {
-    use needle::strand::{ExploreStrand, Strand};
     use needle::config::ExploreConfig;
+    use needle::strand::{ExploreStrand, Strand};
     use std::fs;
 
     // Create real temporary directories.
@@ -1341,9 +1383,7 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
         .find(|l| l.contains("Created"))
         .and_then(|l| {
             // Parse "✓ Created <ID>: <title>" to extract the ID
-            l.split("Created ")
-                .nth(1)
-                .and_then(|s| s.split(':').next())
+            l.split("Created ").nth(1).and_then(|s| s.split(':').next())
         })
         .unwrap()
         .trim()
@@ -1354,17 +1394,21 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     let temp_dir = tempfile::tempdir().unwrap();
     let registry = needle::registry::Registry::new(temp_dir.path());
 
-    // Claim the bead to ourselves (test-worker).
+    // Claim the bead to ourselves using the qualified identity (matching production).
+    let qualified_id = "claude-test-worker";
     let claim_output = std::process::Command::new("/home/coding/.local/bin/br")
         .arg("update")
-        .arg(&bead_id.as_ref())
-        .arg("--assignee=test-worker")
+        .arg(bead_id.as_ref())
+        .arg(format!("--assignee={qualified_id}"))
         .arg("--status=in_progress")
         .current_dir(&remote_workspace)
         .output()
         .expect("br update command failed to execute");
-    assert!(claim_output.status.success(), "br update failed: {}",
-            String::from_utf8_lossy(&claim_output.stderr));
+    assert!(
+        claim_output.status.success(),
+        "br update failed: {}",
+        String::from_utf8_lossy(&claim_output.stderr)
+    );
 
     let telemetry = Telemetry::new("test-worker".to_string());
 
@@ -1378,7 +1422,7 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
         home_workspace,
         registry,
         telemetry,
-        "test-worker".to_string(),
+        qualified_id.to_string(),
     );
 
     // Evaluate — our own bead should NOT be released.
@@ -1390,7 +1434,10 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
             // Expected — our bead not released, no ready beads available.
         }
         StrandResult::BeadFound(beads) => {
-            panic!("should not release our own worker's beads; got beads: {:?}", beads);
+            panic!(
+                "should not release our own worker's beads; got beads: {:?}",
+                beads
+            );
         }
         other => panic!("unexpected result: {:?}", other),
     }
@@ -1398,5 +1445,9 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     // Verify the bead is still assigned to us.
     let remote_store = needle::bead_store::BrCliBeadStore::discover(remote_workspace).unwrap();
     let bead = remote_store.show(&bead_id).await.unwrap();
-    assert_eq!(bead.assignee, Some("test-worker".to_string()), "bead should still be assigned to us");
+    assert_eq!(
+        bead.assignee,
+        Some(qualified_id.to_string()),
+        "bead should still be assigned to us"
+    );
 }

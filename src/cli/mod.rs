@@ -3571,6 +3571,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let hb = HeartbeatData {
             worker_id: "test-w".to_string(),
+            qualified_id: "claude-test-w".to_string(),
             pid: 999_999,
             state: WorkerState::Selecting,
             current_bead: None,
@@ -3579,6 +3580,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             beads_processed: 0,
             session: "test-w".to_string(),
+            heartbeat_file: None,
         };
         std::fs::write(
             tmp.path().join("test-w.json"),
@@ -3599,6 +3601,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let hb = HeartbeatData {
             worker_id: "test-rm".to_string(),
+            qualified_id: "claude-test-rm".to_string(),
             pid: 999_999,
             state: WorkerState::Selecting,
             current_bead: None,
@@ -3607,6 +3610,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             beads_processed: 0,
             session: "test-rm".to_string(),
+            heartbeat_file: None,
         };
         let hb_path = tmp.path().join("test-rm.json");
         std::fs::write(&hb_path, serde_json::to_string(&hb).unwrap()).unwrap();

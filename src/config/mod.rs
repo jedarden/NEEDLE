@@ -91,6 +91,10 @@ pub struct WorkerConfig {
     #[serde(default = "WorkerConfig::default_max_claim_retries")]
     pub max_claim_retries: u32,
 
+    /// Consecutive race_lost attempts before treating the ready queue as empty.
+    #[serde(default = "WorkerConfig::default_claim_race_lost_skip")]
+    pub claim_race_lost_skip: u32,
+
     /// How workers generate their unique names.
     #[serde(default)]
     pub identifier_scheme: IdentifierScheme,
@@ -112,6 +116,7 @@ impl Default for WorkerConfig {
             idle_timeout: Self::default_idle_timeout(),
             idle_action: IdleAction::default(),
             max_claim_retries: Self::default_max_claim_retries(),
+            claim_race_lost_skip: Self::default_claim_race_lost_skip(),
             identifier_scheme: IdentifierScheme::default(),
             cpu_load_warn: Self::default_cpu_load_warn(),
             memory_free_warn_mb: Self::default_memory_free_warn_mb(),
@@ -131,6 +136,9 @@ impl WorkerConfig {
     }
     fn default_max_claim_retries() -> u32 {
         3
+    }
+    fn default_claim_race_lost_skip() -> u32 {
+        5
     }
     fn default_cpu_load_warn() -> f64 {
         0.8
@@ -1073,6 +1081,46 @@ impl SelfModificationConfig {
     }
 }
 
+/// FABRIC telemetry forwarding configuration.
+///
+/// When enabled, NEEDLE workers POST structured events to the FABRIC
+/// web server (`fabric web`) for live dashboard display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FabricConfig {
+    /// Whether to forward events to FABRIC (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// HTTP endpoint to POST events to (e.g., `http://localhost:3000/api/events`).
+    #[serde(default)]
+    pub endpoint: String,
+
+    /// Request timeout in seconds (default: 2).
+    #[serde(default = "FabricConfig::default_timeout")]
+    pub timeout: u64,
+
+    /// Batch events before sending instead of sending one at a time (default: false).
+    #[serde(default)]
+    pub batching: bool,
+}
+
+impl Default for FabricConfig {
+    fn default() -> Self {
+        FabricConfig {
+            enabled: false,
+            endpoint: String::new(),
+            timeout: Self::default_timeout(),
+            batching: false,
+        }
+    }
+}
+
+impl FabricConfig {
+    fn default_timeout() -> u64 {
+        2
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Config Source Tracking
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1213,6 +1261,9 @@ pub struct Config {
     /// Self-modification (hot-reload) configuration.
     #[serde(default)]
     pub self_modification: SelfModificationConfig,
+    /// FABRIC live dashboard forwarding.
+    #[serde(default)]
+    pub fabric: FabricConfig,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2297,6 +2348,7 @@ worker:
   idle_timeout: 120
   launch_stagger_seconds: 5
   max_claim_retries: 10
+  claim_race_lost_skip: 8
 health:
   heartbeat_interval_secs: 15
   heartbeat_ttl_secs: 120
@@ -2316,6 +2368,7 @@ strands:
         assert_eq!(config.worker.idle_timeout, 120);
         assert_eq!(config.worker.launch_stagger_seconds, 5);
         assert_eq!(config.worker.max_claim_retries, 10);
+        assert_eq!(config.worker.claim_race_lost_skip, 8);
         assert_eq!(config.health.heartbeat_interval_secs, 15);
         assert_eq!(config.health.heartbeat_ttl_secs, 120);
         assert!(!config.strands.explore.enabled);
@@ -2550,6 +2603,7 @@ strands:
         assert_eq!(config.launch_stagger_seconds, 2);
         assert_eq!(config.idle_timeout, 60);
         assert_eq!(config.max_claim_retries, 3);
+        assert_eq!(config.claim_race_lost_skip, 5);
         assert!((config.cpu_load_warn - 0.8).abs() < f64::EPSILON);
         assert_eq!(config.memory_free_warn_mb, 512);
     }

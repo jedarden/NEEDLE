@@ -1056,7 +1056,12 @@ mod tests {
     }
 
     fn write_heartbeat(dir: &Path, data: &HeartbeatData) {
-        let path = dir.join(format!("{}.json", data.worker_id));
+        let name = if data.qualified_id.is_empty() {
+            &data.worker_id
+        } else {
+            &data.qualified_id
+        };
+        let path = dir.join(format!("{}.json", name));
         let json = serde_json::to_string(data).unwrap();
         std::fs::write(path, json).unwrap();
     }
@@ -1064,6 +1069,7 @@ mod tests {
     fn make_stale_heartbeat(worker_id: &str, pid: u32, bead_id: Option<&str>) -> HeartbeatData {
         HeartbeatData {
             worker_id: worker_id.to_string(),
+            qualified_id: format!("claude-{}", worker_id),
             pid,
             state: WorkerState::Executing,
             current_bead: bead_id.map(BeadId::from),
@@ -1072,6 +1078,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(3600),
             beads_processed: 0,
             session: worker_id.to_string(),
+            heartbeat_file: None,
         }
     }
 

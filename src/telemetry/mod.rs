@@ -120,6 +120,10 @@ pub enum EventKind {
         bead_id: BeadId,
         reason: String,
     },
+    ClaimRaceLostSkipped {
+        consecutive_losses: u32,
+        threshold: u32,
+    },
 
     // ── Bead lifecycle ──
     BeadReleased {
@@ -407,6 +411,7 @@ impl EventKind {
             EventKind::ClaimAttempt { .. } => "bead.claim.attempted",
             EventKind::ClaimSuccess { .. } => "bead.claim.succeeded",
             EventKind::ClaimRaceLost { .. } => "bead.claim.race_lost",
+            EventKind::ClaimRaceLostSkipped { .. } => "bead.claim.race_lost_skipped",
             EventKind::ClaimFailed { .. } => "bead.claim.failed",
             EventKind::BeadReleased { .. } => "bead.released",
             EventKind::BeadCompleted { .. } => "bead.completed",
@@ -531,6 +536,7 @@ impl EventKind {
             | EventKind::CanarySuiteCompleted { .. }
             | EventKind::CanaryPromoted { .. }
             | EventKind::CanaryRejected { .. }
+            | EventKind::ClaimRaceLostSkipped { .. }
             | EventKind::SinkError { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
@@ -608,6 +614,15 @@ impl EventKind {
             }
             EventKind::ClaimRaceLost { bead_id } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref() })
+            }
+            EventKind::ClaimRaceLostSkipped {
+                consecutive_losses,
+                threshold,
+            } => {
+                serde_json::json!({
+                    "consecutive_losses": consecutive_losses,
+                    "threshold": threshold,
+                })
             }
             EventKind::ClaimFailed { bead_id, reason } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref(), "reason": reason })
@@ -1039,6 +1054,7 @@ impl EventKind {
             | EventKind::ClaimAttempt { .. }
             | EventKind::ClaimSuccess { .. }
             | EventKind::ClaimRaceLost { .. }
+            | EventKind::ClaimRaceLostSkipped { .. }
             | EventKind::ClaimFailed { .. }
             | EventKind::BeadReleased { .. }
             | EventKind::BeadOrphaned { .. }
@@ -1289,6 +1305,7 @@ impl StdoutSink {
             "bead.claim.attempted" => "CLAIMING",
             "bead.claim.succeeded" => "CLAIMED",
             "bead.claim.race_lost" => "RACE_LOST",
+            "bead.claim.race_lost_skipped" => "RACE_LOST_SKIP",
             "bead.claim.failed" => "CLAIM_FAIL",
             "bead.released" => "RELEASED",
             "bead.completed" => "COMPLETED",
@@ -1378,6 +1395,7 @@ impl StdoutSink {
             t if t.starts_with("bead.claim.succeeded") || t == "bead.completed" => "\x1b[32m", // green
             t if t.starts_with("agent.") || t.starts_with("outcome.") => "\x1b[36m", // cyan
             t if t.starts_with("bead.claim.race_lost")
+                || t.starts_with("bead.claim.race_lost_skipped")
                 || t.starts_with("bead.claim.failed")
                 || t == "bead.released"
                 || t == "bead.orphaned" =>
@@ -2260,7 +2278,7 @@ pub fn read_logs(
         }
     }
 
-    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    events.sort_by_key(|a| a.timestamp);
     Ok(events)
 }
 
@@ -2887,6 +2905,10 @@ mod tests {
             },
             EventKind::ClaimRaceLost {
                 bead_id: id.clone(),
+            },
+            EventKind::ClaimRaceLostSkipped {
+                consecutive_losses: 5,
+                threshold: 5,
             },
             EventKind::ClaimFailed {
                 bead_id: id.clone(),

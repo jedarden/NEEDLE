@@ -370,7 +370,7 @@ impl LearningsFile {
             .collect();
 
         // Sort by score descending
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         // Keep top max_count entries
         let kept: Vec<LearningEntry> = scored
