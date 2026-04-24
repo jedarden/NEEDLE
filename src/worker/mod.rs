@@ -1287,10 +1287,13 @@ impl Worker {
                     backoff_seconds: backoff,
                 })?;
 
-                // Cancellable sleep: check shutdown flag every 10 seconds instead of
+                // Cancellable sleep: check shutdown flag every 1 second instead of
                 // sleeping for the full duration. This ensures the worker responds to
-                // signals during idle and emits worker.stopped telemetry.
-                let check_interval = 10u64;
+                // signals during idle and emits worker.stopped telemetry before being
+                // killed. A 1-second interval balances responsiveness (workers can be
+                // reaped at any time by external governors) with efficiency (avoiding
+                // busy-waiting during long idle periods).
+                let check_interval = 1u64;
                 let mut elapsed = 0u64;
                 while elapsed < backoff {
                     let remaining = backoff - elapsed;
