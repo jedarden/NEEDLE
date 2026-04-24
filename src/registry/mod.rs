@@ -117,6 +117,7 @@ impl Default for RegistryFile {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Worker state registry with flock-protected read-modify-write access.
+#[derive(Clone)]
 pub struct Registry {
     path: PathBuf,
 }

@@ -30,8 +30,8 @@ pub struct ExploreStrand {
     registry: Registry,
     /// Telemetry emitter for orphan release events.
     telemetry: Telemetry,
-    /// This worker's ID (excluded from orphan detection).
-    worker_id: String,
+    /// Fully-qualified worker identity (`{adapter}-{worker_id}`).
+    qualified_id: String,
 }
 
 impl ExploreStrand {
@@ -43,7 +43,7 @@ impl ExploreStrand {
         home_workspace: PathBuf,
         registry: Registry,
         telemetry: Telemetry,
-        worker_id: String,
+        qualified_id: String,
     ) -> Self {
         ExploreStrand {
             enabled: config.enabled,
@@ -51,7 +51,7 @@ impl ExploreStrand {
             home_workspace,
             registry,
             telemetry,
-            worker_id,
+            qualified_id,
         }
     }
 
@@ -135,7 +135,7 @@ impl super::Strand for ExploreStrand {
                             &remote_store,
                             &self.registry,
                             &self.telemetry,
-                            &self.worker_id,
+                            &self.qualified_id,
                         )
                         .await
                         {
