@@ -1287,13 +1287,19 @@ impl Worker {
                     backoff_seconds: backoff,
                 })?;
 
-                // Cancellable sleep: check shutdown flag every 1 second instead of
+                // Update heartbeat immediately before entering idle sleep so external
+                // monitoring has a fresh timestamp. If the worker dies during the
+                // idle period, the heartbeat file will become stale and can be detected.
+                self.health.update_state(&WorkerState::Exhausted, None);
+
+                // Cancellable sleep: check shutdown flag every 5 seconds instead of
                 // sleeping for the full duration. This ensures the worker responds to
                 // signals during idle and emits worker.stopped telemetry before being
-                // killed. A 1-second interval balances responsiveness (workers can be
+                // killed. A 5-second interval balances responsiveness (workers can be
                 // reaped at any time by external governors) with efficiency (avoiding
-                // busy-waiting during long idle periods).
-                let check_interval = 1u64;
+                // busy-waiting during long idle periods). Reduced from 1s to reduce
+                // spurious wakeups while maintaining responsiveness.
+                let check_interval = 5u64;
                 let mut elapsed = 0u64;
                 while elapsed < backoff {
                     let remaining = backoff - elapsed;
@@ -1345,6 +1351,9 @@ impl Worker {
                     backoff_secs = backoff,
                     "idle sleep completed, resuming work"
                 );
+
+                // Update heartbeat after idle sleep completes before transitioning.
+                self.health.update_state(&WorkerState::Selecting, None);
                 self.state = WorkerState::Selecting;
                 Ok(WorkerState::Selecting)
             }
