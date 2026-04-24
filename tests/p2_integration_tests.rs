@@ -1081,6 +1081,7 @@ async fn heartbeat_emitter_writes_and_cleans_up() {
         config,
         "hb-test-worker".to_string(),
         Telemetry::new("test".to_string()),
+        None,
     );
 
     monitor.start_emitter().unwrap();

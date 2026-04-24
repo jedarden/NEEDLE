@@ -87,7 +87,21 @@ impl HealthMonitor {
     /// Create a new health monitor.
     ///
     /// Does not start the emitter — call `start_emitter()` after construction.
-    pub fn new(config: Config, worker_name: String, _telemetry: Telemetry) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Worker configuration
+    /// * `worker_name` - Bare NATO name (e.g., "alpha", "foxtrot")
+    /// * `_telemetry` - Telemetry emitter (unused, kept for API compatibility)
+    /// * `shutdown` - Optional shared shutdown flag. If provided, the emitter's
+    ///   circuit breaker will set this flag to trigger graceful worker shutdown.
+    ///   If None, a private flag is created (test compatibility).
+    pub fn new(
+        config: Config,
+        worker_name: String,
+        _telemetry: Telemetry,
+        shutdown: Option<Arc<AtomicBool>>,
+    ) -> Self {
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
         let heartbeat_interval = Duration::from_secs(config.health.heartbeat_interval_secs);
         let heartbeat_ttl = Duration::from_secs(config.health.heartbeat_ttl_secs);
@@ -106,7 +120,7 @@ impl HealthMonitor {
                 current_bead: None,
                 beads_processed: 0,
             })),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             emitter_handle: None,
         }
     }
@@ -542,6 +556,23 @@ fn emitter_loop(
                         consecutive_failures,
                         "heartbeat emitter circuit breaker triggered — worker will shut down"
                     );
+                    // Emit a final heartbeat event before shutting down so the
+                    // telemetry log shows the circuit breaker was the cause.
+                    let _ = std::fs::write(
+                        heartbeat_dir.join(format!("{}-circuit-breaker.txt", qualified_id)),
+                        format!(
+                            "Circuit breaker tripped after {} consecutive heartbeat write failures\n\
+                             Worker: {}\n\
+                             Qualified ID: {}\n\
+                             Last error: {}\n\
+                             Timestamp: {}",
+                            consecutive_failures,
+                            worker_id,
+                            qualified_id,
+                            e,
+                            Utc::now().to_rfc3339()
+                        ),
+                    );
                     shutdown.store(true, Ordering::SeqCst);
                     return;
                 }
@@ -583,6 +614,7 @@ mod tests {
             config,
             "test-worker".to_string(),
             Telemetry::new("test".to_string()),
+            None,
         );
 
         monitor.start_emitter().unwrap();
@@ -608,6 +640,7 @@ mod tests {
             config,
             "state-test".to_string(),
             Telemetry::new("test".to_string()),
+            None,
         );
 
         monitor.start_emitter().unwrap();
@@ -637,6 +670,7 @@ mod tests {
             config,
             "stop-test".to_string(),
             Telemetry::new("test".to_string()),
+            None,
         );
 
         monitor.start_emitter().unwrap();
@@ -752,6 +786,7 @@ mod tests {
             config,
             "atomic-test".to_string(),
             Telemetry::new("test".to_string()),
+            None,
         );
 
         monitor.start_emitter().unwrap();
@@ -811,6 +846,7 @@ mod tests {
             config,
             "self-worker".to_string(),
             Telemetry::new("test".to_string()),
+            None,
         );
 
         // Write a stale heartbeat for ourselves.
@@ -886,5 +922,125 @@ mod tests {
 
         // Restore permissions so the tempdir can be cleaned up.
         let _ = std::fs::set_permissions(&hb_dir, std::fs::Permissions::from_mode(0o755));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_path_uses_qualified_id_not_bare_worker_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+
+        // Create two configs with different adapters but the same worker name.
+        let mut config1 = test_config(&hb_dir);
+        config1.agent.default = "claude-code-glm-5".to_string();
+
+        let mut config2 = test_config(&hb_dir);
+        config2.agent.default = "claude-code-glm-4_7".to_string();
+
+        // Create two monitors with the same worker name but different adapters.
+        let monitor1 = HealthMonitor::new(
+            config1,
+            "foxtrot".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+        let monitor2 = HealthMonitor::new(
+            config2,
+            "foxtrot".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Verify that heartbeat paths are different (keyed by qualified ID).
+        let path1 = monitor1.heartbeat_path();
+        let path2 = monitor2.heartbeat_path();
+
+        assert_eq!(
+            path1,
+            hb_dir.join("claude-code-glm-5-foxtrot.json"),
+            "first monitor's heartbeat path should use qualified ID"
+        );
+        assert_eq!(
+            path2,
+            hb_dir.join("claude-code-glm-4_7-foxtrot.json"),
+            "second monitor's heartbeat path should use qualified ID"
+        );
+        assert_ne!(
+            path1, path2,
+            "heartbeat paths must be different for same worker name across adapters"
+        );
+
+        // Verify that qualified_id field reflects the adapter prefix.
+        assert_eq!(monitor1.qualified_id(), "claude-code-glm-5-foxtrot");
+        assert_eq!(monitor2.qualified_id(), "claude-code-glm-4_7-foxtrot");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_files_dont_collide_across_adapter_pools() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+
+        // Create two configs with different adapters but the same worker name.
+        let mut config1 = test_config(&hb_dir);
+        config1.agent.default = "claude-code-glm-5".to_string();
+
+        let mut config2 = test_config(&hb_dir);
+        config2.agent.default = "claude-code-glm-4_7".to_string();
+
+        // Create and start both monitors.
+        let mut monitor1 = HealthMonitor::new(
+            config1,
+            "foxtrot".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+        let mut monitor2 = HealthMonitor::new(
+            config2,
+            "foxtrot".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        monitor1.start_emitter().unwrap();
+        monitor2.start_emitter().unwrap();
+
+        // Verify that two distinct heartbeat files exist.
+        let path1 = hb_dir.join("claude-code-glm-5-foxtrot.json");
+        let path2 = hb_dir.join("claude-code-glm-4_7-foxtrot.json");
+
+        assert!(path1.exists(), "first worker's heartbeat file must exist");
+        assert!(path2.exists(), "second worker's heartbeat file must exist");
+
+        // Verify that the heartbeat files contain the correct qualified_id.
+        let content1 = std::fs::read_to_string(&path1).unwrap();
+        let data1: HeartbeatData = serde_json::from_str(&content1).unwrap();
+        assert_eq!(data1.worker_id, "foxtrot");
+        assert_eq!(data1.qualified_id, "claude-code-glm-5-foxtrot");
+
+        let content2 = std::fs::read_to_string(&path2).unwrap();
+        let data2: HeartbeatData = serde_json::from_str(&content2).unwrap();
+        assert_eq!(data2.worker_id, "foxtrot");
+        assert_eq!(data2.qualified_id, "claude-code-glm-4_7-foxtrot");
+
+        // Verify that beads_processed starts at 0 for each (not inherited).
+        assert_eq!(data1.beads_processed, 0);
+        assert_eq!(data2.beads_processed, 0);
+
+        // Update counters and verify they don't interfere.
+        monitor1.update_beads_processed(100);
+        monitor2.update_beads_processed(200);
+
+        // Wait for emitter to write.
+        std::thread::sleep(Duration::from_millis(1500));
+
+        let content1_updated = std::fs::read_to_string(&path1).unwrap();
+        let data1_updated: HeartbeatData = serde_json::from_str(&content1_updated).unwrap();
+        assert_eq!(data1_updated.beads_processed, 100);
+
+        let content2_updated = std::fs::read_to_string(&path2).unwrap();
+        let data2_updated: HeartbeatData = serde_json::from_str(&content2_updated).unwrap();
+        assert_eq!(data2_updated.beads_processed, 200);
+
+        monitor1.stop();
+        monitor2.stop();
     }
 }

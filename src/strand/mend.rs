@@ -40,7 +40,7 @@ use crate::types::{BeadStatus, StrandError, StrandResult};
 /// * `store` - The bead store to scan (can be home or remote)
 /// * `registry` - Worker registry for live worker lookup
 /// * `telemetry` - Telemetry emitter for orphan release events
-/// * `worker_id` - This worker's ID (excluded from orphan detection)
+/// * `qualified_id` - This worker's fully-qualified identity (excluded from orphan detection)
 ///
 /// # Returns
 /// * `Ok(u32)` - Number of orphans released
@@ -49,12 +49,12 @@ pub async fn cleanup_orphaned_in_progress(
     store: &dyn BeadStore,
     registry: &Registry,
     telemetry: &Telemetry,
-    worker_id: &str,
+    qualified_id: &str,
 ) -> Result<u32> {
     let all_beads = store.list_all().await?;
     let workers = registry.list()?;
 
-    // Build a set of (worker_id, is_alive) for registered workers.
+    // Build a set of fully-qualified worker IDs for registered, alive workers.
     let live_worker_ids: std::collections::HashSet<String> = workers
         .iter()
         .filter(|w| HealthMonitor::check_pid_alive(w.pid))
@@ -73,12 +73,15 @@ pub async fn cleanup_orphaned_in_progress(
             _ => continue,
         };
 
-        // Skip if the assignee matches our own worker (we're running).
-        if assignee == worker_id {
+        // Skip if the assignee matches our own qualified identity (we're running).
+        if assignee == qualified_id {
             continue;
         }
 
         // Skip if the assignee matches a registered, alive worker.
+        // Workers register with fully-qualified IDs ({adapter}-{worker_id}),
+        // so this comparison prevents collisions when workers from different
+        // adapter pools share a NATO name.
         if live_worker_ids.contains(assignee.as_str()) {
             continue;
         }
@@ -149,7 +152,10 @@ pub struct MendStrand {
     heartbeat_dir: PathBuf,
     heartbeat_ttl: Duration,
     lock_dir: PathBuf,
-    worker_id: String,
+    /// Fully-qualified worker identity ({adapter}-{worker_id}).
+    /// Used for heartbeat file lookups and registry comparisons to prevent
+    /// collisions when workers from different adapter pools share a NATO name.
+    qualified_id: String,
     registry: Registry,
     telemetry: Telemetry,
     log_dir: PathBuf,
@@ -168,7 +174,7 @@ impl MendStrand {
     /// - `heartbeat_dir`: path to `~/.needle/state/heartbeats/`
     /// - `heartbeat_ttl`: how long before a heartbeat is considered stale
     /// - `lock_dir`: directory where claim lock files live (default: `/tmp`)
-    /// - `worker_id`: this worker's ID (excluded from peer checks)
+    /// - `qualified_id`: fully-qualified worker identity ({adapter}-{worker_id})
     /// - `registry`: worker state registry
     /// - `telemetry`: telemetry emitter
     /// - `log_dir`: directory where agent log files live
@@ -184,7 +190,7 @@ impl MendStrand {
         heartbeat_dir: PathBuf,
         heartbeat_ttl: Duration,
         lock_dir: PathBuf,
-        worker_id: String,
+        qualified_id: String,
         registry: Registry,
         telemetry: Telemetry,
         log_dir: PathBuf,
@@ -200,7 +206,7 @@ impl MendStrand {
             heartbeat_dir,
             heartbeat_ttl,
             lock_dir,
-            worker_id,
+            qualified_id,
             registry,
             telemetry,
             log_dir,
@@ -224,7 +230,7 @@ impl MendStrand {
         let peer_monitor = PeerMonitor::new(
             self.heartbeat_dir.clone(),
             self.heartbeat_ttl,
-            self.worker_id.clone(),
+            self.qualified_id.clone(),
             store,
             &self.registry,
             self.telemetry.clone(),
@@ -251,7 +257,7 @@ impl MendStrand {
             store,
             &self.registry,
             &self.telemetry,
-            &self.worker_id,
+            &self.qualified_id,
         )
         .await?;
         summary.beads_released += released;
@@ -996,9 +1002,9 @@ mod tests {
             hb_dir.to_path_buf(),
             Duration::from_secs(300),
             lock_dir.to_path_buf(),
-            "test-worker".to_string(),
+            "claude-test-worker".to_string(),
             Registry::new(reg_dir),
-            Telemetry::new("test-worker".to_string()),
+            Telemetry::new("claude-test-worker".to_string()),
             PathBuf::from("/tmp/needle-test-logs"),
             0,
             PathBuf::from("/tmp/test-traces"),
@@ -1203,8 +1209,8 @@ mod tests {
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
 
-        // An in-progress bead assigned to ourselves.
-        let bead = make_in_progress_bead("nd-mine", "test-worker");
+        // An in-progress bead assigned to ourselves (using qualified_id).
+        let bead = make_in_progress_bead("nd-mine", "claude-test-worker");
 
         let (store, release_count) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());

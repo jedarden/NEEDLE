@@ -953,6 +953,8 @@ impl Worker {
                     operation: "handle".to_string(),
                     error: e.to_string(),
                 })?;
+                // Abort the heartbeat task before returning.
+                heartbeat_task.abort();
                 // Attempt best-effort release with timeout.
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
@@ -975,6 +977,8 @@ impl Worker {
                     operation: "handle".to_string(),
                     error: "timeout after 60s".to_string(),
                 })?;
+                // Abort the heartbeat task before returning.
+                heartbeat_task.abort();
                 // Attempt best-effort release with timeout.
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
@@ -986,9 +990,6 @@ impl Worker {
                 return Ok(());
             }
         };
-
-        // Abort the heartbeat task since handling is complete.
-        heartbeat_task.abort();
 
         // Evaluate for mitosis after failure — the bead has already been
         // released and failure count incremented by the outcome handler.
@@ -1053,6 +1054,9 @@ impl Worker {
         } else {
             self.set_state(WorkerState::Logging)?;
         }
+
+        // Abort the heartbeat task since handling is complete.
+        heartbeat_task.abort();
 
         Ok(())
     }
@@ -1324,9 +1328,16 @@ impl Worker {
 
                     // Update heartbeat periodically during long idle sleeps to prevent
                     // external monitors from thinking the worker is dead.
-                    if shutdown_check_count % 60 == 0 {
-                        // Every 60 seconds (60 * 1s), update heartbeat state
+                    // Use a 5-second interval to match the heartbeat_interval config,
+                    // ensuring the heartbeat file is updated frequently even during long idle periods.
+                    if shutdown_check_count % 5 == 0 {
+                        // Every 5 seconds (5 * 1s), update heartbeat state
                         self.health.update_state(&WorkerState::Exhausted, None);
+                        tracing::debug!(
+                            elapsed_secs = elapsed,
+                            remaining_secs = remaining,
+                            "idle heartbeat update"
+                        );
                     }
 
                     if self.shutdown.load(Ordering::SeqCst) {
@@ -1371,7 +1382,8 @@ impl Worker {
                 tracing::info!(
                     backoff_secs = backoff,
                     shutdown_checks_performed = shutdown_check_count,
-                    "idle sleep completed, resuming work"
+                    elapsed_secs = elapsed,
+                    "idle sleep completed successfully, transitioning to SELECTING"
                 );
 
                 // Emit telemetry to show idle sleep completed successfully

@@ -327,11 +327,30 @@ impl MitosisEvaluator {
     }
 
     /// Read the failure count label from a bead.
+    ///
+    /// All br calls are wrapped in timeouts to prevent indefinite hang.
     async fn get_failure_count(&self, store: &dyn BeadStore, bead_id: &BeadId) -> Result<u32> {
-        let labels = store
-            .labels(bead_id)
-            .await
-            .context("failed to read labels for failure count")?;
+        let labels =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), store.labels(bead_id))
+                .await
+            {
+                Ok(Ok(l)) => l,
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        bead_id = %bead_id,
+                        error = %e,
+                        "failed to read labels for failure count"
+                    );
+                    return Ok(0);
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bead_id = %bead_id,
+                        "labels() timed out after 30s, assuming failure count 0"
+                    );
+                    return Ok(0);
+                }
+            };
 
         let count = labels
             .iter()
@@ -350,16 +369,38 @@ impl MitosisEvaluator {
     /// FrankenSQLite index corruption where `br dep add` creates the
     /// dependency link and labels but the relationship doesn't appear in
     /// `br show --json` output.
+    ///
+    /// The `list_all()` call is wrapped in a timeout to prevent indefinite
+    /// hang in HANDLING state.
     async fn get_existing_children(
         &self,
         store: &dyn BeadStore,
         parent_id: &BeadId,
     ) -> Result<Vec<String>> {
         let parent_label = format!("parent-{}", parent_id);
-        let all_beads = store
-            .list_all()
-            .await
-            .context("failed to list beads for existing children lookup")?;
+        let all_beads = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            store.list_all(),
+        )
+        .await
+        {
+            Ok(Ok(beads)) => beads,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    parent_id = %parent_id,
+                    error = %e,
+                    "list_all failed during get_existing_children, assuming no children"
+                );
+                return Ok(Vec::new());
+            }
+            Err(_) => {
+                tracing::warn!(
+                    parent_id = %parent_id,
+                    "list_all timed out after 30s during get_existing_children, assuming no children"
+                );
+                return Ok(Vec::new());
+            }
+        };
 
         let titles: Vec<String> = all_beads
             .iter()
