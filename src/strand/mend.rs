@@ -1267,6 +1267,156 @@ mod tests {
         assert_eq!(release_count.load(Ordering::Relaxed), 1);
     }
 
+    // ── Qualified ID collision tests ────────────────────────────────────────
+
+    /// When two workers from different adapter pools share a NATO name (e.g.
+    /// "foxtrot"), their qualified IDs differ (e.g. "glm-5-foxtrot" vs
+    /// "glm-4_7-foxtrot"). A bead assigned to one must NOT be treated as
+    /// orphaned just because the other worker of the same NATO name is alive.
+    #[tokio::test]
+    async fn collision_same_nato_different_adapter_live_worker_not_released() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Two workers share NATO name "foxtrot" but have different adapters.
+        let glm5_foxtrot = "claude-code-glm-5-foxtrot";
+        let glm47_foxtrot = "claude-code-glm-4_7-foxtrot";
+
+        // A bead assigned to glm-5-foxtrot.
+        let bead = make_in_progress_bead("nd-collision-a", glm5_foxtrot);
+
+        // Register BOTH workers as alive.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: glm5_foxtrot.to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "claude-code-glm-5".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+            })
+            .unwrap();
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: glm47_foxtrot.to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "claude-code-glm-4_7".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 100,
+            })
+            .unwrap();
+
+        // Run mend as glm-4_7-foxtrot.
+        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            glm47_foxtrot.to_string(),
+            registry,
+            Telemetry::new(glm47_foxtrot.to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork — bead assigned to glm-5-foxtrot should NOT be orphaned, got: {result:?}"
+        );
+        assert_eq!(
+            release_count.load(Ordering::Relaxed),
+            0,
+            "bead must not be released when its owner (glm-5-foxtrot) is alive"
+        );
+    }
+
+    /// When only one worker of a shared NATO name is dead, the bead assigned
+    /// to the dead worker's qualified ID should be released even though the
+    /// other worker with the same NATO name is alive.
+    #[tokio::test]
+    async fn collision_same_nato_different_adapter_dead_worker_released() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let glm5_foxtrot = "claude-code-glm-5-foxtrot";
+        let glm47_foxtrot = "claude-code-glm-4_7-foxtrot";
+
+        // A bead assigned to glm-5-foxtrot (which is dead).
+        let bead = make_in_progress_bead("nd-collision-b", glm5_foxtrot);
+
+        // Register glm-5-foxtrot as DEAD and glm-4_7-foxtrot as alive.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: glm5_foxtrot.to_string(),
+                pid: 99_999_999, // dead PID
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "claude-code-glm-5".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 342,
+            })
+            .unwrap();
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: glm47_foxtrot.to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "claude-code-glm-4_7".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        // Run mend as glm-4_7-foxtrot.
+        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            glm47_foxtrot.to_string(),
+            registry,
+            Telemetry::new(glm47_foxtrot.to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated — bead assigned to dead glm-5-foxtrot should be orphaned, got: {result:?}"
+        );
+        assert_eq!(
+            release_count.load(Ordering::Relaxed),
+            1,
+            "bead must be released when its owner (glm-5-foxtrot) is dead"
+        );
+    }
+
     // ── Orphaned lock file tests ─────────────────────────────────────────────
 
     #[tokio::test]
