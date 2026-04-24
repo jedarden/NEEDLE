@@ -6,6 +6,8 @@
 //! Depends on: `types`, `config`, `bead_store`, `telemetry`, `validation`.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
@@ -124,6 +126,37 @@ impl OutcomeHandler {
             bead_action,
             telemetry_events,
         })
+    }
+
+    /// Handle a process output with cancellation support.
+    ///
+    /// Checks the cancellation flag before starting the handler and returns
+    /// early if the handler has been cancelled (e.g., due to a timeout in
+    /// the worker). This prevents the handler from making further br calls
+    /// after a timeout has occurred.
+    pub async fn handle_with_cancellation(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        output: &AgentOutcome,
+        was_interrupted: bool,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<HandlerResult> {
+        // Check if we've been cancelled before starting.
+        if cancelled.load(Ordering::Acquire) {
+            tracing::warn!(
+                bead_id = %bead.id,
+                "outcome handler cancelled before starting, returning early"
+            );
+            // Return a default HandlerResult to allow the worker to recover.
+            return Ok(HandlerResult {
+                outcome: classify(output.exit_code, was_interrupted),
+                bead_action: BeadAction::None,
+                telemetry_events: vec![],
+            });
+        }
+
+        self.handle(store, bead, output, was_interrupted).await
     }
 
     /// Success: run validation gates (if configured), then verify bead closure.

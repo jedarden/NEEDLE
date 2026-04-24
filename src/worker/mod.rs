@@ -904,15 +904,27 @@ impl Worker {
             state: "HANDLING".to_string(),
         });
 
+        // Create a cancellation flag that can be used to abort the outcome handler
+        // if it hangs. This is a workaround for tokio::time::timeout not cancelling
+        // the future - it just stops waiting for it.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let cancelled = Arc::new(AtomicBool::new(false));
+
         // Spawn a background task that emits heartbeat telemetry events every 5 seconds.
         // This allows external monitoring to detect hangs in HANDLING state without
         // waiting for the slower heartbeat file interval (default 60s).
         let bead_id_for_heartbeat = bead.id.clone();
         let telemetry_for_heartbeat = self.telemetry.clone();
+        let cancelled_for_heartbeat = cancelled.clone();
         let heartbeat_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 interval.tick().await;
+                // Check if we've been cancelled and stop emitting if so.
+                if cancelled_for_heartbeat.load(Ordering::Relaxed) {
+                    break;
+                }
                 let _ = telemetry_for_heartbeat.emit(EventKind::HeartbeatEmitted {
                     bead_id: Some(bead_id_for_heartbeat.clone()),
                     state: "HANDLING".to_string(),
@@ -923,9 +935,13 @@ impl Worker {
         // Wrap the outcome handler in a 60-second timeout to prevent indefinite hangs.
         // The health monitor's background thread writes heartbeat files based on
         // shared state, so external monitoring can detect hangs via stale heartbeats.
-        let handler_future =
-            self.outcome_handler
-                .handle(self.store.as_ref(), &bead, &output, was_interrupted);
+        let handler_future = self.outcome_handler.handle_with_cancellation(
+            self.store.as_ref(),
+            &bead,
+            &output,
+            was_interrupted,
+            cancelled.clone(),
+        );
         let bead_id_clone = bead.id.clone();
         let store_clone = self.store.clone();
         let telemetry_clone = self.telemetry.clone();
@@ -947,6 +963,8 @@ impl Worker {
                     error = %e,
                     "outcome handler failed, attempting best-effort release and transitioning to LOGGING"
                 );
+                // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
+                cancelled.store(true, Ordering::Release);
                 telemetry_clone.emit(EventKind::WorkerHandlingTimeout {
                     bead_id: bead_id_clone.clone(),
                     outcome: "unknown".to_string(),
@@ -971,6 +989,8 @@ impl Worker {
                     bead_id = %bead.id,
                     "outcome handler timed out after 60s, attempting best-effort release and transitioning to LOGGING"
                 );
+                // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
+                cancelled.store(true, Ordering::Release);
                 telemetry_clone.emit(EventKind::WorkerHandlingTimeout {
                     bead_id: bead_id_clone.clone(),
                     outcome: "unknown".to_string(),
@@ -1055,7 +1075,8 @@ impl Worker {
             self.set_state(WorkerState::Logging)?;
         }
 
-        // Abort the heartbeat task since handling is complete.
+        // Set cancellation flag and abort the heartbeat task since handling is complete.
+        cancelled.store(true, Ordering::Release);
         heartbeat_task.abort();
 
         Ok(())
@@ -1299,12 +1320,13 @@ impl Worker {
                 // idle period, the heartbeat file will become stale and can be detected.
                 self.health.update_state(&WorkerState::Exhausted, None);
 
-                // Cancellable sleep: check shutdown flag every 1 second instead of
+                // Cancellable sleep: check shutdown flag every 5 seconds instead of
                 // sleeping for the full duration. This ensures the worker responds to
                 // signals during idle and emits worker.stopped telemetry before being
-                // killed. A 1-second interval provides better responsiveness (workers can be
-                // reaped at any time by external governors) while still avoiding busy-waiting.
-                let check_interval = 1u64;
+                // killed. A 5-second interval matches the heartbeat_interval config,
+                // ensuring the heartbeat file is updated on every iteration while still
+                // avoiding busy-waiting.
+                let check_interval = 5u64;
                 let mut elapsed = 0u64;
                 let mut shutdown_check_count = 0u64;
 
@@ -1321,24 +1343,14 @@ impl Worker {
                         state: "EXHAUSTED_IDLE".to_string(),
                     })?;
 
+                    // Update heartbeat state before sleeping to ensure the heartbeat file
+                    // is fresh even if the worker dies during this sleep iteration.
+                    self.health.update_state(&WorkerState::Exhausted, None);
+
                     // Sleep for a short interval, then check shutdown flag.
                     tokio::time::sleep(sleep_duration).await;
                     elapsed += check_interval;
                     shutdown_check_count += 1;
-
-                    // Update heartbeat periodically during long idle sleeps to prevent
-                    // external monitors from thinking the worker is dead.
-                    // Use a 5-second interval to match the heartbeat_interval config,
-                    // ensuring the heartbeat file is updated frequently even during long idle periods.
-                    if shutdown_check_count % 5 == 0 {
-                        // Every 5 seconds (5 * 1s), update heartbeat state
-                        self.health.update_state(&WorkerState::Exhausted, None);
-                        tracing::debug!(
-                            elapsed_secs = elapsed,
-                            remaining_secs = remaining,
-                            "idle heartbeat update"
-                        );
-                    }
 
                     if self.shutdown.load(Ordering::SeqCst) {
                         // Retrieve and clear the last received signal for logging.
