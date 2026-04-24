@@ -333,10 +333,9 @@ impl HealthMonitor {
 
             if Self::is_stale(&hb, self.heartbeat_ttl) {
                 let pid_alive = Self::check_pid_alive(hb.pid);
-                let hb_file = hb
-                    .heartbeat_file
-                    .clone()
-                    .unwrap_or_else(|| self.heartbeat_dir.join(format!("{}.json", hb.worker_id)));
+                let hb_file = hb.heartbeat_file.clone().unwrap_or_else(|| {
+                    self.heartbeat_dir.join(format!("{}.json", hb.qualified_id))
+                });
                 stale.push(StalePeer {
                     worker_id: hb.worker_id.clone(),
                     qualified_id: Some(hb.qualified_id.clone()),
