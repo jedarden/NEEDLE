@@ -106,6 +106,10 @@ pub struct WorkerConfig {
     /// Warn when available memory falls below this threshold (MB).
     #[serde(default = "WorkerConfig::default_memory_free_warn_mb")]
     pub memory_free_warn_mb: u64,
+
+    /// BUILDING state timeout in seconds (0 = unlimited).
+    #[serde(default = "WorkerConfig::default_building_timeout")]
+    pub building_timeout: u64,
 }
 
 impl Default for WorkerConfig {
@@ -120,6 +124,7 @@ impl Default for WorkerConfig {
             identifier_scheme: IdentifierScheme::default(),
             cpu_load_warn: Self::default_cpu_load_warn(),
             memory_free_warn_mb: Self::default_memory_free_warn_mb(),
+            building_timeout: Self::default_building_timeout(),
         }
     }
 }
@@ -145,6 +150,9 @@ impl WorkerConfig {
     }
     fn default_memory_free_warn_mb() -> u64 {
         512
+    }
+    fn default_building_timeout() -> u64 {
+        600
     }
 }
 

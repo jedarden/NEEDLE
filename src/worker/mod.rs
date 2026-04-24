@@ -382,7 +382,7 @@ impl Worker {
                 WorkerState::Selecting => self.do_select().await?,
                 WorkerState::Claiming => self.do_claim().await?,
                 WorkerState::Retrying => self.do_retry().await?,
-                WorkerState::Building => self.do_build()?,
+                WorkerState::Building => self.do_build().await?,
                 WorkerState::Dispatching => self.do_dispatch().await?,
                 WorkerState::Executing => self.do_execute().await?,
                 WorkerState::Handling => self.do_handle().await?,
@@ -722,22 +722,101 @@ impl Worker {
     }
 
     /// BUILDING: construct prompt from claimed bead.
-    fn do_build(&mut self) -> Result<()> {
+    async fn do_build(&mut self) -> Result<()> {
         let bead = match self.current_bead {
-            Some(ref b) => b,
+            Some(ref b) => b.clone(),
             None => {
                 bail!("BUILDING state without current_bead — invariant violated");
             }
         };
 
         let build_ws = if is_workspace_unset(&bead.workspace) {
-            &self.config.workspace.default
+            self.config.workspace.default.clone()
         } else {
-            &bead.workspace
+            bead.workspace.clone()
         };
-        let mut prompt = self
-            .prompt_builder
-            .build_pluck(bead, build_ws, &self.worker_name)?;
+
+        let worker_name = self.worker_name.clone();
+        let prompt_builder = self.prompt_builder.clone();
+
+        // Wrap prompt building in timeout. The build operation can be slow for
+        // large workspaces with many learning files.
+        // Enforce minimum timeout to prevent indefinite hangs (issue needle-3igr).
+        const MIN_BUILDING_TIMEOUT_SECS: u64 = 60;
+        let timeout_secs = self.config.worker.building_timeout.max(MIN_BUILDING_TIMEOUT_SECS);
+        let timeout_dur = std::time::Duration::from_secs(timeout_secs);
+        let bead_id = bead.id.clone();
+        let heartbeat_bead_id = bead_id.clone();
+        let telemetry = self.telemetry.clone();
+
+        // Spawn heartbeat task that emits periodic updates during the build.
+        // Heartbeat interval: every 30 seconds.
+        let heartbeat_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            let start = std::time::Instant::now();
+            loop {
+                interval.tick().await;
+                let elapsed_ms = start.elapsed().as_millis() as u64;
+                let _ = telemetry.emit(EventKind::BuildHeartbeat {
+                    bead_id: heartbeat_bead_id.clone(),
+                    elapsed_ms,
+                });
+            }
+        });
+
+        let mut prompt = match tokio::time::timeout(
+            timeout_dur,
+            tokio::task::spawn_blocking(move || {
+                prompt_builder.build_pluck(&bead, &build_ws, &worker_name)
+            }),
+        )
+        .await
+        {
+            Ok(Ok(result)) => result?,
+            Ok(Err(e)) => {
+                heartbeat_handle.abort();
+                bail!("prompt building task failed: {}", e);
+            }
+            Err(_) => {
+                heartbeat_handle.abort();
+                // Timeout: release the bead and transition to RETRYING.
+                tracing::error!(
+                    bead_id = %bead_id,
+                    timeout_secs = timeout_secs,
+                    configured_timeout = self.config.worker.building_timeout,
+                    "BUILDING state timed out"
+                );
+
+                // Emit build.timeout event.
+                let _ = self.telemetry.emit(EventKind::BuildTimeout {
+                    bead_id: bead_id.clone(),
+                    timeout_secs,
+                });
+
+                // Release the bead with timeout protection.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    self.store.release(&bead_id),
+                )
+                .await;
+
+                // Emit bead.released event.
+                let _ = self
+                    .telemetry
+                    .emit(EventKind::BeadReleased {
+                        bead_id: bead_id.clone(),
+                        reason: "build_timeout".to_string(),
+                    });
+
+                // Clear current bead and transition to RETRYING.
+                self.current_bead = None;
+                self.set_state(WorkerState::Retrying)?;
+                return Ok(());
+            }
+        };
+
+        // Stop heartbeat task.
+        heartbeat_handle.abort();
 
         // Prepend the HOOP dispatch tag so session tailers can join transcripts
         // back to beads. Format: [needle:<qualified-worker>:<bead-id>:<strand>]
@@ -745,7 +824,7 @@ impl Worker {
         prompt.content = format!(
             "[needle:{}:{}:{}]\n{}",
             self.qualified_id(),
-            bead.id,
+            bead_id,
             strand,
             prompt.content
         );
@@ -1320,13 +1399,12 @@ impl Worker {
                 // idle period, the heartbeat file will become stale and can be detected.
                 self.health.update_state(&WorkerState::Exhausted, None);
 
-                // Cancellable sleep: check shutdown flag every 5 seconds instead of
+                // Cancellable sleep: check shutdown flag every 1 second instead of
                 // sleeping for the full duration. This ensures the worker responds to
-                // signals during idle and emits worker.stopped telemetry before being
-                // killed. A 5-second interval matches the heartbeat_interval config,
-                // ensuring the heartbeat file is updated on every iteration while still
-                // avoiding busy-waiting.
-                let check_interval = 5u64;
+                // signals during idle within 1 second and emits worker.stopped telemetry
+                // before being killed. A 1-second interval provides good responsiveness
+                // while still avoiding busy-waiting.
+                let check_interval = 1u64;
                 let mut elapsed = 0u64;
                 let mut shutdown_check_count = 0u64;
 
@@ -1389,6 +1467,43 @@ impl Worker {
                         }
                         return self.stop("signal received during idle").await;
                     }
+                }
+
+                // Final shutdown check after loop exits to handle the race where
+                // a signal was received during the last sleep iteration. Without this
+                // check, the worker would transition to SELECTING instead of stopping.
+                if self.shutdown.load(Ordering::SeqCst) {
+                    // Retrieve and clear the last received signal for logging.
+                    #[cfg(unix)]
+                    let signal_name = {
+                        let sig = LAST_SIGNAL.swap(0, AtomicOrdering::SeqCst);
+                        if sig == 0 {
+                            None
+                        } else {
+                            Some(match sig {
+                                1 => "SIGHUP",
+                                2 => "SIGINT",
+                                15 => "SIGTERM",
+                                _ => "unknown signal",
+                            })
+                        }
+                    };
+                    #[cfg(not(unix))]
+                    let signal_name = None;
+
+                    if let Some(name) = signal_name {
+                        tracing::info!(
+                            backoff_secs = backoff,
+                            signal = name,
+                            "shutdown received after idle loop completed, stopping worker"
+                        );
+                    } else {
+                        tracing::info!(
+                            backoff_secs = backoff,
+                            "shutdown received after idle loop completed, stopping worker"
+                        );
+                    }
+                    return self.stop("signal received after idle").await;
                 }
 
                 tracing::info!(
@@ -2142,7 +2257,7 @@ mod tests {
         worker.state = WorkerState::Building;
         worker.current_bead = None;
 
-        let result = worker.do_build();
+        let result = worker.do_build().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invariant"));
     }
@@ -2155,7 +2270,7 @@ mod tests {
         worker.state = WorkerState::Building;
         worker.current_bead = Some(make_test_bead("needle-build"));
 
-        worker.do_build().unwrap();
+        worker.do_build().await.unwrap();
 
         assert_eq!(*worker.state(), WorkerState::Dispatching);
         assert!(worker.built_prompt.is_some());

@@ -155,6 +155,14 @@ pub enum EventKind {
         exit_code: i32,
         duration_ms: u64,
     },
+    BuildTimeout {
+        bead_id: BeadId,
+        timeout_secs: u64,
+    },
+    BuildHeartbeat {
+        bead_id: BeadId,
+        elapsed_ms: u64,
+    },
 
     // ── Outcome ──
     OutcomeClassified {
@@ -424,6 +432,8 @@ impl EventKind {
             EventKind::BeadOrphaned { .. } => "bead.orphaned",
             EventKind::DispatchStarted { .. } => "agent.dispatched",
             EventKind::DispatchCompleted { .. } => "agent.completed",
+            EventKind::BuildTimeout { .. } => "build.timeout",
+            EventKind::BuildHeartbeat { .. } => "build.heartbeat",
             EventKind::OutcomeClassified { .. } => "outcome.classified",
             EventKind::OutcomeHandled { .. } => "outcome.handled",
             EventKind::WorkerHandlingTimeout { .. } => "worker.handling.timeout",
@@ -488,6 +498,8 @@ impl EventKind {
             | EventKind::BeadOrphaned { bead_id }
             | EventKind::DispatchStarted { bead_id, .. }
             | EventKind::DispatchCompleted { bead_id, .. }
+            | EventKind::BuildTimeout { bead_id, .. }
+            | EventKind::BuildHeartbeat { bead_id, .. }
             | EventKind::OutcomeClassified { bead_id, .. }
             | EventKind::OutcomeHandled { bead_id, .. }
             | EventKind::WorkerHandlingTimeout { bead_id, .. }
@@ -673,6 +685,24 @@ impl EventKind {
                     "bead_id": bead_id.as_ref(),
                     "exit_code": exit_code,
                     "duration_ms": duration_ms,
+                })
+            }
+            EventKind::BuildTimeout {
+                bead_id,
+                timeout_secs,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "timeout_secs": timeout_secs,
+                })
+            }
+            EventKind::BuildHeartbeat {
+                bead_id,
+                elapsed_ms,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "elapsed_ms": elapsed_ms,
                 })
             }
             EventKind::OutcomeClassified {
@@ -1080,6 +1110,8 @@ impl EventKind {
             | EventKind::BeadReleased { .. }
             | EventKind::BeadOrphaned { .. }
             | EventKind::DispatchStarted { .. }
+            | EventKind::BuildTimeout { .. }
+            | EventKind::BuildHeartbeat { .. }
             | EventKind::OutcomeClassified { .. }
             | EventKind::OutcomeHandled { .. }
             | EventKind::WorkerHandlingTimeout { .. }
