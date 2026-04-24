@@ -515,6 +515,156 @@ async fn exhaustion_with_idle_action_exit() {
     );
 }
 
+#[tokio::test]
+async fn exhaustion_with_idle_action_wait_survives_sleep() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// Mock store that returns NoWork initially, then a bead after N calls.
+    struct DelayedBeadStore {
+        call_count: AtomicU32,
+        bead_after: u32,
+        bead: Mutex<Option<Bead>>,
+    }
+
+    #[async_trait]
+    impl BeadStore for DelayedBeadStore {
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            let count = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if count >= self.bead_after {
+                Ok(self
+                    .bead
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .map(|b| vec![b])
+                    .unwrap_or_default())
+            } else {
+                Ok(Vec::new())
+            }
+        }
+
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(vec![])
+        }
+
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("not implemented in mock")
+        }
+
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            let bead = self.bead.lock().unwrap().clone();
+            match bead {
+                Some(b) => Ok(ClaimResult::Claimed(b)),
+                None => Ok(ClaimResult::NotClaimable {
+                    reason: "no bead".to_string(),
+                }),
+            }
+        }
+
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn create_bead(
+            &self,
+            _title: &str,
+            _body: &str,
+            _labels: &[&str],
+        ) -> Result<BeadId> {
+            Ok(BeadId::from("mock-bead"))
+        }
+
+        async fn add_dependency(
+            &self,
+            _blocker_id: &BeadId,
+            _blocked_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    let bead = Bead {
+        id: BeadId::from("test-bead"),
+        status: BeadStatus::Open,
+        title: "Test Bead".to_string(),
+        body: Some("Test body".to_string()),
+        priority: 1,
+        assignee: None,
+        labels: vec![],
+        workspace: std::path::PathBuf::from("/tmp"),
+        dependencies: vec![],
+        dependents: vec![],
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+
+    let store: Arc<dyn BeadStore> = Arc::new(DelayedBeadStore {
+        call_count: AtomicU32::new(0),
+        bead_after: 2, // Add bead after 2 calls (first call goes to EXHAUSTED, second after sleep)
+        bead: Mutex::new(Some(bead)),
+    });
+
+    let _home_dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.worker.idle_action = IdleAction::Wait;
+    config.worker.idle_timeout = 1; // 1 second for fast test
+    config.agent.default = "echo-test".to_string();
+    config.workspace.home = _home_dir.path().to_path_buf();
+    config.self_modification.hot_reload = false;
+    config.workspace.default = std::path::PathBuf::from("/tmp");
+
+    let mut worker = Worker::new(config, "test-worker".to_string(), store);
+
+    let adapter = test_adapter("echo-test", "echo done", 10);
+    let mut adapters = HashMap::new();
+    adapters.insert("echo-test".to_string(), adapter);
+    worker.set_dispatcher(Dispatcher::with_adapters(
+        adapters,
+        Telemetry::new("test-worker".to_string()),
+        10,
+    ));
+
+    let result = worker.run().await.unwrap();
+    assert_eq!(
+        result,
+        WorkerState::Stopped,
+        "worker should stop after processing the delayed bead"
+    );
+    assert_eq!(
+        worker.beads_processed(),
+        1,
+        "worker should process the bead that appeared after idle sleep"
+    );
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Test 4: Graceful shutdown
 // ═════════════════════════════════════════════════════════════════════════════
