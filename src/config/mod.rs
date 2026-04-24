@@ -642,6 +642,45 @@ impl ReflectConfig {
     }
 }
 
+/// Splice strand configuration (worker failure documentation).
+///
+/// Splice detects dead workers (no heartbeat for stale_threshold_secs) and
+/// documents them as failure beads in the NEEDLE workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpliceConfig {
+    /// Whether the Splice strand is enabled (default: true).
+    #[serde(default = "SpliceConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Seconds since last heartbeat before a worker is considered stale (default: 300).
+    #[serde(default = "SpliceConfig::default_stale_threshold_secs")]
+    pub stale_threshold_secs: u64,
+
+    /// Path to the workspace where worker failure beads are created.
+    /// When `None`, failures are logged but no bead is created.
+    #[serde(default)]
+    pub report_workspace: Option<PathBuf>,
+}
+
+impl Default for SpliceConfig {
+    fn default() -> Self {
+        SpliceConfig {
+            enabled: Self::default_enabled(),
+            stale_threshold_secs: Self::default_stale_threshold_secs(),
+            report_workspace: None,
+        }
+    }
+}
+
+impl SpliceConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_stale_threshold_secs() -> u64 {
+        300
+    }
+}
+
 /// Strand waterfall configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StrandsConfig {
@@ -663,6 +702,8 @@ pub struct StrandsConfig {
     pub pulse: PulseConfig,
     #[serde(default)]
     pub reflect: ReflectConfig,
+    #[serde(default)]
+    pub splice: SpliceConfig,
     /// Learning and trace retention configuration.
     #[serde(default)]
     pub learning: LearningConfig,
@@ -2706,6 +2747,14 @@ strands:
         let config = ReflectConfig::default();
         assert!(config.extraction_agent.is_none());
         assert_eq!(config.max_extraction_per_run, 5);
+    }
+
+    #[test]
+    fn splice_config_default_values() {
+        let config = SpliceConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.stale_threshold_secs, 300);
+        assert!(config.report_workspace.is_none());
     }
 
     #[test]
