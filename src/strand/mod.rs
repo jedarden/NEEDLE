@@ -12,6 +12,7 @@ mod mend;
 mod pluck;
 pub mod pulse;
 pub mod reflect;
+pub mod splice;
 pub mod unravel;
 pub mod weave;
 
@@ -29,6 +30,7 @@ pub use mend::{cleanup_orphaned_in_progress, MendStrand};
 pub use pluck::PluckStrand;
 pub use pulse::PulseStrand;
 pub use reflect::{CliReflectAgent, ReflectAgent, ReflectStrand};
+pub use splice::SpliceStrand;
 pub use unravel::{UnravelAgent, UnravelStrand};
 pub use weave::{CliWeaveAgent, WeaveAgent, WeaveStrand};
 
@@ -55,7 +57,7 @@ impl StrandRunner {
     /// Build the default strand waterfall from config.
     ///
     /// The waterfall order is:
-    /// Pluck → Mend → Explore → Weave → Unravel → Pulse → Reflect → Knot.
+    /// Pluck → Mend → Explore → Weave → Unravel → Pulse → Reflect → Splice → Knot.
     pub fn from_config(
         config: &Config,
         worker_id: &str,
@@ -150,8 +152,17 @@ impl StrandRunner {
             config.strands.reflect.clone(),
             config.workspace.default.clone(),
             state_base.join("reflect"),
-            telemetry,
+            telemetry.clone(),
             reflect_agent,
+        );
+
+        // Reconstruct heartbeat_dir for Splice (same path used by Mend).
+        let splice_heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
+        let splice = SpliceStrand::new(
+            config.strands.splice.clone(),
+            splice_heartbeat_dir,
+            state_base.join("splice"),
+            telemetry,
         );
 
         let knot = KnotStrand::new(config.strands.knot.clone());
@@ -164,6 +175,7 @@ impl StrandRunner {
                 Box::new(unravel),
                 Box::new(pulse),
                 Box::new(reflect),
+                Box::new(splice),
                 Box::new(knot),
             ],
         }
@@ -348,6 +360,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -517,7 +532,10 @@ mod tests {
         let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
         assert_eq!(
             runner.strand_names(),
-            vec!["pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "knot"]
+            vec![
+                "pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "splice",
+                "knot"
+            ]
         );
     }
 }
