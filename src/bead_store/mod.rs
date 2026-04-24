@@ -189,21 +189,38 @@ impl BrCliBeadStore {
         Ok(BrCliBeadStore { br_path, workspace })
     }
 
+    /// Default timeout for br subprocess calls (30 seconds).
+    const DEFAULT_BR_TIMEOUT_SECS: u64 = 30;
+
     /// Run a `br` subcommand in the workspace directory and return stdout.
     ///
     /// Returns `Err` if the process fails to spawn, exits non-zero (unless
     /// the caller handles specific codes), or stdout is not valid UTF-8.
     async fn run_br(&self, args: &[&str]) -> Result<String> {
-        self.run_br_in(&self.workspace, args).await
+        self.run_br_in(&self.workspace, args, Self::DEFAULT_BR_TIMEOUT_SECS)
+            .await
     }
 
-    async fn run_br_in(&self, dir: &Path, args: &[&str]) -> Result<String> {
-        let output = tokio::process::Command::new(&self.br_path)
-            .args(args)
-            .current_dir(dir)
-            .output()
-            .await
-            .with_context(|| format!("failed to spawn br with args: {args:?}"))?;
+    /// Run a `br` subcommand with a custom timeout.
+    ///
+    /// Use this for calls that may take longer (e.g., sync operations).
+    #[allow(dead_code)]
+    async fn run_br_with_timeout(&self, args: &[&str], timeout_secs: u64) -> Result<String> {
+        self.run_br_in(&self.workspace, args, timeout_secs).await
+    }
+
+    async fn run_br_in(&self, dir: &Path, args: &[&str], timeout_secs: u64) -> Result<String> {
+        let timeout_duration = std::time::Duration::from_secs(timeout_secs);
+
+        let output = tokio::time::timeout(
+            timeout_duration,
+            tokio::process::Command::new(&self.br_path)
+                .args(args)
+                .current_dir(dir)
+                .output(),
+        )
+        .await
+        .with_context(|| format!("br subprocess timed out after {timeout_secs}s: {args:?}"))??;
 
         let stdout = String::from_utf8(output.stdout).context("br stdout was not valid UTF-8")?;
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -232,25 +249,35 @@ impl BrCliBeadStore {
                     args = ?args,
                     "br hit SYNC_CONFLICT, running br sync and retrying"
                 );
-                let sync_output = tokio::process::Command::new(&self.br_path)
-                    .args(["sync"])
-                    .current_dir(dir)
-                    .output()
-                    .await
-                    .context("failed to run br sync for SYNC_CONFLICT recovery")?;
+                let sync_output = tokio::time::timeout(
+                    std::time::Duration::from_secs(60), // sync may take longer
+                    tokio::process::Command::new(&self.br_path)
+                        .args(["sync"])
+                        .current_dir(dir)
+                        .output(),
+                )
+                .await
+                .context("br sync timed out after 60s during SYNC_CONFLICT recovery")?
+                .context("failed to run br sync for SYNC_CONFLICT recovery")?;
 
                 if !sync_output.status.success() {
                     let sync_stderr = String::from_utf8_lossy(&sync_output.stderr);
                     tracing::warn!(stderr = %sync_stderr, "br sync failed, retrying original command anyway");
                 }
 
-                // Retry the original command once.
-                let retry = tokio::process::Command::new(&self.br_path)
-                    .args(args)
-                    .current_dir(dir)
-                    .output()
-                    .await
-                    .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
+                // Retry the original command once with timeout.
+                let retry = tokio::time::timeout(
+                    timeout_duration,
+                    tokio::process::Command::new(&self.br_path)
+                        .args(args)
+                        .current_dir(dir)
+                        .output(),
+                )
+                .await
+                .with_context(|| {
+                    format!("br retry subprocess timed out after {timeout_secs}s: {args:?}")
+                })?
+                .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
 
                 let retry_stdout = String::from_utf8(retry.stdout)
                     .context("br retry stdout was not valid UTF-8")?;
@@ -278,12 +305,22 @@ impl BrCliBeadStore {
     /// Auto-recovers from SYNC_CONFLICT (exit code 6): runs `br sync` then
     /// retries the original command once.
     async fn run_br_with_status(&self, args: &[&str]) -> Result<(i32, String)> {
-        let output = tokio::process::Command::new(&self.br_path)
-            .args(args)
-            .current_dir(&self.workspace)
-            .output()
-            .await
-            .with_context(|| format!("failed to spawn br with args: {args:?}"))?;
+        let timeout_duration = std::time::Duration::from_secs(Self::DEFAULT_BR_TIMEOUT_SECS);
+
+        let output = tokio::time::timeout(
+            timeout_duration,
+            tokio::process::Command::new(&self.br_path)
+                .args(args)
+                .current_dir(&self.workspace)
+                .output(),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "br subprocess timed out after {timeout_secs}s: {args:?}",
+                timeout_secs = Self::DEFAULT_BR_TIMEOUT_SECS
+            )
+        })??;
 
         let code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8(output.stdout).context("br stdout was not valid UTF-8")?;
@@ -295,18 +332,31 @@ impl BrCliBeadStore {
                 args = ?args,
                 "br hit SYNC_CONFLICT (run_br_with_status), running br sync and retrying"
             );
-            let _ = tokio::process::Command::new(&self.br_path)
-                .args(["sync"])
-                .current_dir(&self.workspace)
-                .output()
-                .await;
+            let sync_timeout = std::time::Duration::from_secs(60);
+            let _ = tokio::time::timeout(
+                sync_timeout,
+                tokio::process::Command::new(&self.br_path)
+                    .args(["sync"])
+                    .current_dir(&self.workspace)
+                    .output(),
+            )
+            .await;
 
-            let retry = tokio::process::Command::new(&self.br_path)
-                .args(args)
-                .current_dir(&self.workspace)
-                .output()
-                .await
-                .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
+            let retry = tokio::time::timeout(
+                timeout_duration,
+                tokio::process::Command::new(&self.br_path)
+                    .args(args)
+                    .current_dir(&self.workspace)
+                    .output(),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "br retry subprocess timed out after {timeout_secs}s: {args:?}",
+                    timeout_secs = Self::DEFAULT_BR_TIMEOUT_SECS
+                )
+            })?
+            .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
 
             let retry_code = retry.status.code().unwrap_or(-1);
             let retry_stdout =

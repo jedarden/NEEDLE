@@ -17,6 +17,9 @@ use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 
+#[cfg(unix)]
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
+
 use crate::bead_store::BeadStore;
 use crate::canary::CanaryRunner;
 use crate::claim::Claimer;
@@ -33,6 +36,105 @@ use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{AgentOutcome, Bead, BeadId, ClaimResult, IdleAction, Outcome, WorkerState};
 use crate::upgrade::{self, HotReloadCheck};
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Global shutdown flag for signal handlers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Global pointer to the shutdown flag, used by synchronous signal handlers.
+/// This is necessary because signal handlers run in a separate context and
+/// cannot easily access the Worker's shutdown flag directly.
+#[cfg(unix)]
+static GLOBAL_SHUTDOWN_FLAG: AtomicUsize = AtomicUsize::new(0);
+
+/// Set the global shutdown flag pointer.
+/// Called by `install_signal_handlers` to register the shutdown flag.
+#[cfg(unix)]
+fn set_global_shutdown_flag(ptr: usize) {
+    GLOBAL_SHUTDOWN_FLAG.store(ptr, AtomicOrdering::SeqCst);
+}
+
+/// Clear the global shutdown flag pointer.
+/// Called when the worker is dropped to avoid dangling pointers.
+#[cfg(unix)]
+fn clear_global_shutdown_flag() {
+    GLOBAL_SHUTDOWN_FLAG.store(0, AtomicOrdering::SeqCst);
+    LAST_SIGNAL.store(0, AtomicOrdering::SeqCst);
+}
+
+/// Track the last received signal for diagnostic logging.
+/// AtomicU32 allows lock-free reads/writes from the signal handler.
+#[cfg(unix)]
+static LAST_SIGNAL: AtomicU32 = AtomicU32::new(0);
+
+/// Synchronous signal handler for SIGTERM, SIGINT, and SIGHUP.
+///
+/// This function is called directly by the OS when a signal is received.
+/// It must be async-signal-safe: no allocation, no locking, no I/O.
+/// We set the atomic shutdown flag, record the signal number, and return immediately.
+#[cfg(unix)]
+extern "C" fn signal_handler(sig: i32) {
+    // SAFETY: The signal handler is only installed after set_global_shutdown_flag
+    // has been called with a valid pointer. The pointer remains valid for the
+    // entire lifetime of the worker process.
+    let ptr = GLOBAL_SHUTDOWN_FLAG.load(AtomicOrdering::SeqCst) as *const AtomicBool;
+    if !ptr.is_null() {
+        // SAFETY: The pointer is valid and points to an AtomicBool that lives
+        // for the entire program duration.
+        unsafe {
+            (*ptr).store(true, AtomicOrdering::SeqCst);
+        }
+        // Record the signal number so the main loop can log it.
+        LAST_SIGNAL.store(sig as u32, AtomicOrdering::SeqCst);
+    }
+}
+
+/// Install synchronous signal handlers for SIGTERM, SIGINT, and SIGHUP.
+///
+/// Uses libc::sigaction to register handlers that set the shutdown flag
+/// immediately when a signal is received. This ensures that signals are
+/// caught even if the tokio runtime hasn't polled async signal tasks yet.
+#[cfg(unix)]
+unsafe fn install_unix_signal_handlers() {
+    use libc::{sigaction, sigemptyset, SA_RESTART, SIGHUP, SIGINT, SIGTERM};
+
+    // Set up the sigaction structure.
+    let mut act: libc::sigaction = std::mem::zeroed();
+    act.sa_sigaction = signal_handler as *const () as usize;
+    // Block all signals during handler execution to prevent re-entrancy issues.
+    sigemptyset(&mut act.sa_mask as *mut libc::sigset_t);
+    // Use SA_RESTART to automatically restart system calls interrupted by signals.
+    act.sa_flags = SA_RESTART;
+
+    // Install handlers for SIGTERM, SIGINT, and SIGHUP.
+    // We ignore errors here - if a handler can't be installed, we'll log a
+    // warning but continue. The async handlers (below) provide a fallback.
+    for &sig in &[SIGTERM, SIGINT, SIGHUP] {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        if sigaction(sig, &act, &mut old) == 0 {
+            tracing::debug!(signal = sig, "installed synchronous signal handler");
+        } else {
+            // Log the error but don't fail - the async handlers provide a fallback.
+            tracing::warn!(
+                signal = sig,
+                errno = *libc::__errno_location(),
+                "failed to install synchronous signal handler"
+            );
+        }
+    }
+}
+
+/// Stub implementations for non-Unix platforms.
+/// These functions are no-ops on platforms where Unix signals are not available.
+#[cfg(not(unix))]
+fn set_global_shutdown_flag(_ptr: usize) {
+    // No-op on non-Unix platforms
+}
+
+#[cfg(not(unix))]
+fn clear_global_shutdown_flag() {
+    // No-op on non-Unix platforms
+}
 
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
@@ -74,15 +176,18 @@ pub struct Worker {
 impl Worker {
     /// Construct a worker from config, a worker name, and a bead store implementation.
     pub fn new(config: Config, worker_name: String, store: Arc<dyn BeadStore>) -> Self {
+        let qualified_id = format!("{}-{}", config.agent.default, worker_name);
         // Create a single telemetry instance with hooks (if configured) and share
         // clones with all sub-components so that hook sinks receive every event.
-        let telemetry = Telemetry::from_config(worker_name.clone(), &config.telemetry)
+        // Uses qualified_id so log filenames and event worker_id fields are fully
+        // qualified (e.g., "claude-foxtrot" not just "foxtrot"), preventing
+        // collisions when workers from different adapter pools share a NATO name.
+        let telemetry = Telemetry::from_config(qualified_id.clone(), &config.telemetry)
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
-                Telemetry::new(worker_name.clone())
+                Telemetry::new(qualified_id.clone())
             });
         let strand_registry = Registry::default_location(&config.workspace.home);
-        let qualified_id = format!("{}-{}", config.agent.default, worker_name);
         let strands =
             StrandRunner::from_config(&config, &qualified_id, strand_registry, telemetry.clone());
         let claimer = Claimer::new(
@@ -117,7 +222,19 @@ impl Worker {
             }
         };
         let outcome_handler = OutcomeHandler::new(config.clone(), telemetry.clone());
-        let health = HealthMonitor::new(config.clone(), worker_name.clone(), telemetry.clone());
+
+        // Create the shutdown flag BEFORE creating HealthMonitor so we can share it.
+        // This ensures that when the heartbeat emitter's circuit breaker fires,
+        // it sets the worker's shutdown flag (not its own private flag), allowing
+        // the main worker loop to gracefully stop with worker.stopped telemetry.
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let health = HealthMonitor::new(
+            config.clone(),
+            worker_name.clone(),
+            telemetry.clone(),
+            Some(shutdown.clone()),
+        );
         let registry = Registry::default_location(&config.workspace.home);
         let rate_limiter =
             RateLimiter::new(config.limits.clone(), &config.workspace.home.join("state"));
@@ -159,7 +276,7 @@ impl Worker {
             retry_count: 0,
             consecutive_race_lost: 0,
             beads_processed,
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown,
             last_error: None,
             boot_time: None,
             built_prompt: None,
@@ -205,6 +322,30 @@ impl Worker {
         loop {
             // Check for shutdown signal between states.
             if self.shutdown.load(Ordering::SeqCst) {
+                // Retrieve and clear the last received signal for logging.
+                #[cfg(unix)]
+                let signal_name = {
+                    let sig = LAST_SIGNAL.swap(0, AtomicOrdering::SeqCst);
+                    if sig == 0 {
+                        None
+                    } else {
+                        Some(match sig {
+                            1 => "SIGHUP",
+                            2 => "SIGINT",
+                            15 => "SIGTERM",
+                            _ => "unknown signal",
+                        })
+                    }
+                };
+                #[cfg(not(unix))]
+                let signal_name = None;
+
+                let reason = if let Some(name) = signal_name {
+                    format!("signal received ({name})")
+                } else {
+                    "signal received".to_string()
+                };
+
                 match self.state {
                     // If we're in the middle of processing a bead, handle it
                     // as interrupted so the bead gets released.
@@ -226,10 +367,10 @@ impl Worker {
                             tracing::info!(bead_id = %bead_id, "releasing bead on shutdown");
                             let _ = self.store.release(&bead_id).await;
                         }
-                        return self.stop("signal received").await;
+                        return self.stop(&reason).await;
                     }
                     WorkerState::Stopped | WorkerState::Exhausted | WorkerState::Errored => {
-                        return self.stop("signal received").await;
+                        return self.stop(&reason).await;
                     }
                     WorkerState::Booting => {
                         return self.stop("signal received during boot").await;
@@ -247,7 +388,11 @@ impl Worker {
                 WorkerState::Handling => self.do_handle().await?,
                 WorkerState::Logging => self.do_log()?,
                 WorkerState::Exhausted => {
-                    return self.handle_exhausted().await;
+                    let next = self.handle_exhausted().await?;
+                    match next {
+                        WorkerState::Selecting => continue,
+                        terminal => return Ok(terminal),
+                    }
                 }
                 WorkerState::Stopped => {
                     return self.stop("normal shutdown").await;
@@ -338,36 +483,42 @@ impl Worker {
 
     // ── Signal handling ─────────────────────────────────────────────────────
 
-    /// Install SIGTERM and SIGINT handlers that set the shutdown flag.
+    /// Install SIGINT, SIGTERM, and SIGHUP handlers that set the shutdown flag.
+    ///
+    /// SIGHUP is handled because when the parent bash dies (e.g., tmux session
+    /// killed, external reaper), the child process receives SIGHUP by default.
+    /// Without a handler, the process terminates immediately without emitting
+    /// worker.stopped telemetry or flushing the telemetry buffer.
+    ///
+    /// Uses synchronous signal handlers via libc/signal-hook to ensure signals
+    /// are caught immediately, even if the tokio runtime hasn't polled async
+    /// signal tasks yet. This prevents silent process termination when signals
+    /// arrive early (e.g., SIGHUP from parent bash death during worker startup).
     fn install_signal_handlers(&self) {
-        let shutdown = self.shutdown.clone();
+        // Store a global reference to the shutdown flag for signal handlers.
+        // We use a leak to ensure the reference lives for the entire program duration.
+        let shutdown_ptr = Arc::into_raw(self.shutdown.clone()) as usize;
+        set_global_shutdown_flag(shutdown_ptr);
 
-        // SIGINT (Ctrl-C)
-        let shutdown_int = shutdown.clone();
-        tokio::spawn(async move {
-            if tokio::signal::ctrl_c().await.is_ok() {
-                tracing::info!("received SIGINT, initiating graceful shutdown");
-                shutdown_int.store(true, Ordering::SeqCst);
-            }
-        });
-
-        // SIGTERM (Unix only)
         #[cfg(unix)]
         {
-            let shutdown_term = shutdown;
+            // Install synchronous signal handlers using libc.
+            // These handlers are called immediately when the signal is received,
+            // before the tokio runtime has a chance to process any async tasks.
+            unsafe {
+                install_unix_signal_handlers();
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            // On non-Unix platforms, use tokio's ctrl_c handler.
+            let shutdown_int = self.shutdown.clone();
             tokio::spawn(async move {
-                let mut signal =
-                    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    {
-                        Ok(s) => s,
-                        Err(e) => {
-                            tracing::warn!(error = %e, "failed to install SIGTERM handler");
-                            return;
-                        }
-                    };
-                signal.recv().await;
-                tracing::info!("received SIGTERM, initiating graceful shutdown");
-                shutdown_term.store(true, Ordering::SeqCst);
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    tracing::info!("received SIGINT, initiating graceful shutdown");
+                    shutdown_int.store(true, Ordering::SeqCst);
+                }
             });
         }
     }
@@ -589,11 +740,11 @@ impl Worker {
             .build_pluck(bead, build_ws, &self.worker_name)?;
 
         // Prepend the HOOP dispatch tag so session tailers can join transcripts
-        // back to beads. Format: [needle:<worker>:<bead-id>:<strand>]
+        // back to beads. Format: [needle:<qualified-worker>:<bead-id>:<strand>]
         let strand = self.current_strand.as_deref().unwrap_or("pluck");
         prompt.content = format!(
             "[needle:{}:{}:{}]\n{}",
-            self.worker_name, bead.id, strand, prompt.content
+            self.qualified_id(), bead.id, strand, prompt.content
         );
 
         // Store the prompt for the dispatch phase. We use a transient field pattern:
@@ -743,10 +894,98 @@ impl Worker {
             }
         };
 
-        let handler_result = self
-            .outcome_handler
-            .handle(self.store.as_ref(), &bead, &output, was_interrupted)
-            .await?;
+        // Emit an initial heartbeat event to signal we've entered HANDLING state.
+        // This provides immediate visibility in the JSONL log when handling starts.
+        let _ = self.telemetry.emit(EventKind::HeartbeatEmitted {
+            bead_id: Some(bead.id.clone()),
+            state: "HANDLING".to_string(),
+        });
+
+        // Spawn a background task that emits heartbeat telemetry events every 5 seconds.
+        // This allows external monitoring to detect hangs in HANDLING state without
+        // waiting for the slower heartbeat file interval (default 60s).
+        let bead_id_for_heartbeat = bead.id.clone();
+        let telemetry_for_heartbeat = self.telemetry.clone();
+        let heartbeat_task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let _ = telemetry_for_heartbeat.emit(EventKind::HeartbeatEmitted {
+                    bead_id: Some(bead_id_for_heartbeat.clone()),
+                    state: "HANDLING".to_string(),
+                });
+            }
+        });
+
+        // Wrap the outcome handler in a 60-second timeout to prevent indefinite hangs.
+        // The health monitor's background thread writes heartbeat files based on
+        // shared state, so external monitoring can detect hangs via stale heartbeats.
+        let handler_future =
+            self.outcome_handler
+                .handle(self.store.as_ref(), &bead, &output, was_interrupted);
+        let bead_id_clone = bead.id.clone();
+        let store_clone = self.store.clone();
+        let telemetry_clone = self.telemetry.clone();
+
+        let handler_result = match tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            handler_future,
+        )
+        .await
+        {
+            Ok(Ok(result)) => {
+                // Handler completed successfully.
+                result
+            }
+            Ok(Err(e)) => {
+                // Handler returned an error - attempt best-effort release and recover.
+                tracing::error!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "outcome handler failed, attempting best-effort release and transitioning to LOGGING"
+                );
+                telemetry_clone.emit(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead_id_clone.clone(),
+                    outcome: "unknown".to_string(),
+                    operation: "handle".to_string(),
+                    error: e.to_string(),
+                })?;
+                // Attempt best-effort release with timeout.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    store_clone.release(&bead_id_clone),
+                )
+                .await;
+                // Explicitly transition to LOGGING to recover.
+                self.set_state(WorkerState::Logging)?;
+                return Ok(());
+            }
+            Err(_) => {
+                // Timeout after 60 seconds - attempt best-effort release and transition to LOGGING.
+                tracing::error!(
+                    bead_id = %bead.id,
+                    "outcome handler timed out after 60s, attempting best-effort release and transitioning to LOGGING"
+                );
+                telemetry_clone.emit(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead_id_clone.clone(),
+                    outcome: "unknown".to_string(),
+                    operation: "handle".to_string(),
+                    error: "timeout after 60s".to_string(),
+                })?;
+                // Attempt best-effort release with timeout.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    store_clone.release(&bead_id_clone),
+                )
+                .await;
+                // Explicitly transition to LOGGING to recover.
+                self.set_state(WorkerState::Logging)?;
+                return Ok(());
+            }
+        };
+
+        // Abort the heartbeat task since handling is complete.
+        heartbeat_task.abort();
 
         // Evaluate for mitosis after failure — the bead has already been
         // released and failure count incremented by the outcome handler.
@@ -756,40 +995,50 @@ impl Worker {
             } else {
                 bead.workspace.clone()
             };
-            match self
-                .mitosis_evaluator
-                .evaluate(
+
+            // Wrap mitosis evaluation in timeout to prevent indefinite hang.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                self.mitosis_evaluator.evaluate(
                     self.store.as_ref(),
                     &bead,
                     &workspace,
                     &self.dispatcher,
                     &self.prompt_builder,
                     &self.config.agent.default,
-                )
-                .await
+                ),
+            )
+            .await
             {
-                Ok(crate::mitosis::MitosisResult::Split { children }) => {
+                Ok(Ok(crate::mitosis::MitosisResult::Split { children })) => {
                     tracing::info!(
                         bead_id = %bead.id,
                         children = children.len(),
                         "mitosis created child beads — parent blocked"
                     );
                 }
-                Ok(crate::mitosis::MitosisResult::NotSplittable) => {
+                Ok(Ok(crate::mitosis::MitosisResult::NotSplittable)) => {
                     tracing::debug!(bead_id = %bead.id, "mitosis: bead is single task");
                 }
-                Ok(crate::mitosis::MitosisResult::Skipped { reason }) => {
+                Ok(Ok(crate::mitosis::MitosisResult::Skipped { reason })) => {
                     tracing::debug!(
                         bead_id = %bead.id,
                         reason = %reason,
                         "mitosis skipped"
                     );
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(
                         bead_id = %bead.id,
                         error = %e,
                         "mitosis evaluation failed (bead already released)"
+                    );
+                }
+                Err(_) => {
+                    // Timeout after 120s - log warning and continue.
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "mitosis evaluation timed out after 120s, continuing to LOGGING"
                     );
                 }
             }
@@ -1037,7 +1286,62 @@ impl Worker {
                 self.telemetry.emit(EventKind::WorkerIdle {
                     backoff_seconds: backoff,
                 })?;
-                tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+
+                // Cancellable sleep: check shutdown flag every 10 seconds instead of
+                // sleeping for the full duration. This ensures the worker responds to
+                // signals during idle and emits worker.stopped telemetry.
+                let check_interval = 10u64;
+                let mut elapsed = 0u64;
+                while elapsed < backoff {
+                    let remaining = backoff - elapsed;
+                    let sleep_duration =
+                        std::time::Duration::from_secs(remaining.min(check_interval));
+
+                    // Sleep for a short interval, then check shutdown flag.
+                    tokio::time::sleep(sleep_duration).await;
+                    elapsed += check_interval;
+
+                    if self.shutdown.load(Ordering::SeqCst) {
+                        // Retrieve and clear the last received signal for logging.
+                        #[cfg(unix)]
+                        let signal_name = {
+                            let sig = LAST_SIGNAL.swap(0, AtomicOrdering::SeqCst);
+                            if sig == 0 {
+                                None
+                            } else {
+                                Some(match sig {
+                                    1 => "SIGHUP",
+                                    2 => "SIGINT",
+                                    15 => "SIGTERM",
+                                    _ => "unknown signal",
+                                })
+                            }
+                        };
+                        #[cfg(not(unix))]
+                        let signal_name = None;
+
+                        if let Some(name) = signal_name {
+                            tracing::info!(
+                                elapsed_secs = elapsed,
+                                backoff_secs = backoff,
+                                signal = name,
+                                "shutdown received during idle sleep, stopping worker"
+                            );
+                        } else {
+                            tracing::info!(
+                                elapsed_secs = elapsed,
+                                backoff_secs = backoff,
+                                "shutdown received during idle sleep, stopping worker"
+                            );
+                        }
+                        return self.stop("signal received during idle").await;
+                    }
+                }
+
+                tracing::info!(
+                    backoff_secs = backoff,
+                    "idle sleep completed, resuming work"
+                );
                 self.state = WorkerState::Selecting;
                 Ok(WorkerState::Selecting)
             }
@@ -1057,6 +1361,10 @@ impl Worker {
             beads_processed: self.beads_processed,
             uptime_secs: uptime,
         })?;
+
+        // Clear the global shutdown flag to prevent dangling pointers.
+        #[cfg(unix)]
+        clear_global_shutdown_flag();
 
         // Stop heartbeat emitter and remove heartbeat file.
         self.health.stop();
@@ -1211,6 +1519,18 @@ impl Worker {
     /// Request a graceful shutdown (sets the internal shutdown flag).
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        // Clear the global shutdown flag when the worker is dropped.
+        // This prevents dangling pointers if the worker is dropped without
+        // calling stop() (e.g., due to panic or early return).
+        #[cfg(unix)]
+        {
+            clear_global_shutdown_flag();
+        }
     }
 }
 
