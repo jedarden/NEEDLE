@@ -524,6 +524,8 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         call_count: AtomicU32,
         bead_after: u32,
         bead: Mutex<Option<Bead>>,
+        /// Tracks claimed beads (moved here from `bead` on claim).
+        claimed: Mutex<Vec<Bead>>,
     }
 
     #[async_trait]
@@ -531,31 +533,55 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             let count = self.call_count.fetch_add(1, Ordering::SeqCst);
             if count >= self.bead_after {
-                Ok(self
-                    .bead
-                    .lock()
-                    .unwrap()
-                    .take()
-                    .map(|b| vec![b])
-                    .unwrap_or_default())
+                // Only return the bead if it hasn't been claimed yet.
+                let bead = self.bead.lock().unwrap();
+                let claimed = self.claimed.lock().unwrap();
+                if bead.is_some() && !claimed.iter().any(|b| b.id == bead.as_ref().unwrap().id) {
+                    Ok(vec![bead.clone().unwrap()])
+                } else {
+                    Ok(vec![])
+                }
             } else {
                 Ok(Vec::new())
             }
         }
 
         async fn list_all(&self) -> Result<Vec<Bead>> {
-            Ok(vec![])
+            let bead = self.bead.lock().unwrap();
+            let claimed = self.claimed.lock().unwrap();
+            let mut all: Vec<Bead> = claimed.clone();
+            if let Some(b) = bead.as_ref() {
+                if !all.iter().any(|x| x.id == b.id) {
+                    all.push(b.clone());
+                }
+            }
+            Ok(all)
         }
 
-        async fn show(&self, _id: &BeadId) -> Result<Bead> {
-            anyhow::bail!("not implemented in mock")
+        async fn show(&self, id: &BeadId) -> Result<Bead> {
+            let claimed = self.claimed.lock().unwrap();
+            if let Some(b) = claimed.iter().find(|b| b.id == *id) {
+                return Ok(b.clone());
+            }
+            let bead = self.bead.lock().unwrap();
+            match bead.as_ref() {
+                Some(b) if b.id == *id => Ok(b.clone()),
+                _ => anyhow::bail!("bead not found: {id}"),
+            }
         }
 
-        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
-            let bead = self.bead.lock().unwrap().clone();
-            match bead {
-                Some(b) => Ok(ClaimResult::Claimed(b)),
-                None => Ok(ClaimResult::NotClaimable {
+        async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
+            let bead = self.bead.lock().unwrap();
+            let mut claimed = self.claimed.lock().unwrap();
+            match bead.as_ref() {
+                Some(b) if b.id == *id => {
+                    let mut cloned = b.clone();
+                    cloned.status = BeadStatus::InProgress;
+                    cloned.assignee = Some(actor.to_string());
+                    claimed.push(cloned.clone());
+                    Ok(ClaimResult::Claimed(cloned))
+                }
+                _ => Ok(ClaimResult::NotClaimable {
                     reason: "no bead".to_string(),
                 }),
             }
@@ -581,20 +607,11 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
             Ok(())
         }
 
-        async fn create_bead(
-            &self,
-            _title: &str,
-            _body: &str,
-            _labels: &[&str],
-        ) -> Result<BeadId> {
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
             Ok(BeadId::from("mock-bead"))
         }
 
-        async fn add_dependency(
-            &self,
-            _blocker_id: &BeadId,
-            _blocked_id: &BeadId,
-        ) -> Result<()> {
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
 
@@ -630,6 +647,7 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         call_count: AtomicU32::new(0),
         bead_after: 2, // Add bead after 2 calls (first call goes to EXHAUSTED, second after sleep)
         bead: Mutex::new(Some(bead)),
+        claimed: Mutex::new(vec![]),
     });
 
     let _home_dir = tempfile::tempdir().unwrap();

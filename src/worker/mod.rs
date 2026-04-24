@@ -744,7 +744,10 @@ impl Worker {
         let strand = self.current_strand.as_deref().unwrap_or("pluck");
         prompt.content = format!(
             "[needle:{}:{}:{}]\n{}",
-            self.qualified_id(), bead.id, strand, prompt.content
+            self.qualified_id(),
+            bead.id,
+            strand,
+            prompt.content
         );
 
         // Store the prompt for the dispatch phase. We use a transient field pattern:
@@ -1292,23 +1295,39 @@ impl Worker {
                 // idle period, the heartbeat file will become stale and can be detected.
                 self.health.update_state(&WorkerState::Exhausted, None);
 
-                // Cancellable sleep: check shutdown flag every 5 seconds instead of
+                // Cancellable sleep: check shutdown flag every 1 second instead of
                 // sleeping for the full duration. This ensures the worker responds to
                 // signals during idle and emits worker.stopped telemetry before being
-                // killed. A 5-second interval balances responsiveness (workers can be
-                // reaped at any time by external governors) with efficiency (avoiding
-                // busy-waiting during long idle periods). Reduced from 1s to reduce
-                // spurious wakeups while maintaining responsiveness.
-                let check_interval = 5u64;
+                // killed. A 1-second interval provides better responsiveness (workers can be
+                // reaped at any time by external governors) while still avoiding busy-waiting.
+                let check_interval = 1u64;
                 let mut elapsed = 0u64;
+                let mut shutdown_check_count = 0u64;
+
                 while elapsed < backoff {
                     let remaining = backoff - elapsed;
                     let sleep_duration =
                         std::time::Duration::from_secs(remaining.min(check_interval));
 
+                    // Before sleeping, emit a heartbeat event to show the worker is alive
+                    // and in idle state. This helps diagnose cases where workers die during
+                    // idle sleep - the last event will show how long they survived.
+                    self.telemetry.emit(EventKind::HeartbeatEmitted {
+                        bead_id: None,
+                        state: "EXHAUSTED_IDLE".to_string(),
+                    })?;
+
                     // Sleep for a short interval, then check shutdown flag.
                     tokio::time::sleep(sleep_duration).await;
                     elapsed += check_interval;
+                    shutdown_check_count += 1;
+
+                    // Update heartbeat periodically during long idle sleeps to prevent
+                    // external monitors from thinking the worker is dead.
+                    if shutdown_check_count % 60 == 0 {
+                        // Every 60 seconds (60 * 1s), update heartbeat state
+                        self.health.update_state(&WorkerState::Exhausted, None);
+                    }
 
                     if self.shutdown.load(Ordering::SeqCst) {
                         // Retrieve and clear the last received signal for logging.
@@ -1334,12 +1353,14 @@ impl Worker {
                                 elapsed_secs = elapsed,
                                 backoff_secs = backoff,
                                 signal = name,
+                                shutdown_check_count,
                                 "shutdown received during idle sleep, stopping worker"
                             );
                         } else {
                             tracing::info!(
                                 elapsed_secs = elapsed,
                                 backoff_secs = backoff,
+                                shutdown_check_count,
                                 "shutdown received during idle sleep, stopping worker"
                             );
                         }
@@ -1349,8 +1370,15 @@ impl Worker {
 
                 tracing::info!(
                     backoff_secs = backoff,
+                    shutdown_checks_performed = shutdown_check_count,
                     "idle sleep completed, resuming work"
                 );
+
+                // Emit telemetry to show idle sleep completed successfully
+                self.telemetry.emit(EventKind::StateTransition {
+                    from: WorkerState::Exhausted,
+                    to: WorkerState::Selecting,
+                })?;
 
                 // Update heartbeat after idle sleep completes before transitioning.
                 self.health.update_state(&WorkerState::Selecting, None);

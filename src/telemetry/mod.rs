@@ -167,6 +167,12 @@ pub enum EventKind {
         outcome: String,
         action: String,
     },
+    WorkerHandlingTimeout {
+        bead_id: BeadId,
+        outcome: String,
+        operation: String,
+        error: String,
+    },
 
     // ── Health ──
     HeartbeatEmitted {
@@ -420,6 +426,7 @@ impl EventKind {
             EventKind::DispatchCompleted { .. } => "agent.completed",
             EventKind::OutcomeClassified { .. } => "outcome.classified",
             EventKind::OutcomeHandled { .. } => "outcome.handled",
+            EventKind::WorkerHandlingTimeout { .. } => "worker.handling.timeout",
             EventKind::HeartbeatEmitted { .. } => "heartbeat.emitted",
             EventKind::StuckDetected { .. } => "peer.stale",
             EventKind::StuckReleased { .. } => "peer.crashed",
@@ -483,6 +490,7 @@ impl EventKind {
             | EventKind::DispatchCompleted { bead_id, .. }
             | EventKind::OutcomeClassified { bead_id, .. }
             | EventKind::OutcomeHandled { bead_id, .. }
+            | EventKind::WorkerHandlingTimeout { bead_id, .. }
             | EventKind::StuckDetected { bead_id, .. }
             | EventKind::StuckReleased { bead_id, .. }
             | EventKind::MendDependencyCleaned { bead_id, .. }
@@ -687,6 +695,19 @@ impl EventKind {
                     "bead_id": bead_id.as_ref(),
                     "outcome": outcome,
                     "action": action,
+                })
+            }
+            EventKind::WorkerHandlingTimeout {
+                bead_id,
+                outcome,
+                operation,
+                error,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "outcome": outcome,
+                    "operation": operation,
+                    "error": error,
                 })
             }
             EventKind::HeartbeatEmitted { bead_id, state } => {
@@ -1061,6 +1082,7 @@ impl EventKind {
             | EventKind::DispatchStarted { .. }
             | EventKind::OutcomeClassified { .. }
             | EventKind::OutcomeHandled { .. }
+            | EventKind::WorkerHandlingTimeout { .. }
             | EventKind::HeartbeatEmitted { .. }
             | EventKind::StuckDetected { .. }
             | EventKind::StuckReleased { .. }
