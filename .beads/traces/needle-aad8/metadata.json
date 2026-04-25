@@ -1,0 +1,16 @@
+{
+  "bead_id": "needle-aad8",
+  "agent": "claude-code-glm-5",
+  "provider": "zai",
+  "model": "glm-5",
+  "exit_code": 1,
+  "outcome": "failure",
+  "duration_ms": 68702,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-04-25T13:47:54.103563156Z",
+  "trace_format": "claude_json",
+  "pruned": false,
+  "template_version": null
+}
