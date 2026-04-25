@@ -668,8 +668,9 @@ impl Worker {
     async fn do_select(&mut self) -> Result<()> {
         // Clear per-cycle state.
         // Preserve race-lost exclusions with TTL and beads that lost a race in the current cycle.
+        // NOTE: Do NOT reset retry_count or consecutive_race_lost here — they must
+        // accumulate across cycles to prevent infinite race-lost loops (see needle-aad8).
         self.race_lost_this_cycle.clear();
-        self.retry_count = 0;
         self.current_bead = None;
         self.current_strand = None;
 
@@ -809,6 +810,7 @@ impl Worker {
             ClaimResult::Claimed(mut bead) => {
                 tracing::info!(bead_id = %bead.id, title = %bead.title, "claimed bead");
                 self.consecutive_race_lost = 0;
+                self.retry_count = 0;
                 self.clear_all_exclusions();
                 // Preserve the workspace from the pre-claim bead (set by
                 // Explore for remote beads). The claimed bead from br's JSON
@@ -908,13 +910,16 @@ impl Worker {
         } else {
             tracing::debug!(
                 retry_count = self.retry_count,
-                "max claim retries exceeded, clearing all exclusions for next cycle"
+                "max claim retries exceeded, clearing retry state for next cycle"
             );
             self.retry_count = 0;
             self.consecutive_race_lost = 0;
             self.exclusion_set.clear();
-            self.race_lost_exclusions.clear();
             self.race_lost_this_cycle.clear();
+            // NOTE: Do NOT clear race_lost_exclusions here. Those have TTL-based
+            // expiration and must persist to prevent re-selecting the same bead
+            // that just lost a claim race. Clearing them would cause an infinite
+            // race-lost loop (see needle-aad8).
             self.current_bead = None;
             self.set_state(WorkerState::Selecting)?;
         }
@@ -1118,8 +1123,29 @@ impl Worker {
                 &bead.workspace
             };
             // Capture HEAD so do_handle can tag new commits with Bead-Id on success.
-            if let Ok(head) = commit_hook::git_head(dispatch_ws.to_str().unwrap_or(".")).await {
-                self.pre_dispatch_head = Some(head);
+            // Wrap in timeout to prevent indefinite hang if git subprocess hangs.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                commit_hook::git_head(dispatch_ws.to_str().unwrap_or(".")),
+            )
+            .await
+            {
+                Ok(Ok(head)) => {
+                    self.pre_dispatch_head = Some(head);
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(
+                        workspace = %dispatch_ws.display(),
+                        error = %e,
+                        "git_head failed (not a git repo or git error), skipping Bead-Id trailer"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        workspace = %dispatch_ws.display(),
+                        "git_head timed out after 10s, skipping Bead-Id trailer"
+                    );
+                }
             }
             let result = self
                 .dispatcher
@@ -1178,7 +1204,8 @@ impl Worker {
 
         // Emit an initial heartbeat event to signal we've entered HANDLING state.
         // This provides immediate visibility in the JSONL log when handling starts.
-        let _ = self.telemetry.emit(EventKind::HeartbeatEmitted {
+        // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
+        let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
             bead_id: Some(bead.id.clone()),
             state: "HANDLING".to_string(),
         });
@@ -1204,99 +1231,157 @@ impl Worker {
                 if cancelled_for_heartbeat.load(Ordering::Relaxed) {
                     break;
                 }
-                let _ = telemetry_for_heartbeat.emit(EventKind::HeartbeatEmitted {
+                // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
+                let _ = telemetry_for_heartbeat.emit_try_lock(EventKind::HeartbeatEmitted {
                     bead_id: Some(bead_id_for_heartbeat.clone()),
                     state: "HANDLING".to_string(),
                 });
             }
         });
 
-        // Wrap the outcome handler in a 60-second timeout to prevent indefinite hangs.
-        // The health monitor's background thread writes heartbeat files based on
-        // shared state, so external monitoring can detect hangs via stale heartbeats.
-        let handler_future = self.outcome_handler.handle_with_cancellation(
-            self.store.as_ref(),
-            &bead,
-            &output,
-            was_interrupted,
-            cancelled.clone(),
-        );
+        // Clone values needed for error handling before creating the async block.
+        // This avoids borrowing issues with the async block that captures `self`.
         let bead_id_clone = bead.id.clone();
         let store_clone = self.store.clone();
         let telemetry_clone = self.telemetry.clone();
+        let cancelled_clone = cancelled.clone();
 
-        let handler_result = match tokio::time::timeout(
-            std::time::Duration::from_secs(60),
-            handler_future,
-        )
-        .await
-        {
-            Ok(Ok(result)) => {
-                // Handler completed successfully - stop heartbeat and continue.
-                tracing::debug!(
-                    bead_id = %bead.id,
-                    outcome = %result.outcome,
-                    action = %result.bead_action,
-                    "handler completed successfully, stopping heartbeat task"
-                );
-                cancelled.store(true, Ordering::Release);
-                heartbeat_task.abort();
-                result
-            }
-            Ok(Err(e)) => {
-                // Handler returned an error - attempt best-effort release and recover.
-                tracing::error!(
-                    bead_id = %bead.id,
-                    error = %e,
-                    "outcome handler failed, attempting best-effort release and transitioning to LOGGING"
-                );
-                // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
-                cancelled.store(true, Ordering::Release);
-                heartbeat_task.abort();
-                // Use emit_try_lock() to avoid blocking on telemetry mutex if writer is stuck.
-                let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead_id_clone.clone(),
-                    outcome: "unknown".to_string(),
-                    operation: "handle".to_string(),
-                    error: e.to_string(),
-                });
-                // Attempt best-effort release with timeout.
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    store_clone.release(&bead_id_clone),
-                )
-                .await;
-                // Explicitly transition to LOGGING to recover.
-                self.set_state(WorkerState::Logging)?;
-                return Ok(());
-            }
-            Err(_) => {
-                // Timeout after 60 seconds - attempt best-effort release and transition to LOGGING.
-                tracing::error!(
-                    bead_id = %bead.id,
-                    "outcome handler timed out after 60s, attempting best-effort release and transitioning to LOGGING"
-                );
-                // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
-                cancelled.store(true, Ordering::Release);
-                heartbeat_task.abort();
-                // Use emit_try_lock() to avoid blocking on telemetry mutex if writer is stuck.
-                let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead_id_clone.clone(),
-                    outcome: "unknown".to_string(),
-                    operation: "handle".to_string(),
-                    error: "timeout after 60s".to_string(),
-                });
-                // Attempt best-effort release with timeout.
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    store_clone.release(&bead_id_clone),
-                )
-                .await;
-                // Explicitly transition to LOGGING to recover.
-                self.set_state(WorkerState::Logging)?;
-                return Ok(());
+        // Wrap the entire HANDLING state in a timeout to prevent indefinite hangs.
+        // Even if the Tokio runtime gets blocked by a synchronous operation, this
+        // timeout will fire (on a threadpool) and allow recovery.
+        let handling_future = async {
+            // Wrap the outcome handler in a 60-second timeout to prevent indefinite hangs.
+            // The health monitor's background thread writes heartbeat files based on
+            // shared state, so external monitoring can detect hangs via stale heartbeats.
+            let handler_future = self.outcome_handler.handle_with_cancellation(
+                self.store.as_ref(),
+                &bead,
+                &output,
+                was_interrupted,
+                cancelled.clone(),
+            );
+
+            match tokio::time::timeout(std::time::Duration::from_secs(60), handler_future).await {
+                Ok(Ok(result)) => {
+                    // Handler completed successfully - stop heartbeat and continue.
+                    tracing::debug!(
+                        bead_id = %bead.id,
+                        outcome = %result.outcome,
+                        action = %result.bead_action,
+                        "handler completed successfully, stopping heartbeat task"
+                    );
+                    Ok(result)
+                }
+                Ok(Err(e)) => {
+                    // Handler returned an error - attempt best-effort release and recover.
+                    tracing::error!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "outcome handler failed, attempting best-effort release and transitioning to LOGGING"
+                    );
+                    // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
+                    cancelled.store(true, Ordering::Release);
+                    // Use emit_try_lock() to avoid blocking on telemetry mutex if writer is stuck.
+                    let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
+                        bead_id: bead_id_clone.clone(),
+                        outcome: "unknown".to_string(),
+                        operation: "handle".to_string(),
+                        error: e.to_string(),
+                    });
+                    // Attempt best-effort release with timeout.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        store_clone.release(&bead_id_clone),
+                    )
+                    .await;
+                    // Explicitly transition to LOGGING to recover.
+                    self.set_state(WorkerState::Logging)?;
+                    Err(anyhow::anyhow!("handler failed: {}", e))
+                }
+                Err(_) => {
+                    // Timeout after 60 seconds - attempt best-effort release and transition to LOGGING.
+                    tracing::error!(
+                        bead_id = %bead.id,
+                        "outcome handler timed out after 60s, attempting best-effort release and transitioning to LOGGING"
+                    );
+                    // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
+                    cancelled.store(true, Ordering::Release);
+                    // Use emit_try_lock() to avoid blocking on telemetry mutex if writer is stuck.
+                    let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
+                        bead_id: bead_id_clone.clone(),
+                        outcome: "unknown".to_string(),
+                        operation: "handle".to_string(),
+                        error: "timeout after 60s".to_string(),
+                    });
+                    // Attempt best-effort release with timeout.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        store_clone.release(&bead_id_clone),
+                    )
+                    .await;
+                    // Explicitly transition to LOGGING to recover.
+                    self.set_state(WorkerState::Logging)?;
+                    Err(anyhow::anyhow!("handler timed out after 60s"))
+                }
             }
         };
+
+        // Wrap the entire HANDLING state in a 90-second timeout.
+        // This provides a safety net in case the inner timeout doesn't fire due to
+        // runtime blocking or other issues. The 90s limit allows the inner 60s timeout
+        // to fire first under normal conditions, but provides a fallback if needed.
+
+        let handler_result =
+            match tokio::time::timeout(std::time::Duration::from_secs(90), handling_future).await {
+                Ok(Ok(result)) => {
+                    // HANDLING completed successfully - stop heartbeat and continue.
+                    cancelled.store(true, Ordering::Release);
+                    heartbeat_task.abort();
+                    result
+                }
+                Ok(Err(_)) => {
+                    // HANDLING failed but recovered - stop heartbeat and continue to LOGGING.
+                    cancelled.store(true, Ordering::Release);
+                    heartbeat_task.abort();
+                    // Return early since we already transitioned to LOGGING in the error handler.
+                    return Ok(());
+                }
+                Err(_) => {
+                    // Outer timeout fired after 90 seconds - this is a critical failure.
+                    tracing::error!(
+                        bead_id = %bead.id,
+                        "HANDLING state timed out after 90s, forcing recovery"
+                    );
+                    // Set cancellation flag to stop all async operations.
+                    cancelled_clone.store(true, Ordering::Release);
+                    heartbeat_task.abort();
+                    // Emit critical timeout event.
+                    let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
+                        bead_id: bead_id_clone.clone(),
+                        outcome: "unknown".to_string(),
+                        operation: "handling_state".to_string(),
+                        error: "critical timeout after 90s".to_string(),
+                    });
+                    // Attempt best-effort release with timeout.
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        store_clone.release(&bead_id_clone),
+                    )
+                    .await;
+                    // Force transition to LOGGING to recover.
+                    self.set_state(WorkerState::Logging)?;
+                    return Ok(());
+                }
+            };
+
+        // Emit a heartbeat after the outcome handler completes to signal we're
+        // still alive. This helps detect hangs in post-handler code (commit hook,
+        // mitosis, state transitions) that occur after the handler finishes.
+        // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
+        let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
+            bead_id: Some(bead.id.clone()),
+            state: "HANDLING_POST_HANDLER".to_string(),
+        });
 
         // Evaluate for mitosis after failure — the bead has already been
         // released and failure count incremented by the outcome handler.
@@ -1363,14 +1448,32 @@ impl Worker {
                 } else {
                     bead.workspace.clone()
                 };
-                if let Err(e) =
-                    commit_hook::inject_bead_id_trailer(&workspace, &bead.id, pre_head).await
+                // Wrap commit hook in timeout to prevent indefinite hang.
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    commit_hook::inject_bead_id_trailer(&workspace, &bead.id, pre_head),
+                )
+                .await
                 {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        error = %e,
-                        "Bead-Id trailer injection failed (non-fatal)"
-                    );
+                    Ok(Ok(())) => {
+                        tracing::debug!(
+                            bead_id = %bead.id,
+                            "Bead-Id trailer injected successfully"
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %e,
+                            "Bead-Id trailer injection failed (non-fatal)"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            "Bead-Id trailer injection timed out after 30s (non-fatal)"
+                        );
+                    }
                 }
             }
         }
@@ -2400,6 +2503,13 @@ mod tests {
         async fn add_dependency(&self, _a: &BeadId, _b: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     // ── do_claim tests ──
@@ -2490,6 +2600,33 @@ mod tests {
         assert_eq!(worker.retry_count, 0);
         assert!(worker.exclusion_set.is_empty());
         assert!(worker.current_bead.is_none());
+    }
+
+    #[tokio::test]
+    async fn do_retry_at_max_preserves_race_lost_exclusions() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+        worker.state = WorkerState::Retrying;
+        worker.retry_count = worker.config.worker.max_claim_retries; // At max
+
+        // Add a race-lost exclusion with TTL (simulating a recent race loss)
+        let excluded_bead = BeadId::from("race-lost-bead");
+        let expires = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        worker
+            .race_lost_exclusions
+            .push((excluded_bead.clone(), expires));
+        worker.exclusion_set.insert(BeadId::from("some-other-bead"));
+
+        worker.do_retry().await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Selecting);
+        assert_eq!(worker.retry_count, 0);
+        // Manual exclusion_set is cleared
+        assert!(worker.exclusion_set.is_empty());
+        // But race_lost_exclusions are preserved (needle-aad8 fix)
+        assert_eq!(worker.race_lost_exclusions.len(), 1);
+        assert_eq!(worker.race_lost_exclusions[0].0, excluded_bead);
     }
 
     #[tokio::test]
