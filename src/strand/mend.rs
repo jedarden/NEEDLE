@@ -981,8 +981,9 @@ impl MendStrand {
 
                         let _ = self
                             .telemetry
-                            .emit(EventKind::MendRateLimitProviderRemoved {
+                            .emit(EventKind::MendRateLimitCleaned {
                                 provider: provider.to_string(),
+                                age_secs,
                             });
 
                         summary.rate_limit_providers_removed += 1;
@@ -1256,6 +1257,12 @@ impl super::Strand for MendStrand {
             // Non-fatal — continue with remaining steps.
         }
 
+        // Step 4.9: Rate limiter state cleanup.
+        if let Err(e) = self.cleanup_rate_limit_state(&mut summary) {
+            tracing::warn!(error = %e, "mend: rate limit state cleanup failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
         // Step 5: Database health check.
         if let Err(e) = self.check_db_health(store, &mut summary).await {
             tracing::warn!(error = %e, "mend: database health check failed");
@@ -1273,6 +1280,8 @@ impl super::Strand for MendStrand {
             traces_pruned: summary.traces_pruned,
             traces_deleted: summary.traces_cleaned,
             workers_deregistered: summary.workers_deregistered,
+            idle_workers_flagged: summary.idle_workers_flagged,
+            rate_limits_cleaned: summary.rate_limits_cleaned,
         });
 
         if summary.did_work() {
@@ -1516,6 +1525,15 @@ mod tests {
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     fn make_mend_strand(hb_dir: &Path, lock_dir: &Path, reg_dir: &Path) -> MendStrand {
+        make_mend_strand_with_state(hb_dir, lock_dir, reg_dir, tempfile::tempdir().unwrap().path())
+    }
+
+    fn make_mend_strand_with_state(
+        hb_dir: &Path,
+        lock_dir: &Path,
+        reg_dir: &Path,
+        state_dir: &Path,
+    ) -> MendStrand {
         MendStrand::new(
             MendConfig::default(),
             hb_dir.to_path_buf(),
@@ -1531,6 +1549,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            state_dir.to_path_buf(),
+            LimitsConfig::default(),
         )
     }
 
@@ -1712,6 +1732,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -1782,6 +1804,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -1855,6 +1879,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -1928,6 +1954,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -1972,6 +2000,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -2013,6 +2043,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -2341,6 +2373,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            hb_dir.to_path_buf(),
+            LimitsConfig::default(),
         )
     }
 
@@ -2579,6 +2613,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -2763,6 +2799,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            hb_dir.path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -2809,7 +2847,7 @@ mod tests {
             Duration::from_secs(300),
             lock_dir.path().to_path_buf(),
             "test-worker".to_string(),
-            registry,
+            registry.clone(),
             Telemetry::new("test-worker".to_string()),
             PathBuf::from("/tmp/needle-test-logs"),
             0,
@@ -2818,6 +2856,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -2858,7 +2898,7 @@ mod tests {
             Duration::from_secs(300),
             lock_dir.path().to_path_buf(),
             "claude-test-worker".to_string(),
-            registry,
+            registry.clone(),
             Telemetry::new("claude-test-worker".to_string()),
             PathBuf::from("/tmp/needle-test-logs"),
             0,
@@ -2867,6 +2907,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -2923,7 +2965,7 @@ mod tests {
             Duration::from_secs(300),
             lock_dir.path().to_path_buf(),
             "test-worker".to_string(),
-            registry,
+            registry.clone(),
             Telemetry::new("test-worker".to_string()),
             PathBuf::from("/tmp/needle-test-logs"),
             0,
@@ -2932,6 +2974,8 @@ mod tests {
             7,
             PathBuf::from("/tmp/test-workspace"),
             80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
         );
 
         let result = mend.evaluate(&store).await;
@@ -2975,5 +3019,223 @@ mod tests {
         let result = mend.evaluate(&store).await;
         // Should not error — corrupt registry file is handled gracefully.
         assert!(matches!(result, StrandResult::NoWork));
+    }
+
+    // ── Rate limit state cleanup tests ────────────────────────────────────────
+
+    #[test]
+    fn rate_limit_cleanup_removes_orphaned_provider_files() {
+        use crate::rate_limit::TokenBucket;
+        use std::collections::BTreeMap;
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let rate_limits_dir = state_dir.path().join("rate_limits");
+        std::fs::create_dir_all(&rate_limits_dir).unwrap();
+
+        // Create token bucket files for providers that are NOT in config.
+        let orphaned_provider = rate_limits_dir.join("old-provider.json");
+        let bucket = TokenBucket::new(100);
+        std::fs::write(&orphaned_provider, serde_json::to_string(&bucket).unwrap()).unwrap();
+
+        // Create limits config with only "anthropic" provider (not "old-provider").
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "anthropic".to_string(),
+            crate::config::ProviderLimits {
+                max_concurrent: Some(5),
+                requests_per_minute: Some(100),
+            },
+        );
+        let limits_config = crate::config::LimitsConfig {
+            providers,
+            models: BTreeMap::new(),
+        };
+
+        let mut summary = MendSummary::default();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_rate_limit_state(&mut summary).unwrap();
+
+        // Orphaned provider file should be removed.
+        assert!(!orphaned_provider.exists());
+        assert_eq!(summary.rate_limit_providers_removed, 1);
+        assert_eq!(summary.rate_limits_cleaned, 1);
+    }
+
+    #[test]
+    fn rate_limit_cleanup_resets_stale_buckets() {
+        use crate::rate_limit::TokenBucket;
+        use std::collections::BTreeMap;
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let rate_limits_dir = state_dir.path().join("rate_limits");
+        std::fs::create_dir_all(&rate_limits_dir).unwrap();
+
+        // Create a token bucket with a stale last_refill (> 1 hour old).
+        let provider_file = rate_limits_dir.join("anthropic.json");
+        let mut bucket = TokenBucket::new(100);
+        bucket.tokens = 10.0; // Partially depleted
+        bucket.last_refill = Utc::now() - chrono::Duration::seconds(7200); // 2 hours ago
+        std::fs::write(&provider_file, serde_json::to_string(&bucket).unwrap()).unwrap();
+
+        // Create limits config with the provider.
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "anthropic".to_string(),
+            crate::config::ProviderLimits {
+                max_concurrent: Some(5),
+                requests_per_minute: Some(100),
+            },
+        );
+        let limits_config = crate::config::LimitsConfig {
+            providers,
+            models: BTreeMap::new(),
+        };
+
+        let mut summary = MendSummary::default();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_rate_limit_state(&mut summary).unwrap();
+
+        // File should still exist, but bucket should be reset to full capacity.
+        assert!(provider_file.exists());
+        let updated: TokenBucket =
+            serde_json::from_str(&std::fs::read_to_string(&provider_file).unwrap()).unwrap();
+        assert_eq!(updated.tokens, 100.0); // Reset to full capacity
+        assert_eq!(summary.rate_limit_providers_reset, 1);
+        assert_eq!(summary.rate_limits_cleaned, 1);
+    }
+
+    #[test]
+    fn rate_limit_cleanup_noop_when_directory_missing() {
+        use std::collections::BTreeMap;
+
+        let state_dir = tempfile::tempdir().unwrap();
+        // Don't create the rate_limits directory.
+
+        let limits_config = crate::config::LimitsConfig {
+            providers: BTreeMap::new(),
+            models: BTreeMap::new(),
+        };
+
+        let mut summary = MendSummary::default();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        // Should not error when directory doesn't exist.
+        mend.cleanup_rate_limit_state(&mut summary).unwrap();
+
+        // No files cleaned.
+        assert_eq!(summary.rate_limits_cleaned, 0);
+    }
+
+    #[test]
+    fn rate_limit_cleanup_preserves_active_provider_files() {
+        use crate::rate_limit::TokenBucket;
+        use std::collections::BTreeMap;
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let rate_limits_dir = state_dir.path().join("rate_limits");
+        std::fs::create_dir_all(&rate_limits_dir).unwrap();
+
+        // Create a token bucket with a recent last_refill (< 1 hour old).
+        let provider_file = rate_limits_dir.join("anthropic.json");
+        let mut bucket = TokenBucket::new(100);
+        bucket.tokens = 50.0;
+        bucket.last_refill = Utc::now() - chrono::Duration::seconds(300); // 5 minutes ago
+        std::fs::write(&provider_file, serde_json::to_string(&bucket).unwrap()).unwrap();
+
+        // Create limits config with the provider.
+        let mut providers = BTreeMap::new();
+        providers.insert(
+            "anthropic".to_string(),
+            crate::config::ProviderLimits {
+                max_concurrent: Some(5),
+                requests_per_minute: Some(100),
+            },
+        );
+        let limits_config = crate::config::LimitsConfig {
+            providers,
+            models: BTreeMap::new(),
+        };
+
+        let mut summary = MendSummary::default();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_rate_limit_state(&mut summary).unwrap();
+
+        // File should still exist with unchanged state.
+        assert!(provider_file.exists());
+        let updated: TokenBucket =
+            serde_json::from_str(&std::fs::read_to_string(&provider_file).unwrap()).unwrap();
+        assert_eq!(updated.tokens, 50.0); // Unchanged
+        assert_eq!(summary.rate_limits_cleaned, 0);
     }
 }
