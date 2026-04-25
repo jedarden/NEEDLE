@@ -6,11 +6,13 @@
 //! Depends on: `types`, `config`, `bead_store`, `telemetry`, `validation`.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Utc;
 
-use crate::bead_store::BeadStore;
+use crate::bead_store::{BeadStore, SyncRecoveryError};
 use crate::config::Config;
 use crate::telemetry::{EventKind, Telemetry};
 #[cfg(test)]
@@ -42,6 +44,133 @@ pub struct OutcomeHandler {
 impl OutcomeHandler {
     pub fn new(config: Config, telemetry: Telemetry) -> Self {
         OutcomeHandler { config, telemetry }
+    }
+
+    /// Run a bead store operation with a 30s timeout.
+    ///
+    /// Returns `Ok(Some(T))` on success, `Ok(None)` on timeout, and `Err(E)` on
+    /// other errors. Callers should treat timeout and error as non-fatal — log
+    /// and continue rather than blocking the worker in HANDLING state.
+    async fn timeout_op<T, F, Fut>(
+        &self,
+        op: F,
+        operation_name: &str,
+    ) -> Result<Option<T>, anyhow::Error>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, anyhow::Error>>,
+    {
+        match tokio::time::timeout(std::time::Duration::from_secs(30), op()).await {
+            Ok(Ok(result)) => Ok(Some(result)),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                tracing::error!(
+                    operation = operation_name,
+                    "bead store operation timed out after 30s"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Release a bead with sync conflict recovery and graceful failure handling.
+    ///
+    /// Flow:
+    /// 1. Run `br sync --flush-only` to push local writes to JSONL first.
+    /// 2. Attempt `br update` to release the bead (set status=open, assignee="").
+    /// 3. If SYNC_CONFLICT recovery fails, emit `BeadReleaseFailed` and return Ok.
+    ///
+    /// This method never returns an error — release failures are non-fatal.
+    /// The worker can continue processing other beads even if release fails.
+    async fn release_bead(&self, store: &dyn BeadStore, bead: &Bead) -> Result<Vec<EventKind>> {
+        let mut events = Vec::new();
+
+        // Step 1: Flush local writes to JSONL before attempting release.
+        match self.timeout_op(|| store.flush(), "flush").await {
+            Ok(Some(())) => {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    "flushed local changes to JSONL before release"
+                );
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "flush timed out before release, attempting release anyway"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "release".to_string(),
+                    operation: "flush".to_string(),
+                    error: "timeout after 30s".to_string(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "flush failed before release, attempting release anyway"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "release".to_string(),
+                    operation: "flush".to_string(),
+                    error: e.to_string(),
+                });
+            }
+        }
+
+        // Step 2: Attempt release with timeout protection.
+        let release_result =
+            tokio::time::timeout(std::time::Duration::from_secs(30), store.release(&bead.id)).await;
+
+        match release_result {
+            Ok(Ok(())) => {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    "bead released successfully"
+                );
+                events.push(EventKind::BeadReleased {
+                    bead_id: bead.id.clone(),
+                    reason: "release_success".to_string(),
+                });
+            }
+            Ok(Err(e)) => {
+                // Release failed (br error, not timeout).
+                // Check if this is a SyncRecoveryError (sync recovery was attempted but failed).
+                if e.downcast_ref::<SyncRecoveryError>().is_some() {
+                    tracing::error!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "br release failed after SYNC_CONFLICT recovery — \
+                         worker will continue (bead may remain assigned)"
+                    );
+                } else {
+                    tracing::error!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "br release failed — worker will continue (bead may remain assigned)"
+                    );
+                }
+                events.push(EventKind::BeadReleaseFailed {
+                    bead_id: bead.id.clone(),
+                    reason: e.to_string(),
+                });
+            }
+            Err(_) => {
+                // Timeout after 30s.
+                tracing::error!(
+                    bead_id = %bead.id,
+                    "br release timed out after 30s — worker will continue (bead may remain assigned)"
+                );
+                events.push(EventKind::BeadReleaseFailed {
+                    bead_id: bead.id.clone(),
+                    reason: "timeout after 30s".to_string(),
+                });
+            }
+        }
+
+        Ok(events)
     }
 
     /// Handle a process output for the given bead.
@@ -97,6 +226,84 @@ impl OutcomeHandler {
             bead_action,
             telemetry_events,
         })
+    }
+
+    /// Handle a process output with cancellation support.
+    ///
+    /// Checks the cancellation flag before starting the handler and returns
+    /// early if the handler has been cancelled (e.g., due to a timeout in
+    /// the worker). This prevents the handler from making further br calls
+    /// after a timeout has occurred.
+    pub async fn handle_with_cancellation(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        output: &AgentOutcome,
+        was_interrupted: bool,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<HandlerResult> {
+        // Check if we've been cancelled before starting.
+        if cancelled.load(Ordering::Acquire) {
+            tracing::warn!(
+                bead_id = %bead.id,
+                "outcome handler cancelled before starting, returning early"
+            );
+            // Return a default HandlerResult to allow the worker to recover.
+            return Ok(HandlerResult {
+                outcome: classify(output.exit_code, was_interrupted),
+                bead_action: BeadAction::None,
+                telemetry_events: vec![],
+            });
+        }
+
+        // Wrap the handler in a timeout to prevent indefinite hangs.
+        // This is a safety net in case the internal br call timeouts don't work.
+        let bead_id = bead.id.clone();
+        let telemetry = self.telemetry.clone();
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(50),
+            self.handle(store, bead, output, was_interrupted),
+        )
+        .await
+        {
+            Ok(Ok(result)) => Ok(result),
+            Ok(Err(e)) => {
+                // Handler returned an error.
+                tracing::error!(
+                    bead_id = %bead_id,
+                    error = %e,
+                    "outcome handler returned error"
+                );
+                Err(e)
+            }
+            Err(_) => {
+                // Timeout after 50 seconds.
+                tracing::error!(
+                    bead_id = %bead_id,
+                    "outcome handler timed out after 50s, returning early to allow worker recovery"
+                );
+                // Emit a timeout event for observability.
+                let _ = telemetry.emit(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead_id.clone(),
+                    outcome: classify(output.exit_code, was_interrupted)
+                        .as_str()
+                        .to_string(),
+                    operation: "handle".to_string(),
+                    error: "timeout after 50s".to_string(),
+                });
+                // Return a default HandlerResult to allow the worker to recover.
+                // The worker's 60-second timeout wrapper will handle best-effort release.
+                Ok(HandlerResult {
+                    outcome: classify(output.exit_code, was_interrupted),
+                    bead_action: BeadAction::Released,
+                    telemetry_events: vec![EventKind::BeadReleased {
+                        bead_id,
+                        reason: "handler_timeout".to_string(),
+                    }],
+                })
+            }
+        }
     }
 
     /// Success: run validation gates (if configured), then verify bead closure.
@@ -157,8 +364,9 @@ impl OutcomeHandler {
         // Normal success flow: check if agent closed the bead.
         let mut events = Vec::new();
 
-        match store.show(&bead.id).await {
-            Ok(current) if current.status.is_done() => {
+        // Use timeout for show() to prevent indefinite hang in HANDLING state.
+        match self.timeout_op(|| store.show(&bead.id), "show").await {
+            Ok(Some(current)) if current.status.is_done() => {
                 tracing::info!(bead_id = %bead.id, "bead confirmed closed by agent");
                 events.push(EventKind::BeadCompleted {
                     bead_id: bead.id.clone(),
@@ -177,7 +385,7 @@ impl OutcomeHandler {
                     }
                 }
             }
-            Ok(current) => {
+            Ok(Some(current)) => {
                 tracing::warn!(
                     bead_id = %bead.id,
                     status = %current.status,
@@ -187,12 +395,31 @@ impl OutcomeHandler {
                     bead_id: bead.id.clone(),
                 });
             }
+            Ok(None) => {
+                // Timeout - emit telemetry and continue.
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "show() timed out, could not verify bead closure status"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "success".to_string(),
+                    operation: "show".to_string(),
+                    error: "timeout after 30s".to_string(),
+                });
+            }
             Err(e) => {
                 tracing::warn!(
                     bead_id = %bead.id,
                     error = %e,
                     "could not verify bead closure status"
                 );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "success".to_string(),
+                    operation: "show".to_string(),
+                    error: e.to_string(),
+                });
             }
         }
 
@@ -229,30 +456,80 @@ impl OutcomeHandler {
             output: reason,
         })?;
 
+        let mut events = Vec::new();
+
         // If the agent already closed the bead, reopen it before releasing.
-        match store.show(&bead.id).await {
-            Ok(current) if current.status.is_done() => {
+        // Use timeout to prevent indefinite hang in HANDLING state.
+        match self.timeout_op(|| store.show(&bead.id), "show").await {
+            Ok(Some(current)) if current.status.is_done() => {
                 tracing::info!(
                     bead_id = %bead.id,
                     "reopening bead closed by agent (verification failed)"
                 );
-                if let Err(e) = store.reopen(&bead.id).await {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        error = %e,
-                        "failed to reopen bead — attempting release anyway"
-                    );
+                match self.timeout_op(|| store.reopen(&bead.id), "reopen").await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %e,
+                            "failed to reopen bead — attempting release anyway"
+                        );
+                        events.push(EventKind::WorkerHandlingTimeout {
+                            bead_id: bead.id.clone(),
+                            outcome: "gate_failure".to_string(),
+                            operation: "reopen".to_string(),
+                            error: e.to_string(),
+                        });
+                    }
                 }
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "show() timed out during gate failure handling, skipping reopen"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "gate_failure".to_string(),
+                    operation: "show".to_string(),
+                    error: "timeout after 30s".to_string(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "show() failed during gate failure handling"
+                );
             }
             _ => {}
         }
 
-        // Release the bead back to open.
-        store.release(&bead.id).await?;
-        self.increment_failure_count(store, bead).await?;
+        // Release the bead back to open with flush-before-release and sync recovery.
+        let mut release_events = self.release_bead(store, bead).await?;
+        events.append(&mut release_events);
+
+        // If release succeeded, increment failure count.
+        let release_succeeded = events
+            .iter()
+            .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+        if release_succeeded {
+            if let Err(e) = self.increment_failure_count(store, bead).await {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to increment failure count after gate failure"
+                );
+            }
+        }
 
         // Add a label indicating verification failure.
-        if let Err(e) = store.add_label(&bead.id, "verification-failed").await {
+        if let Err(e) = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            store.add_label(&bead.id, "verification-failed"),
+        )
+        .await
+        {
             tracing::warn!(
                 bead_id = %bead.id,
                 error = %e,
@@ -260,19 +537,16 @@ impl OutcomeHandler {
             );
         }
 
-        let event = EventKind::BeadReleased {
-            bead_id: bead.id.clone(),
-            reason: format!("verification_failed: {}", failed_gate),
-        };
-        self.telemetry.emit(event.clone())?;
-
-        Ok((BeadAction::Released, vec![event]))
+        Ok((BeadAction::Released, events))
     }
 
     /// Failure: release bead and increment failure count.
     ///
     /// Mitosis evaluation (for multi-task splitting) is handled externally by
     /// the worker after outcome handling — see `MitosisEvaluator`.
+    ///
+    /// If br calls timeout or fail, logs the error and continues — does not
+    /// block the worker in HANDLING state indefinitely.
     async fn handle_failure(
         &self,
         store: &dyn BeadStore,
@@ -280,19 +554,43 @@ impl OutcomeHandler {
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::warn!(bead_id = %bead.id, "agent failure — releasing bead");
 
-        store.release(&bead.id).await?;
-        self.increment_failure_count(store, bead).await?;
+        let mut events = self.release_bead(store, bead).await?;
 
-        let event = EventKind::BeadReleased {
-            bead_id: bead.id.clone(),
-            reason: "failure".to_string(),
-        };
-        self.telemetry.emit(event.clone())?;
+        // If release succeeded, increment failure count.
+        // Check if the last event is BeadReleased (success) or BeadReleaseFailed (failure).
+        let release_succeeded = events
+            .iter()
+            .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+        if release_succeeded {
+            if let Err(e) = self.increment_failure_count(store, bead).await {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to increment failure count after release"
+                );
+            }
+        }
 
-        Ok((BeadAction::Released, vec![event]))
+        // Ensure we emit a reason event for telemetry.
+        if !events.iter().any(|e| {
+            matches!(
+                e,
+                EventKind::BeadReleased { .. } | EventKind::BeadReleaseFailed { .. }
+            )
+        }) {
+            events.push(EventKind::BeadReleased {
+                bead_id: bead.id.clone(),
+                reason: "failure".to_string(),
+            });
+        }
+
+        Ok((BeadAction::Released, events))
     }
 
     /// Timeout: release bead and add `deferred` label.
+    ///
+    /// If br calls timeout or fail, logs the error and continues — does not
+    /// block the worker in HANDLING state indefinitely.
     async fn handle_timeout(
         &self,
         store: &dyn BeadStore,
@@ -300,19 +598,34 @@ impl OutcomeHandler {
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::warn!(bead_id = %bead.id, "agent timed out — releasing bead as deferred");
 
-        store.release(&bead.id).await?;
+        let mut events = self.release_bead(store, bead).await?;
 
-        if let Err(e) = store.add_label(&bead.id, "deferred").await {
-            tracing::warn!(bead_id = %bead.id, error = %e, "failed to add deferred label");
+        // If release succeeded, add deferred label.
+        let release_succeeded = events
+            .iter()
+            .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+        if release_succeeded {
+            if let Err(e) = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                store.add_label(&bead.id, "deferred"),
+            )
+            .await
+            {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "add_label deferred timed out or failed after timeout release"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "timeout".to_string(),
+                    operation: "add_label".to_string(),
+                    error: e.to_string(),
+                });
+            }
         }
 
-        let event = EventKind::BeadReleased {
-            bead_id: bead.id.clone(),
-            reason: "timeout".to_string(),
-        };
-        self.telemetry.emit(event.clone())?;
-
-        Ok((BeadAction::Deferred, vec![event]))
+        Ok((BeadAction::Deferred, events))
     }
 
     /// Crash: release bead and create alert bead with diagnostic info.
@@ -329,9 +642,9 @@ impl OutcomeHandler {
             "agent crashed — releasing bead and creating alert"
         );
 
-        store.release(&bead.id).await?;
+        let events = self.release_bead(store, bead).await?;
 
-        // Create alert bead with diagnostic info.
+        // Create alert bead with diagnostic info (best-effort).
         let signal_num = if signal_code > 128 {
             signal_code - 128
         } else {
@@ -357,34 +670,40 @@ impl OutcomeHandler {
             timestamp,
         );
 
-        let alert_labels = ["alert", "crash", &format!("signal-{}", signal_num)];
-        match store
-            .create_bead(&alert_title, &alert_body, &alert_labels)
-            .await
+        // Hook 4: propagate stitch labels from the crashed bead to the alert.
+        let signal_label = format!("signal-{}", signal_num);
+        let mut alert_labels: Vec<String> = vec!["alert".into(), "crash".into(), signal_label];
+        alert_labels.extend(crate::types::extract_stitch_labels(&bead.labels));
+        let alert_label_refs: Vec<&str> = alert_labels.iter().map(|s| s.as_str()).collect();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            store.create_bead(&alert_title, &alert_body, &alert_label_refs),
+        )
+        .await
         {
-            Ok(alert_id) => {
+            Ok(Ok(alert_id)) => {
                 tracing::info!(
                     bead_id = %bead.id,
                     %alert_id,
                     "crash alert bead created"
                 );
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(
                     bead_id = %bead.id,
                     error = %e,
                     "failed to create crash alert bead"
                 );
             }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "create_bead timed out after 30s during crash handling"
+                );
+            }
         }
 
-        let event = EventKind::BeadReleased {
-            bead_id: bead.id.clone(),
-            reason: format!("crash_signal_{}", signal_code),
-        };
-        self.telemetry.emit(event.clone())?;
-
-        Ok((BeadAction::Alerted, vec![event]))
+        Ok((BeadAction::Alerted, events))
     }
 
     /// AgentNotFound: release bead, emit error. No retry — this is a config issue.
@@ -399,15 +718,8 @@ impl OutcomeHandler {
             "agent binary not found — releasing bead (config issue, no retry)"
         );
 
-        store.release(&bead.id).await?;
-
-        let event = EventKind::BeadReleased {
-            bead_id: bead.id.clone(),
-            reason: "agent_not_found".to_string(),
-        };
-        self.telemetry.emit(event.clone())?;
-
-        Ok((BeadAction::Released, vec![event]))
+        let events = self.release_bead(store, bead).await?;
+        Ok((BeadAction::Released, events))
     }
 
     /// Interrupted: release bead for graceful shutdown.
@@ -418,33 +730,40 @@ impl OutcomeHandler {
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::info!(bead_id = %bead.id, "agent interrupted — releasing bead for clean shutdown");
 
-        store.release(&bead.id).await?;
-
-        let event = EventKind::BeadReleased {
-            bead_id: bead.id.clone(),
-            reason: "interrupted".to_string(),
-        };
-        self.telemetry.emit(event.clone())?;
-
-        Ok((BeadAction::Released, vec![event]))
+        let events = self.release_bead(store, bead).await?;
+        Ok((BeadAction::Released, events))
     }
 
     /// Increment the failure count label on a bead.
     ///
     /// Labels follow the pattern `failure-count:N`. If `failure-count:2` exists,
     /// the old label is removed and `failure-count:3` is added.
+    ///
+    /// All `br` calls are wrapped in timeouts to prevent indefinite hang in
+    /// HANDLING state. Failures are non-fatal — we log and continue.
     async fn increment_failure_count(&self, store: &dyn BeadStore, bead: &Bead) -> Result<()> {
-        let labels = match store.labels(&bead.id).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    error = %e,
-                    "could not read labels to increment failure count"
-                );
-                return Ok(());
-            }
-        };
+        // Read labels with timeout.
+        let labels =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), store.labels(&bead.id))
+                .await
+            {
+                Ok(Ok(l)) => l,
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "could not read labels to increment failure count"
+                    );
+                    return Ok(());
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "labels() timed out after 30s, skipping failure count increment"
+                    );
+                    return Ok(());
+                }
+            };
 
         let current_count = labels
             .iter()
@@ -457,29 +776,63 @@ impl OutcomeHandler {
         let new_label = format!("failure-count:{}", new_count);
 
         // Remove old failure-count labels before adding the new one.
+        // Each remove_label call is wrapped in a timeout.
         for label in &labels {
             if label.starts_with("failure-count:") {
-                if let Err(e) = store.remove_label(&bead.id, label).await {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        label,
-                        error = %e,
-                        "failed to remove old failure-count label"
-                    );
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    store.remove_label(&bead.id, label),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            label,
+                            error = %e,
+                            "failed to remove old failure-count label"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            label,
+                            "remove_label timed out after 30s"
+                        );
+                    }
                 }
             }
         }
 
-        store
-            .add_label(&bead.id, &new_label)
-            .await
-            .with_context(|| format!("failed to add label {} to bead {}", new_label, bead.id))?;
-
-        tracing::debug!(
-            bead_id = %bead.id,
-            count = new_count,
-            "failure count incremented"
-        );
+        // Add the new label with timeout.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            store.add_label(&bead.id, &new_label),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    count = new_count,
+                    "failure count incremented"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to add failure-count label"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "add_label timed out after 30s"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -598,6 +951,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(StoreAction::Release(id.to_string()));
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
             Ok(())
         }
         async fn reopen(&self, id: &BeadId) -> Result<()> {

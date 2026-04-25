@@ -274,6 +274,7 @@ proptest! {
     fn heartbeat_fresh_is_never_stale(ttl_secs in 1u64..3600) {
         let heartbeat = needle::health::HeartbeatData {
             worker_id: "test-worker".to_string(),
+            qualified_id: "test-worker".to_string(),
             pid: 12345,
             state: needle::types::WorkerState::Selecting,
             current_bead: None,
@@ -282,6 +283,7 @@ proptest! {
             started_at: Utc::now(),
             beads_processed: 0,
             session: "test".to_string(),
+            heartbeat_file: None,
         };
 
         let ttl = std::time::Duration::from_secs(ttl_secs);
@@ -297,6 +299,7 @@ proptest! {
         let old_time = Utc::now() - chrono::Duration::hours(24);
         let heartbeat = needle::health::HeartbeatData {
             worker_id: "test-worker".to_string(),
+            qualified_id: "test-worker".to_string(),
             pid: 12345,
             state: needle::types::WorkerState::Selecting,
             current_bead: None,
@@ -305,6 +308,7 @@ proptest! {
             started_at: old_time,
             beads_processed: 0,
             session: "test".to_string(),
+            heartbeat_file: None,
         };
 
         let ttl = std::time::Duration::from_secs(ttl_secs);

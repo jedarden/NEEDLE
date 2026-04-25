@@ -1,0 +1,16 @@
+{
+  "bead_id": "needle-s9jf",
+  "agent": "claude-code-glm-4.7",
+  "provider": "zai",
+  "model": "glm-4.7",
+  "exit_code": 1,
+  "outcome": "failure",
+  "duration_ms": 330710,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-04-24T12:36:37.872551167Z",
+  "trace_format": "claude_json",
+  "pruned": false,
+  "template_version": null
+}

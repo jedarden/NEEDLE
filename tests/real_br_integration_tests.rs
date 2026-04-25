@@ -324,6 +324,7 @@ async fn real_br_crashed_worker_bead_released_by_peer() {
     // Write a stale heartbeat for the crashed worker.
     let heartbeat_data = needle::health::HeartbeatData {
         worker_id: "crashed-worker".to_string(),
+        qualified_id: "crashed-worker".to_string(),
         pid: 99_999_999, // Dead PID.
         state: needle::types::WorkerState::Executing,
         current_bead: Some(bead_id.clone()),
@@ -332,6 +333,7 @@ async fn real_br_crashed_worker_bead_released_by_peer() {
         started_at: Utc::now() - chrono::Duration::seconds(3600),
         beads_processed: 1,
         session: "crashed-worker".to_string(),
+        heartbeat_file: None,
     };
     let hb_path = hb_dir.path().join("crashed-worker.json");
     std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();
@@ -387,7 +389,13 @@ async fn real_br_explore_discovers_remote_workspace() {
         workspaces: vec![remote_workspace.path().to_path_buf()],
     };
 
-    let explore = ExploreStrand::new(config, home_workspace.path().to_path_buf());
+    let explore = ExploreStrand::new(
+        config,
+        home_workspace.path().to_path_buf(),
+        Registry::new(tempfile::tempdir().unwrap().path()),
+        Telemetry::new("test".to_string()),
+        "test-worker".to_string(),
+    );
 
     // Home workspace is empty, so Explore should find the remote bead.
     let result = explore.evaluate(&home_store).await;
@@ -418,7 +426,16 @@ async fn real_br_explore_skips_home_workspace() {
         workspaces: vec![home_workspace.path().to_path_buf()],
     };
 
-    let explore = ExploreStrand::new(config, home_workspace.path().to_path_buf());
+    let reg_dir = tempfile::tempdir().unwrap();
+    let registry = Registry::new(reg_dir.path());
+    let telemetry = Telemetry::new("explore-worker".to_string());
+    let explore = ExploreStrand::new(
+        config,
+        home_workspace.path().to_path_buf(),
+        registry,
+        telemetry,
+        "explore-worker".to_string(),
+    );
 
     // Explore should skip home and return NoWork.
     let result = explore.evaluate(&home_store).await;
@@ -443,7 +460,13 @@ async fn real_br_explore_disabled_returns_no_work() {
         workspaces: vec![remote_workspace.path().to_path_buf()],
     };
 
-    let explore = ExploreStrand::new(config, home_workspace.path().to_path_buf());
+    let explore = ExploreStrand::new(
+        config,
+        home_workspace.path().to_path_buf(),
+        Registry::new(tempfile::tempdir().unwrap().path()),
+        Telemetry::new("test".to_string()),
+        "test-worker".to_string(),
+    );
 
     let result = explore.evaluate(&home_store).await;
     assert!(
@@ -472,6 +495,7 @@ async fn real_br_mend_cleans_crashed_peer() {
     // Write stale heartbeat for crashed worker.
     let heartbeat_data = needle::health::HeartbeatData {
         worker_id: "dead-peer".to_string(),
+        qualified_id: "claude-dead-peer".to_string(),
         pid: 99_999_999,
         state: needle::types::WorkerState::Executing,
         current_bead: Some(bead_id.clone()),
@@ -480,6 +504,7 @@ async fn real_br_mend_cleans_crashed_peer() {
         started_at: Utc::now() - chrono::Duration::seconds(3600),
         beads_processed: 1,
         session: "dead-peer".to_string(),
+        heartbeat_file: None,
     };
     let hb_path = hb_dir.path().join("dead-peer.json");
     std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();
@@ -534,6 +559,7 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
     // Write fresh heartbeat for healthy worker.
     let heartbeat_data = needle::health::HeartbeatData {
         worker_id: "healthy-peer".to_string(),
+        qualified_id: "healthy-peer".to_string(),
         pid: std::process::id(),
         state: needle::types::WorkerState::Executing,
         current_bead: None,
@@ -542,6 +568,7 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
         started_at: Utc::now() - chrono::Duration::seconds(60),
         beads_processed: 0,
         session: "healthy-peer".to_string(),
+        heartbeat_file: None,
     };
     let hb_path = hb_dir.path().join("healthy-peer.json");
     std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();

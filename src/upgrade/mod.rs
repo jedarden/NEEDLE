@@ -433,10 +433,12 @@ impl ResumeState {
     /// Load resume state from heartbeat file and registry.
     ///
     /// Returns `None` if no valid heartbeat or registry entry exists for the
-    /// given worker ID.
+    /// given worker ID. The `worker_id` parameter is the bare NATO name; the
+    /// qualified identity is derived from `config.agent.default` + `worker_id`.
     pub fn load(config: &crate::config::Config, worker_id: &str) -> Result<Option<Self>> {
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
-        let heartbeat_path = heartbeat_dir.join(format!("{}.json", worker_id));
+        let qualified_id = format!("{}-{}", config.agent.default, worker_id);
+        let heartbeat_path = heartbeat_dir.join(format!("{}.json", qualified_id));
 
         if !heartbeat_path.exists() {
             tracing::debug!(
@@ -454,7 +456,7 @@ impl ResumeState {
         // Check registry for additional context.
         let registry = crate::registry::Registry::default_location(&config.workspace.home);
         let workers = registry.list().context("failed to list registry")?;
-        let entry = workers.iter().find(|w| w.id == worker_id);
+        let entry = workers.iter().find(|w| w.id == qualified_id);
 
         let beads_processed = match entry {
             Some(e) => e.beads_processed,

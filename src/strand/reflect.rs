@@ -870,6 +870,9 @@ mod tests {
             async fn release(&self, _id: &crate::types::BeadId) -> anyhow::Result<()> {
                 Ok(())
             }
+            async fn flush(&self) -> anyhow::Result<()> {
+                Ok(())
+            }
             async fn reopen(&self, _id: &crate::types::BeadId) -> anyhow::Result<()> {
                 Ok(())
             }

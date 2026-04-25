@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 
 use crate::bead_store::BeadStore;
 use crate::config::WeaveConfig;
+use crate::telemetry::{EventKind, Telemetry};
 use crate::types::StrandResult;
 
 // ─── WeaveAgent trait ────────────────────────────────────────────────────────
@@ -110,6 +111,7 @@ pub struct WeaveStrand {
     workspace: PathBuf,
     state_dir: PathBuf,
     agent: Box<dyn WeaveAgent>,
+    telemetry: Telemetry,
 }
 
 impl WeaveStrand {
@@ -122,12 +124,14 @@ impl WeaveStrand {
         workspace: PathBuf,
         state_dir: PathBuf,
         agent: Box<dyn WeaveAgent>,
+        telemetry: Telemetry,
     ) -> Self {
         WeaveStrand {
             config,
             workspace,
             state_dir,
             agent,
+            telemetry,
         }
     }
 
@@ -324,12 +328,20 @@ impl super::Strand for WeaveStrand {
     async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
         // Guard: disabled.
         if !self.config.enabled {
+            let _ = self.telemetry.emit(EventKind::StrandSkipped {
+                strand_name: "weave".to_string(),
+                reason: "disabled".to_string(),
+            });
             tracing::debug!("weave strand disabled");
             return StrandResult::NoWork;
         }
 
         // Guard: workspace exclusion.
         if self.is_workspace_excluded() {
+            let _ = self.telemetry.emit(EventKind::StrandSkipped {
+                strand_name: "weave".to_string(),
+                reason: "workspace_excluded".to_string(),
+            });
             tracing::debug!(
                 workspace = %self.workspace.display(),
                 "weave strand: workspace excluded"
@@ -348,6 +360,18 @@ impl super::Strand for WeaveStrand {
         };
 
         if !state.cooldown_elapsed(self.config.cooldown_hours) {
+            let _ = self.telemetry.emit(EventKind::StrandSkipped {
+                strand_name: "weave".to_string(),
+                reason: format!(
+                    "cooldown ({}/{}/{}h)",
+                    state
+                        .last_run
+                        .map(|t| (Utc::now() - t).num_hours())
+                        .unwrap_or(-1),
+                    0,
+                    self.config.cooldown_hours
+                ),
+            });
             tracing::debug!(
                 last_run = ?state.last_run,
                 cooldown_hours = self.config.cooldown_hours,
@@ -359,6 +383,10 @@ impl super::Strand for WeaveStrand {
         // Discover documentation files.
         let doc_files = self.discover_doc_files();
         if doc_files.is_empty() {
+            let _ = self.telemetry.emit(EventKind::StrandSkipped {
+                strand_name: "weave".to_string(),
+                reason: "no_documentation_files".to_string(),
+            });
             tracing::debug!("weave strand: no documentation files found");
             return StrandResult::NoWork;
         }
@@ -636,6 +664,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -715,16 +746,23 @@ mod tests {
 
     use super::super::Strand;
 
+    #[allow(dead_code)]
+    fn test_telemetry() -> Telemetry {
+        Telemetry::new("test".to_string())
+    }
+
     // ── Tests ────────────────────────────────────────────────────────────
 
     #[test]
     fn strand_name_is_weave() {
         let dir = tempfile::tempdir().unwrap();
+        let telemetry = Telemetry::new("test".to_string());
         let strand = WeaveStrand::new(
             WeaveConfig::default(),
             PathBuf::from("/tmp"),
             dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_GAPS")),
+            telemetry,
         );
         assert_eq!(strand.name(), "weave");
     }
@@ -732,11 +770,13 @@ mod tests {
     #[tokio::test]
     async fn disabled_returns_no_work() {
         let dir = tempfile::tempdir().unwrap();
+        let telemetry = Telemetry::new("test".to_string());
         let strand = WeaveStrand::new(
             WeaveConfig::default(), // disabled by default
             PathBuf::from("/tmp"),
             dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_GAPS")),
+            telemetry,
         );
         let store = MockStore::empty();
         let result = strand.evaluate(&store).await;
@@ -752,11 +792,13 @@ mod tests {
             exclude_workspaces: vec![workspace.clone()],
             ..WeaveConfig::default()
         };
+        let telemetry = Telemetry::new("test".to_string());
         let strand = WeaveStrand::new(
             config,
             workspace,
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_GAPS")),
+            telemetry,
         );
         let store = MockStore::empty();
         let result = strand.evaluate(&store).await;
@@ -782,6 +824,7 @@ mod tests {
             workspace,
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_GAPS")),
+            Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
         let result = strand.evaluate(&store).await;
@@ -798,6 +841,7 @@ mod tests {
             dir.path().to_path_buf(),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_GAPS")),
+            Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
         let result = strand.evaluate(&store).await;
@@ -813,6 +857,7 @@ mod tests {
             workspace,
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_GAPS")),
+            Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
         let result = strand.evaluate(&store).await;
@@ -834,6 +879,7 @@ mod tests {
             workspace,
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
+            Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
         let result = strand.evaluate(&store).await;
@@ -870,6 +916,7 @@ mod tests {
             workspace,
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
+            Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
         let result = strand.evaluate(&store).await;
@@ -904,6 +951,7 @@ mod tests {
             workspace,
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
+            Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
         let result = strand.evaluate(&store).await;
@@ -929,6 +977,7 @@ mod tests {
             workspace,
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
+            Telemetry::new("test".to_string()),
         );
         let store = MockStore::new(vec![make_bead("bead-1", "existing task")]);
         let result = strand.evaluate(&store).await;
@@ -948,6 +997,7 @@ mod tests {
             workspace,
             state_dir.path().to_path_buf(),
             Box::new(FailingAgent),
+            Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
         let result = strand.evaluate(&store).await;
@@ -969,6 +1019,7 @@ mod tests {
             workspace.clone(),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
+            Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
         let _ = strand.evaluate(&store).await;
@@ -995,6 +1046,7 @@ mod tests {
             workspace,
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
+            Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
         let result = strand.evaluate(&store).await;

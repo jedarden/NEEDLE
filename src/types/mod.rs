@@ -1129,3 +1129,32 @@ impl fmt::Display for ExhaustionDiagnosis {
         }
     }
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Label utilities
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Extract labels suitable for propagation to child or related beads.
+///
+/// Returns labels that represent project/domain context. Excludes ephemeral
+/// state labels ("in-progress", "ready", "alert", "crash", "signal-*") that
+/// are set per-bead by NEEDLE and would be inappropriate on a derived bead.
+pub fn extract_stitch_labels(labels: &[String]) -> Vec<String> {
+    const EXCLUDED: &[&str] = &[
+        "alert",
+        "crash",
+        "in-progress",
+        "ready",
+        "blocked",
+        "done",
+        "closed",
+    ];
+    labels
+        .iter()
+        .filter(|l| {
+            let lower = l.to_lowercase();
+            !EXCLUDED.contains(&lower.as_str()) && !lower.starts_with("signal-")
+        })
+        .cloned()
+        .collect()
+}

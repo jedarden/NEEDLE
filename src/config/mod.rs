@@ -91,6 +91,10 @@ pub struct WorkerConfig {
     #[serde(default = "WorkerConfig::default_max_claim_retries")]
     pub max_claim_retries: u32,
 
+    /// Consecutive race_lost attempts before treating the ready queue as empty.
+    #[serde(default = "WorkerConfig::default_claim_race_lost_skip")]
+    pub claim_race_lost_skip: u32,
+
     /// How workers generate their unique names.
     #[serde(default)]
     pub identifier_scheme: IdentifierScheme,
@@ -102,6 +106,10 @@ pub struct WorkerConfig {
     /// Warn when available memory falls below this threshold (MB).
     #[serde(default = "WorkerConfig::default_memory_free_warn_mb")]
     pub memory_free_warn_mb: u64,
+
+    /// BUILDING state timeout in seconds (0 = unlimited).
+    #[serde(default = "WorkerConfig::default_building_timeout")]
+    pub building_timeout: u64,
 }
 
 impl Default for WorkerConfig {
@@ -112,9 +120,11 @@ impl Default for WorkerConfig {
             idle_timeout: Self::default_idle_timeout(),
             idle_action: IdleAction::default(),
             max_claim_retries: Self::default_max_claim_retries(),
+            claim_race_lost_skip: Self::default_claim_race_lost_skip(),
             identifier_scheme: IdentifierScheme::default(),
             cpu_load_warn: Self::default_cpu_load_warn(),
             memory_free_warn_mb: Self::default_memory_free_warn_mb(),
+            building_timeout: Self::default_building_timeout(),
         }
     }
 }
@@ -132,11 +142,17 @@ impl WorkerConfig {
     fn default_max_claim_retries() -> u32 {
         3
     }
+    fn default_claim_race_lost_skip() -> u32 {
+        5
+    }
     fn default_cpu_load_warn() -> f64 {
         0.8
     }
     fn default_memory_free_warn_mb() -> u64 {
         512
+    }
+    fn default_building_timeout() -> u64 {
+        600
     }
 }
 
@@ -626,6 +642,87 @@ impl ReflectConfig {
     }
 }
 
+/// Splice strand configuration (worker failure documentation).
+///
+/// Splice detects dead workers (stale heartbeat) and live-but-looping workers
+/// (fresh heartbeat, stuck in a tight event loop). Both are documented as
+/// failure beads in the configured report workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpliceConfig {
+    /// Whether the Splice strand is enabled (default: true).
+    #[serde(default = "SpliceConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Seconds since last heartbeat before a worker is considered stale (default: 300).
+    #[serde(default = "SpliceConfig::default_stale_threshold_secs")]
+    pub stale_threshold_secs: u64,
+
+    /// Path to the workspace where worker failure beads are created.
+    /// When `None`, uses the current bead store (no separate workspace).
+    #[serde(default)]
+    pub report_workspace: Option<PathBuf>,
+
+    /// Whether to scan live workers' JSONL for stuck-loop patterns (default: true).
+    #[serde(default = "SpliceConfig::default_detect_live_loops")]
+    pub detect_live_loops: bool,
+
+    /// Max events to scan from JSONL tail per worker (default: 200).
+    #[serde(default = "SpliceConfig::default_live_loop_scan_events")]
+    pub live_loop_scan_events: usize,
+
+    /// Min same-bead `bead.claim.race_lost` events to flag as claim churn (default: 20).
+    #[serde(default = "SpliceConfig::default_claim_churn_threshold")]
+    pub claim_churn_threshold: u32,
+
+    /// Max JSONL growth (bytes) in `live_loop_window_secs` without `agent.completed`
+    /// before flagging as log runaway (default: 10 MiB).
+    #[serde(default = "SpliceConfig::default_log_runaway_bytes")]
+    pub log_runaway_bytes: u64,
+
+    /// Window for the log-rate runaway check in seconds (default: 300).
+    #[serde(default = "SpliceConfig::default_live_loop_window_secs")]
+    pub live_loop_window_secs: u64,
+}
+
+impl Default for SpliceConfig {
+    fn default() -> Self {
+        SpliceConfig {
+            enabled: Self::default_enabled(),
+            stale_threshold_secs: Self::default_stale_threshold_secs(),
+            report_workspace: None,
+            detect_live_loops: Self::default_detect_live_loops(),
+            live_loop_scan_events: Self::default_live_loop_scan_events(),
+            claim_churn_threshold: Self::default_claim_churn_threshold(),
+            log_runaway_bytes: Self::default_log_runaway_bytes(),
+            live_loop_window_secs: Self::default_live_loop_window_secs(),
+        }
+    }
+}
+
+impl SpliceConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_stale_threshold_secs() -> u64 {
+        300
+    }
+    fn default_detect_live_loops() -> bool {
+        true
+    }
+    fn default_live_loop_scan_events() -> usize {
+        200
+    }
+    fn default_claim_churn_threshold() -> u32 {
+        20
+    }
+    fn default_log_runaway_bytes() -> u64 {
+        10 * 1024 * 1024 // 10 MiB
+    }
+    fn default_live_loop_window_secs() -> u64 {
+        300
+    }
+}
+
 /// Strand waterfall configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StrandsConfig {
@@ -647,6 +744,8 @@ pub struct StrandsConfig {
     pub pulse: PulseConfig,
     #[serde(default)]
     pub reflect: ReflectConfig,
+    #[serde(default)]
+    pub splice: SpliceConfig,
     /// Learning and trace retention configuration.
     #[serde(default)]
     pub learning: LearningConfig,
@@ -1073,6 +1172,46 @@ impl SelfModificationConfig {
     }
 }
 
+/// FABRIC telemetry forwarding configuration.
+///
+/// When enabled, NEEDLE workers POST structured events to the FABRIC
+/// web server (`fabric web`) for live dashboard display.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FabricConfig {
+    /// Whether to forward events to FABRIC (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// HTTP endpoint to POST events to (e.g., `http://localhost:3000/api/events`).
+    #[serde(default)]
+    pub endpoint: String,
+
+    /// Request timeout in seconds (default: 2).
+    #[serde(default = "FabricConfig::default_timeout")]
+    pub timeout: u64,
+
+    /// Batch events before sending instead of sending one at a time (default: false).
+    #[serde(default)]
+    pub batching: bool,
+}
+
+impl Default for FabricConfig {
+    fn default() -> Self {
+        FabricConfig {
+            enabled: false,
+            endpoint: String::new(),
+            timeout: Self::default_timeout(),
+            batching: false,
+        }
+    }
+}
+
+impl FabricConfig {
+    fn default_timeout() -> u64 {
+        2
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Config Source Tracking
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1213,6 +1352,9 @@ pub struct Config {
     /// Self-modification (hot-reload) configuration.
     #[serde(default)]
     pub self_modification: SelfModificationConfig,
+    /// FABRIC live dashboard forwarding.
+    #[serde(default)]
+    pub fabric: FabricConfig,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2297,6 +2439,7 @@ worker:
   idle_timeout: 120
   launch_stagger_seconds: 5
   max_claim_retries: 10
+  claim_race_lost_skip: 8
 health:
   heartbeat_interval_secs: 15
   heartbeat_ttl_secs: 120
@@ -2316,6 +2459,7 @@ strands:
         assert_eq!(config.worker.idle_timeout, 120);
         assert_eq!(config.worker.launch_stagger_seconds, 5);
         assert_eq!(config.worker.max_claim_retries, 10);
+        assert_eq!(config.worker.claim_race_lost_skip, 8);
         assert_eq!(config.health.heartbeat_interval_secs, 15);
         assert_eq!(config.health.heartbeat_ttl_secs, 120);
         assert!(!config.strands.explore.enabled);
@@ -2550,6 +2694,7 @@ strands:
         assert_eq!(config.launch_stagger_seconds, 2);
         assert_eq!(config.idle_timeout, 60);
         assert_eq!(config.max_claim_retries, 3);
+        assert_eq!(config.claim_race_lost_skip, 5);
         assert!((config.cpu_load_warn - 0.8).abs() < f64::EPSILON);
         assert_eq!(config.memory_free_warn_mb, 512);
     }
@@ -2644,6 +2789,19 @@ strands:
         let config = ReflectConfig::default();
         assert!(config.extraction_agent.is_none());
         assert_eq!(config.max_extraction_per_run, 5);
+    }
+
+    #[test]
+    fn splice_config_default_values() {
+        let config = SpliceConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.stale_threshold_secs, 300);
+        assert!(config.report_workspace.is_none());
+        assert!(config.detect_live_loops);
+        assert_eq!(config.live_loop_scan_events, 200);
+        assert_eq!(config.claim_churn_threshold, 20);
+        assert_eq!(config.log_runaway_bytes, 10 * 1024 * 1024);
+        assert_eq!(config.live_loop_window_secs, 300);
     }
 
     #[test]

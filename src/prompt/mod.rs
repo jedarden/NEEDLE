@@ -237,6 +237,7 @@ pub struct BuiltPrompt {
 /// All five named templates (`pluck`, `mitosis`, `weave`, `unravel`, `pulse`)
 /// are always present with built-in defaults. User-provided overrides from
 /// config replace specific templates while others keep their defaults.
+#[derive(Clone)]
 pub struct PromptBuilder {
     /// Named templates. All five built-in names are always present.
     templates: BTreeMap<String, String>,

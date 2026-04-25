@@ -11,6 +11,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -21,7 +23,7 @@ use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
 use crate::registry::{Registry, WorkerEntry};
-use crate::telemetry;
+use crate::telemetry::{self, EventKind, Telemetry};
 use crate::worker::Worker;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -122,6 +124,10 @@ pub enum CliCommand {
         /// Filter events until this time (e.g., 1h, 24h, 7d, 2026-03-20T15:00:00Z).
         #[arg(long)]
         until: Option<String>,
+
+        /// Show cooldown state for idle-time strands (reflect, weave, pulse, unravel).
+        #[arg(long)]
+        idle_strands: bool,
     },
 
     /// View and query telemetry logs.
@@ -320,7 +326,8 @@ pub fn run() -> Result<()> {
             cost,
             since,
             until,
-        } => cmd_status(format, by_worker, cost, since, until),
+            idle_strands,
+        } => cmd_status(format, by_worker, cost, since, until, idle_strands),
         CliCommand::Logs {
             follow,
             filter,
@@ -605,18 +612,82 @@ fn launch_workers(
 }
 
 /// Start the worker state machine (called when inside tmux or for direct mode).
+///
+/// Creates telemetry and the tokio runtime *before* any other initialization
+/// so that `worker.booting` is the very first JSONL event. Each subsequent
+/// init step is wrapped with `init.step.started` / `init.step.completed` so a
+/// silent hang pinpoints the exact blocking call.
 fn run_worker(config: Config, worker_name: String) -> Result<()> {
-    let store = std::sync::Arc::new(
-        BrCliBeadStore::discover(config.workspace.default.clone())
-            .context("failed to locate br CLI for bead store")?,
-    );
-    let mut worker = Worker::new(config, worker_name, store);
+    let boot_start = Instant::now();
+    let qualified_id = format!("{}-{}", config.agent.default, worker_name);
 
+    // Phase 0: create tokio runtime + telemetry, emit worker.booting immediately.
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    let telemetry =
+        Telemetry::from_config(qualified_id.clone(), &config.telemetry).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
+            Telemetry::new(qualified_id.clone())
+        });
+    telemetry.start();
+    telemetry.emit(EventKind::WorkerBooting {
+        worker_name: worker_name.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })?;
+    // Force-flush worker.booting to disk immediately so we get a trace even if
+    // subsequent init steps block indefinitely (e.g., db lock, network call).
+    telemetry.force_flush(std::time::Duration::from_secs(5))?;
+
+    // Phase 1: bead store discovery.
+    let store: Arc<dyn crate::bead_store::BeadStore> =
+        Arc::new(init_step("bead_store_discover", &telemetry, || {
+            BrCliBeadStore::discover(config.workspace.default.clone())
+                .context("failed to locate br CLI for bead store")
+        })?);
+
+    // Phase 2: worker construction (heavy — prompt loading, adapter discovery, etc.).
+    let mut worker = init_step("worker_construction", &telemetry, || {
+        Ok(Worker::new_with_telemetry(
+            config,
+            worker_name.clone(),
+            store,
+            telemetry.clone(),
+        ))
+    })?;
+
+    // Boot timeout guard: self-abort if init took >60 s.
+    let elapsed_ms = boot_start.elapsed().as_millis() as u64;
+    if elapsed_ms > 60_000 {
+        telemetry.emit(EventKind::WorkerBootTimeout { elapsed_ms })?;
+        bail!("boot exceeded 60 s ({elapsed_ms} ms), aborting");
+    }
+
     let result = rt.block_on(worker.run())?;
 
     tracing::info!(final_state = %result, "worker finished");
     Ok(())
+}
+
+/// Emit start/complete telemetry around a fallible initialization step.
+///
+/// Each step's completion is force-flushed to disk so that if a subsequent
+/// step blocks indefinitely, the telemetry log shows exactly where it stopped.
+fn init_step<T, F>(name: &str, tel: &Telemetry, f: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T>,
+{
+    tel.emit(EventKind::InitStepStarted {
+        step: name.to_string(),
+    })?;
+    let t = Instant::now();
+    let result = f();
+    let elapsed = t.elapsed().as_millis() as u64;
+    tel.emit(EventKind::InitStepCompleted {
+        step: name.to_string(),
+        duration_ms: elapsed,
+    })?;
+    // Force-flush so the step completion is visible before the next (potentially blocking) step.
+    tel.force_flush(std::time::Duration::from_secs(1))?;
+    result
 }
 
 /// Returns true when this process is a re-entrant inner invocation launched
@@ -843,6 +914,7 @@ fn cmd_status(
     cost: bool,
     since: Option<String>,
     until: Option<String>,
+    idle_strands: bool,
 ) -> Result<()> {
     let config = ConfigLoader::load_global()?;
     let needle_home = config.workspace.home.clone();
@@ -1048,6 +1120,91 @@ fn cmd_status(
                     "{}",
                     serde_json::to_string_pretty(&cost_json)
                         .context("failed to serialize cost summary")?
+                );
+            }
+        }
+    }
+
+    // Idle-strands cooldown summary (if requested).
+    if idle_strands {
+        let state_base = needle_home.join("state");
+
+        // Collect unique workspaces: default + all registered worker workspaces.
+        let mut workspaces: Vec<PathBuf> = Vec::new();
+        workspaces.push(config.workspace.default.clone());
+        for w in &workers {
+            if !workspaces.contains(&w.workspace) {
+                workspaces.push(w.workspace.clone());
+            }
+        }
+
+        let rows = idle_strand_rows(&config, &state_base, &workspaces);
+
+        match format {
+            ListFormat::Table => {
+                println!();
+                println!("Idle Strand Cooldowns");
+                println!("{}", "-".repeat(80));
+                println!(
+                    "{:<10} {:<30} {:<12} {:<22} {:<12}",
+                    "STRAND", "WORKSPACE", "ENABLED", "LAST RUN", "STATUS"
+                );
+                println!("{}", "-".repeat(80));
+                for row in &rows {
+                    let ws_display = if row.workspace.len() > 28 {
+                        format!("...{}", &row.workspace[row.workspace.len() - 25..])
+                    } else {
+                        row.workspace.clone()
+                    };
+                    let last_run = row
+                        .last_run
+                        .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+                        .unwrap_or_else(|| "never".to_string());
+                    let enabled = if row.enabled { "yes" } else { "no" };
+                    println!(
+                        "{:<10} {:<30} {:<12} {:<22} {:<12}",
+                        row.strand, ws_display, enabled, last_run, row.status
+                    );
+                }
+                if rows.is_empty() {
+                    println!("  No idle strand state found.");
+                }
+                println!();
+                println!(
+                    "Cooldown hours: reflect={}, weave={}, pulse={}, unravel={}",
+                    config.strands.reflect.cooldown_hours,
+                    config.strands.weave.cooldown_hours,
+                    config.strands.pulse.cooldown_hours,
+                    config.strands.unravel.cooldown_hours,
+                );
+            }
+            ListFormat::Json => {
+                let json_rows: Vec<_> = rows
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "strand": r.strand,
+                            "workspace": r.workspace,
+                            "enabled": r.enabled,
+                            "last_run": r.last_run,
+                            "cooldown_hours": r.cooldown_hours,
+                            "status": r.status,
+                        })
+                    })
+                    .collect();
+                let idle_json = serde_json::json!({
+                    "idle_strands": json_rows,
+                    "cooldown_hours": {
+                        "reflect": config.strands.reflect.cooldown_hours,
+                        "weave": config.strands.weave.cooldown_hours,
+                        "pulse": config.strands.pulse.cooldown_hours,
+                        "unravel": config.strands.unravel.cooldown_hours,
+                    }
+                });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&idle_json)
+                        .context("failed to serialize idle-strands")?
                 );
             }
         }
@@ -2225,6 +2382,175 @@ fn format_duration(secs: u64) -> String {
     } else {
         format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Idle-strand cooldown helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Per-row data for the `needle status --idle-strands` cooldown table.
+struct IdleStrandRow {
+    strand: String,
+    workspace: String,
+    enabled: bool,
+    last_run: Option<DateTime<Utc>>,
+    cooldown_hours: u64,
+    status: String,
+}
+
+#[derive(serde::Deserialize)]
+struct ReflectStateCli {
+    last_consolidation: DateTime<Utc>,
+}
+
+#[derive(serde::Deserialize)]
+struct LastRunStateCli {
+    last_run: Option<DateTime<Utc>>,
+}
+
+#[derive(serde::Deserialize)]
+struct UnravelStateCli {
+    analyzed: std::collections::HashMap<String, DateTime<Utc>>,
+}
+
+/// Compute a short SHA-256 workspace hash (matches strand implementations).
+fn workspace_hash_cli(workspace: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(workspace.display().to_string().as_bytes());
+    let result = hasher.finalize();
+    result
+        .iter()
+        .take(8)
+        .fold(String::with_capacity(16), |mut acc, b| {
+            use std::fmt::Write;
+            let _ = write!(acc, "{b:02x}");
+            acc
+        })
+}
+
+/// Compute a human-readable cooldown status string for an idle strand.
+fn idle_strand_status(
+    enabled: bool,
+    last_run: Option<DateTime<Utc>>,
+    cooldown_hours: u64,
+    now: DateTime<Utc>,
+) -> String {
+    if !enabled {
+        return "disabled".to_string();
+    }
+    match last_run {
+        None => "ready (never run)".to_string(),
+        Some(last) => {
+            let elapsed_hours = (now - last).num_hours().max(0) as u64;
+            if elapsed_hours >= cooldown_hours {
+                "ready".to_string()
+            } else {
+                let remaining = cooldown_hours - elapsed_hours;
+                format!("cooldown ({}h left)", remaining)
+            }
+        }
+    }
+}
+
+/// Build idle-strand cooldown rows for `needle status --idle-strands`.
+///
+/// Reflect uses a single shared state file (not per-workspace-hash) because it
+/// operates on config.workspace.default regardless of which workspace a worker
+/// was launched against. Weave, pulse, and unravel are keyed per workspace path.
+///
+/// Per-workspace vs per-worker gating:
+/// - reflect: workspace-level gate shared by all workers; cooldown_hours and
+///   min_beads_since_last both count against the same state file
+/// - weave/pulse/unravel: per-workspace state, so a fleet of workers on N
+///   workspaces maintains N independent cooldown windows per strand
+fn idle_strand_rows(
+    config: &Config,
+    state_base: &Path,
+    workspaces: &[PathBuf],
+) -> Vec<IdleStrandRow> {
+    let now = Utc::now();
+    let mut rows = Vec::new();
+
+    // Reflect: single shared state file — show once for config.workspace.default.
+    {
+        let state_path = state_base.join("reflect").join("reflect_state.json");
+        let last_run = std::fs::read_to_string(&state_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<ReflectStateCli>(&s).ok())
+            .map(|s| s.last_consolidation);
+        let cooldown = config.strands.reflect.cooldown_hours;
+        rows.push(IdleStrandRow {
+            strand: "reflect".to_string(),
+            workspace: config.workspace.default.display().to_string(),
+            enabled: config.strands.reflect.enabled,
+            last_run,
+            cooldown_hours: cooldown,
+            status: idle_strand_status(config.strands.reflect.enabled, last_run, cooldown, now),
+        });
+    }
+
+    // Weave, pulse, unravel: one row per workspace per strand.
+    for workspace in workspaces {
+        let hash = workspace_hash_cli(workspace);
+        let ws = workspace.display().to_string();
+
+        // Weave
+        {
+            let path = state_base.join("weave").join(format!("{hash}.json"));
+            let last_run = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<LastRunStateCli>(&s).ok())
+                .and_then(|s| s.last_run);
+            let cooldown = config.strands.weave.cooldown_hours;
+            rows.push(IdleStrandRow {
+                strand: "weave".to_string(),
+                workspace: ws.clone(),
+                enabled: config.strands.weave.enabled,
+                last_run,
+                cooldown_hours: cooldown,
+                status: idle_strand_status(config.strands.weave.enabled, last_run, cooldown, now),
+            });
+        }
+
+        // Pulse
+        {
+            let path = state_base.join("pulse").join(format!("{hash}.json"));
+            let last_run = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<LastRunStateCli>(&s).ok())
+                .and_then(|s| s.last_run);
+            let cooldown = config.strands.pulse.cooldown_hours;
+            rows.push(IdleStrandRow {
+                strand: "pulse".to_string(),
+                workspace: ws.clone(),
+                enabled: config.strands.pulse.enabled,
+                last_run,
+                cooldown_hours: cooldown,
+                status: idle_strand_status(config.strands.pulse.enabled, last_run, cooldown, now),
+            });
+        }
+
+        // Unravel: per-bead cooldown — most recent analysis time as proxy for last run.
+        {
+            let path = state_base.join("unravel").join(format!("{hash}.json"));
+            let last_run = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<UnravelStateCli>(&s).ok())
+                .and_then(|s| s.analyzed.values().copied().max());
+            let cooldown = config.strands.unravel.cooldown_hours;
+            rows.push(IdleStrandRow {
+                strand: "unravel".to_string(),
+                workspace: ws.clone(),
+                enabled: config.strands.unravel.enabled,
+                last_run,
+                cooldown_hours: cooldown,
+                status: idle_strand_status(config.strands.unravel.enabled, last_run, cooldown, now),
+            });
+        }
+    }
+
+    rows
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -3571,6 +3897,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let hb = HeartbeatData {
             worker_id: "test-w".to_string(),
+            qualified_id: "claude-test-w".to_string(),
             pid: 999_999,
             state: WorkerState::Selecting,
             current_bead: None,
@@ -3579,6 +3906,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             beads_processed: 0,
             session: "test-w".to_string(),
+            heartbeat_file: None,
         };
         std::fs::write(
             tmp.path().join("test-w.json"),
@@ -3599,6 +3927,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let hb = HeartbeatData {
             worker_id: "test-rm".to_string(),
+            qualified_id: "claude-test-rm".to_string(),
             pid: 999_999,
             state: WorkerState::Selecting,
             current_bead: None,
@@ -3607,6 +3936,7 @@ mod tests {
             started_at: chrono::Utc::now(),
             beads_processed: 0,
             session: "test-rm".to_string(),
+            heartbeat_file: None,
         };
         let hb_path = tmp.path().join("test-rm.json");
         std::fs::write(&hb_path, serde_json::to_string(&hb).unwrap()).unwrap();

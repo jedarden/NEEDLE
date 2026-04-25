@@ -146,7 +146,7 @@ impl SkillFile {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Manages the collection of skill files in `.beads/skills/`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SkillLibrary {
     skills: Vec<SkillFile>,
     skills_dir: PathBuf,
@@ -207,12 +207,8 @@ impl SkillLibrary {
             .collect();
 
         // Sort by score desc, then success_count desc as tiebreaker.
-        scored.sort_by(|a, b| {
-            b.0.cmp(&a.0).then_with(|| {
-                b.1.frontmatter
-                    .success_count
-                    .cmp(&a.1.frontmatter.success_count)
-            })
+        scored.sort_by_key(|(score, skill)| {
+            std::cmp::Reverse((*score, skill.frontmatter.success_count))
         });
 
         scored.into_iter().take(3).map(|(_, skill)| skill).collect()

@@ -23,6 +23,98 @@ use crate::telemetry::{EventKind, Telemetry};
 use crate::trace::cleanup_traces;
 use crate::types::{BeadStatus, StrandError, StrandResult};
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Store-scoped orphan cleanup (shared between Mend and Explore)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Scan all in-progress beads in a store and release any whose assignee does
+/// not correspond to a live worker. This catches beads orphaned by workers
+/// that died without leaving a heartbeat file (or whose heartbeat was already
+/// cleaned up).
+///
+/// This is a store-scoped function that can be called against any BeadStore,
+/// not just the home workspace. Used by both MendStrand (for home) and
+/// ExploreStrand (for remote workspaces).
+///
+/// # Arguments
+/// * `store` - The bead store to scan (can be home or remote)
+/// * `registry` - Worker registry for live worker lookup
+/// * `telemetry` - Telemetry emitter for orphan release events
+/// * `qualified_id` - This worker's fully-qualified identity (excluded from orphan detection)
+///
+/// # Returns
+/// * `Ok(u32)` - Number of orphans released
+/// * `Err(anyhow::Error)` - Store read failure
+pub async fn cleanup_orphaned_in_progress(
+    store: &dyn BeadStore,
+    registry: &Registry,
+    telemetry: &Telemetry,
+    qualified_id: &str,
+) -> Result<u32> {
+    let all_beads = store.list_all().await?;
+    let workers = registry.list()?;
+
+    // Build a set of fully-qualified worker IDs for registered, alive workers.
+    let live_worker_ids: std::collections::HashSet<String> = workers
+        .iter()
+        .filter(|w| HealthMonitor::check_pid_alive(w.pid))
+        .map(|w| w.id.clone())
+        .collect();
+
+    let mut released = 0u32;
+
+    for bead in &all_beads {
+        if bead.status != BeadStatus::InProgress {
+            continue;
+        }
+
+        let assignee = match &bead.assignee {
+            Some(a) if !a.is_empty() => a,
+            _ => continue,
+        };
+
+        // Skip if the assignee matches our own qualified identity (we're running).
+        if assignee == qualified_id {
+            continue;
+        }
+
+        // Skip if the assignee matches a registered, alive worker.
+        // Workers register with fully-qualified IDs ({adapter}-{worker_id}),
+        // so this comparison prevents collisions when workers from different
+        // adapter pools share a NATO name.
+        if live_worker_ids.contains(assignee.as_str()) {
+            continue;
+        }
+
+        // Orphaned: assignee is not a live registered worker. Release it.
+        tracing::info!(
+            bead_id = %bead.id,
+            assignee = %assignee,
+            workspace = %bead.workspace.display(),
+            "releasing orphaned in-progress bead (assignee has no live worker)"
+        );
+
+        match store.release(&bead.id).await {
+            Ok(()) => {
+                let _ = telemetry.emit(EventKind::StuckReleased {
+                    bead_id: bead.id.clone(),
+                    peer_worker: assignee.clone(),
+                });
+                released += 1;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to release orphaned in-progress bead"
+                );
+            }
+        }
+    }
+
+    Ok(released)
+}
+
 /// Summary of work performed during one Mend evaluation cycle.
 #[derive(Debug, Default)]
 struct MendSummary {
@@ -60,7 +152,10 @@ pub struct MendStrand {
     heartbeat_dir: PathBuf,
     heartbeat_ttl: Duration,
     lock_dir: PathBuf,
-    worker_id: String,
+    /// Fully-qualified worker identity ({adapter}-{worker_id}).
+    /// Used for heartbeat file lookups and registry comparisons to prevent
+    /// collisions when workers from different adapter pools share a NATO name.
+    qualified_id: String,
     registry: Registry,
     telemetry: Telemetry,
     log_dir: PathBuf,
@@ -79,7 +174,7 @@ impl MendStrand {
     /// - `heartbeat_dir`: path to `~/.needle/state/heartbeats/`
     /// - `heartbeat_ttl`: how long before a heartbeat is considered stale
     /// - `lock_dir`: directory where claim lock files live (default: `/tmp`)
-    /// - `worker_id`: this worker's ID (excluded from peer checks)
+    /// - `qualified_id`: fully-qualified worker identity ({adapter}-{worker_id})
     /// - `registry`: worker state registry
     /// - `telemetry`: telemetry emitter
     /// - `log_dir`: directory where agent log files live
@@ -95,7 +190,7 @@ impl MendStrand {
         heartbeat_dir: PathBuf,
         heartbeat_ttl: Duration,
         lock_dir: PathBuf,
-        worker_id: String,
+        qualified_id: String,
         registry: Registry,
         telemetry: Telemetry,
         log_dir: PathBuf,
@@ -111,7 +206,7 @@ impl MendStrand {
             heartbeat_dir,
             heartbeat_ttl,
             lock_dir,
-            worker_id,
+            qualified_id,
             registry,
             telemetry,
             log_dir,
@@ -135,7 +230,7 @@ impl MendStrand {
         let peer_monitor = PeerMonitor::new(
             self.heartbeat_dir.clone(),
             self.heartbeat_ttl,
-            self.worker_id.clone(),
+            self.qualified_id.clone(),
             store,
             &self.registry,
             self.telemetry.clone(),
@@ -158,61 +253,14 @@ impl MendStrand {
         store: &dyn BeadStore,
         summary: &mut MendSummary,
     ) -> Result<()> {
-        let all_beads = store.list_all().await?;
-        let workers = self.registry.list()?;
-
-        // Build a set of (worker_id, is_alive) for registered workers.
-        let live_worker_ids: std::collections::HashSet<String> = workers
-            .iter()
-            .filter(|w| HealthMonitor::check_pid_alive(w.pid))
-            .map(|w| w.id.clone())
-            .collect();
-
-        for bead in &all_beads {
-            if bead.status != BeadStatus::InProgress {
-                continue;
-            }
-
-            let assignee = match &bead.assignee {
-                Some(a) if !a.is_empty() => a,
-                _ => continue,
-            };
-
-            // Skip if the assignee matches our own worker (we're running).
-            if assignee == &self.worker_id {
-                continue;
-            }
-
-            // Skip if the assignee matches a registered, alive worker.
-            if live_worker_ids.contains(assignee.as_str()) {
-                continue;
-            }
-
-            // Orphaned: assignee is not a live registered worker. Release it.
-            tracing::info!(
-                bead_id = %bead.id,
-                assignee = %assignee,
-                "releasing orphaned in-progress bead (assignee has no live worker)"
-            );
-
-            match store.release(&bead.id).await {
-                Ok(()) => {
-                    let _ = self.telemetry.emit(EventKind::StuckReleased {
-                        bead_id: bead.id.clone(),
-                        peer_worker: assignee.clone(),
-                    });
-                    summary.beads_released += 1;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        error = %e,
-                        "failed to release orphaned in-progress bead"
-                    );
-                }
-            }
-        }
-
+        let released = super::mend::cleanup_orphaned_in_progress(
+            store,
+            &self.registry,
+            &self.telemetry,
+            &self.qualified_id,
+        )
+        .await?;
+        summary.beads_released += released;
         Ok(())
     }
 
@@ -855,6 +903,9 @@ mod tests {
             self.release_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -917,6 +968,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store error")
         }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -954,9 +1008,9 @@ mod tests {
             hb_dir.to_path_buf(),
             Duration::from_secs(300),
             lock_dir.to_path_buf(),
-            "test-worker".to_string(),
+            "claude-test-worker".to_string(),
             Registry::new(reg_dir),
-            Telemetry::new("test-worker".to_string()),
+            Telemetry::new("claude-test-worker".to_string()),
             PathBuf::from("/tmp/needle-test-logs"),
             0,
             PathBuf::from("/tmp/test-traces"),
@@ -1014,7 +1068,12 @@ mod tests {
     }
 
     fn write_heartbeat(dir: &Path, data: &HeartbeatData) {
-        let path = dir.join(format!("{}.json", data.worker_id));
+        let name = if data.qualified_id.is_empty() {
+            &data.worker_id
+        } else {
+            &data.qualified_id
+        };
+        let path = dir.join(format!("{}.json", name));
         let json = serde_json::to_string(data).unwrap();
         std::fs::write(path, json).unwrap();
     }
@@ -1022,6 +1081,7 @@ mod tests {
     fn make_stale_heartbeat(worker_id: &str, pid: u32, bead_id: Option<&str>) -> HeartbeatData {
         HeartbeatData {
             worker_id: worker_id.to_string(),
+            qualified_id: format!("claude-{}", worker_id),
             pid,
             state: WorkerState::Executing,
             current_bead: bead_id.map(BeadId::from),
@@ -1030,6 +1090,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(3600),
             beads_processed: 0,
             session: worker_id.to_string(),
+            heartbeat_file: None,
         }
     }
 
@@ -1154,8 +1215,8 @@ mod tests {
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
 
-        // An in-progress bead assigned to ourselves.
-        let bead = make_in_progress_bead("nd-mine", "test-worker");
+        // An in-progress bead assigned to ourselves (using qualified_id).
+        let bead = make_in_progress_bead("nd-mine", "claude-test-worker");
 
         let (store, release_count) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
@@ -1216,6 +1277,156 @@ mod tests {
             "expected WorkCreated after releasing bead from dead registered worker, got: {result:?}"
         );
         assert_eq!(release_count.load(Ordering::Relaxed), 1);
+    }
+
+    // ── Qualified ID collision tests ────────────────────────────────────────
+
+    /// When two workers from different adapter pools share a NATO name (e.g.
+    /// "foxtrot"), their qualified IDs differ (e.g. "glm-5-foxtrot" vs
+    /// "glm-4_7-foxtrot"). A bead assigned to one must NOT be treated as
+    /// orphaned just because the other worker of the same NATO name is alive.
+    #[tokio::test]
+    async fn collision_same_nato_different_adapter_live_worker_not_released() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Two workers share NATO name "foxtrot" but have different adapters.
+        let glm5_foxtrot = "claude-code-glm-5-foxtrot";
+        let glm47_foxtrot = "claude-code-glm-4_7-foxtrot";
+
+        // A bead assigned to glm-5-foxtrot.
+        let bead = make_in_progress_bead("nd-collision-a", glm5_foxtrot);
+
+        // Register BOTH workers as alive.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: glm5_foxtrot.to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "claude-code-glm-5".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+            })
+            .unwrap();
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: glm47_foxtrot.to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "claude-code-glm-4_7".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 100,
+            })
+            .unwrap();
+
+        // Run mend as glm-4_7-foxtrot.
+        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            glm47_foxtrot.to_string(),
+            registry,
+            Telemetry::new(glm47_foxtrot.to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork — bead assigned to glm-5-foxtrot should NOT be orphaned, got: {result:?}"
+        );
+        assert_eq!(
+            release_count.load(Ordering::Relaxed),
+            0,
+            "bead must not be released when its owner (glm-5-foxtrot) is alive"
+        );
+    }
+
+    /// When only one worker of a shared NATO name is dead, the bead assigned
+    /// to the dead worker's qualified ID should be released even though the
+    /// other worker with the same NATO name is alive.
+    #[tokio::test]
+    async fn collision_same_nato_different_adapter_dead_worker_released() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let glm5_foxtrot = "claude-code-glm-5-foxtrot";
+        let glm47_foxtrot = "claude-code-glm-4_7-foxtrot";
+
+        // A bead assigned to glm-5-foxtrot (which is dead).
+        let bead = make_in_progress_bead("nd-collision-b", glm5_foxtrot);
+
+        // Register glm-5-foxtrot as DEAD and glm-4_7-foxtrot as alive.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: glm5_foxtrot.to_string(),
+                pid: 99_999_999, // dead PID
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "claude-code-glm-5".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 342,
+            })
+            .unwrap();
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: glm47_foxtrot.to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "claude-code-glm-4_7".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        // Run mend as glm-4_7-foxtrot.
+        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            glm47_foxtrot.to_string(),
+            registry,
+            Telemetry::new(glm47_foxtrot.to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated — bead assigned to dead glm-5-foxtrot should be orphaned, got: {result:?}"
+        );
+        assert_eq!(
+            release_count.load(Ordering::Relaxed),
+            1,
+            "bead must be released when its owner (glm-5-foxtrot) is dead"
+        );
     }
 
     // ── Orphaned lock file tests ─────────────────────────────────────────────

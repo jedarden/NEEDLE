@@ -105,8 +105,8 @@ impl<'a> PeerMonitor<'a> {
         };
 
         for hb in &heartbeats {
-            // Skip our own heartbeat.
-            if hb.worker_id == self.own_worker_id {
+            // Skip our own heartbeat (match by qualified identity).
+            if hb.qualified_id == self.own_worker_id {
                 continue;
             }
 
@@ -118,11 +118,14 @@ impl<'a> PeerMonitor<'a> {
             let pid_alive = HealthMonitor::check_pid_alive(hb.pid);
             let stale_peer = StalePeer {
                 worker_id: hb.worker_id.clone(),
+                qualified_id: Some(hb.qualified_id.clone()),
                 pid: hb.pid,
                 pid_alive,
                 current_bead: hb.current_bead.clone(),
                 last_heartbeat: hb.last_heartbeat,
-                heartbeat_file: self.heartbeat_dir.join(format!("{}.json", hb.worker_id)),
+                heartbeat_file: hb.heartbeat_file.clone().unwrap_or_else(|| {
+                    self.heartbeat_dir.join(format!("{}.json", hb.qualified_id))
+                }),
             };
 
             if pid_alive {
@@ -223,7 +226,11 @@ impl<'a> PeerMonitor<'a> {
             // Emit peer.crashed telemetry.
             self.telemetry.emit(EventKind::StuckReleased {
                 bead_id: bead_id.clone(),
-                peer_worker: peer.worker_id.clone(),
+                peer_worker: peer
+                    .qualified_id
+                    .as_deref()
+                    .unwrap_or(&peer.worker_id)
+                    .to_string(),
             })?;
         }
 
@@ -231,7 +238,8 @@ impl<'a> PeerMonitor<'a> {
         remove_heartbeat_file(&peer.heartbeat_file)?;
 
         // 3. Deregister from the worker registry.
-        if let Err(e) = self.registry.deregister(&peer.worker_id) {
+        let dereg_id = peer.qualified_id.as_deref().unwrap_or(&peer.worker_id);
+        if let Err(e) = self.registry.deregister(dereg_id) {
             tracing::warn!(
                 worker = %peer.worker_id,
                 error = %e,
@@ -318,6 +326,9 @@ mod tests {
             self.release_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -350,7 +361,12 @@ mod tests {
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     fn write_heartbeat(dir: &Path, data: &HeartbeatData) {
-        let path = dir.join(format!("{}.json", data.worker_id));
+        let name = if data.qualified_id.is_empty() {
+            &data.worker_id
+        } else {
+            &data.qualified_id
+        };
+        let path = dir.join(format!("{}.json", name));
         let json = serde_json::to_string(data).unwrap();
         std::fs::write(path, json).unwrap();
     }
@@ -370,6 +386,7 @@ mod tests {
 
         HeartbeatData {
             worker_id: worker_id.to_string(),
+            qualified_id: format!("claude-{}", worker_id),
             pid,
             state: WorkerState::Executing,
             current_bead: bead_id.map(BeadId::from),
@@ -378,6 +395,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(3600),
             beads_processed: 0,
             session: worker_id.to_string(),
+            heartbeat_file: None,
         }
     }
 
@@ -447,7 +465,7 @@ mod tests {
         assert_eq!(release_count.load(Ordering::Relaxed), 1);
 
         // Heartbeat file should be removed.
-        let hb_path = hb_dir.join("dead-worker.json");
+        let hb_path = hb_dir.join("claude-dead-worker.json");
         assert!(!hb_path.exists(), "heartbeat file should be removed");
     }
 
@@ -485,7 +503,7 @@ mod tests {
         assert_eq!(release_count.load(Ordering::Relaxed), 0);
 
         // Heartbeat file should NOT be removed for stuck workers.
-        let hb_path = hb_dir.join("stuck-worker.json");
+        let hb_path = hb_dir.join("claude-stuck-worker.json");
         assert!(
             hb_path.exists(),
             "heartbeat file should remain for stuck worker"
@@ -511,7 +529,7 @@ mod tests {
         let monitor = PeerMonitor::new(
             hb_dir.to_path_buf(),
             Duration::from_secs(300),
-            "my-worker".to_string(),
+            "claude-my-worker".to_string(),
             &store,
             &registry,
             telemetry,
@@ -537,7 +555,7 @@ mod tests {
         let registry = Registry::new(reg_dir.path());
         registry
             .register(crate::registry::WorkerEntry {
-                id: "dead-idle".to_string(),
+                id: "claude-dead-idle".to_string(),
                 pid: 99_999_999,
                 workspace: PathBuf::from("/tmp"),
                 agent: "test".to_string(),
@@ -566,7 +584,7 @@ mod tests {
         assert_eq!(release_count.load(Ordering::Relaxed), 0);
 
         // Heartbeat file should be removed.
-        assert!(!hb_dir.join("dead-idle.json").exists());
+        assert!(!hb_dir.join("claude-dead-idle.json").exists());
 
         // Worker should be deregistered.
         let workers = registry.list().unwrap();
@@ -607,7 +625,7 @@ mod tests {
         let monitor = PeerMonitor::new(
             hb_dir.to_path_buf(),
             Duration::from_secs(300),
-            "my-worker".to_string(),
+            "claude-my-worker".to_string(),
             &store,
             &registry,
             telemetry,
@@ -621,10 +639,10 @@ mod tests {
         assert_eq!(release_count.load(Ordering::Relaxed), 1);
 
         // Only the crashed peer's heartbeat should be removed.
-        assert!(hb_dir.join("healthy.json").exists());
-        assert!(hb_dir.join("stuck.json").exists());
-        assert!(!hb_dir.join("crashed.json").exists());
-        assert!(hb_dir.join("my-worker.json").exists());
+        assert!(hb_dir.join("claude-healthy.json").exists());
+        assert!(hb_dir.join("claude-stuck.json").exists());
+        assert!(!hb_dir.join("claude-crashed.json").exists());
+        assert!(hb_dir.join("claude-my-worker.json").exists());
     }
 
     #[tokio::test]

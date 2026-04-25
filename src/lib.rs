@@ -6,6 +6,7 @@ pub mod agent_event;
 pub mod bead_store;
 pub mod canary;
 pub mod claim;
+pub mod commit_hook;
 pub mod cli;
 pub mod config;
 pub mod cost;

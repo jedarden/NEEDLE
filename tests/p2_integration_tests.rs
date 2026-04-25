@@ -152,6 +152,10 @@ impl BeadStore for ConcurrentMockStore {
         Ok(())
     }
 
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
     async fn reopen(&self, _id: &BeadId) -> Result<()> {
         Ok(())
     }
@@ -234,6 +238,7 @@ fn make_heartbeat(worker_id: &str, pid: u32, bead_id: Option<&str>, stale: bool)
 
     HeartbeatData {
         worker_id: worker_id.to_string(),
+        qualified_id: worker_id.to_string(),
         pid,
         state: WorkerState::Executing,
         current_bead: bead_id.map(BeadId::from),
@@ -242,6 +247,7 @@ fn make_heartbeat(worker_id: &str, pid: u32, bead_id: Option<&str>, stale: bool)
         started_at: Utc::now() - chrono::Duration::seconds(3600),
         beads_processed: 0,
         session: worker_id.to_string(),
+        heartbeat_file: None,
     }
 }
 
@@ -1079,6 +1085,7 @@ async fn heartbeat_emitter_writes_and_cleans_up() {
         config,
         "hb-test-worker".to_string(),
         Telemetry::new("test".to_string()),
+        None,
     );
 
     monitor.start_emitter().unwrap();
@@ -1094,7 +1101,11 @@ async fn heartbeat_emitter_writes_and_cleans_up() {
     assert_eq!(data.pid, std::process::id());
 
     // Update state and wait for emitter to pick it up.
-    monitor.update_state(&WorkerState::Executing, Some(&BeadId::from("nd-test")));
+    monitor.update_state(
+        &WorkerState::Executing,
+        Some(&BeadId::from("nd-test")),
+        None,
+    );
     monitor.update_beads_processed(3);
     std::thread::sleep(Duration::from_millis(1500));
 
@@ -1116,6 +1127,7 @@ async fn heartbeat_emitter_writes_and_cleans_up() {
 fn stale_detection_works_correctly() {
     let fresh_hb = HeartbeatData {
         worker_id: "fresh".to_string(),
+        qualified_id: "fresh".to_string(),
         pid: 1,
         state: WorkerState::Selecting,
         current_bead: None,
@@ -1124,10 +1136,12 @@ fn stale_detection_works_correctly() {
         started_at: Utc::now(),
         beads_processed: 0,
         session: "fresh".to_string(),
+        heartbeat_file: None,
     };
 
     let stale_hb = HeartbeatData {
         worker_id: "stale".to_string(),
+        qualified_id: "stale".to_string(),
         pid: 2,
         state: WorkerState::Executing,
         current_bead: Some(BeadId::from("nd-x")),
@@ -1136,6 +1150,7 @@ fn stale_detection_works_correctly() {
         started_at: Utc::now(),
         beads_processed: 0,
         session: "stale".to_string(),
+        heartbeat_file: None,
     };
 
     let ttl = Duration::from_secs(300);
@@ -1218,7 +1233,13 @@ async fn explore_discovers_work_in_other_workspace() {
         enabled: true,
         workspaces: vec![ws.path().to_path_buf()],
     };
-    let strand = ExploreStrand::new(config, home_ws.path().to_path_buf());
+    let strand = ExploreStrand::new(
+        config,
+        home_ws.path().to_path_buf(),
+        Registry::new(tempfile::tempdir().unwrap().path()),
+        Telemetry::new("test".to_string()),
+        "test-worker".to_string(),
+    );
 
     // ExploreStrand ignores the passed store; use a minimal empty mock.
     let dummy_store = ConcurrentMockStore::new(vec![]);
@@ -1565,6 +1586,10 @@ impl BeadStore for MitosisDedupeStore {
     }
 
     async fn release(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<()> {
         Ok(())
     }
 

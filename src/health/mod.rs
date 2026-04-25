@@ -28,10 +28,14 @@ use crate::types::{BeadId, WorkerState};
 
 /// Data written to the heartbeat JSON file on disk.
 ///
-/// Path: `~/.needle/state/heartbeats/<worker-id>.json`
+/// Path: `~/.needle/state/heartbeats/<qualified-id>.json`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatData {
+    /// Bare NATO name (e.g., "alpha", "foxtrot").
     pub worker_id: String,
+    /// Fully-qualified identity: `{adapter}-{worker_id}` (e.g., "claude-code-glm-5-foxtrot").
+    #[serde(default)]
+    pub qualified_id: String,
     pub pid: u32,
     pub state: WorkerState,
     pub current_bead: Option<BeadId>,
@@ -40,6 +44,9 @@ pub struct HeartbeatData {
     pub started_at: DateTime<Utc>,
     pub beads_processed: u64,
     pub session: String,
+    /// The filename that produced this heartbeat (set during read, not serialized).
+    #[serde(skip)]
+    pub heartbeat_file: Option<PathBuf>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -51,6 +58,8 @@ struct SharedHeartbeatState {
     state: WorkerState,
     current_bead: Option<BeadId>,
     beads_processed: u64,
+    /// The workspace of the current bead (updates dynamically during cross-workspace work).
+    current_workspace: Option<PathBuf>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -65,7 +74,10 @@ pub struct HealthMonitor {
     heartbeat_dir: PathBuf,
     heartbeat_interval: Duration,
     heartbeat_ttl: Duration,
+    /// Bare NATO name (e.g., "alpha", "foxtrot").
     worker_id: String,
+    /// Fully-qualified identity: `{adapter_slug}-{worker_id}` (e.g., "claude-code-glm-5-foxtrot").
+    qualified_id: String,
     workspace: PathBuf,
     started_at: DateTime<Utc>,
     shared_state: Arc<Mutex<SharedHeartbeatState>>,
@@ -77,24 +89,41 @@ impl HealthMonitor {
     /// Create a new health monitor.
     ///
     /// Does not start the emitter — call `start_emitter()` after construction.
-    pub fn new(config: Config, worker_name: String, _telemetry: Telemetry) -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - Worker configuration
+    /// * `worker_name` - Bare NATO name (e.g., "alpha", "foxtrot")
+    /// * `_telemetry` - Telemetry emitter (unused, kept for API compatibility)
+    /// * `shutdown` - Optional shared shutdown flag. If provided, the emitter's
+    ///   circuit breaker will set this flag to trigger graceful worker shutdown.
+    ///   If None, a private flag is created (test compatibility).
+    pub fn new(
+        config: Config,
+        worker_name: String,
+        _telemetry: Telemetry,
+        shutdown: Option<Arc<AtomicBool>>,
+    ) -> Self {
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
         let heartbeat_interval = Duration::from_secs(config.health.heartbeat_interval_secs);
         let heartbeat_ttl = Duration::from_secs(config.health.heartbeat_ttl_secs);
+        let qualified_id = format!("{}-{}", config.agent.default, worker_name);
 
         HealthMonitor {
             heartbeat_dir,
             heartbeat_interval,
             heartbeat_ttl,
             worker_id: worker_name,
+            qualified_id,
             workspace: config.workspace.default.clone(),
             started_at: Utc::now(),
             shared_state: Arc::new(Mutex::new(SharedHeartbeatState {
                 state: WorkerState::Booting,
                 current_bead: None,
                 beads_processed: 0,
+                current_workspace: None,
             })),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             emitter_handle: None,
         }
     }
@@ -119,6 +148,7 @@ impl HealthMonitor {
         let shutdown = self.shutdown.clone();
         let heartbeat_dir = self.heartbeat_dir.clone();
         let worker_id = self.worker_id.clone();
+        let qualified_id = self.qualified_id.clone();
         let workspace = self.workspace.clone();
         let started_at = self.started_at;
         let interval = self.heartbeat_interval;
@@ -131,6 +161,7 @@ impl HealthMonitor {
                     shutdown,
                     heartbeat_dir,
                     worker_id,
+                    qualified_id,
                     workspace,
                     started_at,
                     interval,
@@ -152,10 +183,16 @@ impl HealthMonitor {
     /// Update the worker state visible to the heartbeat emitter.
     ///
     /// Called by the worker on every state transition.
-    pub fn update_state(&self, state: &WorkerState, current_bead: Option<&BeadId>) {
+    pub fn update_state(
+        &self,
+        state: &WorkerState,
+        current_bead: Option<&BeadId>,
+        workspace: Option<&Path>,
+    ) {
         if let Ok(mut guard) = self.shared_state.lock() {
             guard.state = state.clone();
             guard.current_bead = current_bead.cloned();
+            guard.current_workspace = workspace.map(|p| p.to_path_buf());
         }
     }
 
@@ -195,8 +232,17 @@ impl HealthMonitor {
     }
 
     /// Path to this worker's heartbeat file.
+    ///
+    /// Keyed by fully-qualified identity (`{adapter}-{worker_id}`) to prevent
+    /// collisions when workers from different adapter pools share a NATO name.
     pub fn heartbeat_path(&self) -> PathBuf {
-        self.heartbeat_dir.join(format!("{}.json", self.worker_id))
+        self.heartbeat_dir
+            .join(format!("{}.json", self.qualified_id))
+    }
+
+    /// The fully-qualified identity (`{adapter}-{worker_id}`).
+    pub fn qualified_id(&self) -> &str {
+        &self.qualified_id
     }
 
     /// Directory where heartbeat files are stored.
@@ -243,7 +289,14 @@ impl HealthMonitor {
 
             match std::fs::read_to_string(&path) {
                 Ok(content) => match serde_json::from_str::<HeartbeatData>(&content) {
-                    Ok(hb) => heartbeats.push(hb),
+                    Ok(mut hb) => {
+                        // Backfill qualified_id for heartbeats written by older versions.
+                        if hb.qualified_id.is_empty() {
+                            hb.qualified_id = hb.worker_id.clone();
+                        }
+                        hb.heartbeat_file = Some(path.clone());
+                        heartbeats.push(hb)
+                    }
                     Err(e) => {
                         tracing::debug!(
                             path = %path.display(),
@@ -297,19 +350,23 @@ impl HealthMonitor {
 
         for hb in heartbeats {
             // Skip our own heartbeat.
-            if hb.worker_id == self.worker_id {
+            if hb.qualified_id == self.qualified_id {
                 continue;
             }
 
             if Self::is_stale(&hb, self.heartbeat_ttl) {
                 let pid_alive = Self::check_pid_alive(hb.pid);
+                let hb_file = hb.heartbeat_file.clone().unwrap_or_else(|| {
+                    self.heartbeat_dir.join(format!("{}.json", hb.qualified_id))
+                });
                 stale.push(StalePeer {
                     worker_id: hb.worker_id.clone(),
+                    qualified_id: Some(hb.qualified_id.clone()),
                     pid: hb.pid,
                     pid_alive,
                     current_bead: hb.current_bead.clone(),
                     last_heartbeat: hb.last_heartbeat,
-                    heartbeat_file: self.heartbeat_dir.join(format!("{}.json", hb.worker_id)),
+                    heartbeat_file: hb_file,
                 });
             }
         }
@@ -321,7 +378,7 @@ impl HealthMonitor {
 
     /// Write a heartbeat file atomically (write temp, then rename).
     fn write_heartbeat(&self) -> Result<()> {
-        let (state, current_bead, beads_processed) = {
+        let (state, current_bead, beads_processed, current_workspace) = {
             let guard = self
                 .shared_state
                 .lock()
@@ -330,19 +387,25 @@ impl HealthMonitor {
                 guard.state.clone(),
                 guard.current_bead.clone(),
                 guard.beads_processed,
+                guard.current_workspace.clone(),
             )
         };
 
+        // Use the current bead's workspace if set, otherwise fall back to home workspace.
+        let effective_workspace = current_workspace.unwrap_or_else(|| self.workspace.clone());
+
         let data = HeartbeatData {
             worker_id: self.worker_id.clone(),
+            qualified_id: self.qualified_id.clone(),
             pid: std::process::id(),
             state,
             current_bead,
-            workspace: self.workspace.clone(),
+            workspace: effective_workspace,
             last_heartbeat: Utc::now(),
             started_at: self.started_at,
             beads_processed,
             session: self.worker_id.clone(),
+            heartbeat_file: None,
         };
 
         let path = self.heartbeat_path();
@@ -389,6 +452,8 @@ impl Drop for HealthMonitor {
 #[derive(Debug)]
 pub struct StalePeer {
     pub worker_id: String,
+    /// Fully-qualified identity of the peer.
+    pub qualified_id: Option<String>,
     pub pid: u32,
     pub pid_alive: bool,
     pub current_bead: Option<BeadId>,
@@ -417,6 +482,7 @@ fn emitter_loop(
     shutdown: Arc<AtomicBool>,
     heartbeat_dir: PathBuf,
     worker_id: String,
+    qualified_id: String,
     workspace: PathBuf,
     started_at: DateTime<Utc>,
     interval: Duration,
@@ -443,11 +509,12 @@ fn emitter_loop(
             return;
         }
 
-        let (state, current_bead, beads_processed) = match shared_state.lock() {
+        let (state, current_bead, beads_processed, current_workspace) = match shared_state.lock() {
             Ok(guard) => (
                 guard.state.clone(),
                 guard.current_bead.clone(),
                 guard.beads_processed,
+                guard.current_workspace.clone(),
             ),
             Err(_) => {
                 // Mutex poisoned — the main thread panicked. Exit.
@@ -459,19 +526,24 @@ fn emitter_loop(
             }
         };
 
+        // Use the current bead's workspace if set, otherwise fall back to home workspace.
+        let effective_workspace = current_workspace.unwrap_or_else(|| workspace.clone());
+
         let data = HeartbeatData {
             worker_id: worker_id.clone(),
+            qualified_id: qualified_id.clone(),
             pid: std::process::id(),
             state,
             current_bead,
-            workspace: workspace.clone(),
+            workspace: effective_workspace,
             last_heartbeat: Utc::now(),
             started_at,
             beads_processed,
             session: worker_id.clone(),
+            heartbeat_file: None,
         };
 
-        let path = heartbeat_dir.join(format!("{}.json", worker_id));
+        let path = heartbeat_dir.join(format!("{}.json", qualified_id));
         let tmp_path = path.with_extension("json.tmp");
 
         let write_result: anyhow::Result<()> = (|| {
@@ -500,6 +572,23 @@ fn emitter_loop(
                         worker = %worker_id,
                         consecutive_failures,
                         "heartbeat emitter circuit breaker triggered — worker will shut down"
+                    );
+                    // Emit a final heartbeat event before shutting down so the
+                    // telemetry log shows the circuit breaker was the cause.
+                    let _ = std::fs::write(
+                        heartbeat_dir.join(format!("{}-circuit-breaker.txt", qualified_id)),
+                        format!(
+                            "Circuit breaker tripped after {} consecutive heartbeat write failures\n\
+                             Worker: {}\n\
+                             Qualified ID: {}\n\
+                             Last error: {}\n\
+                             Timestamp: {}",
+                            consecutive_failures,
+                            worker_id,
+                            qualified_id,
+                            e,
+                            Utc::now().to_rfc3339()
+                        ),
                     );
                     shutdown.store(true, Ordering::SeqCst);
                     return;
@@ -542,6 +631,7 @@ mod tests {
             config,
             "test-worker".to_string(),
             Telemetry::new("test".to_string()),
+            None,
         );
 
         monitor.start_emitter().unwrap();
@@ -567,12 +657,17 @@ mod tests {
             config,
             "state-test".to_string(),
             Telemetry::new("test".to_string()),
+            None,
         );
 
         monitor.start_emitter().unwrap();
 
         // Update shared state.
-        monitor.update_state(&WorkerState::Executing, Some(&BeadId::from("needle-abc")));
+        monitor.update_state(
+            &WorkerState::Executing,
+            Some(&BeadId::from("needle-abc")),
+            None,
+        );
         monitor.update_beads_processed(5);
 
         // Wait for the emitter to write a new heartbeat.
@@ -596,6 +691,7 @@ mod tests {
             config,
             "stop-test".to_string(),
             Telemetry::new("test".to_string()),
+            None,
         );
 
         monitor.start_emitter().unwrap();
@@ -617,6 +713,7 @@ mod tests {
         // Write two heartbeat files.
         let hb1 = HeartbeatData {
             worker_id: "worker-a".to_string(),
+            qualified_id: "claude-worker-a".to_string(),
             pid: 1000,
             state: WorkerState::Selecting,
             current_bead: None,
@@ -625,9 +722,11 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             session: "worker-a".to_string(),
+            heartbeat_file: None,
         };
         let hb2 = HeartbeatData {
             worker_id: "worker-b".to_string(),
+            qualified_id: "claude-worker-b".to_string(),
             pid: 2000,
             state: WorkerState::Executing,
             current_bead: Some(BeadId::from("nd-x")),
@@ -636,6 +735,7 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 3,
             session: "worker-b".to_string(),
+            heartbeat_file: None,
         };
 
         std::fs::write(
@@ -666,6 +766,7 @@ mod tests {
     fn is_stale_detects_old_heartbeats() {
         let mut hb = HeartbeatData {
             worker_id: "test".to_string(),
+            qualified_id: "claude-test".to_string(),
             pid: 1,
             state: WorkerState::Selecting,
             current_bead: None,
@@ -674,6 +775,7 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             session: "test".to_string(),
+            heartbeat_file: None,
         };
 
         // Fresh heartbeat should not be stale.
@@ -705,6 +807,7 @@ mod tests {
             config,
             "atomic-test".to_string(),
             Telemetry::new("test".to_string()),
+            None,
         );
 
         monitor.start_emitter().unwrap();
@@ -732,6 +835,7 @@ mod tests {
     fn heartbeat_data_roundtrip() {
         let data = HeartbeatData {
             worker_id: "test-rt".to_string(),
+            qualified_id: "claude-test-rt".to_string(),
             pid: 42,
             state: WorkerState::Executing,
             current_bead: Some(BeadId::from("nd-abc")),
@@ -740,6 +844,7 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 10,
             session: "test-rt".to_string(),
+            heartbeat_file: None,
         };
 
         let json = serde_json::to_string_pretty(&data).unwrap();
@@ -762,11 +867,13 @@ mod tests {
             config,
             "self-worker".to_string(),
             Telemetry::new("test".to_string()),
+            None,
         );
 
         // Write a stale heartbeat for ourselves.
         let hb = HeartbeatData {
             worker_id: "self-worker".to_string(),
+            qualified_id: "claude-self-worker".to_string(),
             pid: std::process::id(),
             state: WorkerState::Selecting,
             current_bead: None,
@@ -775,6 +882,7 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             session: "self-worker".to_string(),
+            heartbeat_file: None,
         };
         std::fs::write(
             hb_dir.join("self-worker.json"),
@@ -803,6 +911,7 @@ mod tests {
             state: WorkerState::Selecting,
             current_bead: None,
             beads_processed: 0,
+            current_workspace: None,
         }));
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -817,6 +926,7 @@ mod tests {
                 shutdown_clone,
                 hb_dir_clone,
                 "cb-test".to_string(),
+                "claude-cb-test".to_string(),
                 PathBuf::from("/tmp"),
                 Utc::now(),
                 Duration::from_millis(1),
@@ -834,5 +944,125 @@ mod tests {
 
         // Restore permissions so the tempdir can be cleaned up.
         let _ = std::fs::set_permissions(&hb_dir, std::fs::Permissions::from_mode(0o755));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_path_uses_qualified_id_not_bare_worker_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+
+        // Create two configs with different adapters but the same worker name.
+        let mut config1 = test_config(&hb_dir);
+        config1.agent.default = "claude-code-glm-5".to_string();
+
+        let mut config2 = test_config(&hb_dir);
+        config2.agent.default = "claude-code-glm-4_7".to_string();
+
+        // Create two monitors with the same worker name but different adapters.
+        let monitor1 = HealthMonitor::new(
+            config1,
+            "foxtrot".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+        let monitor2 = HealthMonitor::new(
+            config2,
+            "foxtrot".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Verify that heartbeat paths are different (keyed by qualified ID).
+        let path1 = monitor1.heartbeat_path();
+        let path2 = monitor2.heartbeat_path();
+
+        assert_eq!(
+            path1,
+            hb_dir.join("claude-code-glm-5-foxtrot.json"),
+            "first monitor's heartbeat path should use qualified ID"
+        );
+        assert_eq!(
+            path2,
+            hb_dir.join("claude-code-glm-4_7-foxtrot.json"),
+            "second monitor's heartbeat path should use qualified ID"
+        );
+        assert_ne!(
+            path1, path2,
+            "heartbeat paths must be different for same worker name across adapters"
+        );
+
+        // Verify that qualified_id field reflects the adapter prefix.
+        assert_eq!(monitor1.qualified_id(), "claude-code-glm-5-foxtrot");
+        assert_eq!(monitor2.qualified_id(), "claude-code-glm-4_7-foxtrot");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_files_dont_collide_across_adapter_pools() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+
+        // Create two configs with different adapters but the same worker name.
+        let mut config1 = test_config(&hb_dir);
+        config1.agent.default = "claude-code-glm-5".to_string();
+
+        let mut config2 = test_config(&hb_dir);
+        config2.agent.default = "claude-code-glm-4_7".to_string();
+
+        // Create and start both monitors.
+        let mut monitor1 = HealthMonitor::new(
+            config1,
+            "foxtrot".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+        let mut monitor2 = HealthMonitor::new(
+            config2,
+            "foxtrot".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        monitor1.start_emitter().unwrap();
+        monitor2.start_emitter().unwrap();
+
+        // Verify that two distinct heartbeat files exist.
+        let path1 = hb_dir.join("claude-code-glm-5-foxtrot.json");
+        let path2 = hb_dir.join("claude-code-glm-4_7-foxtrot.json");
+
+        assert!(path1.exists(), "first worker's heartbeat file must exist");
+        assert!(path2.exists(), "second worker's heartbeat file must exist");
+
+        // Verify that the heartbeat files contain the correct qualified_id.
+        let content1 = std::fs::read_to_string(&path1).unwrap();
+        let data1: HeartbeatData = serde_json::from_str(&content1).unwrap();
+        assert_eq!(data1.worker_id, "foxtrot");
+        assert_eq!(data1.qualified_id, "claude-code-glm-5-foxtrot");
+
+        let content2 = std::fs::read_to_string(&path2).unwrap();
+        let data2: HeartbeatData = serde_json::from_str(&content2).unwrap();
+        assert_eq!(data2.worker_id, "foxtrot");
+        assert_eq!(data2.qualified_id, "claude-code-glm-4_7-foxtrot");
+
+        // Verify that beads_processed starts at 0 for each (not inherited).
+        assert_eq!(data1.beads_processed, 0);
+        assert_eq!(data2.beads_processed, 0);
+
+        // Update counters and verify they don't interfere.
+        monitor1.update_beads_processed(100);
+        monitor2.update_beads_processed(200);
+
+        // Wait for emitter to write.
+        std::thread::sleep(Duration::from_millis(1500));
+
+        let content1_updated = std::fs::read_to_string(&path1).unwrap();
+        let data1_updated: HeartbeatData = serde_json::from_str(&content1_updated).unwrap();
+        assert_eq!(data1_updated.beads_processed, 100);
+
+        let content2_updated = std::fs::read_to_string(&path2).unwrap();
+        let data2_updated: HeartbeatData = serde_json::from_str(&content2_updated).unwrap();
+        assert_eq!(data2_updated.beads_processed, 200);
+
+        monitor1.stop();
+        monitor2.stop();
     }
 }

@@ -289,6 +289,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -342,6 +345,9 @@ mod tests {
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store connection failed")
+        }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
         }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())

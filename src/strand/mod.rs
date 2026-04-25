@@ -12,6 +12,7 @@ mod mend;
 mod pluck;
 pub mod pulse;
 pub mod reflect;
+pub mod splice;
 pub mod unravel;
 pub mod weave;
 
@@ -25,10 +26,11 @@ use crate::types::{Bead, StrandResult};
 
 pub use explore::ExploreStrand;
 pub use knot::KnotStrand;
-pub use mend::MendStrand;
+pub use mend::{cleanup_orphaned_in_progress, MendStrand};
 pub use pluck::PluckStrand;
 pub use pulse::PulseStrand;
 pub use reflect::{CliReflectAgent, ReflectAgent, ReflectStrand};
+pub use splice::SpliceStrand;
 pub use unravel::{UnravelAgent, UnravelStrand};
 pub use weave::{CliWeaveAgent, WeaveAgent, WeaveStrand};
 
@@ -45,17 +47,21 @@ pub trait Strand: Send + Sync {
 /// Runs strands in order, returning the first candidate found.
 pub struct StrandRunner {
     strands: Vec<Box<dyn Strand>>,
+    telemetry: crate::telemetry::Telemetry,
 }
 
 impl StrandRunner {
     pub fn new(strands: Vec<Box<dyn Strand>>) -> Self {
-        StrandRunner { strands }
+        StrandRunner {
+            strands,
+            telemetry: crate::telemetry::Telemetry::new("strand-runner".to_string()),
+        }
     }
 
     /// Build the default strand waterfall from config.
     ///
     /// The waterfall order is:
-    /// Pluck → Mend → Explore → Weave → Unravel → Pulse → Reflect → Knot.
+    /// Pluck → Mend → Explore → Weave → Unravel → Pulse → Reflect → Splice → Knot.
     pub fn from_config(
         config: &Config,
         worker_id: &str,
@@ -77,6 +83,13 @@ impl StrandRunner {
         let traces_dir = config.workspace.default.join(".beads").join("traces");
         let trace_retention_failed_days = config.strands.learning.trace_retention_failed_days;
         let trace_retention_success_days = config.strands.learning.trace_retention_success_days;
+
+        // Create a new Registry instance pointing to the same path for ExploreStrand.
+        // We need to get the state_dir_for_explore before moving registry to MendStrand.
+        let state_fallback = config.workspace.home.join("state");
+        let state_dir_for_explore = registry.path().parent().unwrap_or(&state_fallback);
+        let explore_registry = crate::registry::Registry::new(state_dir_for_explore);
+
         let mend = MendStrand::new(
             config.strands.mend.clone(),
             heartbeat_dir,
@@ -97,6 +110,9 @@ impl StrandRunner {
         let explore = ExploreStrand::new(
             config.strands.explore.clone(),
             config.workspace.default.clone(),
+            explore_registry,
+            telemetry.clone(),
+            worker_id.to_string(),
         );
 
         let state_base = config.workspace.home.join("state");
@@ -106,6 +122,7 @@ impl StrandRunner {
             config.workspace.default.clone(),
             state_base.join("weave"),
             Box::new(CliWeaveAgent::new(config.agent.default.clone())),
+            telemetry.clone(),
         );
 
         let unravel = UnravelStrand::new(
@@ -140,8 +157,18 @@ impl StrandRunner {
             config.strands.reflect.clone(),
             config.workspace.default.clone(),
             state_base.join("reflect"),
-            telemetry,
+            telemetry.clone(),
             reflect_agent,
+        );
+
+        // Reconstruct heartbeat_dir for Splice (same path used by Mend).
+        let splice_heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
+        let runner_telemetry = telemetry.clone();
+        let splice = SpliceStrand::new(
+            config.strands.splice.clone(),
+            splice_heartbeat_dir,
+            state_base.join("splice"),
+            telemetry,
         );
 
         let knot = KnotStrand::new(config.strands.knot.clone());
@@ -154,20 +181,25 @@ impl StrandRunner {
                 Box::new(unravel),
                 Box::new(pulse),
                 Box::new(reflect),
+                Box::new(splice),
                 Box::new(knot),
             ],
+            telemetry: runner_telemetry,
         }
     }
 
-    /// Run the waterfall, returning the first candidate bead or None.
+    /// Run the waterfall, returning the first candidate bead (with the strand
+    /// name that found it) or None.
     ///
     /// Returns the full `Bead` (including its workspace path) so the caller
     /// can create the correct bead store for remote beads found by Explore.
+    /// The accompanying `String` is the name of the strand that produced the
+    /// candidate.
     ///
     /// When a strand returns `WorkCreated`, the waterfall restarts from Pluck.
     /// A restart cap prevents infinite loops (e.g. a strand that always creates
     /// work without producing a claimable bead).
-    pub async fn select(&self, store: &dyn BeadStore) -> Result<Option<Bead>> {
+    pub async fn select(&self, store: &dyn BeadStore) -> Result<Option<(Bead, String)>> {
         const MAX_RESTARTS: u32 = 3;
         let mut restarts = 0u32;
 
@@ -179,6 +211,13 @@ impl StrandRunner {
 
                 match result {
                     StrandResult::BeadFound(beads) => {
+                        let _ = self
+                            .telemetry
+                            .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand.name().to_string(),
+                                result: "bead_found".to_string(),
+                                duration_ms: elapsed_ms,
+                            });
                         tracing::info!(
                             strand = strand.name(),
                             candidates = beads.len(),
@@ -186,11 +225,18 @@ impl StrandRunner {
                             "strand found candidates"
                         );
                         if let Some(bead) = beads.into_iter().next() {
-                            return Ok(Some(bead));
+                            return Ok(Some((bead, strand.name().to_string())));
                         }
                         continue;
                     }
                     StrandResult::WorkCreated => {
+                        let _ = self
+                            .telemetry
+                            .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand.name().to_string(),
+                                result: "work_created".to_string(),
+                                duration_ms: elapsed_ms,
+                            });
                         restarts += 1;
                         tracing::info!(
                             strand = strand.name(),
@@ -208,7 +254,14 @@ impl StrandRunner {
                         continue 'waterfall;
                     }
                     StrandResult::NoWork => {
-                        tracing::debug!(
+                        let _ = self
+                            .telemetry
+                            .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand.name().to_string(),
+                                result: "no_work".to_string(),
+                                duration_ms: elapsed_ms,
+                            });
+                        tracing::info!(
                             strand = strand.name(),
                             elapsed_ms,
                             "strand returned no work"
@@ -216,6 +269,13 @@ impl StrandRunner {
                         continue;
                     }
                     StrandResult::Error(e) => {
+                        let _ = self
+                            .telemetry
+                            .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand.name().to_string(),
+                                result: "error".to_string(),
+                                duration_ms: elapsed_ms,
+                            });
                         tracing::warn!(
                             strand = strand.name(),
                             error = %e,
@@ -335,6 +395,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -381,10 +444,9 @@ mod tests {
         ]);
         let store = EmptyStore;
         let result = runner.select(&store).await.unwrap();
-        assert_eq!(
-            result.map(|b| b.id),
-            Some(BeadId::from("test-001".to_string()))
-        );
+        let (bead, strand_name) = result.unwrap();
+        assert_eq!(bead.id, BeadId::from("test-001".to_string()));
+        assert_eq!(strand_name, "finder");
     }
 
     #[tokio::test]
@@ -401,7 +463,7 @@ mod tests {
         // returns NoWork (stub consumed) and "finder" yields the bead.
         let result = runner.select(&store).await.unwrap();
         assert_eq!(
-            result.map(|b| b.id),
+            result.map(|(b, _)| b.id),
             Some(BeadId::from("test-002".to_string()))
         );
     }
@@ -450,7 +512,7 @@ mod tests {
         let store = EmptyStore;
         let result = runner.select(&store).await.unwrap();
         assert_eq!(
-            result.map(|b| b.id),
+            result.map(|(b, _)| b.id),
             Some(BeadId::from("after-error".to_string()))
         );
     }
@@ -475,7 +537,7 @@ mod tests {
         let store = EmptyStore;
         let result = runner.select(&store).await.unwrap();
         assert_eq!(
-            result.map(|b| b.id),
+            result.map(|(b, _)| b.id),
             Some(BeadId::from("real-bead".to_string()))
         );
     }
@@ -491,7 +553,7 @@ mod tests {
         let store = EmptyStore;
         let result = runner.select(&store).await.unwrap();
         assert_eq!(
-            result.map(|b| b.id),
+            result.map(|(b, _)| b.id),
             Some(BeadId::from("first".to_string()))
         );
     }
@@ -505,7 +567,10 @@ mod tests {
         let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
         assert_eq!(
             runner.strand_names(),
-            vec!["pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "knot"]
+            vec![
+                "pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "splice",
+                "knot"
+            ]
         );
     }
 }

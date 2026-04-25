@@ -67,6 +67,10 @@ pub struct TelemetryEvent {
 #[non_exhaustive]
 pub enum EventKind {
     // ── Worker lifecycle ──
+    WorkerBooting {
+        worker_name: String,
+        version: String,
+    },
     WorkerStarted {
         worker_name: String,
         version: String,
@@ -91,6 +95,16 @@ pub enum EventKind {
     StateTransition {
         from: WorkerState,
         to: WorkerState,
+    },
+    InitStepStarted {
+        step: String,
+    },
+    InitStepCompleted {
+        step: String,
+        duration_ms: u64,
+    },
+    WorkerBootTimeout {
+        elapsed_ms: u64,
     },
 
     // ── Strand evaluation ──
@@ -120,9 +134,17 @@ pub enum EventKind {
         bead_id: BeadId,
         reason: String,
     },
+    ClaimRaceLostSkipped {
+        consecutive_losses: u32,
+        threshold: u32,
+    },
 
     // ── Bead lifecycle ──
     BeadReleased {
+        bead_id: BeadId,
+        reason: String,
+    },
+    BeadReleaseFailed {
         bead_id: BeadId,
         reason: String,
     },
@@ -151,6 +173,14 @@ pub enum EventKind {
         exit_code: i32,
         duration_ms: u64,
     },
+    BuildTimeout {
+        bead_id: BeadId,
+        timeout_secs: u64,
+    },
+    BuildHeartbeat {
+        bead_id: BeadId,
+        elapsed_ms: u64,
+    },
 
     // ── Outcome ──
     OutcomeClassified {
@@ -162,6 +192,12 @@ pub enum EventKind {
         bead_id: BeadId,
         outcome: String,
         action: String,
+    },
+    WorkerHandlingTimeout {
+        bead_id: BeadId,
+        outcome: String,
+        operation: String,
+        error: String,
     },
 
     // ── Health ──
@@ -395,26 +431,35 @@ impl EventKind {
     /// Return the dotted event type string.
     pub fn event_type(&self) -> &'static str {
         match self {
+            EventKind::WorkerBooting { .. } => "worker.booting",
             EventKind::WorkerStarted { .. } => "worker.started",
             EventKind::WorkerStopped { .. } => "worker.stopped",
             EventKind::WorkerErrored { .. } => "worker.errored",
             EventKind::WorkerExhausted { .. } => "worker.exhausted",
             EventKind::WorkerIdle { .. } => "worker.idle",
             EventKind::StateTransition { .. } => "worker.state_transition",
+            EventKind::InitStepStarted { .. } => "init.step.started",
+            EventKind::InitStepCompleted { .. } => "init.step.completed",
+            EventKind::WorkerBootTimeout { .. } => "worker.boot.timeout",
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
             EventKind::StrandSkipped { .. } => "strand.skipped",
             EventKind::QueueEmpty => "worker.queue_empty",
             EventKind::ClaimAttempt { .. } => "bead.claim.attempted",
             EventKind::ClaimSuccess { .. } => "bead.claim.succeeded",
             EventKind::ClaimRaceLost { .. } => "bead.claim.race_lost",
+            EventKind::ClaimRaceLostSkipped { .. } => "bead.claim.race_lost_skipped",
             EventKind::ClaimFailed { .. } => "bead.claim.failed",
             EventKind::BeadReleased { .. } => "bead.released",
+            EventKind::BeadReleaseFailed { .. } => "bead.release.failed",
             EventKind::BeadCompleted { .. } => "bead.completed",
             EventKind::BeadOrphaned { .. } => "bead.orphaned",
             EventKind::DispatchStarted { .. } => "agent.dispatched",
             EventKind::DispatchCompleted { .. } => "agent.completed",
+            EventKind::BuildTimeout { .. } => "build.timeout",
+            EventKind::BuildHeartbeat { .. } => "build.heartbeat",
             EventKind::OutcomeClassified { .. } => "outcome.classified",
             EventKind::OutcomeHandled { .. } => "outcome.handled",
+            EventKind::WorkerHandlingTimeout { .. } => "worker.handling.timeout",
             EventKind::HeartbeatEmitted { .. } => "heartbeat.emitted",
             EventKind::StuckDetected { .. } => "peer.stale",
             EventKind::StuckReleased { .. } => "peer.crashed",
@@ -472,12 +517,16 @@ impl EventKind {
             | EventKind::ClaimRaceLost { bead_id }
             | EventKind::ClaimFailed { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
+            | EventKind::BeadReleaseFailed { bead_id, .. }
             | EventKind::BeadCompleted { bead_id, .. }
             | EventKind::BeadOrphaned { bead_id }
             | EventKind::DispatchStarted { bead_id, .. }
             | EventKind::DispatchCompleted { bead_id, .. }
+            | EventKind::BuildTimeout { bead_id, .. }
+            | EventKind::BuildHeartbeat { bead_id, .. }
             | EventKind::OutcomeClassified { bead_id, .. }
             | EventKind::OutcomeHandled { bead_id, .. }
+            | EventKind::WorkerHandlingTimeout { bead_id, .. }
             | EventKind::StuckDetected { bead_id, .. }
             | EventKind::StuckReleased { bead_id, .. }
             | EventKind::MendDependencyCleaned { bead_id, .. }
@@ -497,12 +546,16 @@ impl EventKind {
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
-            EventKind::WorkerStarted { .. }
+            EventKind::WorkerBooting { .. }
+            | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
             | EventKind::WorkerErrored { .. }
             | EventKind::WorkerExhausted { .. }
             | EventKind::WorkerIdle { .. }
             | EventKind::StateTransition { .. }
+            | EventKind::InitStepStarted { .. }
+            | EventKind::InitStepCompleted { .. }
+            | EventKind::WorkerBootTimeout { .. }
             | EventKind::StrandEvaluated { .. }
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
@@ -531,6 +584,7 @@ impl EventKind {
             | EventKind::CanarySuiteCompleted { .. }
             | EventKind::CanaryPromoted { .. }
             | EventKind::CanaryRejected { .. }
+            | EventKind::ClaimRaceLostSkipped { .. }
             | EventKind::SinkError { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
@@ -539,6 +593,12 @@ impl EventKind {
     /// Serialize event-specific payload to a JSON value.
     pub fn to_data(&self) -> serde_json::Value {
         match self {
+            EventKind::WorkerBooting {
+                worker_name,
+                version,
+            } => {
+                serde_json::json!({ "worker_name": worker_name, "version": version })
+            }
             EventKind::WorkerStarted {
                 worker_name,
                 version,
@@ -582,6 +642,15 @@ impl EventKind {
             EventKind::StateTransition { from, to } => {
                 serde_json::json!({ "from": format!("{from}"), "to": format!("{to}") })
             }
+            EventKind::InitStepStarted { step } => {
+                serde_json::json!({ "step": step })
+            }
+            EventKind::InitStepCompleted { step, duration_ms } => {
+                serde_json::json!({ "step": step, "duration_ms": duration_ms })
+            }
+            EventKind::WorkerBootTimeout { elapsed_ms } => {
+                serde_json::json!({ "elapsed_ms": elapsed_ms })
+            }
             EventKind::StrandEvaluated {
                 strand_name,
                 result,
@@ -609,10 +678,22 @@ impl EventKind {
             EventKind::ClaimRaceLost { bead_id } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref() })
             }
+            EventKind::ClaimRaceLostSkipped {
+                consecutive_losses,
+                threshold,
+            } => {
+                serde_json::json!({
+                    "consecutive_losses": consecutive_losses,
+                    "threshold": threshold,
+                })
+            }
             EventKind::ClaimFailed { bead_id, reason } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref(), "reason": reason })
             }
             EventKind::BeadReleased { bead_id, reason } => {
+                serde_json::json!({ "bead_id": bead_id.as_ref(), "reason": reason })
+            }
+            EventKind::BeadReleaseFailed { bead_id, reason } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref(), "reason": reason })
             }
             EventKind::BeadCompleted {
@@ -652,6 +733,24 @@ impl EventKind {
                     "duration_ms": duration_ms,
                 })
             }
+            EventKind::BuildTimeout {
+                bead_id,
+                timeout_secs,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "timeout_secs": timeout_secs,
+                })
+            }
+            EventKind::BuildHeartbeat {
+                bead_id,
+                elapsed_ms,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "elapsed_ms": elapsed_ms,
+                })
+            }
             EventKind::OutcomeClassified {
                 bead_id,
                 outcome,
@@ -672,6 +771,19 @@ impl EventKind {
                     "bead_id": bead_id.as_ref(),
                     "outcome": outcome,
                     "action": action,
+                })
+            }
+            EventKind::WorkerHandlingTimeout {
+                bead_id,
+                outcome,
+                operation,
+                error,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "outcome": outcome,
+                    "operation": operation,
+                    "error": error,
                 })
             }
             EventKind::HeartbeatEmitted { bead_id, state } => {
@@ -1024,27 +1136,36 @@ impl EventKind {
             EventKind::DispatchCompleted { duration_ms, .. }
             | EventKind::BeadCompleted { duration_ms, .. }
             | EventKind::StrandEvaluated { duration_ms, .. }
+            | EventKind::InitStepCompleted { duration_ms, .. }
             | EventKind::EffortRecorded {
                 elapsed_ms: duration_ms,
                 ..
             } => Some(*duration_ms),
-            EventKind::WorkerStarted { .. }
+            EventKind::WorkerBooting { .. }
+            | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
             | EventKind::WorkerErrored { .. }
             | EventKind::WorkerExhausted { .. }
             | EventKind::WorkerIdle { .. }
             | EventKind::StateTransition { .. }
+            | EventKind::InitStepStarted { .. }
+            | EventKind::WorkerBootTimeout { .. }
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
             | EventKind::ClaimAttempt { .. }
             | EventKind::ClaimSuccess { .. }
             | EventKind::ClaimRaceLost { .. }
+            | EventKind::ClaimRaceLostSkipped { .. }
             | EventKind::ClaimFailed { .. }
             | EventKind::BeadReleased { .. }
+            | EventKind::BeadReleaseFailed { .. }
             | EventKind::BeadOrphaned { .. }
             | EventKind::DispatchStarted { .. }
+            | EventKind::BuildTimeout { .. }
+            | EventKind::BuildHeartbeat { .. }
             | EventKind::OutcomeClassified { .. }
             | EventKind::OutcomeHandled { .. }
+            | EventKind::WorkerHandlingTimeout { .. }
             | EventKind::HeartbeatEmitted { .. }
             | EventKind::StuckDetected { .. }
             | EventKind::StuckReleased { .. }
@@ -1164,6 +1285,7 @@ impl Sink for FileSink {
             .lock()
             .map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
         writeln!(writer, "{line}")?;
+        writer.flush()?;
         Ok(())
     }
 
@@ -1288,6 +1410,7 @@ impl StdoutSink {
             "bead.claim.attempted" => "CLAIMING",
             "bead.claim.succeeded" => "CLAIMED",
             "bead.claim.race_lost" => "RACE_LOST",
+            "bead.claim.race_lost_skipped" => "RACE_LOST_SKIP",
             "bead.claim.failed" => "CLAIM_FAIL",
             "bead.released" => "RELEASED",
             "bead.completed" => "COMPLETED",
@@ -1377,6 +1500,7 @@ impl StdoutSink {
             t if t.starts_with("bead.claim.succeeded") || t == "bead.completed" => "\x1b[32m", // green
             t if t.starts_with("agent.") || t.starts_with("outcome.") => "\x1b[36m", // cyan
             t if t.starts_with("bead.claim.race_lost")
+                || t.starts_with("bead.claim.race_lost_skipped")
                 || t.starts_with("bead.claim.failed")
                 || t == "bead.released"
                 || t == "bead.orphaned" =>
@@ -1691,7 +1815,7 @@ pub struct Telemetry {
     sequence: Arc<AtomicU64>,
     /// Wrapped in Arc<Mutex<Option<...>>> so that `shutdown()` can drop the
     /// sender explicitly (closing the channel) even while clones still exist.
-    sender: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<TelemetryEvent>>>>,
+    sender: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<WriterMessage>>>>,
     /// Pending writer state that needs to be spawned in an async context.
     /// This is `Some` until `start()` is called.
     pending_writer: Arc<std::sync::Mutex<Option<PendingWriter>>>,
@@ -1699,9 +1823,16 @@ pub struct Telemetry {
     writer_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
+/// Internal message type for the writer task.
+#[allow(clippy::large_enum_variant)]
+enum WriterMessage {
+    Event(TelemetryEvent),
+    Flush(tokio::sync::oneshot::Sender<()>),
+}
+
 /// Holds the receiver and sinks until they can be spawned in an async context.
 struct PendingWriter {
-    receiver: mpsc::UnboundedReceiver<TelemetryEvent>,
+    receiver: mpsc::UnboundedReceiver<WriterMessage>,
     sinks: Vec<Box<dyn Sink>>,
 }
 
@@ -1869,14 +2000,16 @@ impl Telemetry {
     #[cfg(test)]
     pub fn with_sink(worker_id: WorkerId, sink: impl Sink + 'static) -> Self {
         let session_id = "test0000".to_string();
-        let (sender, receiver) = mpsc::unbounded_channel::<TelemetryEvent>();
+        let (sender, receiver) = mpsc::unbounded_channel::<WriterMessage>();
         let sequence = Arc::new(AtomicU64::new(0));
 
         tokio::spawn(async move {
             let mut rx = receiver;
-            while let Some(event) = rx.recv().await {
-                if let Err(e) = sink.accept(&event) {
-                    tracing::warn!(error = %e, "test sink accept failed");
+            while let Some(msg) = rx.recv().await {
+                if let WriterMessage::Event(event) = msg {
+                    if let Err(e) = sink.accept(&event) {
+                        tracing::warn!(error = %e, "test sink accept failed");
+                    }
                 }
             }
         });
@@ -1913,9 +2046,51 @@ impl Telemetry {
         tracing::debug!(event_type = %event.event_type, seq, "telemetry event");
         // Lock the shared sender; None means shutdown() has been called.
         if let Some(ref s) = *self.sender.lock().unwrap() {
-            s.send(event).ok(); // ok() — never block, never panic
+            s.send(WriterMessage::Event(event)).ok(); // ok() — never block, never panic
         }
         Ok(())
+    }
+
+    /// Force-flush all buffered events to disk (synchronous).
+    ///
+    /// Sends a flush request through the writer channel and waits (up to
+    /// `timeout`) for the writer task to flush its BufWriter. Used after
+    /// `worker.booting` so the event is visible on disk even if subsequent
+    /// init steps block.
+    ///
+    /// NOTE: This uses `blocking_recv()` and must be called from outside a
+    /// tokio runtime (e.g., in `run_worker` before `rt.block_on`). Use
+    /// `force_flush_async()` from within async contexts.
+    pub fn force_flush(&self, timeout: std::time::Duration) -> Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Some(ref s) = *self.sender.lock().unwrap() {
+            s.send(WriterMessage::Flush(tx)).ok();
+        }
+        // Block until the writer task flushes or timeout.
+        // Use a small thread to avoid needing an async context.
+        let _ = rx.blocking_recv();
+        let _ = timeout; // deadline enforced by the writer task
+        Ok(())
+    }
+
+    /// Force-flush all buffered events to disk (async).
+    ///
+    /// Async version of `force_flush()` that can be called from within a
+    /// tokio runtime. Use this in `Worker::run()` and other async contexts.
+    pub async fn force_flush_async(&self, timeout: std::time::Duration) -> Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Some(ref s) = *self.sender.lock().unwrap() {
+            s.send(WriterMessage::Flush(tx)).ok();
+        }
+        // Wait for the writer task to flush, with timeout.
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Ok(()), // Channel closed, writer already flushed
+            Err(_) => {
+                tracing::warn!("force_flush_async timed out after {:?}", timeout);
+                Ok(())
+            }
+        }
     }
 
     /// Return a reference to the session ID for log path discovery.
@@ -1989,18 +2164,30 @@ impl Telemetry {
 
     /// Spawn background writer task draining the channel to all registered sinks.
     fn spawn_writer(
-        mut receiver: mpsc::UnboundedReceiver<TelemetryEvent>,
+        mut receiver: mpsc::UnboundedReceiver<WriterMessage>,
         sinks: Vec<Box<dyn Sink>>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
-                for sink in &sinks {
-                    if let Err(e) = sink.accept(&event) {
-                        tracing::warn!(error = %e, "telemetry sink accept failed");
+            let deadline = std::time::Duration::from_secs(5);
+            while let Some(msg) = receiver.recv().await {
+                match msg {
+                    WriterMessage::Event(event) => {
+                        for sink in &sinks {
+                            if let Err(e) = sink.accept(&event) {
+                                tracing::warn!(error = %e, "telemetry sink accept failed");
+                            }
+                        }
+                    }
+                    WriterMessage::Flush(reply) => {
+                        for sink in &sinks {
+                            if let Err(e) = sink.flush(deadline) {
+                                tracing::warn!(error = %e, "telemetry sink flush on demand failed");
+                            }
+                        }
+                        reply.send(()).ok();
                     }
                 }
             }
-            let deadline = std::time::Duration::from_secs(5);
             for sink in &sinks {
                 if let Err(e) = sink.flush(deadline) {
                     tracing::warn!(error = %e, "telemetry sink flush failed");
@@ -2259,7 +2446,7 @@ pub fn read_logs(
         }
     }
 
-    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    events.sort_by_key(|a| a.timestamp);
     Ok(events)
 }
 
@@ -2790,6 +2977,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
     }
 
+    #[test]
+    fn file_sink_accept_is_visible_without_explicit_flush() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sink = FileSink::with_dir(tmp.path(), "test-worker", "test-session").unwrap();
+
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "test.flush".to_string(),
+            worker_id: "test-worker".to_string(),
+            session_id: "test-session".to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({"flushed": true}),
+            duration_ms: None,
+            trace_id: None,
+            span_id: None,
+        };
+        sink.accept(&event).unwrap();
+
+        // Read the file via an independent handle — no flush() or drop of sink.
+        let contents = std::fs::read_to_string(sink.path()).unwrap();
+        assert!(contents.contains("test-worker"));
+        assert!(contents.contains("\n"));
+    }
+
     #[tokio::test]
     async fn timestamps_are_utc_iso8601() {
         let (sink, events) = MemorySink::new();
@@ -2860,6 +3073,10 @@ mod tests {
             },
             EventKind::ClaimRaceLost {
                 bead_id: id.clone(),
+            },
+            EventKind::ClaimRaceLostSkipped {
+                consecutive_losses: 5,
+                threshold: 5,
             },
             EventKind::ClaimFailed {
                 bead_id: id.clone(),

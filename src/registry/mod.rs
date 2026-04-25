@@ -74,7 +74,7 @@ pub fn is_pid_alive(pid: u32) -> bool {
 /// A single worker entry in the registry.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerEntry {
-    /// Worker identifier (e.g., `alpha`, `bravo`).
+    /// Fully-qualified worker identity (`{adapter}-{worker_id}`, e.g., `claude-foxtrot`).
     pub id: String,
     /// Process ID of the worker.
     pub pid: u32,
@@ -117,6 +117,7 @@ impl Default for RegistryFile {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Worker state registry with flock-protected read-modify-write access.
+#[derive(Clone)]
 pub struct Registry {
     path: PathBuf,
 }
@@ -168,6 +169,15 @@ impl Registry {
         self.modify(|reg| {
             if let Some(entry) = reg.workers.iter_mut().find(|w| w.id == worker_id) {
                 entry.beads_processed = beads_processed;
+            }
+        })
+    }
+
+    /// Update a worker's current workspace.
+    pub fn update_workspace(&self, worker_id: &str, workspace: &Path) -> Result<()> {
+        self.modify(|reg| {
+            if let Some(entry) = reg.workers.iter_mut().find(|w| w.id == worker_id) {
+                entry.workspace = workspace.to_path_buf();
             }
         })
     }

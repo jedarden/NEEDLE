@@ -1,0 +1,16 @@
+{
+  "bead_id": "needle-tx5o",
+  "agent": "claude-code-glm-5",
+  "provider": "zai",
+  "model": "glm-5",
+  "exit_code": 0,
+  "outcome": "success",
+  "duration_ms": 16247,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-04-24T04:01:10.960661466Z",
+  "trace_format": "claude_json",
+  "pruned": false,
+  "template_version": null
+}
