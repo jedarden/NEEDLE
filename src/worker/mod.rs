@@ -181,6 +181,12 @@ pub struct Worker {
     /// Whether `worker.booting` was already emitted externally (e.g., from CLI layer).
     /// When true, `run()` skips emitting the booting event to avoid duplicates.
     booting_emitted: bool,
+    /// Waterfall restart count from the most recent select cycle (for exhausted telemetry).
+    last_waterfall_restarts: u32,
+    /// Names of strands that triggered waterfall restarts in the most recent cycle.
+    last_restart_triggers: Vec<String>,
+    /// Strand evaluations from the most recent select cycle (for exhausted telemetry).
+    last_strand_evaluations: Vec<(String, String, u64)>,
 }
 
 impl Worker {
@@ -323,6 +329,9 @@ impl Worker {
             pre_dispatch_head: None,
             current_workspace: default_workspace,
             booting_emitted,
+            last_waterfall_restarts: 0,
+            last_restart_triggers: Vec::new(),
+            last_strand_evaluations: Vec::new(),
         }
     }
 
@@ -657,9 +666,19 @@ impl Worker {
             Some(self.current_workspace.as_path()),
         );
 
-        let candidate = self.strands.select(self.store.as_ref()).await?;
+        let candidate = self
+            .strands
+            .select(self.store.as_ref(), &self.exclusion_set)
+            .await?;
+        self.last_waterfall_restarts = candidate.waterfall_restarts;
+        self.last_restart_triggers = candidate.restart_triggers.clone();
+        self.last_strand_evaluations = candidate
+            .strand_evaluations
+            .iter()
+            .map(|e| (e.strand_name.clone(), e.result.clone(), e.duration_ms))
+            .collect();
 
-        match candidate {
+        match candidate.bead {
             Some((bead, strand_name)) => {
                 tracing::debug!(bead_id = %bead.id, strand = %strand_name, "candidate found");
 
@@ -1536,6 +1555,9 @@ impl Worker {
                 .last()
                 .unwrap_or(&"none")
                 .to_string(),
+            waterfall_restarts: self.last_waterfall_restarts,
+            restart_triggers: self.last_restart_triggers.clone(),
+            strand_evaluations: self.last_strand_evaluations.clone(),
         })?;
 
         match self.config.worker.idle_action {

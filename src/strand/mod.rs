@@ -231,7 +231,11 @@ impl StrandRunner {
     /// When a strand returns `WorkCreated`, the waterfall restarts from Pluck.
     /// A restart cap prevents infinite loops (e.g. a strand that always creates
     /// work without producing a claimable bead).
-    pub async fn select(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> Result<SelectOutcome> {
+    pub async fn select(
+        &self,
+        store: &dyn BeadStore,
+        exclusions: &HashSet<BeadId>,
+    ) -> Result<SelectOutcome> {
         const MAX_RESTARTS: u32 = 3;
         let mut restarts = 0u32;
         let mut restart_triggers: Vec<String> = Vec::new();
@@ -242,6 +246,28 @@ impl StrandRunner {
                 let start = Instant::now();
                 let result = strand.evaluate(store).await;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
+
+                // Record the evaluation for diagnostic purposes.
+                let (result_str, should_record) = match &result {
+                    StrandResult::BeadFound(beads) => {
+                        let count = beads.len();
+                        ("bead_found".to_string(), count > 0)
+                    }
+                    StrandResult::WorkCreated => ("work_created".to_string(), true),
+                    StrandResult::NoWork => ("no_work".to_string(), true),
+                    StrandResult::Error(_) => ("error".to_string(), true),
+                };
+
+                // Only record evaluations that produced meaningful results.
+                // Skip recording empty BeadFound results since they don't
+                // represent actual strand activity.
+                if should_record {
+                    strand_evaluations.push(StrandEvaluation {
+                        strand_name: strand.name().to_string(),
+                        result: result_str.clone(),
+                        duration_ms: elapsed_ms,
+                    });
+                }
 
                 match result {
                     StrandResult::BeadFound(beads) => {
@@ -255,13 +281,13 @@ impl StrandRunner {
                             .filter(|b| !exclusions.contains(&b.id))
                             .collect();
                         let excluded_count = original_count.saturating_sub(filtered.len());
-                        if let Err(e) = self
-                            .telemetry
-                            .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                strand_name: strand.name().to_string(),
-                                result: "bead_found".to_string(),
-                                duration_ms: elapsed_ms,
-                            })
+                        if let Err(e) =
+                            self.telemetry
+                                .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                    strand_name: strand.name().to_string(),
+                                    result: "bead_found".to_string(),
+                                    duration_ms: elapsed_ms,
+                                })
                         {
                             tracing::warn!(
                                 strand = strand.name(),
@@ -287,13 +313,13 @@ impl StrandRunner {
                         continue;
                     }
                     StrandResult::WorkCreated => {
-                        if let Err(e) = self
-                            .telemetry
-                            .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                strand_name: strand.name().to_string(),
-                                result: "work_created".to_string(),
-                                duration_ms: elapsed_ms,
-                            })
+                        if let Err(e) =
+                            self.telemetry
+                                .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                    strand_name: strand.name().to_string(),
+                                    result: "work_created".to_string(),
+                                    duration_ms: elapsed_ms,
+                                })
                         {
                             tracing::warn!(
                                 strand = strand.name(),
@@ -323,13 +349,13 @@ impl StrandRunner {
                         continue 'waterfall;
                     }
                     StrandResult::NoWork => {
-                        if let Err(e) = self
-                            .telemetry
-                            .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                strand_name: strand.name().to_string(),
-                                result: "no_work".to_string(),
-                                duration_ms: elapsed_ms,
-                            })
+                        if let Err(e) =
+                            self.telemetry
+                                .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                    strand_name: strand.name().to_string(),
+                                    result: "no_work".to_string(),
+                                    duration_ms: elapsed_ms,
+                                })
                         {
                             tracing::warn!(
                                 strand = strand.name(),
@@ -345,13 +371,13 @@ impl StrandRunner {
                         continue;
                     }
                     StrandResult::Error(e) => {
-                        if let Err(te) = self
-                            .telemetry
-                            .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                strand_name: strand.name().to_string(),
-                                result: "error".to_string(),
-                                duration_ms: elapsed_ms,
-                            })
+                        if let Err(te) =
+                            self.telemetry
+                                .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                    strand_name: strand.name().to_string(),
+                                    result: "error".to_string(),
+                                    duration_ms: elapsed_ms,
+                                })
                         {
                             tracing::warn!(
                                 strand = strand.name(),
@@ -621,7 +647,12 @@ mod tests {
         assert_eq!(outcome.waterfall_restarts, 4); // 3 restarts + 1 cap-exceeded
         assert_eq!(
             outcome.restart_triggers,
-            vec!["always-creates", "always-creates", "always-creates", "always-creates"]
+            vec![
+                "always-creates",
+                "always-creates",
+                "always-creates",
+                "always-creates"
+            ]
         );
     }
 

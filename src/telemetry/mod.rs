@@ -88,6 +88,13 @@ pub enum EventKind {
     WorkerExhausted {
         cycle_count: u64,
         last_strand: String,
+        /// How many times the waterfall restarted before exhausting.
+        waterfall_restarts: u32,
+        /// Name of each strand that returned WorkCreated (one entry per restart).
+        restart_triggers: Vec<String>,
+        /// All strand evaluations in order, across all waterfall passes.
+        /// Each entry is (strand_name, result, duration_ms) for diagnostic visibility.
+        strand_evaluations: Vec<(String, String, u64)>,
     },
     WorkerIdle {
         backoff_seconds: u64,
@@ -630,10 +637,16 @@ impl EventKind {
             EventKind::WorkerExhausted {
                 cycle_count,
                 last_strand,
+                waterfall_restarts,
+                restart_triggers,
+                strand_evaluations,
             } => {
                 serde_json::json!({
                     "cycle_count": cycle_count,
                     "last_strand_evaluated": last_strand,
+                    "waterfall_restarts": waterfall_restarts,
+                    "restart_triggers": restart_triggers,
+                    "strand_evaluations": strand_evaluations,
                 })
             }
             EventKind::WorkerIdle { backoff_seconds } => {
@@ -1819,8 +1832,11 @@ pub struct Telemetry {
     /// Pending writer state that needs to be spawned in an async context.
     /// This is `Some` until `start()` is called.
     pending_writer: Arc<std::sync::Mutex<Option<PendingWriter>>>,
-    /// JoinHandle for the background writer task, set by `start()`.
-    writer_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// JoinHandle for the background writer thread, set by `start()`.
+    /// Uses std::thread::JoinHandle (not tokio::task::JoinHandle) because the
+    /// writer runs in its own dedicated thread with its own tokio runtime,
+    /// ensuring it can process messages before the main runtime's block_on().
+    writer_handle: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 /// Internal message type for the writer task.
@@ -2067,10 +2083,19 @@ impl Telemetry {
             s.send(WriterMessage::Flush(tx)).ok();
         }
         // Block until the writer task flushes or timeout.
-        // Use a small thread to avoid needing an async context.
-        let _ = rx.blocking_recv();
-        let _ = timeout; // deadline enforced by the writer task
-        Ok(())
+        // Spawn a thread to handle the blocking recv with a timeout.
+        let handle = std::thread::spawn(move || rx.blocking_recv());
+        let start = std::time::Instant::now();
+        loop {
+            if handle.is_finished() {
+                return Ok(());
+            }
+            if start.elapsed() >= timeout {
+                tracing::warn!("force_flush timed out after {:?}", timeout);
+                return Ok(()); // Don't fail — the writer will eventually flush
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     /// Force-flush all buffered events to disk (async).
@@ -2090,6 +2115,47 @@ impl Telemetry {
                 tracing::warn!("force_flush_async timed out after {:?}", timeout);
                 Ok(())
             }
+        }
+    }
+
+    /// Emit an event synchronously, writing directly to the file sink.
+    ///
+    /// This bypasses the async channel and writes immediately to the file.
+    /// Use this for critical early-boot events (like `worker.booting`) that
+    /// must be visible even if the async writer hasn't started yet.
+    ///
+    /// Returns `Err` if the pending writer is not available (already started)
+    /// or if writing to the file fails.
+    pub fn emit_sync(&self, kind: EventKind) -> Result<()> {
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let (trace_id, span_id) = current_trace_ids();
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: kind.event_type().to_string(),
+            worker_id: self.worker_id.clone(),
+            session_id: self.session_id.clone(),
+            sequence: seq,
+            bead_id: kind.bead_id(),
+            workspace: None,
+            duration_ms: kind.duration_ms(),
+            data: kind.to_data(),
+            trace_id,
+            span_id,
+        };
+
+        // Take the pending writer temporarily to write directly to sinks.
+        let pending_guard = self.pending_writer.lock().unwrap();
+        if let Some(ref pending) = *pending_guard {
+            // Write directly to each sink (typically just FileSink).
+            for sink in &pending.sinks {
+                if let Err(e) = sink.accept(&event) {
+                    tracing::warn!(error = %e, "sync emit to sink failed");
+                }
+            }
+            Ok(())
+        } else {
+            // Pending writer already consumed by start().
+            Err(anyhow::anyhow!("cannot emit_sync after start()"))
         }
     }
 
@@ -2139,60 +2205,113 @@ impl Telemetry {
     pub fn start(&self) {
         let pending = self.pending_writer.lock().unwrap().take();
         if let Some(pw) = pending {
-            let handle = Self::spawn_writer(pw.receiver, pw.sinks);
+            let handle = Self::spawn_writer(pw.receiver, pw.sinks, None);
             *self.writer_handle.lock().unwrap() = Some(handle);
         }
     }
 
+    /// Start the background writer task and wait for it to be ready.
+    ///
+    /// Returns a Future that completes when the writer thread has started
+    /// and is ready to process events. Use this instead of `start()` when
+    /// you need to guarantee that events emitted immediately after will
+    /// be processed (e.g., for `worker.booting` as the first JSONL event).
+    ///
+    /// Must be called from within a tokio runtime context.
+    pub async fn start_and_wait(&self) -> Result<()> {
+        let pending = self.pending_writer.lock().unwrap().take();
+        if let Some(pw) = pending {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let handle = Self::spawn_writer(pw.receiver, pw.sinks, Some(ready_tx));
+            *self.writer_handle.lock().unwrap() = Some(handle);
+
+            // Wait for the writer thread to signal it's ready.
+            // Use a timeout to avoid hanging if the thread fails to start.
+            tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx)
+                .await
+                .map_err(|_| anyhow::anyhow!("writer thread failed to start within 5s"))?
+                .map_err(|_| anyhow::anyhow!("writer thread closed before signaling ready"))?;
+        }
+        Ok(())
+    }
+
     /// Flush and shut down the background writer.
     ///
-    /// Drops the shared sender (closing the channel) so the writer task
+    /// Drops the shared sender (closing the channel) so the writer thread
     /// processes all buffered events and flushes its `BufWriter` before
-    /// exiting. Awaits the task's `JoinHandle` to guarantee completion.
+    /// exiting. Joins the thread to guarantee completion.
     ///
     /// Call this at every terminal path in the worker before the tokio
     /// Runtime is dropped, or the BufWriter flush will be cancelled.
     pub async fn shutdown(&self) {
-        // Drop the sender to signal EOF to the writer task.
+        // Drop the sender to signal EOF to the writer thread.
         *self.sender.lock().unwrap() = None;
-        // Await the writer task so the flush completes before we return.
+        // Join the writer thread so the flush completes before we return.
         let handle = self.writer_handle.lock().unwrap().take();
         if let Some(h) = handle {
-            let _ = h.await;
+            let _ = h.join();
         }
     }
 
     /// Spawn background writer task draining the channel to all registered sinks.
+    ///
+    /// Spawns a dedicated thread with its own tokio runtime so the writer task
+    /// can immediately start processing messages, even before the main runtime's
+    /// `block_on()` is called. This fixes a deadlock where `force_flush()` would
+    /// wait indefinitely for a response from a task that hasn't started yet.
+    ///
+    /// If `ready_signal` is provided, sends () through it when the writer is
+    /// ready to process events.
     fn spawn_writer(
-        mut receiver: mpsc::UnboundedReceiver<WriterMessage>,
+        receiver: mpsc::UnboundedReceiver<WriterMessage>,
         sinks: Vec<Box<dyn Sink>>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let deadline = std::time::Duration::from_secs(5);
-            while let Some(msg) = receiver.recv().await {
-                match msg {
-                    WriterMessage::Event(event) => {
-                        for sink in &sinks {
-                            if let Err(e) = sink.accept(&event) {
-                                tracing::warn!(error = %e, "telemetry sink accept failed");
+        ready_signal: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to create writer runtime");
+                    // Signal that we failed (by dropping the sender without sending)
+                    drop(ready_signal);
+                    return;
+                }
+            };
+            let mut receiver = receiver;
+            rt.block_on(async move {
+                // Signal that the writer is ready to process events.
+                // Do this before entering the recv() loop so the caller
+                // can proceed as soon as we're ready.
+                if let Some(tx) = ready_signal {
+                    tx.send(()).ok();
+                }
+
+                let deadline = std::time::Duration::from_secs(5);
+                while let Some(msg) = receiver.recv().await {
+                    match msg {
+                        WriterMessage::Event(event) => {
+                            for sink in &sinks {
+                                if let Err(e) = sink.accept(&event) {
+                                    tracing::warn!(error = %e, "telemetry sink accept failed");
+                                }
                             }
                         }
-                    }
-                    WriterMessage::Flush(reply) => {
-                        for sink in &sinks {
-                            if let Err(e) = sink.flush(deadline) {
-                                tracing::warn!(error = %e, "telemetry sink flush on demand failed");
+                        WriterMessage::Flush(reply) => {
+                            for sink in &sinks {
+                                if let Err(e) = sink.flush(deadline) {
+                                    tracing::warn!(error = %e, "telemetry sink flush on demand failed");
+                                }
                             }
+                            reply.send(()).ok();
                         }
-                        reply.send(()).ok();
                     }
                 }
-            }
-            for sink in &sinks {
-                if let Err(e) = sink.flush(deadline) {
-                    tracing::warn!(error = %e, "telemetry sink flush failed");
+                for sink in &sinks {
+                    if let Err(e) = sink.flush(deadline) {
+                        tracing::warn!(error = %e, "telemetry sink flush failed");
+                    }
                 }
-            }
+            })
         })
     }
 }
@@ -3046,6 +3165,9 @@ mod tests {
             EventKind::WorkerExhausted {
                 cycle_count: 3,
                 last_strand: "pluck".to_string(),
+                waterfall_restarts: 0,
+                restart_triggers: vec![],
+                strand_evaluations: vec![],
             },
             EventKind::WorkerIdle {
                 backoff_seconds: 30,
