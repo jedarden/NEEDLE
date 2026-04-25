@@ -16,13 +16,42 @@ pub mod splice;
 pub mod unravel;
 pub mod weave;
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use anyhow::Result;
 
 use crate::bead_store::BeadStore;
 use crate::config::Config;
-use crate::types::{Bead, StrandResult};
+use crate::types::{Bead, BeadId, StrandResult};
+
+/// A single strand evaluation result.
+#[derive(Debug, Clone)]
+pub struct StrandEvaluation {
+    pub strand_name: String,
+    pub result: String,
+    pub duration_ms: u64,
+}
+
+/// Result of a single `StrandRunner::select()` call.
+///
+/// Carries both the winning candidate (if any) and diagnostic statistics
+/// about restarts that occurred during the waterfall — used to populate
+/// `worker.exhausted` telemetry with a per-iteration breakdown.
+#[derive(Debug, Default)]
+pub struct SelectOutcome {
+    /// The candidate bead and the strand that found it, or `None` if
+    /// all strands returned `NoWork`.
+    pub bead: Option<(Bead, String)>,
+    /// How many times the waterfall restarted from Pluck (cap = `MAX_RESTARTS`).
+    pub waterfall_restarts: u32,
+    /// Names of strands that returned `WorkCreated` and triggered a restart.
+    /// Duplicate entries are preserved (one per restart event).
+    pub restart_triggers: Vec<String>,
+    /// All strand evaluations in order, across all waterfall passes.
+    /// Each entry is (strand_name, result, duration_ms).
+    pub strand_evaluations: Vec<StrandEvaluation>,
+}
 
 pub use explore::ExploreStrand;
 pub use knot::KnotStrand;
@@ -68,7 +97,10 @@ impl StrandRunner {
         registry: crate::registry::Registry,
         telemetry: crate::telemetry::Telemetry,
     ) -> Self {
-        let pluck = PluckStrand::new(config.strands.pluck.exclude_labels.clone());
+        let pluck = PluckStrand::new(
+            config.strands.pluck.exclude_labels.clone(),
+            telemetry.clone(),
+        );
 
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
         let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
@@ -171,7 +203,7 @@ impl StrandRunner {
             telemetry,
         );
 
-        let knot = KnotStrand::new(config.strands.knot.clone());
+        let knot = KnotStrand::new(config.strands.knot.clone(), runner_telemetry.clone());
         StrandRunner {
             strands: vec![
                 Box::new(pluck),
@@ -188,8 +220,8 @@ impl StrandRunner {
         }
     }
 
-    /// Run the waterfall, returning the first candidate bead (with the strand
-    /// name that found it) or None.
+    /// Run the waterfall, returning a `SelectOutcome` that carries the winning
+    /// candidate (if any) plus restart diagnostics.
     ///
     /// Returns the full `Bead` (including its workspace path) so the caller
     /// can create the correct bead store for remote beads found by Explore.
@@ -199,9 +231,11 @@ impl StrandRunner {
     /// When a strand returns `WorkCreated`, the waterfall restarts from Pluck.
     /// A restart cap prevents infinite loops (e.g. a strand that always creates
     /// work without producing a claimable bead).
-    pub async fn select(&self, store: &dyn BeadStore) -> Result<Option<(Bead, String)>> {
+    pub async fn select(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> Result<SelectOutcome> {
         const MAX_RESTARTS: u32 = 3;
         let mut restarts = 0u32;
+        let mut restart_triggers: Vec<String> = Vec::new();
+        let mut strand_evaluations: Vec<StrandEvaluation> = Vec::new();
 
         'waterfall: loop {
             for strand in &self.strands {
@@ -211,56 +245,98 @@ impl StrandRunner {
 
                 match result {
                     StrandResult::BeadFound(beads) => {
-                        let _ = self
+                        // Filter out beads that are in the exclusion set (e.g.
+                        // recently race-lost).  This prevents the waterfall from
+                        // immediately re-selecting a bead that just lost a claim
+                        // race to another worker.
+                        let original_count = beads.len();
+                        let filtered: Vec<Bead> = beads
+                            .into_iter()
+                            .filter(|b| !exclusions.contains(&b.id))
+                            .collect();
+                        let excluded_count = original_count.saturating_sub(filtered.len());
+                        if let Err(e) = self
                             .telemetry
                             .emit(crate::telemetry::EventKind::StrandEvaluated {
                                 strand_name: strand.name().to_string(),
                                 result: "bead_found".to_string(),
                                 duration_ms: elapsed_ms,
-                            });
+                            })
+                        {
+                            tracing::warn!(
+                                strand = strand.name(),
+                                error = %e,
+                                "failed to emit strand evaluated telemetry"
+                            );
+                        }
                         tracing::info!(
                             strand = strand.name(),
-                            candidates = beads.len(),
+                            candidates = filtered.len(),
+                            excluded = excluded_count,
                             elapsed_ms,
                             "strand found candidates"
                         );
-                        if let Some(bead) = beads.into_iter().next() {
-                            return Ok(Some((bead, strand.name().to_string())));
+                        if let Some(bead) = filtered.into_iter().next() {
+                            return Ok(SelectOutcome {
+                                bead: Some((bead, strand.name().to_string())),
+                                waterfall_restarts: restarts,
+                                restart_triggers,
+                                strand_evaluations,
+                            });
                         }
                         continue;
                     }
                     StrandResult::WorkCreated => {
-                        let _ = self
+                        if let Err(e) = self
                             .telemetry
                             .emit(crate::telemetry::EventKind::StrandEvaluated {
                                 strand_name: strand.name().to_string(),
                                 result: "work_created".to_string(),
                                 duration_ms: elapsed_ms,
-                            });
+                            })
+                        {
+                            tracing::warn!(
+                                strand = strand.name(),
+                                error = %e,
+                                "failed to emit strand evaluated telemetry"
+                            );
+                        }
                         restarts += 1;
+                        restart_triggers.push(strand.name().to_string());
+                        if restarts > MAX_RESTARTS {
+                            tracing::warn!(
+                                strand = strand.name(),
+                                max_restarts = MAX_RESTARTS,
+                                "waterfall restart cap reached, continuing to evaluate remaining strands"
+                            );
+                            // Do NOT return None — continue evaluating remaining strands
+                            // so every strand emits telemetry and the operator can see
+                            // why the worker is idle.
+                            continue;
+                        }
                         tracing::info!(
                             strand = strand.name(),
                             elapsed_ms,
                             restart = restarts,
                             "strand created new work, restarting waterfall"
                         );
-                        if restarts > MAX_RESTARTS {
-                            tracing::warn!(
-                                max_restarts = MAX_RESTARTS,
-                                "waterfall restart cap reached, treating as exhausted"
-                            );
-                            return Ok(None);
-                        }
                         continue 'waterfall;
                     }
                     StrandResult::NoWork => {
-                        let _ = self
+                        if let Err(e) = self
                             .telemetry
                             .emit(crate::telemetry::EventKind::StrandEvaluated {
                                 strand_name: strand.name().to_string(),
                                 result: "no_work".to_string(),
                                 duration_ms: elapsed_ms,
-                            });
+                            })
+                        {
+                            tracing::warn!(
+                                strand = strand.name(),
+                                error = %e,
+                                "failed to emit strand evaluated telemetry"
+                            );
+                        }
                         tracing::info!(
                             strand = strand.name(),
                             elapsed_ms,
@@ -269,13 +345,20 @@ impl StrandRunner {
                         continue;
                     }
                     StrandResult::Error(e) => {
-                        let _ = self
+                        if let Err(te) = self
                             .telemetry
                             .emit(crate::telemetry::EventKind::StrandEvaluated {
                                 strand_name: strand.name().to_string(),
                                 result: "error".to_string(),
                                 duration_ms: elapsed_ms,
-                            });
+                            })
+                        {
+                            tracing::warn!(
+                                strand = strand.name(),
+                                error = %te,
+                                "failed to emit strand evaluated telemetry"
+                            );
+                        }
                         tracing::warn!(
                             strand = strand.name(),
                             error = %e,
@@ -287,7 +370,12 @@ impl StrandRunner {
                 }
             }
             // All strands evaluated without finding work or triggering a restart.
-            return Ok(None);
+            return Ok(SelectOutcome {
+                bead: None,
+                waterfall_restarts: restarts,
+                restart_triggers,
+                strand_evaluations,
+            });
         }
     }
 
@@ -431,8 +519,9 @@ mod tests {
     async fn empty_waterfall_returns_none() {
         let runner = StrandRunner::new(vec![]);
         let store = EmptyStore;
-        let result = runner.select(&store).await.unwrap();
-        assert!(result.is_none());
+        let outcome = runner.select(&store, &HashSet::new()).await.unwrap();
+        assert!(outcome.bead.is_none());
+        assert_eq!(outcome.waterfall_restarts, 0);
     }
 
     #[tokio::test]
@@ -443,8 +532,8 @@ mod tests {
             Box::new(StubStrand::beads("finder", vec![bead])),
         ]);
         let store = EmptyStore;
-        let result = runner.select(&store).await.unwrap();
-        let (bead, strand_name) = result.unwrap();
+        let outcome = runner.select(&store, &HashSet::new()).await.unwrap();
+        let (bead, strand_name) = outcome.bead.unwrap();
         assert_eq!(bead.id, BeadId::from("test-001".to_string()));
         assert_eq!(strand_name, "finder");
     }
@@ -461,11 +550,13 @@ mod tests {
         let store = EmptyStore;
         // WorkCreated restarts the waterfall. On the second pass, "creator"
         // returns NoWork (stub consumed) and "finder" yields the bead.
-        let result = runner.select(&store).await.unwrap();
+        let outcome = runner.select(&store, &HashSet::new()).await.unwrap();
         assert_eq!(
-            result.map(|(b, _)| b.id),
+            outcome.bead.map(|(b, _)| b.id),
             Some(BeadId::from("test-002".to_string()))
         );
+        assert_eq!(outcome.waterfall_restarts, 1);
+        assert_eq!(outcome.restart_triggers, vec!["creator"]);
     }
 
     #[tokio::test]
@@ -476,8 +567,9 @@ mod tests {
             Box::new(StubStrand::no_work("s3")),
         ]);
         let store = EmptyStore;
-        let result = runner.select(&store).await.unwrap();
-        assert!(result.is_none());
+        let outcome = runner.select(&store, &HashSet::new()).await.unwrap();
+        assert!(outcome.bead.is_none());
+        assert_eq!(outcome.waterfall_restarts, 0);
     }
 
     #[tokio::test]
@@ -510,9 +602,9 @@ mod tests {
             Box::new(StubStrand::beads("finder", vec![bead])),
         ]);
         let store = EmptyStore;
-        let result = runner.select(&store).await.unwrap();
+        let outcome = runner.select(&store, &HashSet::new()).await.unwrap();
         assert_eq!(
-            result.map(|(b, _)| b.id),
+            outcome.bead.map(|(b, _)| b.id),
             Some(BeadId::from("after-error".to_string()))
         );
     }
@@ -523,8 +615,111 @@ mod tests {
         // After MAX_RESTARTS (3), the waterfall should return None.
         let runner = StrandRunner::new(vec![Box::new(AlwaysWorkCreated)]);
         let store = EmptyStore;
-        let result = runner.select(&store).await.unwrap();
-        assert!(result.is_none());
+        let exclusions = HashSet::new();
+        let outcome = runner.select(&store, &exclusions).await.unwrap();
+        assert!(outcome.bead.is_none());
+        assert_eq!(outcome.waterfall_restarts, 4); // 3 restarts + 1 cap-exceeded
+        assert_eq!(
+            outcome.restart_triggers,
+            vec!["always-creates", "always-creates", "always-creates", "always-creates"]
+        );
+    }
+
+    /// Strand that increments an external counter each time it is evaluated.
+    struct CountingStrand {
+        name: &'static str,
+        count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        returns_work_created: bool,
+    }
+
+    impl CountingStrand {
+        fn no_work(
+            name: &'static str,
+            count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        ) -> Self {
+            CountingStrand {
+                name,
+                count,
+                returns_work_created: false,
+            }
+        }
+
+        fn work_created(
+            name: &'static str,
+            count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        ) -> Self {
+            CountingStrand {
+                name,
+                count,
+                returns_work_created: true,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Strand for CountingStrand {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.returns_work_created {
+                StrandResult::WorkCreated
+            } else {
+                StrandResult::NoWork
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_cap_still_evaluates_remaining_strands() {
+        // When a strand repeatedly returns WorkCreated, the waterfall restarts.
+        // After MAX_RESTARTS, the remaining strands should still be evaluated
+        // so that operators see telemetry for every strand in the cycle.
+        let creator_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let observer_a_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let observer_b_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        let runner = StrandRunner::new(vec![
+            Box::new(CountingStrand::work_created(
+                "creator",
+                creator_count.clone(),
+            )),
+            Box::new(CountingStrand::no_work(
+                "observer-a",
+                observer_a_count.clone(),
+            )),
+            Box::new(CountingStrand::no_work(
+                "observer-b",
+                observer_b_count.clone(),
+            )),
+        ]);
+        let store = EmptyStore;
+        let exclusions = HashSet::new();
+        let outcome = runner.select(&store, &exclusions).await.unwrap();
+        assert!(outcome.bead.is_none());
+
+        // creator should have been evaluated MAX_RESTARTS + 1 = 4 times.
+        assert_eq!(creator_count.load(std::sync::atomic::Ordering::SeqCst), 4);
+
+        // After the restart cap, the remaining strands should each be evaluated
+        // at least once (the final pass through the waterfall).
+        let a = observer_a_count.load(std::sync::atomic::Ordering::SeqCst);
+        let b = observer_b_count.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            a >= 1,
+            "observer_a should be evaluated at least once, got {a}"
+        );
+        assert!(
+            b >= 1,
+            "observer_b should be evaluated at least once, got {b}"
+        );
+
+        // All 4 WorkCreated events are captured in restart_triggers.
+        assert_eq!(outcome.waterfall_restarts, 4);
+        assert_eq!(outcome.restart_triggers.len(), 4);
+        assert!(outcome.restart_triggers.iter().all(|t| t == "creator"));
     }
 
     #[tokio::test]
@@ -535,9 +730,10 @@ mod tests {
             Box::new(StubStrand::beads("real-finder", vec![bead])),
         ]);
         let store = EmptyStore;
-        let result = runner.select(&store).await.unwrap();
+        let exclusions = HashSet::new();
+        let outcome = runner.select(&store, &exclusions).await.unwrap();
         assert_eq!(
-            result.map(|(b, _)| b.id),
+            outcome.bead.map(|(b, _)| b.id),
             Some(BeadId::from("real-bead".to_string()))
         );
     }
@@ -551,9 +747,10 @@ mod tests {
             vec![bead1, bead2],
         ))]);
         let store = EmptyStore;
-        let result = runner.select(&store).await.unwrap();
+        let exclusions = HashSet::new();
+        let outcome = runner.select(&store, &exclusions).await.unwrap();
         assert_eq!(
-            result.map(|(b, _)| b.id),
+            outcome.bead.map(|(b, _)| b.id),
             Some(BeadId::from("first".to_string()))
         );
     }
