@@ -183,6 +183,17 @@ impl super::Strand for ExploreStrand {
 
                                             return StrandResult::BeadFound(retry_candidates);
                                         }
+
+                                        // Orphans were released but re-query found no candidates.
+                                        // Do NOT return WorkCreated — the beads will become available
+                                        // in the next natural selection cycle when Pluck re-scans the
+                                        // ready queue. Returning WorkCreated here causes restart loops
+                                        // when released beads don't pass filters (e.g., still blocked).
+                                        tracing::info!(
+                                            workspace = %workspace.display(),
+                                            released,
+                                            "cross-workspace mend released orphans but re-query found no candidates (beads may not pass filters), continuing to next workspace"
+                                        );
                                     }
                                     Err(e) => {
                                         tracing::warn!(
@@ -246,7 +257,12 @@ impl super::Strand for ExploreStrand {
             }
         }
 
-        tracing::debug!("explore: no candidates in any configured workspace");
+        let _ = self
+            .telemetry
+            .emit(crate::telemetry::EventKind::StrandSkipped {
+                strand_name: "explore".to_string(),
+                reason: "no_candidates_in_any_workspace".to_string(),
+            });
         StrandResult::NoWork
     }
 }
