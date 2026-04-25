@@ -628,7 +628,11 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
             tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
             Telemetry::new(qualified_id.clone())
         });
-    telemetry.start();
+    // Wait for the writer thread to be ready before emitting events.
+    // This fixes a race condition where emit() would send to the channel
+    // before the writer thread started processing, causing force_flush to timeout.
+    rt.block_on(telemetry.start_and_wait())
+        .context("writer thread failed to start")?;
     telemetry.emit(EventKind::WorkerBooting {
         worker_name: worker_name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
