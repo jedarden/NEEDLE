@@ -12,9 +12,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use chrono::Utc;
 
 use crate::bead_store::BeadStore;
-use crate::config::MendConfig;
+use crate::config::{LimitsConfig, MendConfig};
 use crate::health::HealthMonitor;
 use crate::learning::LearningsFile;
 use crate::peer::PeerMonitor;
@@ -128,10 +129,17 @@ struct MendSummary {
     db_repaired: bool,
     db_rebuilt: bool,
     agent_logs_cleaned: u32,
+    zero_activity_logs_cleaned: u32,
     traces_pruned: u32,
     traces_cleaned: u32,
     learnings_pruned: u32,
     learnings_consolidated: u32,
+    orphaned_heartbeats_removed: u32,
+    workers_deregistered: u32,
+    idle_workers_flagged: u32,
+    rate_limits_cleaned: u32,
+    rate_limit_providers_removed: u32,
+    rate_limit_providers_reset: u32,
 }
 
 impl MendSummary {
@@ -144,6 +152,7 @@ impl MendSummary {
     ///
     /// Operations that return `WorkCreated`:
     /// - `beads_released > 0`: Orphaned beads were released back to Open status.
+    /// - `deps_cleaned > 0`: Stale dependency links were removed (beads become claimable).
     ///
     /// Operations that return `NoWork` (maintenance, not work creation):
     /// - `locks_removed > 0`: Lock file cleanup (doesn't add beads to queue).
@@ -151,18 +160,13 @@ impl MendSummary {
     /// - `db_rebuilt`: Full rebuild from JSONL (doesn't add beads).
     /// - `traces_pruned`, `agent_logs_cleaned`, `learnings_*`: File cleanup.
     ///
-    /// NOTE: `deps_cleaned` is intentionally excluded. The `cleanup_stale_dependencies`
-    /// method only detects and reports stale links—it doesn't remove them (no
-    /// `remove_dependency` method exists). Since links remain unchanged, counting
-    /// `deps_cleaned` as "work" would cause infinite restart loops.
-    ///
     /// A `WorkCreated` return must be paired with a telemetry event identifying
     /// the created bead(s) so operators can see what the restart is chasing.
     fn did_work(&self) -> bool {
-        // Only bead release adds claimable items to the queue. Lock removal,
-        // DB repair, and DB rebuild are maintenance operations that don't
-        // create new work and must not trigger a waterfall restart.
-        self.beads_released > 0
+        // Bead release and dependency removal add claimable items to the queue.
+        // Lock removal, DB repair, and DB rebuild are maintenance operations
+        // that don't create new work and must not trigger a waterfall restart.
+        self.beads_released > 0 || self.deps_cleaned > 0
     }
 }
 
@@ -185,6 +189,10 @@ pub struct MendStrand {
     trace_retention_success_days: u32,
     workspace: PathBuf,
     max_learnings: usize,
+    /// Base state directory (contains `rate_limits/` subdirectory).
+    state_dir: PathBuf,
+    /// Provider/model limits configuration for rate limiter cleanup.
+    limits_config: LimitsConfig,
 }
 
 impl MendStrand {
@@ -284,10 +292,126 @@ impl MendStrand {
         Ok(())
     }
 
+    // ── Step 1.75: Orphaned heartbeat file removal ────────────────────────────
+
+    /// Remove heartbeat files that have no matching entry in the worker registry.
+    ///
+    /// This can happen due to:
+    /// - Manual deletion of registry entries
+    /// - Registry corruption
+    /// - Worker crash between registry write and heartbeat file creation
+    ///
+    /// Only removes heartbeat files older than heartbeat_ttl to avoid deleting
+    /// recently orphaned files that might still be in use.
+    fn cleanup_orphaned_heartbeats(&self, summary: &mut MendSummary) -> Result<()> {
+        // Read all heartbeat files.
+        let heartbeats = match HealthMonitor::read_all_heartbeats(&self.heartbeat_dir) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "mend: failed to read heartbeat directory for orphaned heartbeat cleanup"
+                );
+                return Ok(());
+            }
+        };
+
+        // Get all registered worker IDs.
+        let registered_ids = match self.registry.list() {
+            Ok(workers) => {
+                let mut ids = std::collections::HashSet::new();
+                for w in workers {
+                    ids.insert(w.id);
+                }
+                ids
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "mend: failed to read worker registry for orphaned heartbeat cleanup"
+                );
+                return Ok(());
+            }
+        };
+
+        for hb in heartbeats {
+            // Use qualified_id for comparison; fall back to worker_id for old heartbeats.
+            let worker_key = if hb.qualified_id.is_empty() {
+                &hb.worker_id
+            } else {
+                &hb.qualified_id
+            };
+
+            // Skip if this heartbeat has a matching registry entry.
+            if registered_ids.contains(worker_key) {
+                continue;
+            }
+
+            // Skip our own heartbeat (shouldn't happen, but be safe).
+            if worker_key == &self.qualified_id {
+                continue;
+            }
+
+            // Check if the heartbeat is stale (older than TTL).
+            // Only remove stale heartbeats to avoid deleting recently orphaned files.
+            if !HealthMonitor::is_stale(&hb, self.heartbeat_ttl) {
+                continue;
+            }
+
+            // Heartbeat is orphaned and stale — remove it.
+            let heartbeat_path = hb
+                .heartbeat_file
+                .clone()
+                .unwrap_or_else(|| self.heartbeat_dir.join(format!("{}.json", worker_key)));
+
+            let age_secs = match file_age(&heartbeat_path) {
+                Some(age) => age.as_secs(),
+                None => continue,
+            };
+
+            match std::fs::remove_file(&heartbeat_path) {
+                Ok(()) => {
+                    tracing::info!(
+                        worker_id = %worker_key,
+                        path = %heartbeat_path.display(),
+                        age_secs,
+                        "removed orphaned heartbeat file"
+                    );
+
+                    let _ = self
+                        .telemetry
+                        .emit(EventKind::MendOrphanedHeartbeatRemoved {
+                            worker_id: worker_key.clone(),
+                            age_secs,
+                        });
+
+                    summary.orphaned_heartbeats_removed += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %heartbeat_path.display(),
+                        error = %e,
+                        "failed to remove orphaned heartbeat file"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     // ── Step 2: Orphaned lock file removal ───────────────────────────────────
 
-    /// Remove claim lock files that are older than the configured TTL and not
-    /// actively held by any process.
+    /// Remove claim lock files that are not actively held by any process.
+    ///
+    /// This function immediately cleans up lock files whose holding process
+    /// has died, without waiting for an age-based timeout. The flock(2) lock
+    /// is automatically released by the kernel when the holder process dies,
+    /// so try_acquire_flock() will succeed immediately and we can remove the
+    /// stale metadata file.
+    ///
+    /// Lock files older than lock_ttl_secs are also cleaned up as a fallback
+    /// to handle edge cases where the flock probe might fail.
     fn cleanup_orphaned_locks(&self, summary: &mut MendSummary) -> Result<()> {
         let lock_ttl = Duration::from_secs(self.config.lock_ttl_secs);
 
@@ -321,18 +445,17 @@ impl MendStrand {
                 continue;
             }
 
-            // Check file age.
+            // Check file age for logging/fallback cleanup.
             let age = match file_age(&path) {
                 Some(age) => age,
                 None => continue,
             };
 
-            if age <= lock_ttl {
-                continue;
-            }
-
             // Try to acquire flock (non-blocking). If we can acquire it,
-            // no one is holding it — safe to delete.
+            // no one is holding it — safe to delete immediately.
+            //
+            // The kernel releases flocks when the holder process dies, so this
+            // probe succeeds immediately for dead PIDs regardless of file age.
             match try_acquire_flock(&path) {
                 Ok(Some(_file)) => {
                     // Lock acquired — no one holds it. Remove the file.
@@ -361,10 +484,14 @@ impl MendStrand {
                 }
                 Ok(None) => {
                     // Lock is actively held — skip.
-                    tracing::debug!(
-                        path = %path.display(),
-                        "lock file is actively held, skipping"
-                    );
+                    // Only log if the file is old; otherwise it's just a normal active lock.
+                    if age > lock_ttl {
+                        tracing::debug!(
+                            path = %path.display(),
+                            age_secs = age.as_secs(),
+                            "lock file is old but actively held, skipping"
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::debug!(
@@ -409,16 +536,95 @@ impl MendStrand {
                     tracing::info!(
                         bead_id = %bead.id,
                         blocker_id = %dep.id,
-                        "found stale dependency link (closed blocker on open bead)"
+                        "removing stale dependency link (closed blocker on open bead)"
                     );
 
-                    // Emit telemetry for the cleaned dependency.
-                    let _ = self.telemetry.emit(EventKind::MendDependencyCleaned {
-                        bead_id: bead.id.clone(),
-                        blocker_id: dep.id.clone(),
+                    // Remove the stale dependency link.
+                    match store.remove_dependency(&bead.id, &dep.id).await {
+                        Ok(()) => {
+                            // Emit telemetry for the removed dependency.
+                            let _ = self.telemetry.emit(EventKind::MendDependencyRemoved {
+                                bead_id: bead.id.clone(),
+                                blocker_id: dep.id.clone(),
+                            });
+                            summary.deps_cleaned += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                blocker_id = %dep.id,
+                                error = %e,
+                                "failed to remove stale dependency link"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // ── Step 3.5: Dead worker registry cleanup ───────────────────────────────
+
+    /// Scan the worker registry and remove entries for dead PIDs.
+    ///
+    /// This proactive cleanup ensures that dead worker entries don't accumulate
+    /// in the registry. The registry's list() method already filters dead PIDs,
+    /// but that only happens when rate limit checks run. This step ensures
+    /// cleanup happens every mend cycle.
+    fn cleanup_dead_workers(&self, summary: &mut MendSummary) -> Result<()> {
+        // Read the raw registry file to find entries that need cleanup.
+        let raw_content = match std::fs::read_to_string(self.registry.path()) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to read registry file");
+                return Ok(());
+            }
+        };
+
+        let raw_reg: crate::registry::RegistryFile = match serde_json::from_str(&raw_content) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to parse registry file");
+                return Ok(());
+            }
+        };
+
+        for entry in &raw_reg.workers {
+            // Skip our own entry.
+            if entry.id == self.qualified_id {
+                continue;
+            }
+
+            // Check if the PID is dead.
+            if crate::registry::is_pid_alive(entry.pid) {
+                continue;
+            }
+
+            // Dead worker found — deregister it.
+            match self.registry.deregister(&entry.id) {
+                Ok(()) => {
+                    tracing::info!(
+                        worker_id = %entry.id,
+                        pid = entry.pid,
+                        "removed dead worker from registry"
+                    );
+
+                    let _ = self.telemetry.emit(EventKind::MendWorkerDeregistered {
+                        worker_id: entry.id.clone(),
+                        pid: entry.pid,
                     });
 
-                    summary.deps_cleaned += 1;
+                    summary.workers_deregistered += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        worker_id = %entry.id,
+                        error = %e,
+                        "failed to deregister dead worker"
+                    );
                 }
             }
         }
@@ -638,6 +844,60 @@ impl MendStrand {
 
     // ── Step 5: Database health check with auto-recovery ────────────────────
 
+    // ── Step 4.8: Idle worker flagging ─────────────────────────────────────────
+
+    /// Flag workers that have been registered longer than `idle_timeout` with
+    /// zero beads processed. This helps identify workers that may have failed
+    /// to start, are stuck in dispatch, or have agent adapter problems.
+    ///
+    /// This is a warning/telemetry-only operation — idle workers are NOT
+    /// deregistered (they may be genuinely waiting for work).
+    fn flag_idle_workers(&self, summary: &mut MendSummary) -> Result<()> {
+        let workers = self.registry.list()?;
+
+        for worker in workers {
+            // Skip workers that have processed at least one bead.
+            if worker.beads_processed > 0 {
+                continue;
+            }
+
+            // Calculate worker age from started_at.
+            let age = match Utc::now().signed_duration_since(worker.started_at).to_std() {
+                Ok(d) => d,
+                Err(_) => {
+                    tracing::warn!(
+                        worker_id = %worker.id,
+                        "worker started_at is in the future, skipping idle check"
+                    );
+                    continue;
+                }
+            };
+
+            let idle_timeout = Duration::from_secs(self.config.idle_timeout);
+
+            if age > idle_timeout {
+                let age_secs = age.as_secs();
+                tracing::warn!(
+                    worker_id = %worker.id,
+                    pid = worker.pid,
+                    age_secs,
+                    idle_timeout_secs = self.config.idle_timeout,
+                    "flagging idle worker (0 beads processed for longer than idle_timeout)"
+                );
+
+                let _ = self.telemetry.emit(EventKind::MendIdleWorkerFlagged {
+                    worker_id: worker.id.clone(),
+                    pid: worker.pid,
+                    age_secs,
+                });
+
+                summary.idle_workers_flagged += 1;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Run `br doctor` to check database health. If issues are found,
     /// escalate through the recovery pipeline:
     ///
@@ -759,6 +1019,12 @@ impl super::Strand for MendStrand {
             // Non-fatal — continue with remaining steps.
         }
 
+        // Step 1.75: Orphaned heartbeat file removal.
+        if let Err(e) = self.cleanup_orphaned_heartbeats(&mut summary) {
+            tracing::warn!(error = %e, "mend: orphaned heartbeat cleanup failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
         // Step 2: Orphaned lock file removal.
         if let Err(e) = self.cleanup_orphaned_locks(&mut summary) {
             tracing::warn!(error = %e, "mend: orphaned lock cleanup failed");
@@ -769,6 +1035,12 @@ impl super::Strand for MendStrand {
         if let Err(e) = self.cleanup_stale_dependencies(store, &mut summary).await {
             tracing::warn!(error = %e, "mend: dependency cleanup failed");
             return StrandResult::Error(StrandError::StoreError(e));
+        }
+
+        // Step 3.5: Dead worker registry cleanup.
+        if let Err(e) = self.cleanup_dead_workers(&mut summary) {
+            tracing::warn!(error = %e, "mend: dead worker cleanup failed");
+            // Non-fatal — continue with remaining steps.
         }
 
         // Step 4: Agent log file cleanup.
@@ -789,6 +1061,12 @@ impl super::Strand for MendStrand {
             // Non-fatal — continue with remaining steps.
         }
 
+        // Step 4.8: Idle worker flagging.
+        if let Err(e) = self.flag_idle_workers(&mut summary) {
+            tracing::warn!(error = %e, "mend: idle worker flagging failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
         // Step 5: Database health check.
         if let Err(e) = self.check_db_health(store, &mut summary).await {
             tracing::warn!(error = %e, "mend: database health check failed");
@@ -805,6 +1083,7 @@ impl super::Strand for MendStrand {
             agent_logs_cleaned: summary.agent_logs_cleaned,
             traces_pruned: summary.traces_pruned,
             traces_deleted: summary.traces_cleaned,
+            workers_deregistered: summary.workers_deregistered,
         });
 
         if summary.did_work() {
@@ -985,6 +1264,9 @@ mod tests {
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Failing bead store for error-path tests.
@@ -1036,6 +1318,9 @@ mod tests {
         }
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
+        }
+        async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> Result<()> {
+            anyhow::bail!("store error")
         }
     }
 
@@ -1476,17 +1761,15 @@ mod tests {
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
 
-        // Create an old lock file (we set config lock_ttl to 0 so any age qualifies).
+        // Create a lock file with no holder (simulating a dead process).
+        // Since no process holds the flock, try_acquire_flock() will succeed
+        // immediately and the file will be removed regardless of age.
         let lock_path = lock_dir.path().join("needle-claim-abc123.lock");
         std::fs::write(&lock_path, "").unwrap();
 
-        // Set the modification time to the past by using a 0-second TTL config.
         let (store, _) = MockBeadStore::new(vec![]);
         let mend = MendStrand::new(
-            MendConfig {
-                lock_ttl_secs: 0, // Any lock is "old"
-                ..MendConfig::default()
-            },
+            MendConfig::default(),
             hb_dir.path().to_path_buf(),
             Duration::from_secs(300),
             lock_dir.path().to_path_buf(),
@@ -1527,10 +1810,7 @@ mod tests {
 
         let (store, _) = MockBeadStore::new(vec![]);
         let mend = MendStrand::new(
-            MendConfig {
-                lock_ttl_secs: 0,
-                ..MendConfig::default()
-            },
+            MendConfig::default(),
             hb_dir.path().to_path_buf(),
             Duration::from_secs(300),
             lock_dir.path().to_path_buf(),
@@ -2032,6 +2312,225 @@ mod tests {
         assert!(
             unrelated.exists(),
             "non-agent log files must not be touched"
+        );
+    }
+
+    // ── Orphaned heartbeat cleanup tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn orphaned_heartbeat_removed() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Write a stale heartbeat for a worker that is NOT registered.
+        write_heartbeat(
+            hb_dir.path(),
+            &make_stale_heartbeat("ghost-worker", 99_999_999, Some("nd-ghost")),
+        );
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        // Orphaned heartbeat cleanup is maintenance, not work creation.
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork after removing orphaned heartbeat (maintenance), got: {result:?}"
+        );
+
+        // Heartbeat file should be removed.
+        let hb_path = hb_dir.path().join("claude-ghost-worker.json");
+        assert!(
+            !hb_path.exists(),
+            "orphaned heartbeat file should have been removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_heartbeat_not_removed() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Register a worker.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "claude-registered-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        // Write a stale heartbeat for the registered worker.
+        write_heartbeat(
+            hb_dir.path(),
+            &make_stale_heartbeat("registered-worker", std::process::id(), Some("nd-registered")),
+        );
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+
+        // Heartbeat file should NOT be removed (worker is registered).
+        let hb_path = hb_dir.path().join("claude-registered-worker.json");
+        assert!(
+            hb_path.exists(),
+            "registered worker's heartbeat file should NOT be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn fresh_orphaned_heartbeat_not_removed() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Write a FRESH (non-stale) heartbeat for a worker that is NOT registered.
+        let fresh_hb = HeartbeatData {
+            worker_id: "fresh-ghost".to_string(),
+            qualified_id: "claude-fresh-ghost".to_string(),
+            pid: 99_999_999,
+            state: WorkerState::Executing,
+            current_bead: Some(BeadId::from("nd-fresh")),
+            workspace: PathBuf::from("/tmp/test"),
+            last_heartbeat: Utc::now(), // Fresh heartbeat
+            started_at: Utc::now(),
+            beads_processed: 0,
+            session: "fresh-ghost".to_string(),
+            heartbeat_file: None,
+        };
+        write_heartbeat(hb_dir.path(), &fresh_hb);
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+
+        // Fresh orphaned heartbeat should NOT be removed (only stale ones).
+        let hb_path = hb_dir.path().join("claude-fresh-ghost.json");
+        assert!(
+            hb_path.exists(),
+            "fresh orphaned heartbeat should not be removed (only stale ones)"
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_orphaned_heartbeats_removed() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Write multiple stale heartbeats for unregistered workers.
+        write_heartbeat(
+            hb_dir.path(),
+            &make_stale_heartbeat("ghost-1", 99_999_998, Some("nd-g1")),
+        );
+        write_heartbeat(
+            hb_dir.path(),
+            &make_stale_heartbeat("ghost-2", 99_999_997, Some("nd-g2")),
+        );
+        write_heartbeat(
+            hb_dir.path(),
+            &make_stale_heartbeat("ghost-3", 99_999_996, Some("nd-g3")),
+        );
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+
+        // All orphaned heartbeat files should be removed.
+        assert!(!hb_dir.path().join("claude-ghost-1.json").exists());
+        assert!(!hb_dir.path().join("claude-ghost-2.json").exists());
+        assert!(!hb_dir.path().join("claude-ghost-3.json").exists());
+    }
+
+    #[tokio::test]
+    async fn orphaned_heartbeat_with_qualified_id_removed() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Write a heartbeat with a fully-qualified ID (as written by current workers).
+        let hb = HeartbeatData {
+            worker_id: "nato-name".to_string(),
+            qualified_id: "claude-code-glm-5-nato-name".to_string(),
+            pid: 99_999_999,
+            state: WorkerState::Executing,
+            current_bead: Some(BeadId::from("nd-qualified")),
+            workspace: PathBuf::from("/tmp/test"),
+            last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
+            started_at: Utc::now(),
+            beads_processed: 0,
+            session: "nato-name".to_string(),
+            heartbeat_file: None,
+        };
+        write_heartbeat(hb_dir.path(), &hb);
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+
+        // Heartbeat file keyed by qualified ID should be removed.
+        let hb_path = hb_dir.path().join("claude-code-glm-5-nato-name.json");
+        assert!(
+            !hb_path.exists(),
+            "orphaned heartbeat file (qualified ID) should have been removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn own_heartbeat_not_removed_as_orphan() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Write a stale heartbeat for ourselves (should NOT be removed as orphan).
+        write_heartbeat(
+            hb_dir.path(),
+            &make_stale_heartbeat("test-worker", 99_999_999, Some("nd-own")),
+        );
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        // Run as claude-test-worker (matches heartbeat qualified_id).
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+
+        // Our own heartbeat should NOT be removed even if it appears orphaned.
+        let hb_path = hb_dir.path().join("claude-test-worker.json");
+        assert!(
+            hb_path.exists(),
+            "own heartbeat should not be removed as orphaned"
         );
     }
 }
