@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 use crate::bead_store::BeadStore;
 use crate::canary::CanaryRunner;
 use crate::claim::Claimer;
+use crate::commit_hook;
 use crate::config::{Config, ConfigLoader};
 use crate::cost::{self, BudgetCheck, EffortData};
 use crate::dispatch::{self, Dispatcher};
@@ -172,9 +173,14 @@ pub struct Worker {
     exec_output: Option<(AgentOutcome, bool)>,
     /// Effort tracking data for the current bead cycle.
     last_effort: Option<EffortData>,
+    /// HEAD SHA captured just before agent dispatch; used to detect new commits.
+    pre_dispatch_head: Option<String>,
     /// The workspace of the current bead store — updated when switching to remote.
     /// Used to ensure heartbeat reports the actual workspace where work is happening.
     current_workspace: PathBuf,
+    /// Whether `worker.booting` was already emitted externally (e.g., from CLI layer).
+    /// When true, `run()` skips emitting the booting event to avoid duplicates.
+    booting_emitted: bool,
 }
 
 impl Worker {
@@ -189,7 +195,7 @@ impl Worker {
         store: Arc<dyn BeadStore>,
         telemetry: Telemetry,
     ) -> Self {
-        Self::build(config, worker_name, store, telemetry)
+        Self::build(config, worker_name, store, telemetry, true)
     }
 
     /// Construct a worker from config, a worker name, and a bead store implementation.
@@ -204,7 +210,7 @@ impl Worker {
                 tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
                 Telemetry::new(qualified_id.clone())
             });
-        Self::build(config, worker_name, store, telemetry)
+        Self::build(config, worker_name, store, telemetry, false)
     }
 
     /// Shared construction logic used by both [`new`] and [`new_with_telemetry`].
@@ -213,6 +219,7 @@ impl Worker {
         worker_name: String,
         store: Arc<dyn BeadStore>,
         telemetry: Telemetry,
+        booting_emitted: bool,
     ) -> Self {
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);
         let strand_registry = Registry::default_location(&config.workspace.home);
@@ -313,7 +320,9 @@ impl Worker {
             current_strand: None,
             exec_output: None,
             last_effort: None,
+            pre_dispatch_head: None,
             current_workspace: default_workspace,
+            booting_emitted,
         }
     }
 
@@ -330,14 +339,17 @@ impl Worker {
 
         // IMMEDIATE boot event — must be the first thing emitted after telemetry starts.
         // This ensures we get a trace even if subsequent init steps block indefinitely.
-        self.telemetry.emit(EventKind::WorkerBooting {
-            worker_name: self.worker_name.clone(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        })?;
-        // Force-flush to disk before boot() — if init blocks, we still have a trace.
-        self.telemetry
-            .force_flush_async(std::time::Duration::from_secs(5))
-            .await?;
+        // Skip if already emitted externally (e.g., from CLI layer for early boot diagnostics).
+        if !self.booting_emitted {
+            self.telemetry.emit(EventKind::WorkerBooting {
+                worker_name: self.worker_name.clone(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            })?;
+            // Force-flush to disk before boot() — if init blocks, we still have a trace.
+            self.telemetry
+                .force_flush_async(std::time::Duration::from_secs(5))
+                .await?;
+        }
 
         let result = self.run_inner().await;
 
@@ -963,18 +975,9 @@ impl Worker {
 
     /// DISPATCHING: check rate limits, resolve adapter, and prepare for execution.
     async fn do_dispatch(&mut self) -> Result<()> {
-        let bead = match self.current_bead {
-            Some(ref b) => b,
-            None => {
-                bail!("DISPATCHING state without current_bead — invariant violated");
-            }
-        };
-
-        self.health.update_state(
-            &WorkerState::Dispatching,
-            Some(&bead.id),
-            Some(bead.workspace.as_path()),
-        );
+        if self.current_bead.is_none() {
+            bail!("DISPATCHING state without current_bead — invariant violated");
+        }
 
         // Check rate limits before dispatching.
         let adapter = self.resolve_adapter()?;
@@ -1049,6 +1052,10 @@ impl Worker {
             } else {
                 &bead.workspace
             };
+            // Capture HEAD so do_handle can tag new commits with Bead-Id on success.
+            if let Ok(head) = commit_hook::git_head(dispatch_ws.to_str().unwrap_or(".")).await {
+                self.pre_dispatch_head = Some(head);
+            }
             let result = self
                 .dispatcher
                 .dispatch(&bead.id, &prompt, &adapter, dispatch_ws)
@@ -1270,6 +1277,26 @@ impl Worker {
                     tracing::warn!(
                         bead_id = %bead.id,
                         "mitosis evaluation timed out after 120s, continuing to LOGGING"
+                    );
+                }
+            }
+        }
+
+        // On success, inject Bead-Id trailer into the latest commit (non-fatal if it fails).
+        if handler_result.outcome == Outcome::Success {
+            if let Some(ref pre_head) = self.pre_dispatch_head {
+                let workspace = if is_workspace_unset(&bead.workspace) {
+                    self.config.workspace.default.clone()
+                } else {
+                    bead.workspace.clone()
+                };
+                if let Err(e) =
+                    commit_hook::inject_bead_id_trailer(&workspace, &bead.id, pre_head).await
+                {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "Bead-Id trailer injection failed (non-fatal)"
                     );
                 }
             }
@@ -1726,14 +1753,43 @@ impl Worker {
         })?;
         // Update heartbeat shared state with the new worker state.
         let current_bead_id = self.current_bead.as_ref().map(|b| &b.id);
-        // Prefer the tracked workspace (explicitly managed during cross-workspace work).
-        // Only fall back to the bead's workspace if tracked workspace is unset.
-        // This ensures heartbeat reports the actual workspace where work is happening,
-        // not the "." that br returns when showing beads from a remote workspace.
-        let current_workspace = if is_workspace_unset(&self.current_workspace) {
-            self.current_bead.as_ref().map(|b| b.workspace.as_path())
-        } else {
-            Some(self.current_workspace.as_path())
+        // For bead-processing states, use the bead's actual workspace if set.
+        // This ensures heartbeat reports the workspace where the bead lives,
+        // not the worker's home workspace when processing cross-workspace beads.
+        let current_workspace = match to {
+            WorkerState::Claiming
+            | WorkerState::Building
+            | WorkerState::Dispatching
+            | WorkerState::Executing => {
+                // Use the bead's workspace if it's set and not unset/placeholder
+                if let Some(ref bead) = self.current_bead {
+                    if !is_workspace_unset(&bead.workspace) {
+                        Some(bead.workspace.as_path())
+                    } else {
+                        // Bead workspace is unset, use tracked workspace
+                        if is_workspace_unset(&self.current_workspace) {
+                            None
+                        } else {
+                            Some(self.current_workspace.as_path())
+                        }
+                    }
+                } else {
+                    // No current bead, use tracked workspace
+                    if is_workspace_unset(&self.current_workspace) {
+                        None
+                    } else {
+                        Some(self.current_workspace.as_path())
+                    }
+                }
+            }
+            _ => {
+                // For non-bead-processing states, use tracked workspace
+                if is_workspace_unset(&self.current_workspace) {
+                    None
+                } else {
+                    Some(self.current_workspace.as_path())
+                }
+            }
         };
         self.health
             .update_state(&to, current_bead_id, current_workspace);
