@@ -11,6 +11,7 @@
 //!             `bead_store`, `telemetry`, `health`, `config`, `types`.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -171,22 +172,49 @@ pub struct Worker {
     exec_output: Option<(AgentOutcome, bool)>,
     /// Effort tracking data for the current bead cycle.
     last_effort: Option<EffortData>,
+    /// The workspace of the current bead store — updated when switching to remote.
+    /// Used to ensure heartbeat reports the actual workspace where work is happening.
+    current_workspace: PathBuf,
 }
 
 impl Worker {
+    /// Construct a worker using a pre-existing telemetry instance.
+    ///
+    /// Use this when telemetry has already been started (e.g. after emitting
+    /// `worker.booting` from the CLI layer) so that early init steps are
+    /// visible in the JSONL log.
+    pub fn new_with_telemetry(
+        config: Config,
+        worker_name: String,
+        store: Arc<dyn BeadStore>,
+        telemetry: Telemetry,
+    ) -> Self {
+        Self::build(config, worker_name, store, telemetry)
+    }
+
     /// Construct a worker from config, a worker name, and a bead store implementation.
+    ///
+    /// Creates its own telemetry instance. Prefer [`new_with_telemetry`] when
+    /// the caller has already created and started telemetry for early boot
+    /// diagnostics.
     pub fn new(config: Config, worker_name: String, store: Arc<dyn BeadStore>) -> Self {
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);
-        // Create a single telemetry instance with hooks (if configured) and share
-        // clones with all sub-components so that hook sinks receive every event.
-        // Uses qualified_id so log filenames and event worker_id fields are fully
-        // qualified (e.g., "claude-foxtrot" not just "foxtrot"), preventing
-        // collisions when workers from different adapter pools share a NATO name.
         let telemetry = Telemetry::from_config(qualified_id.clone(), &config.telemetry)
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
                 Telemetry::new(qualified_id.clone())
             });
+        Self::build(config, worker_name, store, telemetry)
+    }
+
+    /// Shared construction logic used by both [`new`] and [`new_with_telemetry`].
+    fn build(
+        config: Config,
+        worker_name: String,
+        store: Arc<dyn BeadStore>,
+        telemetry: Telemetry,
+    ) -> Self {
+        let qualified_id = format!("{}-{}", config.agent.default, worker_name);
         let strand_registry = Registry::default_location(&config.workspace.home);
         let strands =
             StrandRunner::from_config(&config, &qualified_id, strand_registry, telemetry.clone());
@@ -255,6 +283,8 @@ impl Worker {
             .map(|entry| entry.beads_processed)
             .unwrap_or(0);
 
+        let default_workspace = config.workspace.default.clone();
+
         Worker {
             config,
             worker_name,
@@ -283,6 +313,7 @@ impl Worker {
             current_strand: None,
             exec_output: None,
             last_effort: None,
+            current_workspace: default_workspace,
         }
     }
 
@@ -296,6 +327,13 @@ impl Worker {
     pub async fn run(&mut self) -> Result<WorkerState> {
         // Start the telemetry writer now that we are inside the tokio runtime.
         self.telemetry.start();
+
+        // IMMEDIATE boot event — must be the first thing emitted after telemetry starts.
+        // This ensures we get a trace even if subsequent init steps block indefinitely.
+        self.telemetry.emit(EventKind::WorkerBooting {
+            worker_name: self.worker_name.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })?;
 
         let result = self.run_inner().await;
 
@@ -427,10 +465,20 @@ impl Worker {
     // ── Boot ────────────────────────────────────────────────────────────────
 
     /// Validate configuration and initialize the worker.
+    ///
+    /// Each step is instrumented with `init.step.started`/`init.step.completed`
+    /// events so that hangs are visible in the telemetry log. Boot duration is
+    /// capped at 60 seconds — if exceeded, the worker self-aborts with a
+    /// `worker.boot.timeout` event and exits with a non-zero code.
     fn boot(&mut self) -> Result<()> {
         self.boot_time = Some(Instant::now());
+        const BOOT_TIMEOUT_SECS: u64 = 60;
 
-        // Validate configuration.
+        // Step: Config validation
+        self.telemetry.emit(EventKind::InitStepStarted {
+            step: "config_validation".to_string(),
+        })?;
+        let step_start = Instant::now();
         let errors = ConfigLoader::validate(&self.config);
         if !errors.is_empty() {
             let msg = errors
@@ -440,19 +488,22 @@ impl Worker {
                 .join("; ");
             bail!("config validation failed: {msg}");
         }
-
-        // Emit worker started event.
-        self.telemetry.emit(EventKind::WorkerStarted {
-            worker_name: self.worker_name.clone(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+        self.telemetry.emit(EventKind::InitStepCompleted {
+            step: "config_validation".to_string(),
+            duration_ms: step_start.elapsed().as_millis() as u64,
         })?;
 
-        // Register in worker state registry.
-        // Use qualified identity ({adapter}-{worker_id}) to prevent collisions
-        // when workers from different adapter pools share a NATO name.
+        // Check boot timeout before each step
+        self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
+
+        // Step: Registry registration
+        self.telemetry.emit(EventKind::InitStepStarted {
+            step: "registry_registration".to_string(),
+        })?;
+        let step_start = Instant::now();
         let qualified_id = format!("{}-{}", self.config.agent.default, self.worker_name);
         let entry = WorkerEntry {
-            id: qualified_id,
+            id: qualified_id.clone(),
             pid: std::process::id(),
             workspace: self.config.workspace.default.clone(),
             agent: self.config.agent.default.clone(),
@@ -464,11 +515,32 @@ impl Worker {
         if let Err(e) = self.registry.register(entry) {
             tracing::warn!(error = %e, "failed to register in worker registry");
         }
+        self.telemetry.emit(EventKind::InitStepCompleted {
+            step: "registry_registration".to_string(),
+            duration_ms: step_start.elapsed().as_millis() as u64,
+        })?;
 
-        // Start heartbeat emitter (background thread).
+        // Check boot timeout before each step
+        self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
+
+        // Step: Heartbeat emitter start
+        self.telemetry.emit(EventKind::InitStepStarted {
+            step: "heartbeat_emitter".to_string(),
+        })?;
+        let step_start = Instant::now();
         if let Err(e) = self.health.start_emitter() {
             tracing::warn!(error = %e, "failed to start heartbeat emitter");
         }
+        self.telemetry.emit(EventKind::InitStepCompleted {
+            step: "heartbeat_emitter".to_string(),
+            duration_ms: step_start.elapsed().as_millis() as u64,
+        })?;
+
+        // Emit worker started event — boot complete
+        self.telemetry.emit(EventKind::WorkerStarted {
+            worker_name: self.worker_name.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        })?;
 
         self.set_state(WorkerState::Selecting)?;
 
@@ -478,6 +550,33 @@ impl Worker {
             "worker booted"
         );
 
+        Ok(())
+    }
+
+    /// Check if boot has exceeded the timeout and abort if so.
+    ///
+    /// Emits `worker.boot.timeout` and exits the process with a non-zero
+    /// code. This is a last-resort measure when an init step hangs.
+    fn check_boot_timeout(&self, timeout_secs: u64) -> Result<()> {
+        if let Some(boot_start) = self.boot_time {
+            let elapsed = boot_start.elapsed();
+            if elapsed.as_secs() > timeout_secs {
+                let elapsed_ms = elapsed.as_millis() as u64;
+                // Emit the timeout event before aborting
+                let _ = self
+                    .telemetry
+                    .emit(EventKind::WorkerBootTimeout { elapsed_ms });
+                tracing::error!(
+                    elapsed_ms,
+                    "boot timeout exceeded {}s — aborting",
+                    timeout_secs
+                );
+                // Flush telemetry before exit
+                std::mem::forget(self.telemetry.clone());
+                // Exit with a distinct code to indicate boot timeout
+                std::process::exit(71); // EX_OSERR + custom offset
+            }
+        }
         Ok(())
     }
 
@@ -536,7 +635,11 @@ impl Worker {
         // Restore home store if it was swapped for a remote workspace.
         self.restore_home_store();
 
-        self.health.update_state(&WorkerState::Selecting, None);
+        self.health.update_state(
+            &WorkerState::Selecting,
+            None,
+            Some(self.current_workspace.as_path()),
+        );
 
         let candidate = self.strands.select(self.store.as_ref()).await?;
 
@@ -583,6 +686,7 @@ impl Worker {
                 .context("failed to create bead store for remote workspace")?,
         );
         self.store = remote_store.clone();
+        self.current_workspace = workspace.to_path_buf();
         self.claimer = Claimer::new(
             remote_store,
             std::path::PathBuf::from("/tmp"),
@@ -590,6 +694,13 @@ impl Worker {
             100,
             self.telemetry.clone(),
         );
+        // Update registry so observers see the actual workspace being processed.
+        if let Err(e) = self
+            .registry
+            .update_workspace(&self.qualified_id(), workspace)
+        {
+            tracing::warn!(error = %e, "failed to update registry workspace");
+        }
         Ok(())
     }
 
@@ -598,6 +709,7 @@ impl Worker {
         if !Arc::ptr_eq(&self.store, &self.home_store) {
             tracing::debug!("restoring home workspace store");
             self.store = self.home_store.clone();
+            self.current_workspace = self.config.workspace.default.clone();
             self.claimer = Claimer::new(
                 self.home_store.clone(),
                 std::path::PathBuf::from("/tmp"),
@@ -605,6 +717,13 @@ impl Worker {
                 100,
                 self.telemetry.clone(),
             );
+            // Update registry to reflect return to home workspace.
+            if let Err(e) = self
+                .registry
+                .update_workspace(&self.qualified_id(), &self.config.workspace.default)
+            {
+                tracing::warn!(error = %e, "failed to update registry workspace");
+            }
         }
     }
 
@@ -743,7 +862,11 @@ impl Worker {
         // large workspaces with many learning files.
         // Enforce minimum timeout to prevent indefinite hangs (issue needle-3igr).
         const MIN_BUILDING_TIMEOUT_SECS: u64 = 60;
-        let timeout_secs = self.config.worker.building_timeout.max(MIN_BUILDING_TIMEOUT_SECS);
+        let timeout_secs = self
+            .config
+            .worker
+            .building_timeout
+            .max(MIN_BUILDING_TIMEOUT_SECS);
         let timeout_dur = std::time::Duration::from_secs(timeout_secs);
         let bead_id = bead.id.clone();
         let heartbeat_bead_id = bead_id.clone();
@@ -801,12 +924,10 @@ impl Worker {
                 .await;
 
                 // Emit bead.released event.
-                let _ = self
-                    .telemetry
-                    .emit(EventKind::BeadReleased {
-                        bead_id: bead_id.clone(),
-                        reason: "build_timeout".to_string(),
-                    });
+                let _ = self.telemetry.emit(EventKind::BeadReleased {
+                    bead_id: bead_id.clone(),
+                    reason: "build_timeout".to_string(),
+                });
 
                 // Clear current bead and transition to RETRYING.
                 self.current_bead = None;
@@ -845,8 +966,11 @@ impl Worker {
             }
         };
 
-        self.health
-            .update_state(&WorkerState::Dispatching, Some(&bead.id));
+        self.health.update_state(
+            &WorkerState::Dispatching,
+            Some(&bead.id),
+            Some(bead.workspace.as_path()),
+        );
 
         // Check rate limits before dispatching.
         let adapter = self.resolve_adapter()?;
@@ -1397,7 +1521,11 @@ impl Worker {
                 // Update heartbeat immediately before entering idle sleep so external
                 // monitoring has a fresh timestamp. If the worker dies during the
                 // idle period, the heartbeat file will become stale and can be detected.
-                self.health.update_state(&WorkerState::Exhausted, None);
+                self.health.update_state(
+                    &WorkerState::Exhausted,
+                    None,
+                    Some(self.current_workspace.as_path()),
+                );
 
                 // Cancellable sleep: check shutdown flag every 1 second instead of
                 // sleeping for the full duration. This ensures the worker responds to
@@ -1423,7 +1551,11 @@ impl Worker {
 
                     // Update heartbeat state before sleeping to ensure the heartbeat file
                     // is fresh even if the worker dies during this sleep iteration.
-                    self.health.update_state(&WorkerState::Exhausted, None);
+                    self.health.update_state(
+                        &WorkerState::Exhausted,
+                        None,
+                        Some(self.current_workspace.as_path()),
+                    );
 
                     // Sleep for a short interval, then check shutdown flag.
                     tokio::time::sleep(sleep_duration).await;
@@ -1520,7 +1652,11 @@ impl Worker {
                 })?;
 
                 // Update heartbeat after idle sleep completes before transitioning.
-                self.health.update_state(&WorkerState::Selecting, None);
+                self.health.update_state(
+                    &WorkerState::Selecting,
+                    None,
+                    Some(self.current_workspace.as_path()),
+                );
                 self.state = WorkerState::Selecting;
                 Ok(WorkerState::Selecting)
             }
@@ -1586,7 +1722,22 @@ impl Worker {
         })?;
         // Update heartbeat shared state with the new worker state.
         let current_bead_id = self.current_bead.as_ref().map(|b| &b.id);
-        self.health.update_state(&to, current_bead_id);
+        // Prefer the tracked workspace (explicitly managed during cross-workspace work).
+        // Only fall back to the bead's workspace if tracked workspace is unset.
+        // This ensures heartbeat reports the actual workspace where work is happening,
+        // not the "." that br returns when showing beads from a remote workspace.
+        let current_workspace = if is_workspace_unset(&self.current_workspace) {
+            self.current_bead.as_ref().map(|b| b.workspace.as_path())
+        } else {
+            Some(self.current_workspace.as_path())
+        };
+        self.health
+            .update_state(&to, current_bead_id, current_workspace);
+        // Sync current_workspace from the shared state so subsequent heartbeats
+        // use the correct workspace during cross-workspace work.
+        if let Some(ws) = current_workspace {
+            self.current_workspace = ws.to_path_buf();
+        }
         self.state = to;
         Ok(())
     }
@@ -1777,6 +1928,9 @@ mod tests {
             }
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
             Ok(())
         }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
@@ -1974,6 +2128,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -2039,6 +2196,9 @@ mod tests {
             })
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
             Ok(())
         }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
