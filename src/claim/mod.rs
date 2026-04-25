@@ -134,6 +134,7 @@ impl Claimer {
                 self.telemetry.emit(EventKind::ClaimRaceLost {
                     bead_id: bead_id.clone(),
                 })?;
+                // Apply backoff before trying next candidate (same as store.claim RaceLost path)
                 if attempts < self.max_retries {
                     tokio::time::sleep(Duration::from_millis(
                         self.retry_backoff_ms * u64::from(attempts),
@@ -189,10 +190,28 @@ impl Claimer {
 
     /// Convenience: claim a single bead by ID (fetches the bead, then delegates
     /// to `claim_next` with a single-element candidate list).
-    pub async fn claim_one(&self, bead_id: &BeadId, actor: &str) -> Result<ClaimResult> {
+    ///
+    /// The `exclusions` parameter allows the caller to pass beads that should
+    /// be skipped (e.g., beads that recently lost a claim race). This prevents
+    /// tight loops when multiple workers are racing on the same bead.
+    pub async fn claim_one(
+        &self,
+        bead_id: &BeadId,
+        actor: &str,
+        exclusions: &HashSet<BeadId>,
+    ) -> Result<ClaimResult> {
         let bead = self.store.show(bead_id).await?;
-        let exclusions = HashSet::new();
-        match self.claim_next(&[bead], actor, &exclusions).await? {
+
+        // If the bead is in the exclusion set, return NotClaimable immediately
+        // without attempting the claim. This prevents tight loops when the worker
+        // has already lost a race on this bead.
+        if exclusions.contains(bead_id) {
+            return Ok(ClaimResult::NotClaimable {
+                reason: "bead is excluded".to_string(),
+            });
+        }
+
+        match self.claim_next(&[bead], actor, exclusions).await? {
             ClaimOutcome::Claimed(b) => Ok(ClaimResult::Claimed(b)),
             ClaimOutcome::AllRaceLost => Ok(ClaimResult::RaceLost {
                 claimed_by: "(race)".to_string(),
@@ -344,6 +363,14 @@ mod tests {
         }
 
         async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -518,7 +545,7 @@ mod tests {
         let claimer = make_claimer(store);
 
         let result = claimer
-            .claim_one(&BeadId::from("needle-abc"), "worker-1")
+            .claim_one(&BeadId::from("needle-abc"), "worker-1", &HashSet::new())
             .await
             .unwrap();
         assert!(matches!(result, ClaimResult::Claimed(_)));

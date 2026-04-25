@@ -796,9 +796,13 @@ impl Worker {
             }
         };
 
+        // Build the current exclusion set and pass it to claim_one. This
+        // prevents claim_one from attempting to claim a bead that was
+        // just race-lost (which would cause a tight loop).
+        let exclusions = self.current_exclusions();
         let claim = self
             .claimer
-            .claim_one(&bead_id, &self.qualified_id())
+            .claim_one(&bead_id, &self.qualified_id(), &exclusions)
             .await?;
 
         match claim {
@@ -884,7 +888,10 @@ impl Worker {
         // This ensures even the first retry has a small delay to prevent tight loops.
         let backoff_ms = if self.consecutive_race_lost > 0 {
             // For race-lost retries: 100ms, 200ms, 400ms, 800ms, 1600ms, 3200ms, 5000ms (capped)
-            std::cmp::min(100 * (1u64 << (self.consecutive_race_lost - 1).min(5)), 5000)
+            std::cmp::min(
+                100 * (1u64 << (self.consecutive_race_lost - 1).min(5)),
+                5000,
+            )
         } else {
             // For other retries (e.g., max_claim_retries): 100ms minimum
             100
@@ -1246,12 +1253,13 @@ impl Worker {
                 // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
                 cancelled.store(true, Ordering::Release);
                 heartbeat_task.abort();
-                telemetry_clone.emit(EventKind::WorkerHandlingTimeout {
+                // Use emit_try_lock() to avoid blocking on telemetry mutex if writer is stuck.
+                let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
                     bead_id: bead_id_clone.clone(),
                     outcome: "unknown".to_string(),
                     operation: "handle".to_string(),
                     error: e.to_string(),
-                })?;
+                });
                 // Attempt best-effort release with timeout.
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
@@ -1271,12 +1279,13 @@ impl Worker {
                 // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
                 cancelled.store(true, Ordering::Release);
                 heartbeat_task.abort();
-                telemetry_clone.emit(EventKind::WorkerHandlingTimeout {
+                // Use emit_try_lock() to avoid blocking on telemetry mutex if writer is stuck.
+                let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
                     bead_id: bead_id_clone.clone(),
                     outcome: "unknown".to_string(),
                     operation: "handle".to_string(),
                     error: "timeout after 60s".to_string(),
-                })?;
+                });
                 // Attempt best-effort release with timeout.
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
@@ -2113,7 +2122,11 @@ mod tests {
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
-        async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> Result<()> {
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
             Ok(())
         }
     }
