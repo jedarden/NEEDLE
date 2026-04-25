@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
@@ -138,6 +138,12 @@ fn clear_global_shutdown_flag() {
     // No-op on non-Unix platforms
 }
 
+/// TTL for race-lost bead exclusions.
+///
+/// After losing a claim race, a bead is excluded from selection for this duration
+/// to prevent infinite loops where the selector returns the same bead repeatedly.
+const RACE_LOST_EXCLUSION_TTL: Duration = Duration::from_secs(30);
+
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
     config: Config,
@@ -160,6 +166,13 @@ pub struct Worker {
     state: WorkerState,
     current_bead: Option<Bead>,
     exclusion_set: HashSet<BeadId>,
+    /// Race-lost exclusions with TTL — prevents re-selecting beads that just lost a claim race.
+    /// Each entry is (bead_id, expiration_time). Entries are pruned on access.
+    race_lost_exclusions: Vec<(BeadId, Instant)>,
+    /// Beads that lost a claim race in the current selection cycle.
+    /// These are added to exclusion_set to prevent immediate re-selection.
+    /// Cleared at the start of the next SELECTING cycle.
+    race_lost_this_cycle: HashSet<BeadId>,
     retry_count: u32,
     consecutive_race_lost: u32,
     beads_processed: u64,
@@ -316,6 +329,8 @@ impl Worker {
             state: WorkerState::Booting,
             current_bead: None,
             exclusion_set: HashSet::new(),
+            race_lost_exclusions: Vec::new(),
+            race_lost_this_cycle: HashSet::new(),
             retry_count: 0,
             consecutive_race_lost: 0,
             beads_processed,
@@ -652,7 +667,8 @@ impl Worker {
     /// SELECTING: run strand waterfall to find a candidate bead.
     async fn do_select(&mut self) -> Result<()> {
         // Clear per-cycle state.
-        self.exclusion_set.clear();
+        // Preserve race-lost exclusions with TTL and beads that lost a race in the current cycle.
+        self.race_lost_this_cycle.clear();
         self.retry_count = 0;
         self.current_bead = None;
         self.current_strand = None;
@@ -666,9 +682,10 @@ impl Worker {
             Some(self.current_workspace.as_path()),
         );
 
+        let exclusions = self.current_exclusions();
         let candidate = self
             .strands
-            .select(self.store.as_ref(), &self.exclusion_set)
+            .select(self.store.as_ref(), &exclusions)
             .await?;
         self.last_waterfall_restarts = candidate.waterfall_restarts;
         self.last_restart_triggers = candidate.restart_triggers.clone();
@@ -697,6 +714,13 @@ impl Worker {
                         "bead is from remote workspace, switching store"
                     );
                     self.switch_store_to(bead_ws)?;
+                    // Update heartbeat with the new workspace so observers
+                    // can see where the work is actually happening.
+                    self.health.update_state(
+                        &WorkerState::Selecting,
+                        Some(&bead.id),
+                        Some(bead_ws),
+                    );
                 }
 
                 self.current_bead = Some(bead);
@@ -781,6 +805,7 @@ impl Worker {
             ClaimResult::Claimed(mut bead) => {
                 tracing::info!(bead_id = %bead.id, title = %bead.title, "claimed bead");
                 self.consecutive_race_lost = 0;
+                self.clear_all_exclusions();
                 // Preserve the workspace from the pre-claim bead (set by
                 // Explore for remote beads). The claimed bead from br's JSON
                 // returns source_repo as "." (cwd-relative), so we treat empty
@@ -805,7 +830,12 @@ impl Worker {
             }
             ClaimResult::RaceLost { claimed_by } => {
                 tracing::debug!(bead_id = %bead_id, %claimed_by, "claim race lost");
-                self.exclusion_set.insert(bead_id);
+                // Add to race-lost exclusions with TTL (persists across cycles)
+                let expires = Instant::now() + RACE_LOST_EXCLUSION_TTL;
+                self.race_lost_exclusions.push((bead_id.clone(), expires));
+                // Also add to exclusion_set for immediate protection in the current cycle
+                self.exclusion_set.insert(bead_id.clone());
+                self.race_lost_this_cycle.insert(bead_id);
                 self.retry_count += 1;
                 self.consecutive_race_lost += 1;
                 self.set_state(WorkerState::Retrying)?;
@@ -844,21 +874,27 @@ impl Worker {
             self.consecutive_race_lost = 0;
             self.retry_count = 0;
             self.exclusion_set.clear();
+            self.race_lost_this_cycle.clear();
             self.current_bead = None;
             self.set_state(WorkerState::Exhausted)?;
             return Ok(());
         }
 
-        // Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s.
-        if self.consecutive_race_lost > 0 {
-            let backoff_secs = std::cmp::min(1u64 << (self.consecutive_race_lost - 1).min(4), 30);
-            tracing::debug!(
-                consecutive_race_lost = self.consecutive_race_lost,
-                backoff_secs,
-                "backing off before retry"
-            );
-            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-        }
+        // Exponential backoff: start at 100ms, doubling each time, capped at 5s.
+        // This ensures even the first retry has a small delay to prevent tight loops.
+        let backoff_ms = if self.consecutive_race_lost > 0 {
+            // For race-lost retries: 100ms, 200ms, 400ms, 800ms, 1600ms, 3200ms, 5000ms (capped)
+            std::cmp::min(100 * (1u64 << (self.consecutive_race_lost - 1).min(5)), 5000)
+        } else {
+            // For other retries (e.g., max_claim_retries): 100ms minimum
+            100
+        };
+        tracing::debug!(
+            consecutive_race_lost = self.consecutive_race_lost,
+            backoff_ms,
+            "backing off before retry"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
 
         if self.retry_count < self.config.worker.max_claim_retries {
             self.set_state(WorkerState::Selecting)?;
@@ -869,6 +905,7 @@ impl Worker {
             );
             self.retry_count = 0;
             self.exclusion_set.clear();
+            self.race_lost_this_cycle.clear();
             self.current_bead = None;
             self.set_state(WorkerState::Selecting)?;
         }
@@ -1765,6 +1802,32 @@ impl Worker {
         format!("{}-{}", self.config.agent.default, self.worker_name)
     }
 
+    /// Build the current exclusion set, pruning expired race-lost entries.
+    ///
+    /// Race-lost exclusions have a TTL of 30 seconds. This method removes
+    /// expired entries and returns the union of race-lost exclusions and
+    /// the manual exclusion set.
+    fn current_exclusions(&mut self) -> HashSet<BeadId> {
+        let now = Instant::now();
+        // Prune expired entries in-place
+        self.race_lost_exclusions
+            .retain(|(_, expires)| expires > &now);
+
+        // Build the union of both exclusion sets
+        let mut exclusions = self.exclusion_set.clone();
+        for (bead_id, _) in &self.race_lost_exclusions {
+            exclusions.insert(bead_id.clone());
+        }
+        exclusions
+    }
+
+    /// Clear all exclusion state (both manual and race-lost exclusions).
+    fn clear_all_exclusions(&mut self) {
+        self.exclusion_set.clear();
+        self.race_lost_exclusions.clear();
+        self.race_lost_this_cycle.clear();
+    }
+
     /// Transition to a new state, emitting telemetry and updating heartbeat.
     fn set_state(&mut self, to: WorkerState) -> Result<()> {
         let from = self.state.clone();
@@ -2042,6 +2105,9 @@ mod tests {
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
     }
 
     fn make_test_bead(id: &str) -> Bead {
@@ -2238,6 +2304,9 @@ mod tests {
             Ok(())
         }
         async fn add_dependency(&self, _a: &BeadId, _b: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dependency(&self, _a: &BeadId, _b: &BeadId) -> Result<()> {
             Ok(())
         }
     }
@@ -2827,17 +2896,19 @@ mod tests {
     // ── do_select with exclusion set ──
 
     #[tokio::test]
-    async fn do_select_clears_exclusion_set_and_retry_count() {
+    async fn do_select_clears_race_lost_this_cycle_and_retry_count() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
         worker.boot().unwrap();
-        worker.exclusion_set.insert(BeadId::from("old-bead"));
+        worker.race_lost_this_cycle.insert(BeadId::from("old-bead"));
         worker.retry_count = 3;
 
         worker.do_select().await.unwrap();
 
-        assert!(worker.exclusion_set.is_empty());
+        assert!(worker.race_lost_this_cycle.is_empty());
         assert_eq!(worker.retry_count, 0);
+        // Note: exclusion_set is NOT cleared by do_select() anymore - it persists
+        // for race-lost beads until they expire or the worker transitions to Exhausted
     }
 
     // ── full cycle test ──
