@@ -58,6 +58,8 @@ struct SharedHeartbeatState {
     state: WorkerState,
     current_bead: Option<BeadId>,
     beads_processed: u64,
+    /// The workspace of the current bead (updates dynamically during cross-workspace work).
+    current_workspace: Option<PathBuf>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -119,6 +121,7 @@ impl HealthMonitor {
                 state: WorkerState::Booting,
                 current_bead: None,
                 beads_processed: 0,
+                current_workspace: None,
             })),
             shutdown: shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             emitter_handle: None,
@@ -180,10 +183,16 @@ impl HealthMonitor {
     /// Update the worker state visible to the heartbeat emitter.
     ///
     /// Called by the worker on every state transition.
-    pub fn update_state(&self, state: &WorkerState, current_bead: Option<&BeadId>) {
+    pub fn update_state(
+        &self,
+        state: &WorkerState,
+        current_bead: Option<&BeadId>,
+        workspace: Option<&Path>,
+    ) {
         if let Ok(mut guard) = self.shared_state.lock() {
             guard.state = state.clone();
             guard.current_bead = current_bead.cloned();
+            guard.current_workspace = workspace.map(|p| p.to_path_buf());
         }
     }
 
@@ -369,7 +378,7 @@ impl HealthMonitor {
 
     /// Write a heartbeat file atomically (write temp, then rename).
     fn write_heartbeat(&self) -> Result<()> {
-        let (state, current_bead, beads_processed) = {
+        let (state, current_bead, beads_processed, current_workspace) = {
             let guard = self
                 .shared_state
                 .lock()
@@ -378,8 +387,12 @@ impl HealthMonitor {
                 guard.state.clone(),
                 guard.current_bead.clone(),
                 guard.beads_processed,
+                guard.current_workspace.clone(),
             )
         };
+
+        // Use the current bead's workspace if set, otherwise fall back to home workspace.
+        let effective_workspace = current_workspace.unwrap_or_else(|| self.workspace.clone());
 
         let data = HeartbeatData {
             worker_id: self.worker_id.clone(),
@@ -387,7 +400,7 @@ impl HealthMonitor {
             pid: std::process::id(),
             state,
             current_bead,
-            workspace: self.workspace.clone(),
+            workspace: effective_workspace,
             last_heartbeat: Utc::now(),
             started_at: self.started_at,
             beads_processed,
@@ -496,11 +509,12 @@ fn emitter_loop(
             return;
         }
 
-        let (state, current_bead, beads_processed) = match shared_state.lock() {
+        let (state, current_bead, beads_processed, current_workspace) = match shared_state.lock() {
             Ok(guard) => (
                 guard.state.clone(),
                 guard.current_bead.clone(),
                 guard.beads_processed,
+                guard.current_workspace.clone(),
             ),
             Err(_) => {
                 // Mutex poisoned — the main thread panicked. Exit.
@@ -512,13 +526,16 @@ fn emitter_loop(
             }
         };
 
+        // Use the current bead's workspace if set, otherwise fall back to home workspace.
+        let effective_workspace = current_workspace.unwrap_or_else(|| workspace.clone());
+
         let data = HeartbeatData {
             worker_id: worker_id.clone(),
             qualified_id: qualified_id.clone(),
             pid: std::process::id(),
             state,
             current_bead,
-            workspace: workspace.clone(),
+            workspace: effective_workspace,
             last_heartbeat: Utc::now(),
             started_at,
             beads_processed,
@@ -646,7 +663,11 @@ mod tests {
         monitor.start_emitter().unwrap();
 
         // Update shared state.
-        monitor.update_state(&WorkerState::Executing, Some(&BeadId::from("needle-abc")));
+        monitor.update_state(
+            &WorkerState::Executing,
+            Some(&BeadId::from("needle-abc")),
+            None,
+        );
         monitor.update_beads_processed(5);
 
         // Wait for the emitter to write a new heartbeat.
@@ -890,6 +911,7 @@ mod tests {
             state: WorkerState::Selecting,
             current_bead: None,
             beads_processed: 0,
+            current_workspace: None,
         }));
         let shutdown = Arc::new(AtomicBool::new(false));
 

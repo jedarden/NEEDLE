@@ -152,6 +152,10 @@ impl BeadStore for ConcurrentMockStore {
         Ok(())
     }
 
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
     async fn reopen(&self, _id: &BeadId) -> Result<()> {
         Ok(())
     }
@@ -1097,7 +1101,11 @@ async fn heartbeat_emitter_writes_and_cleans_up() {
     assert_eq!(data.pid, std::process::id());
 
     // Update state and wait for emitter to pick it up.
-    monitor.update_state(&WorkerState::Executing, Some(&BeadId::from("nd-test")));
+    monitor.update_state(
+        &WorkerState::Executing,
+        Some(&BeadId::from("nd-test")),
+        None,
+    );
     monitor.update_beads_processed(3);
     std::thread::sleep(Duration::from_millis(1500));
 
@@ -1578,6 +1586,10 @@ impl BeadStore for MitosisDedupeStore {
     }
 
     async fn release(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<()> {
         Ok(())
     }
 

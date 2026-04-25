@@ -173,6 +173,15 @@ impl Registry {
         })
     }
 
+    /// Update a worker's current workspace.
+    pub fn update_workspace(&self, worker_id: &str, workspace: &Path) -> Result<()> {
+        self.modify(|reg| {
+            if let Some(entry) = reg.workers.iter_mut().find(|w| w.id == worker_id) {
+                entry.workspace = workspace.to_path_buf();
+            }
+        })
+    }
+
     /// Read all registered workers, filtering out entries for dead PIDs.
     ///
     /// This lazy cleanup ensures that workers killed via SIGKILL or crashes

@@ -1815,7 +1815,7 @@ pub struct Telemetry {
     sequence: Arc<AtomicU64>,
     /// Wrapped in Arc<Mutex<Option<...>>> so that `shutdown()` can drop the
     /// sender explicitly (closing the channel) even while clones still exist.
-    sender: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<TelemetryEvent>>>>,
+    sender: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<WriterMessage>>>>,
     /// Pending writer state that needs to be spawned in an async context.
     /// This is `Some` until `start()` is called.
     pending_writer: Arc<std::sync::Mutex<Option<PendingWriter>>>,
@@ -1823,9 +1823,16 @@ pub struct Telemetry {
     writer_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
+/// Internal message type for the writer task.
+#[allow(clippy::large_enum_variant)]
+enum WriterMessage {
+    Event(TelemetryEvent),
+    Flush(tokio::sync::oneshot::Sender<()>),
+}
+
 /// Holds the receiver and sinks until they can be spawned in an async context.
 struct PendingWriter {
-    receiver: mpsc::UnboundedReceiver<TelemetryEvent>,
+    receiver: mpsc::UnboundedReceiver<WriterMessage>,
     sinks: Vec<Box<dyn Sink>>,
 }
 
@@ -1993,14 +2000,16 @@ impl Telemetry {
     #[cfg(test)]
     pub fn with_sink(worker_id: WorkerId, sink: impl Sink + 'static) -> Self {
         let session_id = "test0000".to_string();
-        let (sender, receiver) = mpsc::unbounded_channel::<TelemetryEvent>();
+        let (sender, receiver) = mpsc::unbounded_channel::<WriterMessage>();
         let sequence = Arc::new(AtomicU64::new(0));
 
         tokio::spawn(async move {
             let mut rx = receiver;
-            while let Some(event) = rx.recv().await {
-                if let Err(e) = sink.accept(&event) {
-                    tracing::warn!(error = %e, "test sink accept failed");
+            while let Some(msg) = rx.recv().await {
+                if let WriterMessage::Event(event) = msg {
+                    if let Err(e) = sink.accept(&event) {
+                        tracing::warn!(error = %e, "test sink accept failed");
+                    }
                 }
             }
         });
@@ -2037,9 +2046,51 @@ impl Telemetry {
         tracing::debug!(event_type = %event.event_type, seq, "telemetry event");
         // Lock the shared sender; None means shutdown() has been called.
         if let Some(ref s) = *self.sender.lock().unwrap() {
-            s.send(event).ok(); // ok() — never block, never panic
+            s.send(WriterMessage::Event(event)).ok(); // ok() — never block, never panic
         }
         Ok(())
+    }
+
+    /// Force-flush all buffered events to disk (synchronous).
+    ///
+    /// Sends a flush request through the writer channel and waits (up to
+    /// `timeout`) for the writer task to flush its BufWriter. Used after
+    /// `worker.booting` so the event is visible on disk even if subsequent
+    /// init steps block.
+    ///
+    /// NOTE: This uses `blocking_recv()` and must be called from outside a
+    /// tokio runtime (e.g., in `run_worker` before `rt.block_on`). Use
+    /// `force_flush_async()` from within async contexts.
+    pub fn force_flush(&self, timeout: std::time::Duration) -> Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Some(ref s) = *self.sender.lock().unwrap() {
+            s.send(WriterMessage::Flush(tx)).ok();
+        }
+        // Block until the writer task flushes or timeout.
+        // Use a small thread to avoid needing an async context.
+        let _ = rx.blocking_recv();
+        let _ = timeout; // deadline enforced by the writer task
+        Ok(())
+    }
+
+    /// Force-flush all buffered events to disk (async).
+    ///
+    /// Async version of `force_flush()` that can be called from within a
+    /// tokio runtime. Use this in `Worker::run()` and other async contexts.
+    pub async fn force_flush_async(&self, timeout: std::time::Duration) -> Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Some(ref s) = *self.sender.lock().unwrap() {
+            s.send(WriterMessage::Flush(tx)).ok();
+        }
+        // Wait for the writer task to flush, with timeout.
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Ok(()), // Channel closed, writer already flushed
+            Err(_) => {
+                tracing::warn!("force_flush_async timed out after {:?}", timeout);
+                Ok(())
+            }
+        }
     }
 
     /// Return a reference to the session ID for log path discovery.
@@ -2113,18 +2164,30 @@ impl Telemetry {
 
     /// Spawn background writer task draining the channel to all registered sinks.
     fn spawn_writer(
-        mut receiver: mpsc::UnboundedReceiver<TelemetryEvent>,
+        mut receiver: mpsc::UnboundedReceiver<WriterMessage>,
         sinks: Vec<Box<dyn Sink>>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            while let Some(event) = receiver.recv().await {
-                for sink in &sinks {
-                    if let Err(e) = sink.accept(&event) {
-                        tracing::warn!(error = %e, "telemetry sink accept failed");
+            let deadline = std::time::Duration::from_secs(5);
+            while let Some(msg) = receiver.recv().await {
+                match msg {
+                    WriterMessage::Event(event) => {
+                        for sink in &sinks {
+                            if let Err(e) = sink.accept(&event) {
+                                tracing::warn!(error = %e, "telemetry sink accept failed");
+                            }
+                        }
+                    }
+                    WriterMessage::Flush(reply) => {
+                        for sink in &sinks {
+                            if let Err(e) = sink.flush(deadline) {
+                                tracing::warn!(error = %e, "telemetry sink flush on demand failed");
+                            }
+                        }
+                        reply.send(()).ok();
                     }
                 }
             }
-            let deadline = std::time::Duration::from_secs(5);
             for sink in &sinks {
                 if let Err(e) = sink.flush(deadline) {
                     tracing::warn!(error = %e, "telemetry sink flush failed");

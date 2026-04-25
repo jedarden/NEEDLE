@@ -47,11 +47,15 @@ pub trait Strand: Send + Sync {
 /// Runs strands in order, returning the first candidate found.
 pub struct StrandRunner {
     strands: Vec<Box<dyn Strand>>,
+    telemetry: crate::telemetry::Telemetry,
 }
 
 impl StrandRunner {
     pub fn new(strands: Vec<Box<dyn Strand>>) -> Self {
-        StrandRunner { strands }
+        StrandRunner {
+            strands,
+            telemetry: crate::telemetry::Telemetry::new("strand-runner".to_string()),
+        }
     }
 
     /// Build the default strand waterfall from config.
@@ -118,6 +122,7 @@ impl StrandRunner {
             config.workspace.default.clone(),
             state_base.join("weave"),
             Box::new(CliWeaveAgent::new(config.agent.default.clone())),
+            telemetry.clone(),
         );
 
         let unravel = UnravelStrand::new(
@@ -158,6 +163,7 @@ impl StrandRunner {
 
         // Reconstruct heartbeat_dir for Splice (same path used by Mend).
         let splice_heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
+        let runner_telemetry = telemetry.clone();
         let splice = SpliceStrand::new(
             config.strands.splice.clone(),
             splice_heartbeat_dir,
@@ -178,6 +184,7 @@ impl StrandRunner {
                 Box::new(splice),
                 Box::new(knot),
             ],
+            telemetry: runner_telemetry,
         }
     }
 
@@ -204,6 +211,13 @@ impl StrandRunner {
 
                 match result {
                     StrandResult::BeadFound(beads) => {
+                        let _ = self
+                            .telemetry
+                            .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand.name().to_string(),
+                                result: "bead_found".to_string(),
+                                duration_ms: elapsed_ms,
+                            });
                         tracing::info!(
                             strand = strand.name(),
                             candidates = beads.len(),
@@ -216,6 +230,13 @@ impl StrandRunner {
                         continue;
                     }
                     StrandResult::WorkCreated => {
+                        let _ = self
+                            .telemetry
+                            .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand.name().to_string(),
+                                result: "work_created".to_string(),
+                                duration_ms: elapsed_ms,
+                            });
                         restarts += 1;
                         tracing::info!(
                             strand = strand.name(),
@@ -233,7 +254,14 @@ impl StrandRunner {
                         continue 'waterfall;
                     }
                     StrandResult::NoWork => {
-                        tracing::debug!(
+                        let _ = self
+                            .telemetry
+                            .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand.name().to_string(),
+                                result: "no_work".to_string(),
+                                duration_ms: elapsed_ms,
+                            });
+                        tracing::info!(
                             strand = strand.name(),
                             elapsed_ms,
                             "strand returned no work"
@@ -241,6 +269,13 @@ impl StrandRunner {
                         continue;
                     }
                     StrandResult::Error(e) => {
+                        let _ = self
+                            .telemetry
+                            .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand.name().to_string(),
+                                result: "error".to_string(),
+                                duration_ms: elapsed_ms,
+                            });
                         tracing::warn!(
                             strand = strand.name(),
                             error = %e,

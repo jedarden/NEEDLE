@@ -903,6 +903,9 @@ mod tests {
             self.release_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -964,6 +967,9 @@ mod tests {
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store error")
+        }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
         }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())

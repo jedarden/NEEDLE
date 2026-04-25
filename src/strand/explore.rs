@@ -75,11 +75,21 @@ impl super::Strand for ExploreStrand {
     async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
         // If disabled or no workspaces configured, nothing to explore.
         if !self.enabled {
-            tracing::debug!("explore strand disabled");
+            let _ = self
+                .telemetry
+                .emit(crate::telemetry::EventKind::StrandSkipped {
+                    strand_name: "explore".to_string(),
+                    reason: "disabled".to_string(),
+                });
             return StrandResult::NoWork;
         }
         if self.workspaces.is_empty() {
-            tracing::debug!("explore strand: no workspaces configured");
+            let _ = self
+                .telemetry
+                .emit(crate::telemetry::EventKind::StrandSkipped {
+                    strand_name: "explore".to_string(),
+                    reason: "no_workspaces_configured".to_string(),
+                });
             return StrandResult::NoWork;
         }
 
@@ -296,6 +306,9 @@ mod tests {
             anyhow::bail!("not implemented")
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
             Ok(())
         }
         async fn reopen(&self, _id: &BeadId) -> Result<()> {

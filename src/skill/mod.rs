@@ -146,7 +146,7 @@ impl SkillFile {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Manages the collection of skill files in `.beads/skills/`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SkillLibrary {
     skills: Vec<SkillFile>,
     skills_dir: PathBuf,

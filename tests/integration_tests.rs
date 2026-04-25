@@ -118,6 +118,10 @@ impl BeadStore for IntegrationMockStore {
         Ok(())
     }
 
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
     async fn reopen(&self, id: &BeadId) -> Result<()> {
         self.record(&format!("reopen:{id}"));
         Ok(())
@@ -588,6 +592,10 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         }
 
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn flush(&self) -> Result<()> {
             Ok(())
         }
 
@@ -1150,6 +1158,10 @@ impl BeadStore for ZombieMockStore {
         Ok(())
     }
 
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
+
     async fn reopen(&self, _id: &BeadId) -> Result<()> {
         Ok(())
     }
@@ -1231,6 +1243,10 @@ impl BeadStore for MultiWorkspaceStore {
 
     async fn release(&self, id: &BeadId) -> Result<()> {
         self.home_store.release(id).await
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.home_store.flush().await
     }
 
     async fn reopen(&self, id: &BeadId) -> Result<()> {

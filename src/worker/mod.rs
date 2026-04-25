@@ -334,6 +334,10 @@ impl Worker {
             worker_name: self.worker_name.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         })?;
+        // Force-flush to disk before boot() — if init blocks, we still have a trace.
+        self.telemetry
+            .force_flush_async(std::time::Duration::from_secs(5))
+            .await?;
 
         let result = self.run_inner().await;
 

@@ -1,0 +1,16 @@
+{
+  "bead_id": "needle-ry21.4",
+  "agent": "claude-anthropic-sonnet",
+  "provider": "anthropic",
+  "model": "claude-sonnet-4-6",
+  "exit_code": 0,
+  "outcome": "success",
+  "duration_ms": 147525,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-04-21T12:30:03.981558885Z",
+  "trace_format": "claude_json",
+  "pruned": false,
+  "template_version": null
+}

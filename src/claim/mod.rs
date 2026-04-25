@@ -343,6 +343,10 @@ mod tests {
             Ok(())
         }
 
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
