@@ -96,6 +96,10 @@ pub async fn cleanup_orphaned_in_progress(
 
         match store.release(&bead.id).await {
             Ok(()) => {
+                let _ = telemetry.emit(EventKind::BeadReleased {
+                    bead_id: bead.id.clone(),
+                    reason: format!("orphaned: assignee {} has no live worker", assignee),
+                });
                 let _ = telemetry.emit(EventKind::StuckReleased {
                     bead_id: bead.id.clone(),
                     peer_worker: assignee.clone(),
@@ -131,18 +135,34 @@ struct MendSummary {
 }
 
 impl MendSummary {
-    /// Whether any cleanup work was performed.
+    /// Whether mend performed work that changes bead store state.
+    ///
+    /// Only operations that add or release claimable beads should return true.
+    /// A strand MUST return `WorkCreated` only when it inserts a claimable bead
+    /// into the store that the waterfall will re-scan. No-op cleanup (pruning
+    /// traces, removing stale locks, repairing DB) should return `NoWork`.
+    ///
+    /// Operations that return `WorkCreated`:
+    /// - `beads_released > 0`: Orphaned beads were released back to Open status.
+    ///
+    /// Operations that return `NoWork` (maintenance, not work creation):
+    /// - `locks_removed > 0`: Lock file cleanup (doesn't add beads to queue).
+    /// - `db_repaired`: Doctor repair fixed index corruption (doesn't add beads).
+    /// - `db_rebuilt`: Full rebuild from JSONL (doesn't add beads).
+    /// - `traces_pruned`, `agent_logs_cleaned`, `learnings_*`: File cleanup.
+    ///
+    /// NOTE: `deps_cleaned` is intentionally excluded. The `cleanup_stale_dependencies`
+    /// method only detects and reports stale links—it doesn't remove them (no
+    /// `remove_dependency` method exists). Since links remain unchanged, counting
+    /// `deps_cleaned` as "work" would cause infinite restart loops.
+    ///
+    /// A `WorkCreated` return must be paired with a telemetry event identifying
+    /// the created bead(s) so operators can see what the restart is chasing.
     fn did_work(&self) -> bool {
+        // Only bead release adds claimable items to the queue. Lock removal,
+        // DB repair, and DB rebuild are maintenance operations that don't
+        // create new work and must not trigger a waterfall restart.
         self.beads_released > 0
-            || self.locks_removed > 0
-            || self.deps_cleaned > 0
-            || self.db_repaired
-            || self.db_rebuilt
-            || self.agent_logs_cleaned > 0
-            || self.traces_pruned > 0
-            || self.traces_cleaned > 0
-            || self.learnings_pruned > 0
-            || self.learnings_consolidated > 0
     }
 }
 
@@ -667,8 +687,27 @@ impl MendStrand {
                     .telemetry
                     .emit(EventKind::MendDbRepaired { warnings, fixed });
 
-                summary.db_repaired = true;
-                return Ok(());
+                // Only mark as repaired if actual fixes were applied.
+                // If warnings persist without fixes, returning WorkCreated would
+                // cause an infinite restart loop without making progress.
+                if fixed > 0 {
+                    summary.db_repaired = true;
+                    return Ok(());
+                }
+
+                // If doctor_repair succeeded but warnings persist without fixes,
+                // escalate to full rebuild. This prevents repeated Mend cycles
+                // where each evaluation calls doctor_repair which returns the
+                // same unfixed warnings without making progress.
+                if !report.warnings.is_empty() {
+                    tracing::warn!(
+                        warnings,
+                        "doctor --repair succeeded but warnings persist without fixes, escalating to full rebuild"
+                    );
+                } else {
+                    // No warnings and no fixes - DB is clean, no work needed.
+                    return Ok(());
+                }
             }
             Err(e) => {
                 tracing::warn!(
@@ -1464,9 +1503,11 @@ mod tests {
         );
 
         let result = mend.evaluate(&store).await;
+        // Lock file removal is maintenance, not work creation — it doesn't add
+        // claimable beads to the queue, so it should return NoWork.
         assert!(
-            matches!(result, StrandResult::WorkCreated),
-            "expected WorkCreated after removing orphaned lock, got: {result:?}"
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork after removing orphaned lock (maintenance doesn't create work), got: {result:?}"
         );
         assert!(
             !lock_path.exists(),
@@ -1529,9 +1570,12 @@ mod tests {
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
+        // NOTE: Dependency detection alone does NOT return WorkCreated because we don't
+        // actually remove the dependency links. The cleanup_stale_dependencies method
+        // only detects and reports stale dependencies—it has no way to remove them.
         assert!(
-            matches!(result, StrandResult::WorkCreated),
-            "expected WorkCreated after finding stale dependency, got: {result:?}"
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when finding stale dependencies (not actually removed), got: {result:?}"
         );
     }
 
@@ -1581,7 +1625,7 @@ mod tests {
     // ── Database health tests ────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn db_repair_triggers_work_created() {
+    async fn db_repair_returns_no_work() {
         let hb_dir = tempfile::tempdir().unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
@@ -1596,8 +1640,8 @@ mod tests {
 
         let result = mend.evaluate(&store).await;
         assert!(
-            matches!(result, StrandResult::WorkCreated),
-            "expected WorkCreated after db repair, got: {result:?}"
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork after db repair (maintenance doesn't add claimable beads), got: {result:?}"
         );
     }
 
@@ -1734,9 +1778,11 @@ mod tests {
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
+        // DB repair is maintenance, not work creation — it doesn't add claimable
+        // beads to the queue, so it should return NoWork.
         assert!(
-            matches!(result, StrandResult::WorkCreated),
-            "expected WorkCreated after repair, got: {result:?}"
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork after db repair (maintenance doesn't create work), got: {result:?}"
         );
     }
 
@@ -1752,9 +1798,11 @@ mod tests {
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
+        // DB rebuild is maintenance, not work creation — it doesn't add claimable
+        // beads to the queue, so it should return NoWork.
         assert!(
-            matches!(result, StrandResult::WorkCreated),
-            "expected WorkCreated after full rebuild, got: {result:?}"
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork after full rebuild (maintenance doesn't create work), got: {result:?}"
         );
     }
 
@@ -1850,8 +1898,8 @@ mod tests {
 
         let result = mend.evaluate(&store).await;
         assert!(
-            matches!(result, StrandResult::WorkCreated),
-            "expected WorkCreated after cleaning old agent log, got: {result:?}"
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork after cleaning old agent log (maintenance, not work creation), got: {result:?}"
         );
         assert!(
             !log_path.exists(),

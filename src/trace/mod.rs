@@ -354,7 +354,8 @@ pub fn cleanup_traces(
         // Only prune if metadata says not pruned AND data files actually exist.
         // If files are gone but metadata says not pruned, we have a partial
         // state from an interrupted run - fix the metadata and skip counting.
-        let should_prune = !is_failed && !is_pruned && has_data_files && age_days > retention_days_success as u64;
+        let should_prune =
+            !is_failed && !is_pruned && has_data_files && age_days > retention_days_success as u64;
 
         // Fix up metadata for traces that were partially pruned (files gone
         // but metadata not updated). This prevents infinite loops.
@@ -870,12 +871,18 @@ mod tests {
         // First cleanup: should skip the already-pruned trace.
         let summary1 = cleanup_traces(&traces_dir, 30, 7).unwrap();
         assert_eq!(summary1.traces_deleted, 0);
-        assert_eq!(summary1.traces_pruned, 0, "already-pruned trace should not be counted");
+        assert_eq!(
+            summary1.traces_pruned, 0,
+            "already-pruned trace should not be counted"
+        );
 
         // Second cleanup: should still skip.
         let summary2 = cleanup_traces(&traces_dir, 30, 7).unwrap();
         assert_eq!(summary2.traces_deleted, 0);
-        assert_eq!(summary2.traces_pruned, 0, "already-pruned trace should not be counted again");
+        assert_eq!(
+            summary2.traces_pruned, 0,
+            "already-pruned trace should not be counted again"
+        );
     }
 
     #[test]
@@ -917,7 +924,10 @@ mod tests {
         // First cleanup: should prune the trace.
         let summary1 = cleanup_traces(&traces_dir, 30, 7).unwrap();
         assert_eq!(summary1.traces_deleted, 0);
-        assert_eq!(summary1.traces_pruned, 1, "trace should be pruned on first cleanup");
+        assert_eq!(
+            summary1.traces_pruned, 1,
+            "trace should be pruned on first cleanup"
+        );
 
         // Verify files were removed and metadata marked as pruned.
         assert!(!bead_dir.join("stdout.txt").exists());
@@ -929,7 +939,10 @@ mod tests {
         // Second cleanup: should NOT count the same trace again.
         let summary2 = cleanup_traces(&traces_dir, 30, 7).unwrap();
         assert_eq!(summary2.traces_deleted, 0);
-        assert_eq!(summary2.traces_pruned, 0, "already-pruned trace should not be counted again");
+        assert_eq!(
+            summary2.traces_pruned, 0,
+            "already-pruned trace should not be counted again"
+        );
     }
 
     #[test]
@@ -974,16 +987,25 @@ mod tests {
         // (because no data files were actually removed)
         let summary1 = cleanup_traces(&traces_dir, 30, 7).unwrap();
         assert_eq!(summary1.traces_deleted, 0);
-        assert_eq!(summary1.traces_pruned, 0, "partially-pruned trace should not be counted");
+        assert_eq!(
+            summary1.traces_pruned, 0,
+            "partially-pruned trace should not be counted"
+        );
 
         // Verify metadata was fixed
         let content = std::fs::read_to_string(&metadata_path).unwrap();
         let parsed: TraceMetadata = serde_json::from_str(&content).unwrap();
-        assert!(parsed.pruned, "metadata should be marked as pruned after fix");
+        assert!(
+            parsed.pruned,
+            "metadata should be marked as pruned after fix"
+        );
 
         // Second cleanup: should still skip (now properly marked as pruned)
         let summary2 = cleanup_traces(&traces_dir, 30, 7).unwrap();
         assert_eq!(summary2.traces_deleted, 0);
-        assert_eq!(summary2.traces_pruned, 0, "fixed trace should not be counted again");
+        assert_eq!(
+            summary2.traces_pruned, 0,
+            "fixed trace should not be counted again"
+        );
     }
 }
