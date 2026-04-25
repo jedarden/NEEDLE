@@ -113,6 +113,11 @@ pub async fn cleanup_orphaned_in_progress(
                     error = %e,
                     "failed to release orphaned in-progress bead"
                 );
+                let _ = telemetry.emit(EventKind::MendBeadReleaseFailed {
+                    bead_id: bead.id.to_string(),
+                    assignee: assignee.clone(),
+                    error: e.to_string(),
+                });
             }
         }
     }
@@ -212,6 +217,8 @@ impl MendStrand {
     /// - `trace_retention_success_days`: retention days for successful bead traces
     /// - `workspace`: workspace root path for learning consolidation
     /// - `max_learnings`: maximum number of learning entries before consolidation
+    /// - `state_dir`: base state directory (contains `rate_limits/` subdirectory)
+    /// - `limits_config`: provider/model limits configuration for rate limiter cleanup
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: MendConfig,
@@ -228,6 +235,8 @@ impl MendStrand {
         trace_retention_success_days: u32,
         workspace: PathBuf,
         max_learnings: usize,
+        state_dir: PathBuf,
+        limits_config: LimitsConfig,
     ) -> Self {
         MendStrand {
             config,
@@ -244,6 +253,8 @@ impl MendStrand {
             trace_retention_success_days,
             workspace,
             max_learnings,
+            state_dir,
+            limits_config,
         }
     }
 
@@ -466,6 +477,10 @@ impl MendStrand {
                             error = %e,
                             "failed to remove orphaned lock file"
                         );
+                        let _ = self.telemetry.emit(EventKind::MendLockRemoveFailed {
+                            lock_path: path.display().to_string(),
+                            error: e.to_string(),
+                        });
                         continue;
                     }
 
@@ -892,6 +907,180 @@ impl MendStrand {
                 });
 
                 summary.idle_workers_flagged += 1;
+            }
+        }
+
+        Ok(())
+    }
+
+    // ── Step 4.9: Rate limiter state cleanup ─────────────────────────────────────
+
+    /// Clean up rate limiter state files.
+    ///
+    /// - Remove token bucket files for providers no longer in config
+    /// - Reset token buckets with stale last_refill (> 1 hour old) to full capacity
+    fn cleanup_rate_limit_state(&self, summary: &mut MendSummary) -> Result<()> {
+        use crate::rate_limit::TokenBucket;
+
+        let rate_limits_dir = self.state_dir.join("rate_limits");
+
+        let entries = match std::fs::read_dir(&rate_limits_dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                tracing::debug!(
+                    dir = %rate_limits_dir.display(),
+                    error = %e,
+                    "mend: failed to read rate_limits directory for cleanup"
+                );
+                return Ok(());
+            }
+        };
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+
+            // Only consider JSON files (token bucket files).
+            if !name.ends_with(".json") {
+                continue;
+            }
+
+            // Extract provider name from filename (e.g., "anthropic.json" -> "anthropic").
+            let provider = match name.strip_suffix(".json") {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Check if provider exists in config.
+            let provider_in_config = self.limits_config.providers.contains_key(provider);
+
+            if !provider_in_config {
+                // Provider no longer in config — remove the file.
+                let age_secs = match file_age(&path) {
+                    Some(age) => age.as_secs(),
+                    None => continue,
+                };
+
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {
+                        tracing::info!(
+                            provider,
+                            path = %path.display(),
+                            age_secs,
+                            "removed rate limit state file for provider not in config"
+                        );
+
+                        let _ = self
+                            .telemetry
+                            .emit(EventKind::MendRateLimitProviderRemoved {
+                                provider: provider.to_string(),
+                            });
+
+                        summary.rate_limit_providers_removed += 1;
+                        summary.rate_limits_cleaned += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            provider,
+                            path = %path.display(),
+                            error = %e,
+                            "failed to remove rate limit state file"
+                        );
+                    }
+                }
+                continue;
+            }
+
+            // Provider is in config — check if last_refill is stale (> 1 hour old).
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::debug!(
+                        provider,
+                        path = %path.display(),
+                        error = %e,
+                        "failed to read rate limit state file"
+                    );
+                    continue;
+                }
+            };
+
+            let mut bucket: TokenBucket = match serde_json::from_str(&content) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::debug!(
+                        provider,
+                        path = %path.display(),
+                        error = %e,
+                        "failed to parse rate limit state file"
+                    );
+                    continue;
+                }
+            };
+
+            let last_refill_age = match Utc::now().signed_duration_since(bucket.last_refill).to_std() {
+                Ok(d) => d,
+                Err(_) => {
+                    tracing::debug!(
+                        provider,
+                        "last_refill is in the future, skipping reset"
+                    );
+                    continue;
+                }
+            };
+
+            const STALE_THRESHOLD: Duration = Duration::from_secs(3600); // 1 hour
+
+            if last_refill_age > STALE_THRESHOLD {
+                // Stale token bucket — reset to full capacity.
+                let age_secs = last_refill_age.as_secs();
+                bucket.tokens = bucket.capacity as f64;
+                bucket.last_refill = Utc::now();
+
+                match serde_json::to_string_pretty(&bucket) {
+                    Ok(json) => {
+                        if let Err(e) = std::fs::write(&path, &json) {
+                            tracing::warn!(
+                                provider,
+                                path = %path.display(),
+                                error = %e,
+                                "failed to write reset rate limit state file"
+                            );
+                            continue;
+                        }
+
+                        tracing::info!(
+                            provider,
+                            age_secs,
+                            capacity = bucket.capacity,
+                            "reset stale rate limit state to full capacity"
+                        );
+
+                        let _ = self.telemetry.emit(EventKind::MendRateLimitProviderReset {
+                            provider: provider.to_string(),
+                            age_secs,
+                        });
+
+                        summary.rate_limit_providers_reset += 1;
+                        summary.rate_limits_cleaned += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            provider,
+                            error = %e,
+                            "failed to serialize reset rate limit state"
+                        );
+                    }
+                }
             }
         }
 
@@ -2532,5 +2721,259 @@ mod tests {
             hb_path.exists(),
             "own heartbeat should not be removed as orphaned"
         );
+    }
+
+    // ── Dead worker registry cleanup tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn dead_worker_removed_from_registry() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+
+        // Register a worker with a dead PID.
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "dead-worker".to_string(),
+                pid: 99_999_999,
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 5,
+            })
+            .unwrap();
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork after registry cleanup (maintenance), got: {result:?}"
+        );
+
+        // Verify the dead worker was removed from the registry file.
+        let reg_content = std::fs::read_to_string(reg_dir.path().join("workers.json")).unwrap();
+        let reg_file: crate::registry::RegistryFile = serde_json::from_str(&reg_content).unwrap();
+        assert!(
+            reg_file.workers.is_empty(),
+            "dead worker should have been removed from registry"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_worker_not_removed_from_registry() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+
+        // Register a live worker with current PID.
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "live-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 10,
+            })
+            .unwrap();
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+
+        // Verify the live worker is still in the registry.
+        let workers = registry.list().unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].id, "live-worker");
+    }
+
+    #[tokio::test]
+    async fn own_worker_entry_not_removed_from_registry() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+
+        // Register ourselves as a worker.
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "claude-test-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "claude-test-worker".to_string(),
+            registry,
+            Telemetry::new("claude-test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+
+        // Verify our own entry is still in the registry.
+        let workers = registry.list().unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].id, "claude-test-worker");
+    }
+
+    #[tokio::test]
+    async fn multiple_dead_workers_removed_from_registry() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+
+        // Register multiple dead workers.
+        for i in 0..5 {
+            registry
+                .register(crate::registry::WorkerEntry {
+                    id: format!("dead-worker-{}", i),
+                    pid: 99_999_999 - i,
+                    workspace: PathBuf::from("/tmp/test"),
+                    agent: "test".to_string(),
+                    model: None,
+                    provider: None,
+                    started_at: Utc::now(),
+                    beads_processed: i as u64,
+                })
+                .unwrap();
+        }
+
+        // Register one live worker.
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "live-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 100,
+            })
+            .unwrap();
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+
+        // Verify only the live worker remains.
+        let workers = registry.list().unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].id, "live-worker");
+    }
+
+    #[tokio::test]
+    async fn registry_cleanup_handles_missing_file() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Don't create any registry file.
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        // Should not error — missing registry file is handled gracefully.
+        assert!(matches!(result, StrandResult::NoWork));
+    }
+
+    #[tokio::test]
+    async fn registry_cleanup_handles_corrupt_file() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Write invalid JSON to the registry file.
+        let reg_path = reg_dir.path().join("workers.json");
+        std::fs::write(&reg_path, "not valid json").unwrap();
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        // Should not error — corrupt registry file is handled gracefully.
+        assert!(matches!(result, StrandResult::NoWork));
     }
 }

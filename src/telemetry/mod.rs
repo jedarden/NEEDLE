@@ -258,6 +258,48 @@ pub enum EventKind {
         pruned: u32,
         consolidated: u32,
     },
+    MendIdleWorkerFlagged {
+        worker_id: String,
+        pid: u32,
+        age_secs: u64,
+    },
+    MendWorkerDeregistered {
+        worker_id: String,
+        pid: u32,
+    },
+    MendOrphanedHeartbeatRemoved {
+        worker_id: String,
+        age_secs: u64,
+    },
+    MendDependencyRemoved {
+        bead_id: BeadId,
+        blocker_id: BeadId,
+    },
+    MendBeadReleaseFailed {
+        bead_id: String,
+        assignee: String,
+        error: String,
+    },
+    MendDependencyCleanupFailed {
+        bead_id: String,
+        blocker_id: String,
+        error: String,
+    },
+    MendLockRemoveFailed {
+        lock_path: String,
+        error: String,
+    },
+    MendRateLimitCleaned {
+        provider: String,
+        age_secs: u64,
+    },
+    MendRateLimitProviderRemoved {
+        provider: String,
+    },
+    MendRateLimitProviderReset {
+        provider: String,
+        age_secs: u64,
+    },
 
     // ── Effort tracking ──
     EffortRecorded {
@@ -478,6 +520,16 @@ impl EventKind {
             EventKind::MendCycleSummary { .. } => "mend.cycle_summary",
             EventKind::MendTraceCleanup { .. } => "mend.trace_cleanup",
             EventKind::MendLearningCleanup { .. } => "mend.learning_cleanup",
+            EventKind::MendIdleWorkerFlagged { .. } => "mend.idle_worker_flagged",
+            EventKind::MendWorkerDeregistered { .. } => "mend.worker_deregistered",
+            EventKind::MendOrphanedHeartbeatRemoved { .. } => "mend.orphaned_heartbeat_removed",
+            EventKind::MendDependencyRemoved { .. } => "mend.dependency_removed",
+            EventKind::MendBeadReleaseFailed { .. } => "mend.bead_release_failed",
+            EventKind::MendDependencyCleanupFailed { .. } => "mend.dependency_cleanup_failed",
+            EventKind::MendLockRemoveFailed { .. } => "mend.lock_remove_failed",
+            EventKind::MendRateLimitCleaned { .. } => "mend.rate_limit_cleaned",
+            EventKind::MendRateLimitProviderRemoved { .. } => "mend.rate_limit_provider_removed",
+            EventKind::MendRateLimitProviderReset { .. } => "mend.rate_limit_provider_reset",
             EventKind::EffortRecorded { .. } => "effort.recorded",
             EventKind::BudgetWarning { .. } => "budget.warning",
             EventKind::BudgetStop { .. } => "budget.stop",
@@ -1098,6 +1150,15 @@ impl EventKind {
                 serde_json::json!({
                     "pruned": pruned,
                     "consolidated": consolidated,
+                })
+            }
+            EventKind::MendRateLimitCleaned {
+                provider,
+                age_secs,
+            } => {
+                serde_json::json!({
+                    "provider": provider,
+                    "age_secs": age_secs,
                 })
             }
             EventKind::CanaryStarted { suite } => {

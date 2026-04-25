@@ -228,6 +228,10 @@ pub struct MendConfig {
     /// Run `br doctor` after every N beads processed (0 = disabled).
     #[serde(default = "MendConfig::default_db_check_interval")]
     pub db_check_interval: u64,
+
+    /// Workers with 0 beads processed longer than this (seconds) are flagged.
+    #[serde(default = "MendConfig::default_idle_timeout")]
+    pub idle_timeout: u64,
 }
 
 impl Default for MendConfig {
@@ -236,6 +240,7 @@ impl Default for MendConfig {
             stuck_threshold_secs: Self::default_stuck_threshold_secs(),
             lock_ttl_secs: Self::default_lock_ttl_secs(),
             db_check_interval: Self::default_db_check_interval(),
+            idle_timeout: Self::default_idle_timeout(),
         }
     }
 }
@@ -250,6 +255,9 @@ impl MendConfig {
     fn default_db_check_interval() -> u64 {
         50
     }
+    fn default_idle_timeout() -> u64 {
+        120
+    }
 }
 
 /// Explore strand configuration (multi-workspace discovery).
@@ -260,9 +268,15 @@ pub struct ExploreConfig {
     pub enabled: bool,
 
     /// Explicit workspace paths to search for beads.
-    /// No filesystem scanning — only these paths are checked.
+    /// When empty, workspaces are auto-discovered under `workspace_root`.
     #[serde(default)]
     pub workspaces: Vec<PathBuf>,
+
+    /// Root path for workspace auto-discovery (when `workspaces` is empty).
+    /// All directories under this path containing a `.beads/` subdirectory
+    /// are treated as workspaces.
+    #[serde(default = "ExploreConfig::default_workspace_root")]
+    pub workspace_root: PathBuf,
 }
 
 impl Default for ExploreConfig {
@@ -270,6 +284,7 @@ impl Default for ExploreConfig {
         ExploreConfig {
             enabled: Self::default_enabled(),
             workspaces: Vec::new(),
+            workspace_root: Self::default_workspace_root(),
         }
     }
 }
@@ -277,6 +292,10 @@ impl Default for ExploreConfig {
 impl ExploreConfig {
     fn default_enabled() -> bool {
         true
+    }
+
+    fn default_workspace_root() -> PathBuf {
+        dirs_or_home("")
     }
 }
 

@@ -901,10 +901,12 @@ impl Worker {
         } else {
             tracing::debug!(
                 retry_count = self.retry_count,
-                "max claim retries exceeded, moving to next strand cycle"
+                "max claim retries exceeded, clearing all exclusions for next cycle"
             );
             self.retry_count = 0;
+            self.consecutive_race_lost = 0;
             self.exclusion_set.clear();
+            self.race_lost_exclusions.clear();
             self.race_lost_this_cycle.clear();
             self.current_bead = None;
             self.set_state(WorkerState::Selecting)?;
@@ -1223,7 +1225,15 @@ impl Worker {
         .await
         {
             Ok(Ok(result)) => {
-                // Handler completed successfully.
+                // Handler completed successfully - stop heartbeat and continue.
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    outcome = %result.outcome,
+                    action = %result.bead_action,
+                    "handler completed successfully, stopping heartbeat task"
+                );
+                cancelled.store(true, Ordering::Release);
+                heartbeat_task.abort();
                 result
             }
             Ok(Err(e)) => {
@@ -1235,14 +1245,13 @@ impl Worker {
                 );
                 // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
                 cancelled.store(true, Ordering::Release);
+                heartbeat_task.abort();
                 telemetry_clone.emit(EventKind::WorkerHandlingTimeout {
                     bead_id: bead_id_clone.clone(),
                     outcome: "unknown".to_string(),
                     operation: "handle".to_string(),
                     error: e.to_string(),
                 })?;
-                // Abort the heartbeat task before returning.
-                heartbeat_task.abort();
                 // Attempt best-effort release with timeout.
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
@@ -1261,14 +1270,13 @@ impl Worker {
                 );
                 // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
                 cancelled.store(true, Ordering::Release);
+                heartbeat_task.abort();
                 telemetry_clone.emit(EventKind::WorkerHandlingTimeout {
                     bead_id: bead_id_clone.clone(),
                     outcome: "unknown".to_string(),
                     operation: "handle".to_string(),
                     error: "timeout after 60s".to_string(),
                 })?;
-                // Abort the heartbeat task before returning.
-                heartbeat_task.abort();
                 // Attempt best-effort release with timeout.
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
