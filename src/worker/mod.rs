@@ -1281,6 +1281,8 @@ impl Worker {
                     );
                     // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
                     cancelled.store(true, Ordering::Release);
+                    // Abort the heartbeat task to prevent it from continuing in the background.
+                    heartbeat_task.abort();
                     // Use emit_try_lock() to avoid blocking on telemetry mutex if writer is stuck.
                     let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
                         bead_id: bead_id_clone.clone(),
@@ -1306,6 +1308,8 @@ impl Worker {
                     );
                     // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
                     cancelled.store(true, Ordering::Release);
+                    // Abort the heartbeat task to prevent it from continuing in the background.
+                    heartbeat_task.abort();
                     // Use emit_try_lock() to avoid blocking on telemetry mutex if writer is stuck.
                     let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
                         bead_id: bead_id_clone.clone(),
@@ -1326,53 +1330,71 @@ impl Worker {
             }
         };
 
-        // Wrap the entire HANDLING state in a 90-second timeout.
-        // This provides a safety net in case the inner timeout doesn't fire due to
-        // runtime blocking or other issues. The 90s limit allows the inner 60s timeout
-        // to fire first under normal conditions, but provides a fallback if needed.
+        // Wrap the entire HANDLING state in a 90-second timeout using spawn_blocking.
+        // This provides a safety net that can fire even if the tokio runtime becomes wedged.
+        // The blocking thread runs independently of the async runtime, so the timeout will
+        // trigger even if all async tasks are blocked. The 90s limit allows the inner 60s
+        // timeout to fire first under normal conditions, but provides a fallback if needed.
 
-        let handler_result =
-            match tokio::time::timeout(std::time::Duration::from_secs(90), handling_future).await {
-                Ok(Ok(result)) => {
-                    // HANDLING completed successfully - stop heartbeat and continue.
-                    cancelled.store(true, Ordering::Release);
-                    heartbeat_task.abort();
-                    result
+        // Use a channel to signal timeout from the blocking thread.
+        let (timeout_tx, timeout_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Spawn a blocking thread that will send a timeout signal after 90 seconds.
+        let cancelled_for_timeout = cancelled_clone.clone();
+        tokio::task::spawn_blocking(move || {
+            std::thread::sleep(std::time::Duration::from_secs(90));
+            // Only send timeout signal if not already cancelled.
+            if !cancelled_for_timeout.load(Ordering::Relaxed) {
+                let _ = timeout_tx.send(());
+            }
+        });
+
+        // Use tokio::select! to race between the handling future and the timeout signal.
+        let handler_result = tokio::select! {
+            result = handling_future => {
+                // Handling completed (or inner timeout fired) - cancel the outer timeout.
+                cancelled.store(true, Ordering::Release);
+                // The timeout_tx is dropped here, which will cause the blocking thread's
+                // send() to fail, effectively cancelling it.
+                match result {
+                    Ok(result) => {
+                        heartbeat_task.abort();
+                        result
+                    }
+                    Err(_) => {
+                        // HANDLING failed but recovered - stop heartbeat and continue to LOGGING.
+                        heartbeat_task.abort();
+                        return Ok(());
+                    }
                 }
-                Ok(Err(_)) => {
-                    // HANDLING failed but recovered - stop heartbeat and continue to LOGGING.
-                    cancelled.store(true, Ordering::Release);
-                    heartbeat_task.abort();
-                    // Return early since we already transitioned to LOGGING in the error handler.
-                    return Ok(());
-                }
-                Err(_) => {
-                    // Outer timeout fired after 90 seconds - this is a critical failure.
-                    tracing::error!(
-                        bead_id = %bead.id,
-                        "HANDLING state timed out after 90s, forcing recovery"
-                    );
-                    // Set cancellation flag to stop all async operations.
-                    cancelled_clone.store(true, Ordering::Release);
-                    heartbeat_task.abort();
-                    // Emit critical timeout event.
-                    let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
-                        bead_id: bead_id_clone.clone(),
-                        outcome: "unknown".to_string(),
-                        operation: "handling_state".to_string(),
-                        error: "critical timeout after 90s".to_string(),
-                    });
-                    // Attempt best-effort release with timeout.
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        store_clone.release(&bead_id_clone),
-                    )
-                    .await;
-                    // Force transition to LOGGING to recover.
-                    self.set_state(WorkerState::Logging)?;
-                    return Ok(());
-                }
-            };
+            }
+            _ = timeout_rx => {
+                // Outer timeout fired after 90 seconds - this is a critical failure.
+                tracing::error!(
+                    bead_id = %bead.id,
+                    "HANDLING state timed out after 90s, forcing recovery"
+                );
+                // Set cancellation flag to stop all async operations.
+                cancelled.store(true, Ordering::Release);
+                heartbeat_task.abort();
+                // Emit critical timeout event.
+                let _ = telemetry_clone.emit_try_lock(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead_id_clone.clone(),
+                    outcome: "unknown".to_string(),
+                    operation: "handling_state".to_string(),
+                    error: "critical timeout after 90s".to_string(),
+                });
+                // Attempt best-effort release with timeout.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    store_clone.release(&bead_id_clone),
+                )
+                .await;
+                // Force transition to LOGGING to recover.
+                self.set_state(WorkerState::Logging)?;
+                return Ok(());
+            }
+        };
 
         // Emit a heartbeat after the outcome handler completes to signal we're
         // still alive. This helps detect hangs in post-handler code (commit hook,

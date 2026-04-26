@@ -571,6 +571,11 @@ impl MendStrand {
                                 error = %e,
                                 "failed to remove stale dependency link"
                             );
+                            let _ = self.telemetry.emit(EventKind::MendDependencyCleanupFailed {
+                                bead_id: bead.id.to_string(),
+                                blocker_id: dep.id.to_string(),
+                                error: e.to_string(),
+                            });
                         }
                     }
                 }
@@ -1415,9 +1420,16 @@ mod tests {
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             anyhow::bail!("not implemented in mock")
         }
-        async fn release(&self, _id: &BeadId) -> Result<()> {
-            self.release_count.fetch_add(1, Ordering::Relaxed);
-            Ok(())
+        async fn release(&self, id: &BeadId) -> Result<()> {
+            // Only return Ok if the bead exists in all_beads.
+            // This matches real bead store behavior where releasing a
+            // non-existent bead returns an error.
+            if self.all_beads.iter().any(|b| &b.id == id) {
+                self.release_count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            } else {
+                anyhow::bail!("bead not found: {}", id)
+            }
         }
         async fn flush(&self) -> Result<()> {
             Ok(())
