@@ -381,7 +381,8 @@ impl Worker {
     /// the main worker loop checks to force recovery.
     fn start_watchdog_thread(&mut self) {
         let watchdog_triggered = self.watchdog_triggered.clone();
-        let handling_state_entered_at_ptr = &self.handling_state_entered_at as *const Option<Instant> as usize;
+        let handling_state_entered_at_ptr =
+            &self.handling_state_entered_at as *const Option<Instant> as usize;
 
         let handle = std::thread::spawn(move || {
             loop {
@@ -532,25 +533,27 @@ impl Worker {
             if self.watchdog_triggered.load(Ordering::Relaxed)
                 && self.state == WorkerState::Handling
             {
-                tracing::error!(
-                    "watchdog detected HANDLING state hang, forcing recovery"
-                );
+                tracing::error!("watchdog detected HANDLING state hang, forcing recovery");
                 // Emit critical timeout event.
                 let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
-                let _ = self.telemetry.emit_try_lock(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead_id.clone().unwrap_or_else(|| BeadId::from("unknown")),
-                    outcome: "unknown".to_string(),
-                    operation: "watchdog".to_string(),
-                    error: format!("HANDLING state exceeded {}s timeout", HANDLING_WATCHDOG_TIMEOUT_SECS),
-                });
+                let _ = self
+                    .telemetry
+                    .emit_try_lock(EventKind::WorkerHandlingTimeout {
+                        bead_id: bead_id.clone().unwrap_or_else(|| BeadId::from("unknown")),
+                        outcome: "unknown".to_string(),
+                        operation: "watchdog".to_string(),
+                        error: format!(
+                            "HANDLING state exceeded {}s timeout",
+                            HANDLING_WATCHDOG_TIMEOUT_SECS
+                        ),
+                    });
                 // Attempt best-effort release if we have a bead.
                 if let Some(ref bead) = self.current_bead {
                     let bead_id = bead.id.clone();
                     tracing::warn!(bead_id = %bead_id, "best-effort bead release due to watchdog timeout");
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(30),
-                        self.store.release(&bead_id),
-                    ).await;
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead_id))
+                            .await;
                 }
                 // Clear the watchdog trigger and force transition to LOGGING.
                 self.watchdog_triggered.store(false, Ordering::Release);
@@ -589,6 +592,17 @@ impl Worker {
                         error_message: msg.clone(),
                         beads_processed: self.beads_processed,
                     })?;
+
+                    // Emit WorkerStopped before exiting so telemetry shows a clean shutdown.
+                    // This ensures operators can distinguish "exited with error" from
+                    // "killed by external agent" (e.g., SIGKILL, OOM).
+                    let uptime = self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                    let _ = self.telemetry.emit(EventKind::WorkerStopped {
+                        reason: format!("error: {msg}"),
+                        beads_processed: self.beads_processed,
+                        uptime_secs: uptime,
+                    });
+
                     // Best-effort stop heartbeat on error.
                     self.health.stop();
                     // Best-effort deregister on error.
@@ -780,10 +794,13 @@ impl Worker {
         // Restore home store if it was swapped for a remote workspace.
         self.restore_home_store();
 
+        // Update heartbeat with home workspace (not current_workspace which
+        // might be stale). This ensures heartbeat reports correctly even if
+        // restore_home_store() was a no-op (stores already equal).
         self.health.update_state(
             &WorkerState::Selecting,
             None,
-            Some(self.current_workspace.as_path()),
+            Some(self.config.workspace.default.as_path()),
         );
 
         let exclusions = self.current_exclusions();
@@ -807,9 +824,9 @@ impl Worker {
                 // swap the active store so claim/show/release operate on the
                 // correct workspace. Only switch if the workspace has a real
                 // .beads/ directory — avoids false triggers from mock/stub beads.
-                let bead_ws = &bead.workspace;
-                if !is_workspace_unset(bead_ws)
-                    && bead_ws != &self.config.workspace.default
+                let bead_ws = bead.workspace.clone();
+                if !is_workspace_unset(&bead_ws)
+                    && bead_ws != self.config.workspace.default
                     && bead_ws.join(".beads").is_dir()
                 {
                     tracing::info!(
@@ -817,19 +834,30 @@ impl Worker {
                         remote_workspace = %bead_ws.display(),
                         "bead is from remote workspace, switching store"
                     );
-                    self.switch_store_to(bead_ws)?;
+                    self.switch_store_to(&bead_ws)?;
                 }
 
                 // Always update current_workspace to reflect the bead's workspace.
                 // For local beads, this keeps heartbeat consistent with home workspace.
                 // For cross-workspace beads, this ensures heartbeat reports where
                 // the work is actually happening.
-                if !is_workspace_unset(bead_ws) {
+                if !is_workspace_unset(&bead_ws) {
                     self.current_workspace = bead_ws.clone();
                 }
 
                 self.current_bead = Some(bead);
                 self.current_strand = Some(strand_name);
+
+                // Update heartbeat immediately with the bead's workspace so that
+                // observers see the correct workspace even before transitioning to
+                // CLAIMING. This ensures heartbeats are accurate for cross-workspace
+                // work (see bead needle-c63c).
+                self.health.update_state(
+                    &WorkerState::Selecting,
+                    Some(&self.current_bead.as_ref().unwrap().id),
+                    Some(&bead_ws),
+                );
+
                 self.set_state(WorkerState::Claiming)?;
             }
             None => {
@@ -1872,6 +1900,16 @@ impl Worker {
                 let mut elapsed = 0u64;
                 let mut shutdown_check_count = 0u64;
 
+                // Emit an initial heartbeat to show we're entering idle sleep.
+                // This ensures there's at least one diagnostic event even if the
+                // worker dies before the first sleep iteration completes.
+                if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
+                    bead_id: None,
+                    state: "EXHAUSTED_IDLE".to_string(),
+                }) {
+                    tracing::warn!(error = %e, "failed to emit initial idle heartbeat, continuing anyway");
+                }
+
                 while elapsed < backoff {
                     let remaining = backoff - elapsed;
                     let sleep_duration =
@@ -1880,10 +1918,12 @@ impl Worker {
                     // Before sleeping, emit a heartbeat event to show the worker is alive
                     // and in idle state. This helps diagnose cases where workers die during
                     // idle sleep - the last event will show how long they survived.
-                    self.telemetry.emit(EventKind::HeartbeatEmitted {
+                    if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
                         bead_id: None,
                         state: "EXHAUSTED_IDLE".to_string(),
-                    })?;
+                    }) {
+                        tracing::warn!(error = %e, "failed to emit idle heartbeat, continuing anyway");
+                    }
 
                     // Update heartbeat state before sleeping to ensure the heartbeat file
                     // is fresh even if the worker dies during this sleep iteration.
@@ -1917,23 +1957,32 @@ impl Worker {
                         #[cfg(not(unix))]
                         let signal_name = None;
 
-                        if let Some(name) = signal_name {
-                            tracing::info!(
-                                elapsed_secs = elapsed,
-                                backoff_secs = backoff,
-                                signal = name,
-                                shutdown_check_count,
-                                "shutdown received during idle sleep, stopping worker"
-                            );
+                        // Emit a diagnostic event before stopping to ensure we have
+                        // a record of why the worker stopped during idle. This is
+                        // especially important for debugging cases where workers
+                        // die mysteriously during long idle periods.
+                        let reason = if let Some(name) = signal_name {
+                            format!("signal received during idle ({name})")
                         } else {
-                            tracing::info!(
-                                elapsed_secs = elapsed,
-                                backoff_secs = backoff,
-                                shutdown_check_count,
-                                "shutdown received during idle sleep, stopping worker"
-                            );
-                        }
-                        return self.stop("signal received during idle").await;
+                            "shutdown received during idle".to_string()
+                        };
+
+                        tracing::info!(
+                            elapsed_secs = elapsed,
+                            backoff_secs = backoff,
+                            shutdown_check_count,
+                            reason = %reason,
+                            "shutdown received during idle sleep, stopping worker"
+                        );
+
+                        // Force-flush telemetry before stopping to ensure the
+                        // diagnostic event is written even if the stop() method
+                        // fails or the process is killed immediately after.
+                        let _ = self
+                            .telemetry
+                            .force_flush(std::time::Duration::from_secs(5));
+
+                        return self.stop(&reason).await;
                     }
                 }
 
@@ -2101,7 +2150,17 @@ impl Worker {
         // For bead-processing states, use the bead's actual workspace if set.
         // This ensures heartbeat reports the workspace where the bead lives,
         // not the worker's home workspace when processing cross-workspace beads.
+        //
+        // For Selecting state, use the home workspace (not current_workspace)
+        // because restore_home_store() has just reset the store to home.
+        // Using current_workspace here would cause a race condition where the
+        // heartbeat reports a stale workspace from the previous cycle.
         let current_workspace = match to {
+            WorkerState::Selecting => {
+                // Selecting always uses home workspace because the store has
+                // just been restored to home by restore_home_store().
+                Some(self.config.workspace.default.as_path())
+            }
             WorkerState::Claiming
             | WorkerState::Building
             | WorkerState::Dispatching
@@ -2111,26 +2170,26 @@ impl Worker {
                     if !is_workspace_unset(&bead.workspace) {
                         Some(bead.workspace.as_path())
                     } else {
-                        // Bead workspace is unset, use tracked workspace
+                        // Bead workspace is unset, use tracked workspace or home
                         if is_workspace_unset(&self.current_workspace) {
-                            None
+                            Some(self.config.workspace.default.as_path())
                         } else {
                             Some(self.current_workspace.as_path())
                         }
                     }
                 } else {
-                    // No current bead, use tracked workspace
+                    // No current bead, use tracked workspace or home
                     if is_workspace_unset(&self.current_workspace) {
-                        None
+                        Some(self.config.workspace.default.as_path())
                     } else {
                         Some(self.current_workspace.as_path())
                     }
                 }
             }
             _ => {
-                // For non-bead-processing states, use tracked workspace
+                // For other non-bead-processing states, use tracked workspace or home
                 if is_workspace_unset(&self.current_workspace) {
-                    None
+                    Some(self.config.workspace.default.as_path())
                 } else {
                     Some(self.current_workspace.as_path())
                 }
@@ -3072,6 +3131,96 @@ mod tests {
     #[test]
     fn is_workspace_unset_relative_path() {
         assert!(!is_workspace_unset(std::path::Path::new("some/path")));
+    }
+
+    // ── cross-workspace heartbeat tests ──
+
+    #[test]
+    fn set_state_uses_bead_workspace_for_cross_workspace_bead() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.workspace.home = dir.path().join("home");
+        config.workspace.default = dir.path().join("home");
+        let mut worker = Worker::new(config, "test-cross-ws".to_string(), store);
+        worker.boot().unwrap();
+
+        // Set up a bead from a remote workspace
+        let remote_ws = dir.path().join("remote");
+        let bead = Bead {
+            id: BeadId::from("needle-remote"),
+            title: "Remote bead".to_string(),
+            body: None,
+            priority: 1,
+            status: BeadStatus::InProgress,
+            assignee: Some(worker.qualified_id()),
+            labels: vec![],
+            workspace: remote_ws.clone(),
+            dependencies: vec![],
+            dependents: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        worker.current_bead = Some(bead);
+        worker.set_state(WorkerState::Executing).unwrap();
+
+        // Verify that current_workspace was updated with the remote workspace
+        assert_eq!(worker.current_workspace, remote_ws);
+    }
+
+    #[test]
+    fn set_state_uses_home_workspace_when_bead_workspace_is_unset() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let dir = tempfile::tempdir().unwrap();
+        let home_ws = dir.path().join("home");
+        let mut config = Config::default();
+        config.workspace.home = home_ws.clone();
+        config.workspace.default = home_ws.clone();
+        let mut worker = Worker::new(config, "test-unset-ws".to_string(), store);
+        worker.boot().unwrap();
+
+        // Set up a bead with an unset workspace (".")
+        let bead = Bead {
+            id: BeadId::from("needle-unset"),
+            title: "Unset workspace bead".to_string(),
+            body: None,
+            priority: 1,
+            status: BeadStatus::InProgress,
+            assignee: Some(worker.qualified_id()),
+            labels: vec![],
+            workspace: std::path::PathBuf::from("."),
+            dependencies: vec![],
+            dependents: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        worker.current_bead = Some(bead);
+        worker.set_state(WorkerState::Executing).unwrap();
+
+        // Verify that current_workspace was updated with the home workspace
+        assert_eq!(worker.current_workspace, home_ws);
+    }
+
+    #[test]
+    fn set_state_uses_home_workspace_when_no_current_bead() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let dir = tempfile::tempdir().unwrap();
+        let home_ws = dir.path().join("home");
+        let mut config = Config::default();
+        config.workspace.home = home_ws.clone();
+        config.workspace.default = home_ws.clone();
+        let mut worker = Worker::new(config, "test-no-bead".to_string(), store);
+        worker.boot().unwrap();
+
+        // No current bead, current_workspace is unset
+        worker.current_bead = None;
+        worker.current_workspace = std::path::PathBuf::from("");
+        worker.set_state(WorkerState::Exhausted).unwrap();
+
+        // Verify that current_workspace was updated with the home workspace
+        assert_eq!(worker.current_workspace, home_ws);
     }
 
     // ── do_log tests ──

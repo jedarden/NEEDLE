@@ -1065,4 +1065,43 @@ mod tests {
         monitor1.stop();
         monitor2.stop();
     }
+
+    #[tokio::test]
+    async fn heartbeat_uses_cross_workspace_bead_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        let home_workspace = dir.path().join("home");
+        let remote_workspace = dir.path().join("remote");
+
+        let mut config = test_config(&hb_dir);
+        config.workspace.home = home_workspace.clone();
+
+        let mut monitor = HealthMonitor::new(
+            config,
+            "cross-ws-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        monitor.start_emitter().unwrap();
+
+        // Simulate processing a bead from a different workspace
+        monitor.update_state(
+            &WorkerState::Executing,
+            Some(&BeadId::from("needle-abc")),
+            Some(remote_workspace.as_path()),
+        );
+
+        // Wait for the emitter to write a new heartbeat
+        std::thread::sleep(Duration::from_millis(1500));
+
+        let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
+        let data: HeartbeatData = serde_json::from_str(&content).unwrap();
+
+        // The heartbeat should report the remote workspace, not the home workspace
+        assert_eq!(data.workspace, remote_workspace);
+        assert_ne!(data.workspace, home_workspace);
+
+        monitor.stop();
+    }
 }
