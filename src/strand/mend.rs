@@ -1426,7 +1426,7 @@ mod tests {
     use crate::types::{Bead, BeadId, BrDependency, ClaimResult, WorkerState};
 
     use async_trait::async_trait;
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, TimeZone, Utc};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
 
@@ -3955,17 +3955,20 @@ mod tests {
 
     // ── Stale dependency cleanup tests ─────────────────────────────────────────
 
+    /// Type alias for the removed dependencies tracking vector.
+    type RemovedDeps = Arc<std::sync::Mutex<Vec<(BeadId, BeadId)>>>;
+
     /// Mock bead store that tracks remove_dependency calls.
     struct DepTrackingMockStore {
         all_beads: Vec<Bead>,
         /// Records (blocked_id, blocker_id) pairs for remove_dependency calls.
-        removed_deps: Arc<std::sync::Mutex<Vec<(BeadId, BeadId)>>>,
+        removed_deps: RemovedDeps,
         /// If true, remove_dependency fails.
         removal_fails: bool,
     }
 
     impl DepTrackingMockStore {
-        fn new(beads: Vec<Bead>) -> (Self, Arc<std::sync::Mutex<Vec<(BeadId, BeadId)>>>) {
+        fn new(beads: Vec<Bead>) -> (Self, RemovedDeps) {
             let removed_deps = Arc::new(std::sync::Mutex::new(Vec::new()));
             (
                 DepTrackingMockStore {
@@ -4276,12 +4279,6 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_stale_dependencies_emits_telemetry_on_removal() {
-        // This test verifies the MendDependencyRemoved event is emitted
-        // when a stale dependency is successfully removed.
-        // The actual telemetry event emission is handled by the Telemetry struct,
-        // and the function correctly calls emit(EventKind::MendDependencyRemoved).
-        // See telemetry module tests for full event delivery verification.
-
         let open_bead = make_bead_with_deps(
             "open-bead",
             BeadStatus::Open,
@@ -4293,24 +4290,49 @@ mod tests {
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
 
-        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+        let (telemetry, events) = make_test_telemetry();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(reg_dir.path()),
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
         let mut summary = MendSummary::default();
 
-        // The function completes successfully and updates the summary.
-        // Telemetry emit is called internally (verified by code inspection).
         mend.cleanup_stale_dependencies(&store, &mut summary)
             .await
             .unwrap();
 
         // Verify the dependency was counted as cleaned.
         assert_eq!(summary.deps_cleaned, 1);
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendDependencyRemoved telemetry event was emitted.
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|e| e.event_type == "mend.dependency_removed"),
+            "expected MendDependencyRemoved event to be emitted"
+        );
     }
 
     #[tokio::test]
     async fn cleanup_stale_dependencies_emits_failure_telemetry_on_error() {
-        // This test verifies the MendDependencyCleanupFailed event is emitted
-        // when dependency removal fails.
-
         let open_bead = make_bead_with_deps(
             "open-bead",
             BeadStatus::Open,
@@ -4323,17 +4345,46 @@ mod tests {
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
 
-        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+        let (telemetry, events) = make_test_telemetry();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(reg_dir.path()),
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
         let mut summary = MendSummary::default();
 
         // The function should handle the error gracefully and not fail.
-        // Telemetry emit for failure is called internally.
         mend.cleanup_stale_dependencies(&store, &mut summary)
             .await
             .unwrap();
 
         // Verify no dependency was counted as cleaned (removal failed).
         assert_eq!(summary.deps_cleaned, 0);
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendDependencyCleanupFailed telemetry event was emitted.
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|e| e.event_type == "mend.dependency_cleanup_failed"),
+            "expected MendDependencyCleanupFailed event to be emitted"
+        );
     }
 
     // ── cleanup_orphaned_locks tests ───────────────────────────────────────────
@@ -5562,5 +5613,85 @@ mod tests {
             .expect("learning_cleanup event should exist");
         assert_eq!(learning_event.data["pruned"], 1);
         assert_eq!(learning_event.data["consolidated"], 2);
+    }
+
+    // ── Idle worker flagging tests ───────────────────────────────────────────────
+
+    use crate::registry::WorkerEntry;
+
+    fn make_worker_entry(
+        id: &str,
+        pid: u32,
+        started_at: DateTime<Utc>,
+        beads_processed: u64,
+    ) -> WorkerEntry {
+        WorkerEntry {
+            id: id.to_string(),
+            pid,
+            workspace: PathBuf::from("/tmp/test"),
+            agent: "claude".to_string(),
+            model: Some("claude-sonnet-4".to_string()),
+            provider: Some("anthropic".to_string()),
+            started_at,
+            beads_processed,
+        }
+    }
+
+    #[tokio::test]
+    async fn flag_idle_workers_flags_idle_worker_with_zero_beads() {
+        use crate::telemetry::test_utils::MemorySink;
+
+        let reg_dir = tempfile::tempdir().unwrap();
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let registry = Registry::new(reg_dir.path());
+
+        // Register a worker with 0 beads processed, started 90 seconds ago
+        // (exceeds default 60 second idle_timeout).
+        let started_at = Utc::now() - chrono::Duration::seconds(90);
+        let worker = make_worker_entry("claude-idle", 12345, started_at, 0);
+        registry.register(worker).unwrap();
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let mut config = MendConfig::default();
+        config.idle_timeout = 60; // 60 seconds
+
+        let mend = MendStrand::new(
+            config,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let mut summary = MendSummary::default();
+        mend.flag_idle_workers(&mut summary).unwrap();
+
+        assert_eq!(summary.idle_workers_flagged, 1);
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendIdleWorkerFlagged event was emitted.
+        let captured = events.lock().unwrap();
+        let idle_event = captured
+            .iter()
+            .find(|e| e.event_type == "mend.idle_worker_flagged")
+            .expect("MendIdleWorkerFlagged event should be emitted");
+
+        assert_eq!(idle_event.data["worker_id"], "claude-idle");
+        assert_eq!(idle_event.data["pid"], 12345);
+        assert!(idle_event.data["age_secs"].as_u64().unwrap() >= 85); // Allow some timing tolerance
     }
 }
