@@ -1257,7 +1257,17 @@ impl super::Strand for MendStrand {
         "mend"
     }
 
+    #[tracing::instrument(
+        name = "strand.mend",
+        skip(self, store),
+        fields(
+            needle.strand.name = "mend",
+            needle.strand.result = tracing::field::Empty,
+            needle.strand.duration_ms = tracing::field::Empty,
+        )
+    )]
     async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+        let start = std::time::Instant::now();
         let mut summary = MendSummary::default();
 
         // Step 1: Stale claim cleanup via peer monitoring.
@@ -1348,7 +1358,7 @@ impl super::Strand for MendStrand {
             rate_limits_cleaned: summary.rate_limits_cleaned,
         });
 
-        if summary.did_work() {
+        let result = if summary.did_work() {
             tracing::info!(
                 beads_released = summary.beads_released,
                 locks_removed = summary.locks_removed,
@@ -1364,7 +1374,14 @@ impl super::Strand for MendStrand {
         } else {
             tracing::debug!("mend found nothing to clean");
             StrandResult::NoWork
-        }
+        };
+
+        // Record result and duration on the span
+        let duration_ms = start.elapsed().as_millis() as u64;
+        tracing::Span::current().record("needle.strand.result", format!("{:?}", result));
+        tracing::Span::current().record("needle.strand.duration_ms", duration_ms);
+
+        result
     }
 }
 
@@ -1696,17 +1713,21 @@ mod tests {
     }
 
     fn make_stale_heartbeat(worker_id: &str, pid: u32, bead_id: Option<&str>) -> HeartbeatData {
+        let current_bead = bead_id.map(BeadId::from);
         HeartbeatData {
             worker_id: worker_id.to_string(),
             qualified_id: format!("claude-{}", worker_id),
             pid,
             state: WorkerState::Executing,
-            current_bead: bead_id.map(BeadId::from),
+            current_bead,
             workspace: PathBuf::from("/tmp/test"),
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
             started_at: Utc::now() - chrono::Duration::seconds(3600),
             beads_processed: 0,
             session: worker_id.to_string(),
+            is_idle: false,
+            current_task: bead_id.map(|s| s.to_string()),
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         }
     }
@@ -2899,6 +2920,9 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             session: "fresh-ghost".to_string(),
+            is_idle: false,
+            current_task: Some("nd-fresh".to_string()),
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
         write_heartbeat(hb_dir.path(), &fresh_hb);
@@ -2967,6 +2991,9 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             session: "nato-name".to_string(),
+            is_idle: false,
+            current_task: Some("nd-qualified".to_string()),
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
         write_heartbeat(hb_dir.path(), &hb);
@@ -3923,7 +3950,7 @@ mod tests {
         let age_secs = event.data["age_secs"]
             .as_u64()
             .expect("age_secs should be u64");
-        assert!(age_secs >= 295 && age_secs <= 305);
+        assert!((295..=305).contains(&age_secs));
     }
 
     // ── Stale dependency cleanup tests ─────────────────────────────────────────
@@ -4203,10 +4230,12 @@ mod tests {
     // ── Telemetry event tests ───────────────────────────────────────────────────
 
     /// Mock telemetry that captures emitted events.
+    #[allow(dead_code)]
     struct MockTelemetry {
         events: Arc<std::sync::Mutex<Vec<EventKind>>>,
     }
 
+    #[allow(dead_code)]
     impl MockTelemetry {
         fn new() -> (Self, Arc<std::sync::Mutex<Vec<EventKind>>>) {
             let events = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -4549,6 +4578,135 @@ mod tests {
         assert!(captured
             .iter()
             .any(|e| e.event_type == "mend.lock_remove_failed"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_orphaned_locks_removes_multiple_orphaned_locks() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Create multiple orphaned lock files.
+        let lock1 = lock_dir.path().join("needle-claim-aaa.lock");
+        let lock2 = lock_dir.path().join("needle-claim-bbb.lock");
+        let lock3 = lock_dir.path().join("needle-claim-ccc.lock");
+        std::fs::write(&lock1, "").unwrap();
+        std::fs::write(&lock2, "").unwrap();
+        std::fs::write(&lock3, "").unwrap();
+
+        let (telemetry, events) = make_test_telemetry();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(reg_dir.path()),
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let mut summary = MendSummary::default();
+        mend.cleanup_orphaned_locks(&mut summary).unwrap();
+
+        // All orphaned locks should be removed.
+        assert!(!lock1.exists());
+        assert!(!lock2.exists());
+        assert!(!lock3.exists());
+        assert_eq!(summary.locks_removed, 3);
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify multiple MendOrphanedLockRemoved events were emitted.
+        let captured = events.lock().unwrap();
+        let orphan_removed_count = captured
+            .iter()
+            .filter(|e| e.event_type == "mend.orphaned_lock_removed")
+            .count();
+        assert_eq!(orphan_removed_count, 3);
+    }
+
+    #[tokio::test]
+    async fn cleanup_orphaned_locks_mixed_orphaned_and_held() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Create orphaned locks.
+        let orphan1 = lock_dir.path().join("needle-claim-orphan1.lock");
+        let orphan2 = lock_dir.path().join("needle-claim-orphan2.lock");
+        std::fs::write(&orphan1, "").unwrap();
+        std::fs::write(&orphan2, "").unwrap();
+
+        // Create actively held locks.
+        let held1 = lock_dir.path().join("needle-claim-held1.lock");
+        let held2 = lock_dir.path().join("needle-claim-held2.lock");
+        std::fs::write(&held1, "").unwrap();
+        std::fs::write(&held2, "").unwrap();
+
+        use fs2::FileExt;
+        let file1 = std::fs::File::open(&held1).unwrap();
+        file1.lock_exclusive().unwrap();
+        let file2 = std::fs::File::open(&held2).unwrap();
+        file2.lock_exclusive().unwrap();
+
+        let (telemetry, events) = make_test_telemetry();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(reg_dir.path()),
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let mut summary = MendSummary::default();
+        mend.cleanup_orphaned_locks(&mut summary).unwrap();
+
+        // Orphaned locks should be removed.
+        assert!(!orphan1.exists());
+        assert!(!orphan2.exists());
+
+        // Actively held locks should still exist.
+        assert!(held1.exists());
+        assert!(held2.exists());
+
+        // Only orphaned locks counted.
+        assert_eq!(summary.locks_removed, 2);
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify two MendOrphanedLockRemoved events were emitted.
+        let captured = events.lock().unwrap();
+        let orphan_removed_count = captured
+            .iter()
+            .filter(|e| e.event_type == "mend.orphaned_lock_removed")
+            .count();
+        assert_eq!(orphan_removed_count, 2);
+
+        // Release locks before cleanup.
+        drop(file1);
+        drop(file2);
     }
 
     // ── flag_idle_workers tests ───────────────────────────────────────────────
@@ -5122,7 +5280,6 @@ mod tests {
 
     #[test]
     fn cleanup_learnings_prunes_stale_entries() {
-
         let workspace = tempfile::tempdir().unwrap();
         let beads_dir = workspace.path().join(".beads");
         std::fs::create_dir_all(&beads_dir).unwrap();
@@ -5192,7 +5349,6 @@ mod tests {
 
     #[test]
     fn cleanup_learnings_consolidates_when_over_limit() {
-
         let workspace = tempfile::tempdir().unwrap();
         let beads_dir = workspace.path().join(".beads");
         std::fs::create_dir_all(&beads_dir).unwrap();
@@ -5259,7 +5415,6 @@ mod tests {
 
     #[test]
     fn cleanup_learnings_skips_when_under_limit() {
-
         let workspace = tempfile::tempdir().unwrap();
         let beads_dir = workspace.path().join(".beads");
         std::fs::create_dir_all(&beads_dir).unwrap();
