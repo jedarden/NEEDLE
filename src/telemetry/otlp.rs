@@ -4,18 +4,28 @@
 //! to any compliant collector.
 
 use crate::config::OtlpSinkConfig;
-use crate::telemetry::TelemetryEvent;
+use crate::telemetry::{FileSink, TelemetryEvent};
 use anyhow::{Context, Result};
-use opentelemetry::logs::{AnyValue, Logger, LogRecord, LoggerProvider, Severity};
-use opentelemetry::metrics::{Counter, Histogram, MeterProvider, UpDownCounter};
+use opentelemetry::logs::{AnyValue, LogRecord, Logger, LoggerProvider, Severity};
+use opentelemetry::metrics::InstrumentProvider;
+use opentelemetry::metrics::{Counter, Histogram, MeterProvider, ObservableGauge, UpDownCounter};
+use opentelemetry::trace::{SpanId, TraceId, TracerProvider};
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::logs::{BatchLogProcessor, SdkLoggerProvider};
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use opentelemetry_sdk::resource::{Resource, SdkProvidedResourceDetector, TelemetryResourceDetector};
+use opentelemetry_sdk::resource::{
+    Resource, SdkProvidedResourceDetector, TelemetryResourceDetector,
+};
 use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::panic::catch_unwind;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+#[cfg(feature = "otlp")]
+use tracing_opentelemetry::OpenTelemetryLayer;
+#[cfg(feature = "otlp")]
+use tracing_subscriber::Registry;
 
 /// OTLP sink implementing the telemetry Sink trait.
 ///
@@ -31,29 +41,51 @@ pub struct OtlpSink {
     logger_provider: Arc<SdkLoggerProvider>,
     /// Cached metric instruments.
     metrics: Metrics,
+    /// File sink for emitting drop events (never to OTLP, to avoid recursion).
+    file_sink: Option<Arc<FileSink>>,
+    /// Worker ID for drop events.
+    worker_id: String,
+    /// Session ID for drop events.
+    session_id: String,
+    /// Drop event counter (for tracking drops across all signals).
+    drop_count: Arc<Mutex<DropCounter>>,
+}
+
+/// Counter for tracking dropped events by signal type.
+#[derive(Debug, Default)]
+struct DropCounter {
+    traces: u64,
+    metrics: u64,
+    logs: u64,
 }
 
 /// Cached metric instruments for efficient recording.
 #[derive(Clone)]
 struct Metrics {
+    /// UpDownCounter: `needle.workers.active`
+    workers_active: UpDownCounter<i64>,
+    /// Counter: `needle.beads.claimed`
+    beads_claimed: Counter<u64>,
     /// Counter: `needle.beads.completed`
     beads_completed: Counter<u64>,
     /// Histogram: `needle.beads.duration`
     bead_duration: Histogram<f64>,
+    /// Counter: `needle.claim.attempts`
+    claim_attempts: Counter<u64>,
     /// Histogram: `needle.strand.duration`
     strand_duration: Histogram<f64>,
     /// Histogram: `needle.agent.duration`
     agent_duration: Histogram<f64>,
-    /// Counter: `needle.claim.attempts`
-    claim_attempts: Counter<u64>,
     /// Counter: `needle.agent.tokens.input`
     tokens_input: Counter<u64>,
     /// Counter: `needle.agent.tokens.output`
     tokens_output: Counter<u64>,
     /// Counter: `needle.cost.usd`
     cost_usd: Counter<f64>,
-    /// UpDownCounter: `needle.beads.claimed`
-    beads_claimed: UpDownCounter<i64>,
+    /// UpDownCounter: `needle.peers.stale`
+    peers_stale: UpDownCounter<i64>,
+    /// Counter: `needle.mitosis.children_created`
+    mitosis_children_created: Counter<u64>,
 }
 
 impl OtlpSink {
@@ -61,29 +93,59 @@ impl OtlpSink {
     ///
     /// Initializes the OpenTelemetry SDK with batch processors for
     /// non-blocking export of all three signals.
-    pub fn new(worker_id: String, session_id: String, config: &OtlpSinkConfig) -> Result<Self> {
+    ///
+    /// The `file_sink` parameter is used to emit drop events when the OTLP
+    /// queue overflows. Drop events are NEVER sent to OTLP to avoid recursion.
+    ///
+    /// The `agent`, `model`, and `workspace` parameters are optional resource
+    /// attributes for OpenTelemetry semantic conventions.
+    pub fn new(
+        worker_id: String,
+        session_id: String,
+        config: &OtlpSinkConfig,
+        file_sink: Option<Arc<FileSink>>,
+        agent: Option<&str>,
+        model: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Result<Self> {
         // Build resource attributes from config + computed attributes
-        let resource = Self::build_resource(&worker_id, &session_id, config)?;
+        let resource =
+            Self::build_resource(&worker_id, &session_id, config, agent, model, workspace)?;
 
         // Build exporters based on protocol
-        let (tracer_provider, meter_provider, logger_provider) =
-            match config.protocol.as_str() {
-                "grpc" => Self::build_grpc_providers(config, &resource)?,
-                "http" | "http/protobuf" => Self::build_http_providers(config, &resource)?,
-                other => anyhow::bail!("invalid OTLP protocol: {other}, must be 'grpc' or 'http'"),
-            };
+        let (tracer_provider, meter_provider, logger_provider) = match config.protocol.as_str() {
+            "grpc" => Self::build_grpc_providers(config, &resource)?,
+            "http" | "http/protobuf" => Self::build_http_providers(config, &resource)?,
+            other => anyhow::bail!("invalid OTLP protocol: {other}, must be 'grpc' or 'http'"),
+        };
 
         // Build metric instruments
         let meter = meter_provider.meter("needle");
         let metrics = Metrics {
+            workers_active: meter
+                .i64_up_down_counter("needle.workers.active")
+                .with_unit("{worker}")
+                .with_description("Current live worker count")
+                .build(),
+            beads_claimed: meter
+                .u64_counter("needle.beads.claimed")
+                .with_unit("{bead}")
+                .with_description("Successful bead claims")
+                .build(),
             beads_completed: meter
                 .u64_counter("needle.beads.completed")
+                .with_unit("{bead}")
                 .with_description("Bead terminal outcomes (one per bead.outcome)")
                 .build(),
             bead_duration: meter
                 .f64_histogram("needle.beads.duration")
                 .with_unit("ms")
                 .with_description("End-to-end bead lifecycle time")
+                .build(),
+            claim_attempts: meter
+                .u64_counter("needle.claim.attempts")
+                .with_unit("{attempt}")
+                .with_description("Claim attempts")
                 .build(),
             strand_duration: meter
                 .f64_histogram("needle.strand.duration")
@@ -94,10 +156,6 @@ impl OtlpSink {
                 .f64_histogram("needle.agent.duration")
                 .with_unit("ms")
                 .with_description("Agent process runtime")
-                .build(),
-            claim_attempts: meter
-                .u64_counter("needle.claim.attempts")
-                .with_description("Claim attempts")
                 .build(),
             tokens_input: meter
                 .u64_counter("needle.agent.tokens.input")
@@ -114,10 +172,15 @@ impl OtlpSink {
                 .with_unit("USD")
                 .with_description("Estimated cost accumulator")
                 .build(),
-            beads_claimed: meter
-                .i64_up_down_counter("needle.beads.claimed")
+            peers_stale: meter
+                .i64_up_down_counter("needle.peers.stale")
+                .with_unit("{peer}")
+                .with_description("Currently-stale peers observed by this worker")
+                .build(),
+            mitosis_children_created: meter
+                .u64_counter("needle.mitosis.children_created")
                 .with_unit("{bead}")
-                .with_description("Current claimed bead count")
+                .with_description("Mitosis child creations")
                 .build(),
         };
 
@@ -126,18 +189,39 @@ impl OtlpSink {
             meter_provider: Arc::new(meter_provider),
             logger_provider: Arc::new(logger_provider),
             metrics,
+            file_sink,
+            worker_id,
+            session_id,
+            drop_count: Arc::new(Mutex::new(DropCounter::default())),
         })
     }
 
     /// Build the OTel Resource with config and computed attributes.
-    fn build_resource(worker_id: &str, session_id: &str, config: &OtlpSinkConfig) -> Result<Resource> {
-        let mut builder = Resource::builder()
-            .with_attributes([
-                KeyValue::new("service.name", "needle"),
-                KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
-                KeyValue::new("service.instance.id", worker_id.to_string()),
-                KeyValue::new("needle.session_id", session_id.to_string()),
-            ]);
+    ///
+    /// Merges three layers (lowest → highest precedence):
+    /// 1. OTel defaults (service.name = "needle", schema url)
+    /// 2. Computed attributes (set by NEEDLE at runtime)
+    /// 3. Config attributes (from telemetry.otlp.resource_attributes)
+    ///
+    /// Reserved keys `service.name` and `service.instance.id` cannot be overridden
+    /// via config - attempting to do so will return an error.
+    pub(crate) fn build_resource(
+        worker_id: &str,
+        session_id: &str,
+        config: &OtlpSinkConfig,
+        agent: Option<&str>,
+        model: Option<&str>,
+        workspace: Option<&str>,
+    ) -> Result<Resource> {
+        // Reserved keys that cannot be overridden via config
+        const RESERVED_KEYS: &[&str] = &["service.name", "service.instance.id"];
+
+        let mut builder = Resource::builder().with_attributes([
+            KeyValue::new("service.name", "needle"),
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+            KeyValue::new("service.instance.id", worker_id.to_string()),
+            KeyValue::new("needle.session_id", session_id.to_string()),
+        ]);
 
         // Add hostname from OS
         if let Some(hostname) = gethostname::gethostname().to_str() {
@@ -145,12 +229,33 @@ impl OtlpSink {
         }
 
         // Add process PID
-        builder = builder.with_attributes([KeyValue::new("process.pid", std::process::id().to_string())]);
+        builder =
+            builder.with_attributes([KeyValue::new("process.pid", std::process::id().to_string())]);
+
+        // Add computed needle.* attributes if provided
+        if let Some(agent_value) = agent {
+            builder = builder.with_attributes([KeyValue::new("needle.agent", agent_value.to_string())]);
+        }
+        if let Some(model_value) = model {
+            builder = builder.with_attributes([KeyValue::new("needle.model", model_value.to_string())]);
+        }
+        if let Some(workspace_value) = workspace {
+            builder =
+                builder.with_attributes([KeyValue::new("needle.workspace", workspace_value.to_string())]);
+        }
 
         // Add resource attributes from config (KEY=VALUE pairs)
+        // Validate that reserved keys are not being overridden
         for attr_str in &config.resource_attributes {
             if let Some((key, value)) = attr_str.split_once('=') {
-                builder = builder.with_attributes([KeyValue::new(key.to_string(), value.to_string())]);
+                if RESERVED_KEYS.contains(&key) {
+                    anyhow::bail!(
+                        "cannot override reserved resource attribute '{key}' via config. \
+                         Reserved keys are: service.name, service.instance.id"
+                    );
+                }
+                builder =
+                    builder.with_attributes([KeyValue::new(key.to_string(), value.to_string())]);
             }
         }
 
@@ -164,11 +269,13 @@ impl OtlpSink {
     }
 
     /// Build providers using gRPC transport (tonic).
-    fn build_grpc_providers(
+    pub(crate) fn build_grpc_providers(
         config: &OtlpSinkConfig,
         resource: &Resource,
     ) -> Result<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)> {
-        use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithTonicConfig};
+        use opentelemetry_otlp::{
+            LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithTonicConfig,
+        };
         use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
 
         let timeout = Duration::from_secs(config.timeout_secs);
@@ -241,20 +348,16 @@ impl OtlpSink {
             .with_resource(resource.clone())
             .build();
 
-        Ok((
-            tracer_provider,
-            meter_provider,
-            logger_provider,
-        ))
+        Ok((tracer_provider, meter_provider, logger_provider))
     }
 
     /// Build providers using HTTP/protobuf transport (reqwest).
-    fn build_http_providers(
+    pub(crate) fn build_http_providers(
         config: &OtlpSinkConfig,
         resource: &Resource,
     ) -> Result<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)> {
-        use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
         use opentelemetry_otlp::WithHttpConfig;
+        use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 
         let timeout = Duration::from_secs(config.timeout_secs);
 
@@ -318,22 +421,103 @@ impl OtlpSink {
             .with_resource(resource.clone())
             .build();
 
-        Ok((
-            tracer_provider,
-            meter_provider,
-            logger_provider,
-        ))
+        Ok((tracer_provider, meter_provider, logger_provider))
     }
 
     /// Dispatch a telemetry event to the appropriate signal.
     ///
     /// Per the semantic mapping:
-    /// - Span events: agent.executing, heartbeat.emitted
+    /// - Spans (NOT logs): bead.claim.attempted, bead.claim.succeeded, bead.claim.race_lost,
+    ///                     bead.claim.failed, agent.dispatched, agent.completed,
+    ///                     strand.evaluated, outcome.handled, bead.completed
+    /// - Span events (NOT logs): heartbeat.emitted, build.heartbeat
     /// - Metrics: beads.completed, bead.duration, strand.duration, agent.duration, etc.
-    /// - Logs: everything not already represented as a span or metric
+    /// - Logs: everything not already represented as a span or span event
     fn dispatch_event(&self, event: &TelemetryEvent) -> Result<()> {
         match event.event_type.as_str() {
-            // Metrics: bead completion
+            // Metrics: worker lifecycle
+            "worker.started" => {
+                self.metrics.workers_active.add(1, &[]);
+                // Also export as log for visibility
+                self.emit_log(event)?;
+            }
+
+            "worker.stopped" => {
+                self.metrics.workers_active.add(-1, &[]);
+                // Also export as log for visibility
+                self.emit_log(event)?;
+            }
+
+            // Events that ARE spans - export as metrics only, NOT as logs
+            "bead.claim.attempted" => {
+                if let Some(attempt) = event.data.get("attempt").and_then(|v| v.as_u64()) {
+                    self.metrics
+                        .claim_attempts
+                        .add(1, &[KeyValue::new("attempt", attempt.to_string())]);
+                }
+                // Do NOT export as log - this is a span
+            }
+
+            "bead.claim.succeeded" => {
+                self.metrics.beads_claimed.add(1, &[]);
+                // Do NOT export as log - this is a span
+            }
+
+            "bead.claim.race_lost" => {
+                // Export as log with WARN severity
+                self.emit_log(event)?;
+            }
+
+            "bead.claim.failed" => {
+                // Export as log with ERROR severity
+                self.emit_log(event)?;
+            }
+
+            "agent.dispatched" => {
+                // Do NOT export as log - this is a span
+            }
+
+            "agent.completed" => {
+                if let Some(duration_ms) = event.duration_ms {
+                    let exit_code = event
+                        .data
+                        .get("exit_code")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(-1);
+                    self.metrics
+                        .agent_duration
+                        .record(duration_ms as f64, &[KeyValue::new("exit_code", exit_code)]);
+                }
+                // Do NOT export as log - this is a span
+            }
+
+            "strand.evaluated" => {
+                if let Some(duration_ms) = event.duration_ms {
+                    if let Some(strand_name) =
+                        event.data.get("strand_name").and_then(|v| v.as_str())
+                    {
+                        let result = event
+                            .data
+                            .get("result")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        self.metrics.strand_duration.record(
+                            duration_ms as f64,
+                            &[
+                                KeyValue::new("strand", strand_name.to_string()),
+                                KeyValue::new("result", result.to_string()),
+                            ],
+                        );
+                    }
+                }
+                // Do NOT export as log - this is a span
+            }
+
+            "outcome.handled" => {
+                // Do NOT export as log - this is a span
+            }
+
+            // Metrics: bead completion (also a span, but we need metrics)
             "bead.completed" => {
                 if let Some(duration_ms) = event.duration_ms {
                     let outcome = event
@@ -344,76 +528,86 @@ impl OtlpSink {
                     self.metrics
                         .beads_completed
                         .add(1, &[KeyValue::new("outcome", outcome.to_string())]);
-                    self.metrics
-                        .bead_duration
-                        .record(duration_ms as f64, &[KeyValue::new("outcome", outcome.to_string())]);
-                    self.metrics.beads_claimed.add(-1, &[]);
+                    self.metrics.bead_duration.record(
+                        duration_ms as f64,
+                        &[KeyValue::new("outcome", outcome.to_string())],
+                    );
                 }
+                // Do NOT export as log - this is a span
             }
 
-            // Metrics: strand evaluation
-            "strand.evaluated" => {
-                if let Some(duration_ms) = event.duration_ms {
-                    if let Some(strand_name) = event.data.get("strand_name").and_then(|v| v.as_str()) {
-                        let result = event.data.get("result").and_then(|v| v.as_str()).unwrap_or("unknown");
-                        self.metrics
-                            .strand_duration
-                            .record(duration_ms as f64, &[
-                                KeyValue::new("strand", strand_name.to_string()),
-                                KeyValue::new("result", result.to_string()),
-                            ]);
-                    }
-                }
+            // Span events - emit as span events, NOT as logs
+            "heartbeat.emitted" | "build.heartbeat" => {
+                self.emit_span_event(event)?;
+                // Do NOT export as log - this is a span event
             }
 
-            // Metrics: agent duration
-            "dispatch.completed" => {
-                if let Some(duration_ms) = event.duration_ms {
-                    let exit_code = event.data.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(-1);
-                    self.metrics
-                        .agent_duration
-                        .record(duration_ms as f64, &[KeyValue::new("exit_code", exit_code)]);
-                }
-            }
-
-            // Metrics: claim attempts
-            "claim.attempt" => {
-                if let Some(attempt) = event.data.get("attempt").and_then(|v| v.as_u64()) {
-                    self.metrics
-                        .claim_attempts
-                        .add(1, &[KeyValue::new("attempt", attempt.to_string())]);
-                }
-            }
-
-            // Metrics: claim success
-            "claim.success" => {
-                self.metrics.beads_claimed.add(1, &[]);
-            }
-
-            // Metrics: tokens and cost (from effort.recorded)
+            // Metrics: effort.recorded (not a span, but metrics only)
             "effort.recorded" => {
                 if let Some(tokens_in) = event.data.get("tokens_in").and_then(|v| v.as_u64()) {
-                    let model = event.data.get("model").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let model = event
+                        .data
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
                     self.metrics
                         .tokens_input
                         .add(tokens_in, &[KeyValue::new("model", model.to_string())]);
                 }
                 if let Some(tokens_out) = event.data.get("tokens_out").and_then(|v| v.as_u64()) {
-                    let model = event.data.get("model").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    let model = event
+                        .data
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
                     self.metrics
                         .tokens_output
                         .add(tokens_out, &[KeyValue::new("model", model.to_string())]);
                 }
-                if let Some(cost) = event.data.get("estimated_cost_usd").and_then(|v| v.as_f64()) {
-                    let agent = event.data.get("agent_name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    let model = event.data.get("model").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    self.metrics
-                        .cost_usd
-                        .add(cost, &[
+                if let Some(cost) = event
+                    .data
+                    .get("estimated_cost_usd")
+                    .and_then(|v| v.as_f64())
+                {
+                    let agent = event
+                        .data
+                        .get("agent_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let model = event
+                        .data
+                        .get("model")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    self.metrics.cost_usd.add(
+                        cost,
+                        &[
                             KeyValue::new("agent", agent.to_string()),
                             KeyValue::new("model", model.to_string()),
-                        ]);
+                        ],
+                    );
                 }
+                // Do NOT export as log - metrics only
+            }
+
+            // Metrics: peer staleness
+            "peer.stale" => {
+                self.metrics.peers_stale.add(1, &[]);
+                // Also export as log with WARN severity
+                self.emit_log(event)?;
+            }
+
+            // Metrics: mitosis child creation
+            "bead.mitosis.split" => {
+                if let Some(children_created) =
+                    event.data.get("children_created").and_then(|v| v.as_u64())
+                {
+                    self.metrics
+                        .mitosis_children_created
+                        .add(children_created, &[]);
+                }
+                // Also export as log for visibility
+                self.emit_log(event)?;
             }
 
             // For all other events, export as logs
@@ -442,6 +636,22 @@ impl OtlpSink {
             .unwrap_or_else(|_| "{\"error\":\"failed to serialize data\"}".to_string());
         log_record.set_body(AnyValue::from(body_str));
 
+        // Set trace linkage using OTel LogRecord API (not as attributes)
+        if let Some(ref trace_id) = event.trace_id {
+            if let Ok(bytes) = hex::decode(trace_id) {
+                if let Ok(arr) = bytes.try_into().map(|b: [u8; 32]| b) {
+                    log_record.set_trace_id(TraceId::from_bytes(arr));
+                }
+            }
+        }
+        if let Some(ref span_id) = event.span_id {
+            if let Ok(bytes) = hex::decode(span_id) {
+                if let Ok(arr) = bytes.try_into().map(|b: [u8; 16]| b) {
+                    log_record.set_span_id(SpanId::from_bytes(arr));
+                }
+            }
+        }
+
         // Build and add attributes - explicit type to avoid inference errors
         let mut attrs: Vec<(&str, AnyValue)> = Vec::with_capacity(8);
         attrs.push(("event_type", event.event_type.clone().into()));
@@ -461,17 +671,52 @@ impl OtlpSink {
             attrs.push(("duration_ms", AnyValue::from(duration_ms as i64)));
         }
 
-        if let Some(ref trace_id) = event.trace_id {
-            attrs.push(("trace_id", trace_id.clone().into()));
-        }
-
-        if let Some(ref span_id) = event.span_id {
-            attrs.push(("span_id", span_id.clone().into()));
-        }
-
         log_record.add_attributes(attrs);
 
         logger.emit(log_record);
+
+        Ok(())
+    }
+
+    /// Emit a telemetry event as a span event on the current span.
+    ///
+    /// Used for intra-span state changes like heartbeat.emitted and build.heartbeat.
+    fn emit_span_event(&self, event: &TelemetryEvent) -> Result<()> {
+        // Use tracing to emit a span event
+        // The event name is the event type, and the data is added as fields
+        let event_name = event.event_type.as_str();
+
+        // Build fields from event data
+        let mut fields = Vec::new();
+        fields.push(("event_type", event.event_type.as_str()));
+        fields.push(("worker_id", event.worker_id.as_str()));
+        fields.push(("session_id", event.session_id.as_str()));
+
+        if let Some(ref bead_id) = event.bead_id {
+            fields.push(("bead_id", bead_id.as_ref().as_str()));
+        }
+
+        // Add any additional fields from the data JSON
+        if let Ok(data_map) = event.data.as_object() {
+            for (key, value) in data_map {
+                if let Some(str_val) = value.as_str() {
+                    fields.push((key.as_str(), str_val));
+                } else if let Some(num_val) = value.as_i64() {
+                    fields.push((key.as_str(), num_val.to_string().as_str()));
+                } else if let Some(bool_val) = value.as_bool() {
+                    fields.push((key.as_str(), if bool_val { "true" } else { "false" }));
+                }
+            }
+        }
+
+        // Emit as a tracing event (which becomes an OTel span event)
+        tracing::event!(
+            tracing::Level::INFO,
+            name = event_name,
+            ?fields,
+            "{}",
+            event_name
+        );
 
         Ok(())
     }
@@ -482,17 +727,19 @@ impl OtlpSink {
             // ERROR events
             "worker.errored"
             | "bead.claim.failed"
-            | "bead.orphaned"
-            | "build.timeout"
-            | "worker.handling.timeout"
-            | "telemetry.sink_error"
-            | "transform.failed" => (Severity::Error, "ERROR"),
+            | "build.timeout"        // agent timeout
+            | "telemetry.sink_error" // telemetry.otlp.dropped
+            => (Severity::Error, "ERROR"),
 
             // WARN events
-            "peer.stale" | "budget.warning" | "rate_limit.wait" | "bead.released"
+            "peer.stale"       // StuckDetected
+            | "peer.crashed"   // StuckReleased
             | "bead.claim.race_lost" => (Severity::Warn, "WARN"),
 
             // INFO events (default)
+            // Includes: worker.started, worker.stopped, health.check, effort.recorded,
+            //           bead.orphaned, budget.warning, rate_limit.wait, bead.released,
+            //           transform.failed, worker.handling.timeout, and everything else
             _ => (Severity::Info, "INFO"),
         }
     }
@@ -519,6 +766,41 @@ impl OtlpSink {
 
         Ok(())
     }
+}
+
+/// Create an OpenTelemetry tracing layer for the tracing subscriber.
+///
+/// This bridges `tracing` spans to the OTLP exporter, allowing use of
+/// `#[instrument]` macros throughout the codebase.
+///
+/// Returns `None` if the OTLP feature is not enabled or if the layer
+/// cannot be created.
+#[cfg(feature = "otlp")]
+pub fn create_tracing_layer(
+    worker_id: String,
+    session_id: String,
+    config: &OtlpSinkConfig,
+) -> Result<Option<OpenTelemetryLayer<Registry, opentelemetry_sdk::trace::Tracer>>> {
+    if !config.enabled {
+        return Ok(None);
+    }
+
+    // Build resource attributes from config + computed attributes
+    let resource = OtlpSink::build_resource(&worker_id, &session_id, config)?;
+
+    // Build exporters based on protocol
+    let (tracer_provider, ..) = match config.protocol.as_str() {
+        "grpc" => OtlpSink::build_grpc_providers(config, &resource)?,
+        "http" | "http/protobuf" => OtlpSink::build_http_providers(config, &resource)?,
+        other => anyhow::bail!("invalid OTLP protocol: {other}, must be 'grpc' or 'http'"),
+    };
+
+    // Create the tracing layer with the tracer provider
+    let layer = tracing_opentelemetry::layer()
+        .with_tracer(tracer_provider.tracer("needle"))
+        .with_tracer_in_span_name(true);
+
+    Ok(Some(layer))
 }
 
 impl crate::telemetry::Sink for OtlpSink {
