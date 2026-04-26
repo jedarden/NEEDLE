@@ -2434,13 +2434,31 @@ mod tests {
         log_dir: &Path,
         retention_days: u32,
     ) -> MendStrand {
+        make_mend_strand_with_logs_and_registry(
+            hb_dir,
+            lock_dir,
+            reg_dir,
+            log_dir,
+            retention_days,
+            None,
+        )
+    }
+
+    fn make_mend_strand_with_logs_and_registry(
+        hb_dir: &Path,
+        lock_dir: &Path,
+        reg_dir: &Path,
+        log_dir: &Path,
+        retention_days: u32,
+        registry: Option<Registry>,
+    ) -> MendStrand {
         MendStrand::new(
             MendConfig::default(),
             hb_dir.to_path_buf(),
             Duration::from_secs(300),
             lock_dir.to_path_buf(),
             "test-worker".to_string(),
-            Registry::new(reg_dir),
+            registry.unwrap_or_else(|| Registry::new(reg_dir)),
             Telemetry::new("test-worker".to_string()),
             log_dir.to_path_buf(),
             retention_days,
@@ -2493,18 +2511,34 @@ mod tests {
         let reg_dir = tempfile::tempdir().unwrap();
         let log_dir = tempfile::tempdir().unwrap();
 
+        // Register a worker with beads_processed > 0 (active worker).
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "worker-abc".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 5,
+            })
+            .unwrap();
+
         // Create a fresh agent log (0 days old, retention = 1 day).
         let log_path = log_dir.path().join("worker-abc-nd-fresh.agent.jsonl");
         std::fs::write(&log_path, b"{}").unwrap();
         // No mtime change — file is brand-new.
 
         let (store, _) = MockBeadStore::new(vec![]);
-        let mend = make_mend_strand_with_logs(
+        let mend = make_mend_strand_with_logs_and_registry(
             hb_dir.path(),
             lock_dir.path(),
             reg_dir.path(),
             log_dir.path(),
             1,
+            Some(registry),
         );
 
         let result = mend.evaluate(&store).await;
@@ -2693,12 +2727,13 @@ mod tests {
         // No mtime change — file is brand-new.
 
         let (store, _) = MockBeadStore::new(vec![]);
-        let mend = make_mend_strand_with_logs(
+        let mend = make_mend_strand_with_logs_and_registry(
             hb_dir.path(),
             lock_dir.path(),
             reg_dir.path(),
             log_dir.path(),
             7,
+            Some(registry),
         );
 
         let result = mend.evaluate(&store).await;
@@ -3508,7 +3543,7 @@ mod tests {
         // Register an active worker (beads_processed > 0).
         let active_entry = crate::registry::WorkerEntry {
             id: "active-worker".to_string(),
-            pid: 12345,
+            pid: std::process::id(),
             workspace: PathBuf::from("/tmp/workspace"),
             agent: "claude".to_string(),
             model: Some("sonnet".to_string()),
@@ -3557,7 +3592,7 @@ mod tests {
         // Register a worker with 0 beads but started recently (under timeout).
         let recent_entry = crate::registry::WorkerEntry {
             id: "recent-worker".to_string(),
-            pid: 12345,
+            pid: std::process::id(),
             workspace: PathBuf::from("/tmp/workspace"),
             agent: "claude".to_string(),
             model: Some("sonnet".to_string()),
@@ -3759,6 +3794,128 @@ mod tests {
         mend.flag_idle_workers(&mut summary).unwrap();
 
         assert_eq!(summary.idle_workers_flagged, 0);
+    }
+
+    #[test]
+    fn idle_worker_flagging_skips_future_started_at() {
+        let reg_dir = tempfile::tempdir().unwrap();
+        let registry = Registry::new(reg_dir.path());
+
+        // Register a worker with a future started_at timestamp (clock skew or bug).
+        let future_entry = crate::registry::WorkerEntry {
+            id: "future-worker".to_string(),
+            pid: 12345,
+            workspace: PathBuf::from("/tmp/workspace"),
+            agent: "claude".to_string(),
+            model: Some("sonnet".to_string()),
+            provider: Some("anthropic".to_string()),
+            started_at: Utc::now() + chrono::Duration::seconds(300), // 5 minutes in the future
+            beads_processed: 0,
+        };
+        registry.register(future_entry).unwrap();
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+        let mut summary = MendSummary::default();
+
+        let mend = MendStrand::new(
+            MendConfig {
+                idle_timeout: 60,
+                ..Default::default()
+            },
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.flag_idle_workers(&mut summary).unwrap();
+
+        // Worker with future started_at should be skipped (not flagged).
+        assert_eq!(summary.idle_workers_flagged, 0);
+    }
+
+    #[tokio::test]
+    async fn idle_worker_flagging_emits_telemetry_event() {
+        use crate::telemetry::test_utils::MemorySink;
+
+        let reg_dir = tempfile::tempdir().unwrap();
+        let registry = Registry::new(reg_dir.path());
+
+        // Register an idle worker that should be flagged.
+        let idle_entry = crate::registry::WorkerEntry {
+            id: "idle-worker".to_string(),
+            pid: std::process::id(),
+            workspace: PathBuf::from("/tmp/workspace"),
+            agent: "claude".to_string(),
+            model: Some("sonnet".to_string()),
+            provider: Some("anthropic".to_string()),
+            started_at: Utc::now() - chrono::Duration::seconds(300), // 5 minutes ago
+            beads_processed: 0,
+        };
+        registry.register(idle_entry).unwrap();
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+        let mut summary = MendSummary::default();
+
+        // Create telemetry with MemorySink to capture events.
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let mend = MendStrand::new(
+            MendConfig {
+                idle_timeout: 60,
+                ..Default::default()
+            },
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.flag_idle_workers(&mut summary).unwrap();
+
+        // Verify the idle worker was flagged.
+        assert_eq!(summary.idle_workers_flagged, 1);
+
+        // Verify the MendIdleWorkerFlagged telemetry event was emitted.
+        let captured_events = events.lock().unwrap();
+        let idle_worker_events: Vec<_> = captured_events
+            .iter()
+            .filter(|e| e.event_type == "mend.idle_worker_flagged")
+            .collect();
+
+        assert_eq!(idle_worker_events.len(), 1);
+        let event = &idle_worker_events[0];
+        assert_eq!(event.data["worker_id"], "idle-worker");
+        assert_eq!(event.data["pid"], std::process::id());
+        // age_secs should be approximately 300 (5 minutes), give or take a few seconds.
+        let age_secs = event.data["age_secs"]
+            .as_u64()
+            .expect("age_secs should be u64");
+        assert!(age_secs >= 295 && age_secs <= 305);
     }
 
     // ── Stale dependency cleanup tests ─────────────────────────────────────────
@@ -4045,7 +4202,12 @@ mod tests {
     impl MockTelemetry {
         fn new() -> (Self, Arc<std::sync::Mutex<Vec<EventKind>>>) {
             let events = Arc::new(std::sync::Mutex::new(Vec::new()));
-            (MockTelemetry { events: events.clone() }, events)
+            (
+                MockTelemetry {
+                    events: events.clone(),
+                },
+                events,
+            )
         }
 
         fn make_mend_strand_with_mock_telemetry(
@@ -4140,10 +4302,16 @@ mod tests {
     // ── cleanup_orphaned_locks tests ───────────────────────────────────────────
 
     /// Create a test telemetry with a memory sink for event capture.
-    fn make_test_telemetry() -> (Telemetry, Arc<std::sync::Mutex<Vec<crate::telemetry::TelemetryEvent>>>) {
+    fn make_test_telemetry() -> (
+        Telemetry,
+        Arc<std::sync::Mutex<Vec<crate::telemetry::TelemetryEvent>>>,
+    ) {
         use crate::telemetry::test_utils::MemorySink;
         let (sink, events) = MemorySink::new();
-        (Telemetry::with_sink("test-worker".to_string(), sink), events)
+        (
+            Telemetry::with_sink("test-worker".to_string(), sink),
+            events,
+        )
     }
 
     #[tokio::test]
@@ -4215,9 +4383,14 @@ mod tests {
         assert!(!lock_file.exists());
         assert_eq!(summary.locks_removed, 1);
 
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
         // Verify telemetry event was emitted.
         let captured = events.lock().unwrap();
-        assert!(captured.iter().any(|e| e.event_type == "mend.orphaned_lock_removed"));
+        assert!(captured
+            .iter()
+            .any(|e| e.event_type == "mend.orphaned_lock_removed"));
     }
 
     #[tokio::test]
@@ -4263,7 +4436,9 @@ mod tests {
 
         // Verify no MendOrphanedLockRemoved event was emitted.
         let captured = events.lock().unwrap();
-        assert!(!captured.iter().any(|e| e.event_type == "mend.orphaned_lock_removed"));
+        assert!(!captured
+            .iter()
+            .any(|e| e.event_type == "mend.orphaned_lock_removed"));
 
         // Release the lock before cleanup.
         drop(file);
@@ -4342,10 +4517,10 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        // Make the file read-only to trigger a removal error.
-        let mut perms = std::fs::metadata(&lock_file).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&lock_file, perms.clone()).unwrap();
+        // Make the lock directory non-writable to trigger a removal error.
+        let mut dir_perms = std::fs::metadata(lock_dir.path()).unwrap().permissions();
+        dir_perms.set_readonly(true);
+        std::fs::set_permissions(lock_dir.path(), dir_perms).unwrap();
 
         let mut summary = MendSummary::default();
         mend.cleanup_orphaned_locks(&mut summary).unwrap();
@@ -4353,12 +4528,18 @@ mod tests {
         // Lock should not be counted as removed (error occurred).
         assert_eq!(summary.locks_removed, 0);
 
+        // Restore directory permissions before waiting/cleanup.
+        let mut dir_perms = std::fs::metadata(lock_dir.path()).unwrap().permissions();
+        dir_perms.set_readonly(false);
+        std::fs::set_permissions(lock_dir.path(), dir_perms).unwrap();
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
         // Verify MendLockRemoveFailed event was emitted.
         let captured = events.lock().unwrap();
-        assert!(captured.iter().any(|e| e.event_type == "mend.lock_remove_failed"));
-
-        // Restore permissions for cleanup.
-        perms.set_readonly(false);
-        std::fs::set_permissions(&lock_file, perms).unwrap();
+        assert!(captured
+            .iter()
+            .any(|e| e.event_type == "mend.lock_remove_failed"));
     }
 }
