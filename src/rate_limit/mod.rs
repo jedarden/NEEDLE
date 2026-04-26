@@ -95,17 +95,17 @@ impl std::fmt::Display for RateLimitDecision {
 
 /// On-disk token bucket state for RPM limiting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TokenBucket {
+pub struct TokenBucket {
     /// Current available tokens (fractional for smooth refill).
-    tokens: f64,
+    pub tokens: f64,
     /// Maximum tokens (= requests_per_minute).
-    capacity: u32,
+    pub capacity: u32,
     /// Last time tokens were refilled.
-    last_refill: DateTime<Utc>,
+    pub last_refill: DateTime<Utc>,
 }
 
 impl TokenBucket {
-    fn new(capacity: u32) -> Self {
+    pub(crate) fn new(capacity: u32) -> Self {
         TokenBucket {
             tokens: capacity as f64,
             capacity,

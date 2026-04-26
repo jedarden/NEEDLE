@@ -674,6 +674,13 @@ mod tests {
                 .push((blocker_id.to_string(), blocked_id.to_string()));
             Ok(())
         }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
         async fn doctor_repair(&self) -> Result<RepairReport> {
             Ok(RepairReport::default())
         }

@@ -144,6 +144,13 @@ fn clear_global_shutdown_flag() {
 /// to prevent infinite loops where the selector returns the same bead repeatedly.
 const RACE_LOST_EXCLUSION_TTL: Duration = Duration::from_secs(30);
 
+/// Timeout for HANDLING state watchdog.
+///
+/// If the worker remains in HANDLING state for longer than this duration,
+/// the watchdog thread will force a recovery. This is longer than the
+/// inner timeouts (50s, 60s, 90s) to allow normal recovery to work first.
+const HANDLING_WATCHDOG_TIMEOUT_SECS: u64 = 120;
+
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
     config: Config,
@@ -200,6 +207,15 @@ pub struct Worker {
     last_restart_triggers: Vec<String>,
     /// Strand evaluations from the most recent select cycle (for exhausted telemetry).
     last_strand_evaluations: Vec<(String, String, u64)>,
+    /// Timestamp when the worker entered HANDLING state.
+    /// Used by the watchdog to detect stuck HANDLING state.
+    handling_state_entered_at: Option<Instant>,
+    /// Flag set by the watchdog thread when HANDLING state timeout is detected.
+    /// The main worker loop checks this flag and forces recovery if set.
+    watchdog_triggered: Arc<AtomicBool>,
+    /// Handle to the watchdog thread for cleanup on worker drop.
+    #[allow(dead_code)]
+    watchdog_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Worker {
@@ -311,6 +327,9 @@ impl Worker {
 
         let default_workspace = config.workspace.default.clone();
 
+        // Create the watchdog trigger flag before creating the Worker.
+        let watchdog_triggered = Arc::new(AtomicBool::new(false));
+
         Worker {
             config,
             worker_name,
@@ -347,7 +366,54 @@ impl Worker {
             last_waterfall_restarts: 0,
             last_restart_triggers: Vec::new(),
             last_strand_evaluations: Vec::new(),
+            handling_state_entered_at: None,
+            watchdog_triggered: watchdog_triggered.clone(),
+            watchdog_handle: None,
         }
+    }
+
+    /// Start the watchdog thread that monitors HANDLING state duration.
+    ///
+    /// The watchdog runs in a separate thread (not part of the Tokio runtime)
+    /// and can detect when the worker is stuck in HANDLING state even if
+    /// the Tokio runtime becomes wedged. If HANDLING state exceeds the
+    /// timeout, the watchdog sets the `watchdog_triggered` flag, which
+    /// the main worker loop checks to force recovery.
+    fn start_watchdog_thread(&mut self) {
+        let watchdog_triggered = self.watchdog_triggered.clone();
+        let handling_state_entered_at_ptr = &self.handling_state_entered_at as *const Option<Instant> as usize;
+
+        let handle = std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(5));
+                if watchdog_triggered.load(Ordering::Relaxed) {
+                    // Watchdog has already triggered, exit the thread.
+                    break;
+                }
+                // Check if we've been in HANDLING state for too long.
+                // We read the timestamp from the Worker struct via the pointer.
+                // SAFETY: The Worker struct outlives the watchdog thread because
+                // the thread is joined when the Worker is dropped.
+                let entered_at = unsafe {
+                    let ptr = handling_state_entered_at_ptr as *const Option<Instant>;
+                    (*ptr).as_ref().copied()
+                };
+
+                if let Some(entry_time) = entered_at {
+                    let elapsed = entry_time.elapsed().as_secs();
+                    if elapsed >= HANDLING_WATCHDOG_TIMEOUT_SECS {
+                        tracing::error!(
+                            elapsed_secs = elapsed,
+                            "HANDLING state watchdog triggered - forcing recovery"
+                        );
+                        watchdog_triggered.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+            }
+        });
+
+        self.watchdog_handle = Some(handle);
     }
 
     /// Run the worker loop until exhausted, stopped, or errored.
@@ -393,6 +459,10 @@ impl Worker {
     async fn run_inner(&mut self) -> Result<WorkerState> {
         // Boot: validate config and initialize.
         self.boot()?;
+
+        // Start the watchdog thread that monitors HANDLING state duration.
+        // This must be started after boot() so the Worker struct is fully initialized.
+        self.start_watchdog_thread();
 
         // Install signal handlers.
         self.install_signal_handlers();
@@ -454,6 +524,39 @@ impl Worker {
                         return self.stop("signal received during boot").await;
                     }
                 }
+            }
+
+            // Check for watchdog trigger - this indicates HANDLING state is wedged.
+            // The watchdog runs in a separate thread and can detect when the worker
+            // is stuck even if the Tokio runtime becomes unresponsive.
+            if self.watchdog_triggered.load(Ordering::Relaxed)
+                && self.state == WorkerState::Handling
+            {
+                tracing::error!(
+                    "watchdog detected HANDLING state hang, forcing recovery"
+                );
+                // Emit critical timeout event.
+                let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
+                let _ = self.telemetry.emit_try_lock(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead_id.clone().unwrap_or_else(|| BeadId::from("unknown")),
+                    outcome: "unknown".to_string(),
+                    operation: "watchdog".to_string(),
+                    error: format!("HANDLING state exceeded {}s timeout", HANDLING_WATCHDOG_TIMEOUT_SECS),
+                });
+                // Attempt best-effort release if we have a bead.
+                if let Some(ref bead) = self.current_bead {
+                    let bead_id = bead.id.clone();
+                    tracing::warn!(bead_id = %bead_id, "best-effort bead release due to watchdog timeout");
+                    let _ = tokio::time::timeout(
+                        Duration::from_secs(30),
+                        self.store.release(&bead_id),
+                    ).await;
+                }
+                // Clear the watchdog trigger and force transition to LOGGING.
+                self.watchdog_triggered.store(false, Ordering::Release);
+                self.handling_state_entered_at = None;
+                // Force transition to LOGGING to recover.
+                self.set_state(WorkerState::Logging)?;
             }
 
             match self.state {
@@ -715,13 +818,14 @@ impl Worker {
                         "bead is from remote workspace, switching store"
                     );
                     self.switch_store_to(bead_ws)?;
-                    // Update heartbeat with the new workspace so observers
-                    // can see where the work is actually happening.
-                    self.health.update_state(
-                        &WorkerState::Selecting,
-                        Some(&bead.id),
-                        Some(bead_ws),
-                    );
+                }
+
+                // Always update current_workspace to reflect the bead's workspace.
+                // For local beads, this keeps heartbeat consistent with home workspace.
+                // For cross-workspace beads, this ensures heartbeat reports where
+                // the work is actually happening.
+                if !is_workspace_unset(bead_ws) {
+                    self.current_workspace = bead_ws.clone();
                 }
 
                 self.current_bead = Some(bead);
@@ -1974,10 +2078,24 @@ impl Worker {
     fn set_state(&mut self, to: WorkerState) -> Result<()> {
         let from = self.state.clone();
         tracing::debug!(from = %from, to = %to, "state transition");
-        self.telemetry.emit(EventKind::StateTransition {
+
+        // Update handling_state_entered_at for HANDLING state watchdog.
+        // Must be done before emitting the event since we need the from value.
+        if to == WorkerState::Handling {
+            self.handling_state_entered_at = Some(std::time::Instant::now());
+        } else if from == WorkerState::Handling {
+            self.handling_state_entered_at = None;
+        }
+
+        // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
+        // State transitions must not block — if telemetry is wedged, we skip
+        // the event and continue anyway. The heartbeat shared state is always
+        // updated below, so monitoring can detect the new state via heartbeat files.
+        let _ = self.telemetry.emit_try_lock(EventKind::StateTransition {
             from,
             to: to.clone(),
-        })?;
+        });
+
         // Update heartbeat shared state with the new worker state.
         let current_bead_id = self.current_bead.as_ref().map(|b| &b.id);
         // For bead-processing states, use the bead's actual workspace if set.
@@ -2147,6 +2265,15 @@ impl Drop for Worker {
         #[cfg(unix)]
         {
             clear_global_shutdown_flag();
+        }
+
+        // Join the watchdog thread if it was started.
+        // Set the trigger flag to signal the thread to exit.
+        self.watchdog_triggered.store(true, Ordering::Release);
+        if let Some(handle) = self.watchdog_handle.take() {
+            // Don't block indefinitely joining the thread during drop.
+            // If it doesn't exit within 1 second, we'll still continue.
+            let _ = handle.join();
         }
     }
 }

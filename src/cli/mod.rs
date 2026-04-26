@@ -622,24 +622,39 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
     let qualified_id = format!("{}-{}", config.agent.default, worker_name);
 
     // Phase 0: create tokio runtime + telemetry, emit worker.booting immediately.
+    // Emit eprintln diagnostics before each step so hangs are visible even if telemetry fails.
+    eprintln!("NEEDLE worker boot: creating tokio runtime...");
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    eprintln!("NEEDLE worker boot: tokio runtime created");
+
+    eprintln!("NEEDLE worker boot: creating telemetry...");
     let telemetry =
         Telemetry::from_config(qualified_id.clone(), &config.telemetry).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
             Telemetry::new(qualified_id.clone())
         });
+    eprintln!("NEEDLE worker boot: telemetry created");
+
     // Wait for the writer thread to be ready before emitting events.
     // This fixes a race condition where emit() would send to the channel
     // before the writer thread started processing, causing force_flush to timeout.
+    eprintln!("NEEDLE worker boot: starting telemetry writer thread...");
     rt.block_on(telemetry.start_and_wait())
         .context("writer thread failed to start")?;
+    eprintln!("NEEDLE worker boot: writer thread started");
+
+    eprintln!("NEEDLE worker boot: emitting worker.booting event...");
     telemetry.emit(EventKind::WorkerBooting {
         worker_name: worker_name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })?;
+    eprintln!("NEEDLE worker boot: worker.booting emitted");
+
     // Force-flush worker.booting to disk immediately so we get a trace even if
     // subsequent init steps block indefinitely (e.g., db lock, network call).
+    eprintln!("NEEDLE worker boot: flushing worker.booting to disk...");
     telemetry.force_flush(std::time::Duration::from_secs(5))?;
+    eprintln!("NEEDLE worker boot: worker.booting flushed");
 
     // Phase 1: bead store discovery.
     let store: Arc<dyn crate::bead_store::BeadStore> =
@@ -665,6 +680,7 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
         bail!("boot exceeded 60 s ({elapsed_ms} ms), aborting");
     }
 
+    eprintln!("NEEDLE worker boot: all init steps completed in {elapsed_ms}ms, starting worker loop...");
     let result = rt.block_on(worker.run())?;
 
     tracing::info!(final_state = %result, "worker finished");
@@ -675,10 +691,12 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
 ///
 /// Each step's completion is force-flushed to disk so that if a subsequent
 /// step blocks indefinitely, the telemetry log shows exactly where it stopped.
+/// Also emits eprintln diagnostics for visibility even if telemetry hangs.
 fn init_step<T, F>(name: &str, tel: &Telemetry, f: F) -> Result<T>
 where
     F: FnOnce() -> Result<T>,
 {
+    eprintln!("NEEDLE worker boot: starting init step '{name}'...");
     tel.emit(EventKind::InitStepStarted {
         step: name.to_string(),
     })?;
@@ -689,6 +707,7 @@ where
         step: name.to_string(),
         duration_ms: elapsed,
     })?;
+    eprintln!("NEEDLE worker boot: init step '{name}' completed in {elapsed}ms");
     // Force-flush so the step completion is visible before the next (potentially blocking) step.
     tel.force_flush(std::time::Duration::from_secs(1))?;
     result

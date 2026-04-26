@@ -913,6 +913,13 @@ mod tests {
             ) -> anyhow::Result<()> {
                 Ok(())
             }
+            async fn remove_dependency(
+                &self,
+                _blocked_id: &crate::types::BeadId,
+                _blocker_id: &crate::types::BeadId,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
 
         let config = ReflectConfig {

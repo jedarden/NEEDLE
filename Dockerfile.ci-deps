@@ -1,0 +1,18 @@
+FROM ronaldraygun/needle-ci-builder:latest
+
+# Pre-compile all dependencies.
+# Copy only Cargo.toml/Cargo.lock first, create dummy source, build deps.
+# This layer is cached unless Cargo.toml/Cargo.lock change.
+COPY Cargo.toml Cargo.lock ./
+COPY src/bin/needle_transform_claude.rs ./src/bin/needle_transform_claude.rs
+COPY src/bin/needle_transform_codex.rs ./src/bin/needle_transform_codex.rs
+RUN mkdir -p src && \
+    echo "pub fn _dummy() {}" > src/lib.rs && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "fn main() {}" > src/bin/needle_transform_claude.rs && \
+    echo "fn main() {}" > src/bin/needle_transform_codex.rs && \
+    cargo build && \
+    cargo build --tests && \
+    rm -rf src
+
+WORKDIR /workspace

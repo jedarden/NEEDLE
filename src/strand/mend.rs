@@ -657,9 +657,13 @@ impl MendStrand {
     /// Delete `.agent.jsonl` files in `log_dir` that are older than
     /// `retention_days` and do not belong to a currently-executing bead.
     ///
+    /// Also deletes logs from workers that processed 0 beads immediately,
+    /// regardless of age. This cleans up logs from workers that crashed
+    /// before processing any beads.
+    ///
     /// Files are matched by the `.agent.jsonl` suffix. The bead ID is parsed
     /// from the stem (`<worker>-<bead>`): a file is considered active if the
-    /// stem ends with `-<bead_id>` for any in-progress bead.
+    /// stem ends with `-<bead_id}` for any in-progress bead.
     async fn cleanup_old_agent_logs(
         &self,
         store: &dyn BeadStore,
@@ -709,17 +713,10 @@ impl MendStrand {
             .map(|b| b.id.as_ref().to_string())
             .collect();
 
+        // Get the registry workers for zero-activity detection.
+        let registry_workers = self.registry.list()?;
+
         for path in &agent_log_paths {
-            // Check file age.
-            let age = match file_age(path) {
-                Some(a) => a,
-                None => continue,
-            };
-
-            if age <= cutoff {
-                continue;
-            }
-
             // Skip if this log belongs to an in-progress bead.
             let stem = match path
                 .file_name()
@@ -739,6 +736,61 @@ impl MendStrand {
                     path = %path.display(),
                     "skipping agent log for in-progress bead"
                 );
+                continue;
+            }
+
+            // Extract worker ID from stem. Format is "{worker_id}-{bead_id}".
+            let worker_id = match stem.rsplit_once('-') {
+                Some((worker_part, _bead_part)) => worker_part.to_string(),
+                None => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "could not extract worker ID from log filename"
+                    );
+                    continue;
+                }
+            };
+
+            // Check if this is a zero-activity worker log.
+            let is_zero_activity = registry_workers
+                .iter()
+                .find(|w| w.id == worker_id)
+                .map(|w| w.beads_processed == 0)
+                // Worker not in registry — treat as zero-activity (crashed before registering).
+                .unwrap_or(true);
+
+            if is_zero_activity {
+                // Delete immediately regardless of age.
+                if let Err(e) = std::fs::remove_file(path) {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "mend: failed to remove zero-activity agent log"
+                    );
+                    continue;
+                }
+
+                tracing::info!(
+                    path = %path.display(),
+                    worker_id = %worker_id,
+                    "mend: removed zero-activity agent log"
+                );
+                summary.zero_activity_logs_cleaned += 1;
+
+                let _ = self.telemetry.emit(EventKind::MendZeroActivityLogCleaned {
+                    worker_id: worker_id.clone(),
+                    log_path: path.display().to_string(),
+                });
+                continue;
+            }
+
+            // Check file age for retention-based cleanup.
+            let age = match file_age(path) {
+                Some(a) => a,
+                None => continue,
+            };
+
+            if age <= cutoff {
                 continue;
             }
 
@@ -1282,6 +1334,7 @@ impl super::Strand for MendStrand {
             db_repaired: summary.db_repaired,
             db_rebuilt: summary.db_rebuilt,
             agent_logs_cleaned: summary.agent_logs_cleaned,
+            zero_activity_logs_cleaned: summary.zero_activity_logs_cleaned,
             traces_pruned: summary.traces_pruned,
             traces_deleted: summary.traces_cleaned,
             workers_deregistered: summary.workers_deregistered,
@@ -2547,6 +2600,134 @@ mod tests {
         assert!(
             unrelated.exists(),
             "non-agent log files must not be touched"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_log_cleanup_deletes_zero_activity_log_immediately() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+
+        // Register a worker with beads_processed = 0 (zero-activity worker).
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "claude-zero-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        // Create a FRESH agent log for the zero-activity worker.
+        let log_path = log_dir.path().join("claude-zero-worker-nd-test.agent.jsonl");
+        std::fs::write(&log_path, b"{}").unwrap();
+        // No mtime change — file is brand-new (would normally be kept).
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand_with_logs(
+            hb_dir.path(),
+            lock_dir.path(),
+            reg_dir.path(),
+            log_dir.path(),
+            7, // 7-day retention, but zero-activity logs are deleted immediately
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork after cleaning zero-activity log, got: {result:?}"
+        );
+        assert!(
+            !log_path.exists(),
+            "zero-activity agent log should be deleted immediately regardless of age"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_log_cleanup_preserves_active_worker_log() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+
+        // Register a worker with beads_processed > 0 (active worker).
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "claude-active-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 10,
+            })
+            .unwrap();
+
+        // Create a FRESH agent log for the active worker.
+        let log_path = log_dir
+            .path()
+            .join("claude-active-worker-nd-active.agent.jsonl");
+        std::fs::write(&log_path, b"{}").unwrap();
+        // No mtime change — file is brand-new.
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand_with_logs(
+            hb_dir.path(),
+            lock_dir.path(),
+            reg_dir.path(),
+            log_dir.path(),
+            7,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(matches!(result, StrandResult::NoWork));
+        assert!(
+            log_path.exists(),
+            "active worker log should be preserved (not zero-activity)"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_log_cleanup_deletes_unregistered_worker_log() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+
+        // No worker registered — worker crashed before registering.
+        // Create an agent log for an unregistered worker.
+        let log_path = log_dir
+            .path()
+            .join("claude-crashed-worker-nd-crash.agent.jsonl");
+        std::fs::write(&log_path, b"{}").unwrap();
+        // No mtime change — file is brand-new.
+
+        let (store, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand_with_logs(
+            hb_dir.path(),
+            lock_dir.path(),
+            reg_dir.path(),
+            log_dir.path(),
+            7,
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork after cleaning unregistered worker log, got: {result:?}"
+        );
+        assert!(
+            !log_path.exists(),
+            "unregistered worker log should be deleted immediately (treated as zero-activity)"
         );
     }
 

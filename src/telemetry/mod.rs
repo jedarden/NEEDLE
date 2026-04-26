@@ -247,8 +247,12 @@ pub enum EventKind {
         db_repaired: bool,
         db_rebuilt: bool,
         agent_logs_cleaned: u32,
+        zero_activity_logs_cleaned: u32,
         traces_pruned: u32,
         traces_deleted: u32,
+        workers_deregistered: u32,
+        idle_workers_flagged: u32,
+        rate_limits_cleaned: u32,
     },
     MendTraceCleanup {
         traces_pruned: u32,
@@ -299,6 +303,10 @@ pub enum EventKind {
     MendRateLimitProviderReset {
         provider: String,
         age_secs: u64,
+    },
+    MendZeroActivityLogCleaned {
+        worker_id: String,
+        log_path: String,
     },
 
     // ── Effort tracking ──
@@ -530,6 +538,7 @@ impl EventKind {
             EventKind::MendRateLimitCleaned { .. } => "mend.rate_limit_cleaned",
             EventKind::MendRateLimitProviderRemoved { .. } => "mend.rate_limit_provider_removed",
             EventKind::MendRateLimitProviderReset { .. } => "mend.rate_limit_provider_reset",
+            EventKind::MendZeroActivityLogCleaned { .. } => "mend.zero_activity_log_cleaned",
             EventKind::EffortRecorded { .. } => "effort.recorded",
             EventKind::BudgetWarning { .. } => "budget.warning",
             EventKind::BudgetStop { .. } => "budget.stop",
@@ -589,6 +598,7 @@ impl EventKind {
             | EventKind::StuckDetected { bead_id, .. }
             | EventKind::StuckReleased { bead_id, .. }
             | EventKind::MendDependencyCleaned { bead_id, .. }
+            | EventKind::MendDependencyRemoved { bead_id, .. }
             | EventKind::EffortRecorded { bead_id, .. }
             | EventKind::MitosisEvaluated { bead_id, .. }
             | EventKind::VerificationFailed { bead_id, .. }
@@ -623,6 +633,16 @@ impl EventKind {
             | EventKind::MendDbRepaired { .. }
             | EventKind::MendDbRebuilt
             | EventKind::MendCycleSummary { .. }
+            | EventKind::MendIdleWorkerFlagged { .. }
+            | EventKind::MendWorkerDeregistered { .. }
+            | EventKind::MendOrphanedHeartbeatRemoved { .. }
+            | EventKind::MendBeadReleaseFailed { .. }
+            | EventKind::MendDependencyCleanupFailed { .. }
+            | EventKind::MendLockRemoveFailed { .. }
+            | EventKind::MendRateLimitCleaned { .. }
+            | EventKind::MendRateLimitProviderRemoved { .. }
+            | EventKind::MendRateLimitProviderReset { .. }
+            | EventKind::MendZeroActivityLogCleaned { .. }
             | EventKind::MendTraceCleanup { .. }
             | EventKind::MendLearningCleanup { .. }
             | EventKind::BudgetWarning { .. }
@@ -903,8 +923,12 @@ impl EventKind {
                 db_repaired,
                 db_rebuilt,
                 agent_logs_cleaned,
+                zero_activity_logs_cleaned,
                 traces_pruned,
                 traces_deleted,
+                workers_deregistered,
+                idle_workers_flagged,
+                rate_limits_cleaned,
             } => {
                 serde_json::json!({
                     "beads_released": beads_released,
@@ -913,8 +937,12 @@ impl EventKind {
                     "db_repaired": db_repaired,
                     "db_rebuilt": db_rebuilt,
                     "agent_logs_cleaned": agent_logs_cleaned,
+                    "zero_activity_logs_cleaned": zero_activity_logs_cleaned,
                     "traces_pruned": traces_pruned,
                     "traces_deleted": traces_deleted,
+                    "workers_deregistered": workers_deregistered,
+                    "idle_workers_flagged": idle_workers_flagged,
+                    "rate_limits_cleaned": rate_limits_cleaned,
                 })
             }
             EventKind::EffortRecorded {
@@ -1152,13 +1180,88 @@ impl EventKind {
                     "consolidated": consolidated,
                 })
             }
-            EventKind::MendRateLimitCleaned {
-                provider,
+            EventKind::MendIdleWorkerFlagged {
+                worker_id,
+                pid,
                 age_secs,
             } => {
                 serde_json::json!({
+                    "worker_id": worker_id,
+                    "pid": pid,
+                    "age_secs": age_secs,
+                })
+            }
+            EventKind::MendWorkerDeregistered { worker_id, pid } => {
+                serde_json::json!({
+                    "worker_id": worker_id,
+                    "pid": pid,
+                })
+            }
+            EventKind::MendOrphanedHeartbeatRemoved {
+                worker_id,
+                age_secs,
+            } => {
+                serde_json::json!({
+                    "worker_id": worker_id,
+                    "age_secs": age_secs,
+                })
+            }
+            EventKind::MendDependencyRemoved {
+                bead_id,
+                blocker_id,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id,
+                    "blocker_id": blocker_id,
+                })
+            }
+            EventKind::MendBeadReleaseFailed {
+                bead_id,
+                assignee,
+                error,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id,
+                    "assignee": assignee,
+                    "error": error,
+                })
+            }
+            EventKind::MendDependencyCleanupFailed {
+                bead_id,
+                blocker_id,
+                error,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id,
+                    "blocker_id": blocker_id,
+                    "error": error,
+                })
+            }
+            EventKind::MendLockRemoveFailed { lock_path, error } => {
+                serde_json::json!({
+                    "lock_path": lock_path,
+                    "error": error,
+                })
+            }
+            EventKind::MendRateLimitCleaned { provider, age_secs } => {
+                serde_json::json!({
                     "provider": provider,
                     "age_secs": age_secs,
+                })
+            }
+            EventKind::MendRateLimitProviderRemoved { provider } => {
+                serde_json::json!({ "provider": provider })
+            }
+            EventKind::MendRateLimitProviderReset { provider, age_secs } => {
+                serde_json::json!({
+                    "provider": provider,
+                    "age_secs": age_secs,
+                })
+            }
+            EventKind::MendZeroActivityLogCleaned { worker_id, log_path } => {
+                serde_json::json!({
+                    "worker_id": worker_id,
+                    "log_path": log_path,
                 })
             }
             EventKind::CanaryStarted { suite } => {
@@ -1249,6 +1352,16 @@ impl EventKind {
             | EventKind::MendDbRepaired { .. }
             | EventKind::MendDbRebuilt
             | EventKind::MendCycleSummary { .. }
+            | EventKind::MendIdleWorkerFlagged { .. }
+            | EventKind::MendWorkerDeregistered { .. }
+            | EventKind::MendOrphanedHeartbeatRemoved { .. }
+            | EventKind::MendDependencyRemoved { .. }
+            | EventKind::MendBeadReleaseFailed { .. }
+            | EventKind::MendDependencyCleanupFailed { .. }
+            | EventKind::MendLockRemoveFailed { .. }
+            | EventKind::MendRateLimitCleaned { .. }
+            | EventKind::MendRateLimitProviderRemoved { .. }
+            | EventKind::MendRateLimitProviderReset { .. }
             | EventKind::BudgetWarning { .. }
             | EventKind::BudgetStop { .. }
             | EventKind::RateLimitWait { .. }
@@ -1283,6 +1396,7 @@ impl EventKind {
             | EventKind::ReflectStarted { .. }
             | EventKind::ReflectConsolidated { .. }
             | EventKind::ReflectSkipped { .. }
+            | EventKind::MendZeroActivityLogCleaned { .. }
             | EventKind::SinkError { .. } => None,
             EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
         }
@@ -2121,11 +2235,69 @@ impl Telemetry {
             span_id,
         };
         tracing::debug!(event_type = %event.event_type, seq, "telemetry event");
-        // Lock the shared sender; None means shutdown() has been called.
-        if let Some(ref s) = *self.sender.lock().unwrap() {
-            s.send(WriterMessage::Event(event)).ok(); // ok() — never block, never panic
+        // Use try_lock() to avoid blocking indefinitely if the telemetry writer
+        // is stuck holding the lock. If the lock is contended, we log and return
+        // Ok(()) to allow the worker to continue.
+        match self.sender.try_lock() {
+            Ok(guard) => {
+                if let Some(ref s) = *guard {
+                    s.send(WriterMessage::Event(event)).ok(); // ok() — never block, never panic
+                }
+                Ok(())
+            }
+            Err(_) => {
+                tracing::warn!(
+                    event_type = %event.event_type,
+                    seq,
+                    "telemetry sender lock contended, skipping emit"
+                );
+                Ok(())
+            }
         }
-        Ok(())
+    }
+
+    /// Emit an event without blocking — uses try_lock() instead of lock().
+    ///
+    /// Returns `Ok(())` if emitted successfully or if the lock is contended
+    /// (gracefully degrades). Returns `Err` only if the channel is disconnected.
+    ///
+    /// Use this in timeout recovery paths where blocking on emit() would
+    /// prevent the worker from recovering.
+    pub fn emit_try_lock(&self, kind: EventKind) -> Result<()> {
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let (trace_id, span_id) = current_trace_ids();
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: kind.event_type().to_string(),
+            worker_id: self.worker_id.clone(),
+            session_id: self.session_id.clone(),
+            sequence: seq,
+            bead_id: kind.bead_id(),
+            workspace: None,
+            duration_ms: kind.duration_ms(),
+            data: kind.to_data(),
+            trace_id,
+            span_id,
+        };
+        // Use try_lock() to avoid blocking indefinitely if the telemetry writer
+        // is stuck holding the lock. If the lock is contended, we log and return
+        // Ok(()) to allow the worker to continue.
+        match self.sender.try_lock() {
+            Ok(guard) => {
+                if let Some(ref s) = *guard {
+                    s.send(WriterMessage::Event(event)).ok();
+                }
+                Ok(())
+            }
+            Err(_) => {
+                tracing::warn!(
+                    event_type = %event.event_type,
+                    seq,
+                    "telemetry sender lock contended, skipping emit in timeout recovery path"
+                );
+                Ok(())
+            }
+        }
     }
 
     /// Force-flush all buffered events to disk (synchronous).
@@ -2140,8 +2312,18 @@ impl Telemetry {
     /// `force_flush_async()` from within async contexts.
     pub fn force_flush(&self, timeout: std::time::Duration) -> Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Some(ref s) = *self.sender.lock().unwrap() {
-            s.send(WriterMessage::Flush(tx)).ok();
+        // Use try_lock() to avoid blocking indefinitely if the telemetry writer
+        // is stuck holding the lock.
+        match self.sender.try_lock() {
+            Ok(guard) => {
+                if let Some(ref s) = *guard {
+                    s.send(WriterMessage::Flush(tx)).ok();
+                }
+            }
+            Err(_) => {
+                tracing::warn!("telemetry sender lock contended in force_flush, skipping flush");
+                return Ok(()); // Don't fail — the writer will eventually flush
+            }
         }
         // Block until the writer task flushes or timeout.
         // Spawn a thread to handle the blocking recv with a timeout.
@@ -2165,8 +2347,18 @@ impl Telemetry {
     /// tokio runtime. Use this in `Worker::run()` and other async contexts.
     pub async fn force_flush_async(&self, timeout: std::time::Duration) -> Result<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Some(ref s) = *self.sender.lock().unwrap() {
-            s.send(WriterMessage::Flush(tx)).ok();
+        // Use try_lock() to avoid blocking indefinitely if the telemetry writer
+        // is stuck holding the lock.
+        match self.sender.try_lock() {
+            Ok(guard) => {
+                if let Some(ref s) = *guard {
+                    s.send(WriterMessage::Flush(tx)).ok();
+                }
+            }
+            Err(_) => {
+                tracing::warn!("telemetry sender lock contended in force_flush_async, skipping flush");
+                return Ok(()); // Don't fail — the writer will eventually flush
+            }
         }
         // Wait for the writer task to flush, with timeout.
         match tokio::time::timeout(timeout, rx).await {
@@ -2280,6 +2472,7 @@ impl Telemetry {
     ///
     /// Must be called from within a tokio runtime context.
     pub async fn start_and_wait(&self) -> Result<()> {
+        eprintln!("NEEDLE telemetry: starting writer thread and waiting for ready signal...");
         let pending = self.pending_writer.lock().unwrap().take();
         if let Some(pw) = pending {
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
@@ -2288,11 +2481,16 @@ impl Telemetry {
 
             // Wait for the writer thread to signal it's ready.
             // Use a timeout to avoid hanging if the thread fails to start.
+            eprintln!("NEEDLE telemetry: waiting for writer thread ready signal (timeout 5s)...");
             tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx)
                 .await
                 .map_err(|_| anyhow::anyhow!("writer thread failed to start within 5s"))?
                 .map_err(|_| anyhow::anyhow!("writer thread closed before signaling ready"))?;
+            eprintln!("NEEDLE telemetry: writer thread ready signal received");
+        } else {
+            eprintln!("NEEDLE telemetry: writer thread already started, skipping");
         }
+        eprintln!("NEEDLE telemetry: start_and_wait complete");
         Ok(())
     }
 
@@ -2332,34 +2530,49 @@ impl Telemetry {
             let rt = match tokio::runtime::Runtime::new() {
                 Ok(r) => r,
                 Err(e) => {
+                    // Fallback to stderr when tracing may not be initialized yet
+                    eprintln!("NEEDLE telemetry writer thread: FAILED to create tokio runtime: {}", e);
                     tracing::error!(error = %e, "failed to create writer runtime");
                     // Signal that we failed (by dropping the sender without sending)
                     drop(ready_signal);
                     return;
                 }
             };
+            eprintln!("NEEDLE telemetry writer thread: started successfully");
+            if sinks.is_empty() {
+                eprintln!("NEEDLE telemetry writer thread: WARNING - no sinks configured, events will be discarded!");
+            }
             let mut receiver = receiver;
             rt.block_on(async move {
                 // Signal that the writer is ready to process events.
                 // Do this before entering the recv() loop so the caller
                 // can proceed as soon as we're ready.
+                eprintln!("NEEDLE telemetry writer thread: signaling ready to main thread...");
                 if let Some(tx) = ready_signal {
                     tx.send(()).ok();
                 }
+                eprintln!("NEEDLE telemetry writer thread: ready, waiting for events...");
 
                 let deadline = std::time::Duration::from_secs(5);
+                let mut event_count = 0u64;
                 while let Some(msg) = receiver.recv().await {
                     match msg {
                         WriterMessage::Event(event) => {
+                            event_count += 1;
                             for sink in &sinks {
                                 if let Err(e) = sink.accept(&event) {
+                                    eprintln!("NEEDLE telemetry: sink accept failed for event {}: {}", event.event_type, e);
                                     tracing::warn!(error = %e, "telemetry sink accept failed");
                                 }
+                            }
+                            if event_count == 1 {
+                                eprintln!("NEEDLE telemetry writer thread: first event written: {}", event.event_type);
                             }
                         }
                         WriterMessage::Flush(reply) => {
                             for sink in &sinks {
                                 if let Err(e) = sink.flush(deadline) {
+                                    eprintln!("NEEDLE telemetry: sink flush failed: {}", e);
                                     tracing::warn!(error = %e, "telemetry sink flush on demand failed");
                                 }
                             }
@@ -3101,6 +3314,84 @@ mod tests {
             .unwrap();
         telemetry.emit(EventKind::QueueEmpty).unwrap();
         // No panic, no block
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn emit_try_lock_delivers_events_when_lock_available() {
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-try-lock".to_string(), sink);
+
+        // emit_try_lock() should succeed when the lock is available.
+        telemetry
+            .emit_try_lock(EventKind::WorkerStarted {
+                worker_name: "test-worker".to_string(),
+                version: "0.1.0".to_string(),
+            })
+            .unwrap();
+        telemetry
+            .emit_try_lock(EventKind::ClaimAttempt {
+                bead_id: BeadId::from("nd-test"),
+                attempt: 1,
+            })
+            .unwrap();
+
+        // Drop to close channel and drain.
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let collected = events.lock().unwrap();
+        assert_eq!(
+            collected.len(),
+            2,
+            "expected 2 events, got {}",
+            collected.len()
+        );
+        assert_eq!(collected[0].event_type, "worker.started");
+        assert_eq!(collected[1].event_type, "bead.claim.attempted");
+    }
+
+    #[tokio::test]
+    async fn emit_try_lock_gracefully_degrades_when_lock_contended() {
+        let (sink, _events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-try-lock-contend".to_string(), sink);
+
+        // Hold the sender lock to simulate contention.
+        let sender_lock = telemetry.sender.clone();
+        let _guard = sender_lock.lock().unwrap();
+
+        // emit_try_lock() should return Ok(()) without blocking when lock is contended.
+        let result = telemetry.emit_try_lock(EventKind::QueueEmpty);
+        assert!(
+            result.is_ok(),
+            "emit_try_lock should not error on contention"
+        );
+
+        // Drop the guard and cleanup.
+        drop(_guard);
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn emit_gracefully_degrades_when_lock_contended() {
+        let (sink, _events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-emit-contend".to_string(), sink);
+
+        // Hold the sender lock to simulate contention.
+        let sender_lock = telemetry.sender.clone();
+        let _guard = sender_lock.lock().unwrap();
+
+        // emit() should return Ok(()) without blocking when lock is contended.
+        let result = telemetry.emit(EventKind::QueueEmpty);
+        assert!(
+            result.is_ok(),
+            "emit should not error on contention"
+        );
+
+        // Drop the guard and cleanup.
+        drop(_guard);
         drop(telemetry);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -4365,6 +4656,103 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(30),
             "shutdown must not hang: elapsed={elapsed:?}"
+        );
+    }
+
+    /// Verify that `trace_id` and `span_id` are captured from the current OTel span.
+    #[cfg(feature = "otlp")]
+    #[tokio::test]
+    async fn emit_captures_trace_and_span_ids_from_otel_context() {
+        use opentelemetry::trace::{Tracer, TracerProvider as _};
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+
+        // Create a simple tracer provider for testing (no exporter).
+        let provider = SdkTracerProvider::builder().build();
+        let tracer = provider.tracer("test");
+
+        // Create a test sink to capture emitted events.
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-tracer".to_string(), sink);
+
+        // Emit an event inside a span using the tracer's in_span method.
+        tracer.in_span("test-span", |_cx| {
+            telemetry
+                .emit(EventKind::QueueEmpty)
+                .expect("emit should succeed");
+        });
+
+        // Drop telemetry to close channel and drain events.
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let collected = events.lock().unwrap();
+        assert_eq!(collected.len(), 1, "expected 1 event");
+        let event = &collected[0];
+
+        // Verify trace_id and span_id were captured.
+        assert!(
+            event.trace_id.is_some(),
+            "trace_id should be captured inside a span"
+        );
+        assert!(
+            event.span_id.is_some(),
+            "span_id should be captured inside a span"
+        );
+
+        // Verify W3C format: 32 hex chars for trace_id, 16 hex chars for span_id.
+        let trace_id = event.trace_id.as_ref().unwrap();
+        let span_id = event.span_id.as_ref().unwrap();
+        assert_eq!(trace_id.len(), 32, "trace_id should be 32 hex chars");
+        assert_eq!(span_id.len(), 16, "span_id should be 16 hex chars");
+        assert!(
+            trace_id.chars().all(|c| c.is_ascii_hexdigit() && c.is_lowercase()),
+            "trace_id should be lowercase hex"
+        );
+        assert!(
+            span_id.chars().all(|c| c.is_ascii_hexdigit() && c.is_lowercase()),
+            "span_id should be lowercase hex"
+        );
+    }
+
+    /// Verify that events emitted outside any span omit trace_id/span_id.
+    #[tokio::test]
+    async fn emit_omits_trace_and_span_ids_outside_span() {
+        // Create a test sink to capture emitted events.
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-no-span".to_string(), sink);
+
+        // Emit an event outside any span context.
+        telemetry
+            .emit(EventKind::QueueEmpty)
+            .expect("emit should succeed");
+
+        // Drop telemetry to close channel and drain events.
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let collected = events.lock().unwrap();
+        assert_eq!(collected.len(), 1, "expected 1 event");
+        let event = &collected[0];
+
+        // Verify trace_id and span_id are None when emitted outside a span.
+        assert!(
+            event.trace_id.is_none(),
+            "trace_id should be None outside a span"
+        );
+        assert!(
+            event.span_id.is_none(),
+            "span_id should be None outside a span"
+        );
+
+        // Verify the JSON omits the fields entirely (via skip_serializing_if).
+        let json = serde_json::to_string(event).expect("serialize");
+        assert!(
+            !json.contains("trace_id"),
+            "trace_id should be omitted from JSON when None"
+        );
+        assert!(
+            !json.contains("span_id"),
+            "span_id should be omitted from JSON when None"
         );
     }
 }

@@ -427,7 +427,11 @@ mod tests {
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
-        async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> Result<()> {
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
             Ok(())
         }
     }
@@ -562,7 +566,7 @@ mod tests {
 
     #[test]
     fn discover_workspaces_returns_empty_for_nonexistent_root() {
-        let discovered = ExploreStrand::discover_workspaces(PathBuf::from("/nonexistent/path/xyz"));
+        let discovered = ExploreStrand::discover_workspaces(Path::new("/nonexistent/path/xyz"));
         assert!(discovered.is_empty());
     }
 
@@ -581,13 +585,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let registry = crate::registry::Registry::new(temp_dir.path());
         let telemetry = Telemetry::new("test-worker".to_string());
-        let strand = ExploreStrand::new(
-            config,
-            home,
-            registry,
-            telemetry,
-            "test-worker".to_string(),
-        );
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
 
         // The discovered workspace should be in the list
         assert_eq!(strand.workspaces.len(), 1);
@@ -606,13 +605,8 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let registry = crate::registry::Registry::new(temp_dir.path());
         let telemetry = Telemetry::new("test-worker".to_string());
-        let strand = ExploreStrand::new(
-            config,
-            home,
-            registry,
-            telemetry,
-            "test-worker".to_string(),
-        );
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
 
         // Should use the explicit list, not discovery
         assert_eq!(strand.workspaces, explicit_workspaces);

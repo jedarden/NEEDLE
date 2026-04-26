@@ -85,6 +85,9 @@ toml = "0.8"
 # Unix process handling (PID liveness check)
 libc = "0.2"
 
+# Random jitter (backoff desynchronization)
+rand = "0.8"
+
 # OpenTelemetry / OTLP (gated behind `otlp` feature)
 opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }

@@ -86,12 +86,23 @@ impl OutcomeHandler {
         let mut events = Vec::new();
 
         // Step 1: Flush local writes to JSONL before attempting release.
+        // Emit heartbeat before br call to track where hang occurs.
+        let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
+            bead_id: Some(bead.id.clone()),
+            state: "HANDLING_FLUSH".to_string(),
+        });
+
         match self.timeout_op(|| store.flush(), "flush").await {
             Ok(Some(())) => {
                 tracing::debug!(
                     bead_id = %bead.id,
                     "flushed local changes to JSONL before release"
                 );
+                // Emit heartbeat after successful flush.
+                let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
+                    bead_id: Some(bead.id.clone()),
+                    state: "HANDLING_FLUSH_DONE".to_string(),
+                });
             }
             Ok(None) => {
                 tracing::warn!(
@@ -121,6 +132,12 @@ impl OutcomeHandler {
         }
 
         // Step 2: Attempt release with timeout protection.
+        // Emit heartbeat before br release call to track where hang occurs.
+        let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
+            bead_id: Some(bead.id.clone()),
+            state: "HANDLING_RELEASE".to_string(),
+        });
+
         let release_result =
             tokio::time::timeout(std::time::Duration::from_secs(30), store.release(&bead.id)).await;
 
@@ -130,6 +147,11 @@ impl OutcomeHandler {
                     bead_id = %bead.id,
                     "bead released successfully"
                 );
+                // Emit heartbeat after successful release.
+                let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
+                    bead_id: Some(bead.id.clone()),
+                    state: "HANDLING_RELEASE_DONE".to_string(),
+                });
                 events.push(EventKind::BeadReleased {
                     bead_id: bead.id.clone(),
                     reason: "release_success".to_string(),
@@ -194,11 +216,13 @@ impl OutcomeHandler {
             "handling agent outcome"
         );
 
-        self.telemetry.emit(EventKind::OutcomeClassified {
+        // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
+        // This prevents worker hang in HANDLING state when telemetry is wedged.
+        let _ = self.telemetry.emit_try_lock(EventKind::OutcomeClassified {
             bead_id: bead.id.clone(),
             outcome: outcome.as_str().to_string(),
             exit_code: output.exit_code,
-        })?;
+        });
 
         let (bead_action, telemetry_events) = match outcome.clone() {
             Outcome::Success => self.handle_success(store, bead).await?,
@@ -211,15 +235,17 @@ impl OutcomeHandler {
 
         // Emit sub-handler events (e.g. BeadCompleted, BeadOrphaned) to the
         // telemetry sink so they appear in the JSONL log.
+        // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
         for event in &telemetry_events {
-            self.telemetry.emit(event.clone())?;
+            let _ = self.telemetry.emit_try_lock(event.clone());
         }
 
-        self.telemetry.emit(EventKind::OutcomeHandled {
+        // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
+        let _ = self.telemetry.emit_try_lock(EventKind::OutcomeHandled {
             bead_id: bead.id.clone(),
             outcome: outcome.as_str().to_string(),
             action: bead_action.to_string(),
-        })?;
+        });
 
         Ok(HandlerResult {
             outcome,
@@ -1004,6 +1030,13 @@ mod tests {
                     blocker_id.to_string(),
                     blocked_id.to_string(),
                 ));
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
             Ok(())
         }
     }

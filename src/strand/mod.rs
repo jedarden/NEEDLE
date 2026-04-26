@@ -8,7 +8,7 @@
 
 mod explore;
 mod knot;
-mod mend;
+pub mod mend;
 mod pluck;
 pub mod pulse;
 pub mod reflect;
@@ -97,10 +97,7 @@ impl StrandRunner {
         registry: crate::registry::Registry,
         telemetry: crate::telemetry::Telemetry,
     ) -> Self {
-        let pluck = PluckStrand::new(
-            config.strands.pluck.exclude_labels.clone(),
-            telemetry.clone(),
-        );
+        let pluck = PluckStrand::new(config.strands.pluck.exclude_labels.clone());
 
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
         let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
@@ -137,7 +134,11 @@ impl StrandRunner {
             trace_retention_success_days,
             config.workspace.default.clone(),
             config.strands.learning.max_learnings,
+            config.workspace.home.join("state"),
+            config.limits.clone(),
         );
+
+        let state_base = config.workspace.home.join("state");
 
         let explore = ExploreStrand::new(
             config.strands.explore.clone(),
@@ -146,8 +147,6 @@ impl StrandRunner {
             telemetry.clone(),
             worker_id.to_string(),
         );
-
-        let state_base = config.workspace.home.join("state");
 
         let weave = WeaveStrand::new(
             config.strands.weave.clone(),
@@ -203,7 +202,7 @@ impl StrandRunner {
             telemetry,
         );
 
-        let knot = KnotStrand::new(config.strands.knot.clone(), runner_telemetry.clone());
+        let knot = KnotStrand::new(config.strands.knot.clone());
         StrandRunner {
             strands: vec![
                 Box::new(pluck),
@@ -537,6 +536,13 @@ mod tests {
             Ok(())
         }
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
             Ok(())
         }
     }

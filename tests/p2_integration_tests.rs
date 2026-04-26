@@ -204,6 +204,10 @@ impl BeadStore for ConcurrentMockStore {
     async fn full_rebuild(&self) -> Result<()> {
         Ok(())
     }
+
+    async fn remove_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+        Ok(())
+    }
 }
 
 fn make_bead(id: &str, priority: u8) -> Bead {
