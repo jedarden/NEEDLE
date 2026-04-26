@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::sync::Mutex;
 
 use anyhow::{bail, Context, Result};
 
@@ -126,6 +127,68 @@ unsafe fn install_unix_signal_handlers() {
     }
 }
 
+/// Global state for atexit handler to emit worker.stopped on unexpected termination.
+///
+/// When a worker is killed externally (e.g., SIGKILL from capacity governor),
+/// the normal signal handlers don't run. The atexit handler provides a last-resort
+/// mechanism to emit worker.stopped telemetry with diagnostic information.
+static ATEXIT_WORKER_STATE: Mutex<Option<AtexitWorkerState>> = Mutex::new(None);
+
+/// State captured for the atexit handler.
+struct AtexitWorkerState {
+    worker_name: String,
+    beads_processed: u64,
+    start_time: Instant,
+    last_state: String,
+}
+
+/// Register the atexit handler with worker state.
+///
+/// Called by `install_signal_handlers` to ensure the atexit handler can
+/// emit meaningful telemetry if the process terminates unexpectedly.
+fn register_atexit_handler(
+    worker_name: String,
+    beads_processed: u64,
+    start_time: Instant,
+    last_state: String,
+) {
+    let state = AtexitWorkerState {
+        worker_name,
+        beads_processed,
+        start_time,
+        last_state,
+    };
+    *ATEXIT_WORKER_STATE.lock().unwrap() = Some(state);
+
+    // Register the atexit handler.
+    // This will run when the process exits normally, but NOT on SIGKILL.
+    extern "C" fn atexit_handler() {
+        if let Some(state) = ATEXIT_WORKER_STATE.lock().unwrap().as_ref() {
+            let uptime = state.start_time.elapsed().as_secs();
+            // Try to write to stderr as a last resort since telemetry may be unavailable.
+            eprintln!(
+                "NEEDLE worker '{}' stopped unexpectedly: state={}, beads_processed={}, uptime={}s",
+                state.worker_name, state.last_state, state.beads_processed, uptime
+            );
+            eprintln!("This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)");
+        }
+    }
+
+    // SAFETY: atexit is safe to call with a function pointer.
+    unsafe {
+        libc::atexit(atexit_handler);
+    }
+}
+
+/// Update the atexit state when the worker state changes.
+///
+/// Called by `set_state` to keep the atexit handler's last state fresh.
+fn update_atexit_state(last_state: String) {
+    if let Some(mut state) = ATEXIT_WORKER_STATE.lock().unwrap().as_mut() {
+        state.last_state = last_state;
+    }
+}
+
 /// Stub implementations for non-Unix platforms.
 /// These functions are no-ops on platforms where Unix signals are not available.
 #[cfg(not(unix))]
@@ -135,6 +198,21 @@ fn set_global_shutdown_flag(_ptr: usize) {
 
 #[cfg(not(unix))]
 fn clear_global_shutdown_flag() {
+    // No-op on non-Unix platforms
+}
+
+#[cfg(not(unix))]
+fn register_atexit_handler(
+    _worker_name: String,
+    _beads_processed: u64,
+    _start_time: Instant,
+    _last_state: String,
+) {
+    // No-op on non-Unix platforms
+}
+
+#[cfg(not(unix))]
+fn update_atexit_state(_last_state: String) {
     // No-op on non-Unix platforms
 }
 
@@ -216,6 +294,12 @@ pub struct Worker {
     /// Handle to the watchdog thread for cleanup on worker drop.
     #[allow(dead_code)]
     watchdog_handle: Option<std::thread::JoinHandle<()>>,
+    /// The current bead lifecycle span guard. Created when a bead is claimed,
+    /// dropped when the bead lifecycle ends (after HANDLING or when the bead is released).
+    #[allow(dead_code)]
+    bead_lifecycle_span: Option<tracing::span::EnteredSpan>,
+    /// The last outcome for the current bead (used to record on bead.lifecycle span).
+    last_outcome: Option<String>,
 }
 
 impl Worker {
@@ -369,6 +453,8 @@ impl Worker {
             handling_state_entered_at: None,
             watchdog_triggered: watchdog_triggered.clone(),
             watchdog_handle: None,
+            bead_lifecycle_span: None,
+            last_outcome: None,
         }
     }
 
@@ -467,6 +553,18 @@ impl Worker {
 
         // Install signal handlers.
         self.install_signal_handlers();
+
+        // Create the worker.session root span that encompasses the entire worker lifecycle.
+        let worker_id = self.qualified_id();
+        let session_span = tracing::info_span!(
+            "worker.session",
+            needle.worker_id = %worker_id,
+            needle.session_id = %self.telemetry.session_id(),
+            needle.agent = %self.config.agent.default,
+            needle.model = %self.config.agent.default, // Will be updated when adapter is resolved
+            needle.workspace = %self.config.workspace.default.display(),
+        );
+        let _enter = session_span.enter();
 
         loop {
             // Check for shutdown signal between states.
@@ -756,6 +854,17 @@ impl Worker {
         let shutdown_ptr = Arc::into_raw(self.shutdown.clone()) as usize;
         set_global_shutdown_flag(shutdown_ptr);
 
+        // Register atexit handler to emit worker.stopped telemetry on unexpected termination.
+        // This provides diagnostic information when the worker is killed by an external
+        // process (e.g., capacity governor, OOM killer, SIGKILL).
+        let start_time = self.boot_time.unwrap_or_else(Instant::now);
+        register_atexit_handler(
+            self.worker_name.clone(),
+            self.beads_processed,
+            start_time,
+            format!("{:?}", self.state),
+        );
+
         #[cfg(unix)]
         {
             // Install synchronous signal handlers using libc.
@@ -933,9 +1042,25 @@ impl Worker {
         // prevents claim_one from attempting to claim a bead that was
         // just race-lost (which would cause a tight loop).
         let exclusions = self.current_exclusions();
+        let strand = self.current_strand.as_deref().unwrap_or("unknown");
+
+        // Create the bead.claim span that wraps the claim operation.
+        // Note: This span is a child of strand.{name}, not bead.lifecycle,
+        // because bead.lifecycle is only created after the claim succeeds.
+        let claim_span = tracing::info_span!(
+            "bead.claim",
+            needle.bead.id = %bead_id.as_ref(),
+            needle.claim.retry_number = tracing::field::Empty,
+            needle.claim.result = tracing::field::Empty,
+        );
+        let _claim_enter = claim_span.enter();
+
+        // Record the initial retry number (will be updated by claim module)
+        tracing::Span::current().record("needle.claim.retry_number", 1u32);
+
         let claim = self
             .claimer
-            .claim_one(&bead_id, &self.qualified_id(), &exclusions)
+            .claim_one(&bead_id, &self.qualified_id(), &exclusions, Some(strand))
             .await?;
 
         match claim {
@@ -964,10 +1089,40 @@ impl Worker {
                     tokens: dispatch::TokenUsage::default(),
                     estimated_cost_usd: None,
                 });
+
+                // Compute bead metadata for the lifecycle span.
+                let bead_priority = self.current_bead.as_ref().map(|b| b.priority);
+                let bead_title_hash = self.current_bead.as_ref().map(|b| {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    b.title.hash(&mut hasher);
+                    format!("{:x}", hasher.finish())
+                });
+
+                // Create the bead.lifecycle span after the claim succeeds.
+                // This span will remain active for the entire bead processing.
+                let lifecycle_span = tracing::info_span!(
+                    "bead.lifecycle",
+                    needle.bead.id = %self.current_bead.as_ref().map(|b| b.id.as_ref()).unwrap_or("unknown"),
+                    needle.bead.priority = bead_priority.unwrap_or(0),
+                    needle.bead.title_hash = %bead_title_hash.as_deref().unwrap_or("unknown"),
+                    needle.bead.outcome = tracing::field::Empty, // Will be set on completion
+                );
+                self.bead_lifecycle_span = Some(lifecycle_span.entered());
+
+                // Note: The claim_span (_claim_enter) is dropped here, closing the bead.claim span.
+                // The bead.lifecycle span is now active and will be the parent for subsequent operations.
+
                 self.set_state(WorkerState::Building)?;
             }
             ClaimResult::RaceLost { claimed_by } => {
                 tracing::debug!(bead_id = %bead_id, %claimed_by, "claim race lost");
+                // Set the claim span result attribute
+                tracing::Span::current().record("needle.claim.result", "race_lost");
+                // Set Error status on the claim span
+                tracing::Span::current().record("otel.status_code", 2u64);
+                tracing::Span::current().record("otel.status_description", "race_lost");
                 // Add to race-lost exclusions with TTL (persists across cycles)
                 let expires = Instant::now() + RACE_LOST_EXCLUSION_TTL;
                 self.race_lost_exclusions.push((bead_id.clone(), expires));
@@ -976,13 +1131,20 @@ impl Worker {
                 self.race_lost_this_cycle.insert(bead_id);
                 self.retry_count += 1;
                 self.consecutive_race_lost += 1;
+                // The claim_span is dropped here, closing the bead.claim span.
                 self.set_state(WorkerState::Retrying)?;
             }
             ClaimResult::NotClaimable { reason } => {
                 tracing::debug!(bead_id = %bead_id, %reason, "bead not claimable");
+                // Set the claim span result attribute
+                tracing::Span::current().record("needle.claim.result", &reason);
+                // Set Error status on the claim span
+                tracing::Span::current().record("otel.status_code", 2u64);
+                tracing::Span::current().record("otel.status_description", &reason);
                 self.consecutive_race_lost = 0;
                 self.exclusion_set.insert(bead_id);
                 self.current_bead = None;
+                // The claim_span is dropped here, closing the bead.claim span.
                 self.set_state(WorkerState::Selecting)?;
             }
         }
@@ -1090,6 +1252,13 @@ impl Worker {
         let heartbeat_bead_id = bead_id.clone();
         let telemetry = self.telemetry.clone();
 
+        // Enter the bead.prompt_build span for the prompt building phase.
+        let prompt_build_span = tracing::info_span!(
+            "bead.prompt_build",
+            needle.bead.id = %bead_id,
+        );
+        let _prompt_build_enter = prompt_build_span.enter();
+
         // Spawn heartbeat task that emits periodic updates during the build.
         // Heartbeat interval: every 30 seconds.
         let heartbeat_handle = tokio::spawn(async move {
@@ -1126,6 +1295,13 @@ impl Worker {
                     timeout_secs = timeout_secs,
                     configured_timeout = self.config.worker.building_timeout,
                     "BUILDING state timed out"
+                );
+
+                // Set Error status on the bead.prompt_build span
+                tracing::Span::current().record("otel.status_code", 2u64);
+                tracing::Span::current().record(
+                    "otel.status_description",
+                    format!("timeout after {}s", timeout_secs),
                 );
 
                 // Emit build.timeout event.
@@ -1185,6 +1361,17 @@ impl Worker {
         let adapter = self.resolve_adapter()?;
         let provider = adapter.provider.as_deref();
         let model = adapter.model.as_deref();
+
+        // Enter the agent.dispatch span for the dispatching phase.
+        let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
+        let dispatch_span = tracing::info_span!(
+            "agent.dispatch",
+            gen_ai.system = %provider.unwrap_or("unknown"),
+            gen_ai.request.model = %model.unwrap_or("unknown"),
+            needle.agent.pid = tracing::field::Empty, // Will be set when process starts
+            needle.agent.exit_code = tracing::field::Empty, // Will be set after execution
+        );
+        let _dispatch_enter = dispatch_span.enter();
 
         let decision = self.rate_limiter.check(provider, model, &self.registry)?;
 
@@ -1279,10 +1466,59 @@ impl Worker {
                     );
                 }
             }
-            let result = self
-                .dispatcher
-                .dispatch(&bead.id, &prompt, &adapter, dispatch_ws)
-                .await?;
+            // Enter the agent.execution span for the actual agent process execution.
+            // This is a child of agent.dispatch.
+            // We need to record attributes on the parent agent.dispatch span after execution,
+            // so we use a scope to drop the execution_span guard first.
+            let (result, exec_tokens) = {
+                let execution_span = tracing::info_span!(
+                    "agent.execution",
+                    needle.bead.id = %bead.id,
+                );
+                let _execution_enter = execution_span.enter();
+
+                let result = self
+                    .dispatcher
+                    .dispatch(&bead.id, &prompt, &adapter, dispatch_ws)
+                    .await?;
+
+                // Set span status based on exit code: 0 = Ok, non-zero = Error
+                if result.exit_code != 0 {
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current().record(
+                        "otel.status_description",
+                        format!("exit_code: {}", result.exit_code),
+                    );
+                }
+
+                // Extract tokens from the result while still in the execution span.
+                let exec_tokens = dispatch::extract_tokens(
+                    &adapter.token_extraction,
+                    &result.stdout,
+                    &result.stderr,
+                );
+                (result, exec_tokens)
+            };
+
+            // Now we're back in the agent.dispatch span. Record the execution results.
+            tracing::Span::current().record("needle.agent.pid", result.pid);
+            tracing::Span::current().record("needle.agent.exit_code", result.exit_code);
+            if let Some(input_tokens) = exec_tokens.input_tokens {
+                tracing::Span::current().record("gen_ai.usage.input_tokens", input_tokens);
+            }
+            if let Some(output_tokens) = exec_tokens.output_tokens {
+                tracing::Span::current().record("gen_ai.usage.output_tokens", output_tokens);
+            }
+
+            // Set agent.dispatch span status based on exit code: 0 = Ok, non-zero = Error
+            if result.exit_code != 0 {
+                tracing::Span::current().record("otel.status_code", 2u64);
+                tracing::Span::current().record(
+                    "otel.status_description",
+                    format!("exit_code: {}", result.exit_code),
+                );
+            }
+
             was_interrupted = self.shutdown.load(Ordering::SeqCst);
             Some(result)
         };
@@ -1385,6 +1621,16 @@ impl Worker {
             // Wrap the outcome handler in a 60-second timeout to prevent indefinite hangs.
             // The health monitor's background thread writes heartbeat files based on
             // shared state, so external monitoring can detect hangs via stale heartbeats.
+
+            // Enter the bead.outcome span for the outcome handling phase.
+            let outcome_span = tracing::info_span!(
+                "bead.outcome",
+                needle.bead.id = %bead.id,
+                needle.outcome = tracing::field::Empty, // Will be set based on handler result
+                needle.outcome.action = tracing::field::Empty, // Will be set based on handler result
+            );
+            let _outcome_enter = outcome_span.enter();
+
             let handler_future = self.outcome_handler.handle_with_cancellation(
                 self.store.as_ref(),
                 &bead,
@@ -1396,6 +1642,28 @@ impl Worker {
             match tokio::time::timeout(std::time::Duration::from_secs(60), handler_future).await {
                 Ok(Ok(result)) => {
                     // Handler completed successfully - stop heartbeat and continue.
+                    // Record the outcome and action on the bead.outcome span.
+                    tracing::Span::current().record("needle.outcome", result.outcome.as_str());
+                    tracing::Span::current()
+                        .record("needle.outcome.action", result.bead_action.to_string());
+
+                    // Store outcome for recording on bead.lifecycle span
+                    self.last_outcome = Some(result.outcome.as_str().to_string());
+
+                    // Set span status: Ok for Success, Error for all other outcomes.
+                    match result.outcome {
+                        crate::types::Outcome::Success => {
+                            // Span status is Ok by default
+                        }
+                        _ => {
+                            // Set Error status with the outcome as description
+                            // otel.status_code = 2 indicates ERROR in OpenTelemetry
+                            tracing::Span::current().record("otel.status_code", 2u64);
+                            tracing::Span::current()
+                                .record("otel.status_description", result.outcome.as_str());
+                        }
+                    }
+
                     tracing::debug!(
                         bead_id = %bead.id,
                         outcome = %result.outcome,
@@ -1546,6 +1814,14 @@ impl Worker {
                 bead.workspace.clone()
             };
 
+            // Enter the bead.mitosis span for mitosis evaluation.
+            let mitosis_span = tracing::info_span!(
+                "bead.mitosis",
+                needle.bead.id = %bead.id,
+                needle.mitosis.result = tracing::field::Empty, // Will be set based on evaluation result
+            );
+            let _mitosis_enter = mitosis_span.enter();
+
             // Wrap mitosis evaluation in timeout to prevent indefinite hang.
             match tokio::time::timeout(
                 std::time::Duration::from_secs(120),
@@ -1561,6 +1837,7 @@ impl Worker {
             .await
             {
                 Ok(Ok(crate::mitosis::MitosisResult::Split { children })) => {
+                    tracing::Span::current().record("needle.mitosis.result", "split");
                     tracing::info!(
                         bead_id = %bead.id,
                         children = children.len(),
@@ -1568,9 +1845,11 @@ impl Worker {
                     );
                 }
                 Ok(Ok(crate::mitosis::MitosisResult::NotSplittable)) => {
+                    tracing::Span::current().record("needle.mitosis.result", "not_splittable");
                     tracing::debug!(bead_id = %bead.id, "mitosis: bead is single task");
                 }
                 Ok(Ok(crate::mitosis::MitosisResult::Skipped { reason })) => {
+                    tracing::Span::current().record("needle.mitosis.result", "skipped");
                     tracing::debug!(
                         bead_id = %bead.id,
                         reason = %reason,
@@ -1578,6 +1857,10 @@ impl Worker {
                     );
                 }
                 Ok(Err(e)) => {
+                    tracing::Span::current().record("needle.mitosis.result", "error");
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current()
+                        .record("otel.status_description", format!("error: {e}"));
                     tracing::warn!(
                         bead_id = %bead.id,
                         error = %e,
@@ -1586,12 +1869,17 @@ impl Worker {
                 }
                 Err(_) => {
                     // Timeout after 120s - log warning and continue.
+                    tracing::Span::current().record("needle.mitosis.result", "timeout");
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current()
+                        .record("otel.status_description", "timeout after 120s");
                     tracing::warn!(
                         bead_id = %bead.id,
                         "mitosis evaluation timed out after 120s, continuing to LOGGING"
                     );
                 }
             }
+            // mitosis span ends here when _mitosis_enter is dropped
         }
 
         // On success, inject Bead-Id trailer into the latest commit (non-fatal if it fails).
@@ -1685,6 +1973,24 @@ impl Worker {
         self.last_effort = None;
         self.beads_processed += 1;
         self.current_bead = None;
+
+        // Close the bead.lifecycle span by dropping it.
+        // Record the outcome before closing if we have the handler result available.
+        if let Some(lifecycle_guard) = self.bead_lifecycle_span.take() {
+            // Record the outcome on the bead.lifecycle span before closing
+            if let Some(ref outcome) = self.last_outcome {
+                lifecycle_guard.record("needle.bead.outcome", outcome.as_str());
+                // Set span status: Ok for success, Error for all other outcomes
+                if outcome != "success" {
+                    // otel.status_code = 2 indicates ERROR in OpenTelemetry
+                    lifecycle_guard.record("otel.status_code", 2u64);
+                    lifecycle_guard.record("otel.status_description", outcome.as_str());
+                }
+            }
+            // Clear the outcome for the next cycle
+            self.last_outcome = None;
+            // The span is automatically closed when the guard is dropped.
+        }
 
         // Update heartbeat with new bead count.
         self.health.update_beads_processed(self.beads_processed);
@@ -1903,11 +2209,29 @@ impl Worker {
                 // Emit an initial heartbeat to show we're entering idle sleep.
                 // This ensures there's at least one diagnostic event even if the
                 // worker dies before the first sleep iteration completes.
+                tracing::debug!(
+                    backoff_secs = backoff,
+                    check_interval_secs = check_interval,
+                    "about to emit initial idle heartbeat event"
+                );
                 if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
                     bead_id: None,
                     state: "EXHAUSTED_IDLE".to_string(),
                 }) {
                     tracing::warn!(error = %e, "failed to emit initial idle heartbeat, continuing anyway");
+                }
+
+                tracing::debug!(backoff_secs = backoff, "entering idle sleep loop");
+
+                // Emit diagnostic event to help identify external killer.
+                // This event is emitted before the sleep loop starts so that if the worker
+                // is killed during idle sleep, there's a record of when it entered the idle state.
+                if let Err(e) = self.telemetry.emit(EventKind::IdleSleepEntered {
+                    backoff_secs: backoff,
+                    beads_processed: self.beads_processed,
+                    uptime_secs: self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                }) {
+                    tracing::warn!(error = %e, "failed to emit idle_sleep_entered event");
                 }
 
                 while elapsed < backoff {
@@ -1933,8 +2257,26 @@ impl Worker {
                         Some(self.current_workspace.as_path()),
                     );
 
-                    // Sleep for a short interval, then check shutdown flag.
-                    tokio::time::sleep(sleep_duration).await;
+                    // Race between sleep and shutdown flag to respond immediately to signals.
+                    // This ensures that when SIGHUP is received (e.g., from cgov killing tmux session),
+                    // the worker responds within milliseconds instead of waiting up to 1 second.
+                    tokio::select! {
+                        _ = tokio::time::sleep(sleep_duration) => {
+                            // Sleep completed normally, continue to shutdown check.
+                        }
+                        _ = async {
+                            // Poll shutdown flag every 10ms for immediate response.
+                            loop {
+                                if self.shutdown.load(Ordering::SeqCst) {
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                            }
+                        } => {
+                            // Shutdown flag was set, exit immediately.
+                        }
+                    }
+
                     elapsed += check_interval;
                     shutdown_check_count += 1;
 
@@ -2023,6 +2365,17 @@ impl Worker {
                     return self.stop("signal received after idle").await;
                 }
 
+                // Emit a diagnostic event BEFORE the tracing log to ensure we have
+                // a record even if the worker dies immediately after. This helps
+                // diagnose cases where workers die mysteriously after idle sleep.
+                if let Err(e) = self.telemetry.emit(EventKind::IdleSleepCompleted {
+                    backoff_secs: backoff,
+                    elapsed_secs: elapsed,
+                    shutdown_checks: shutdown_check_count,
+                }) {
+                    tracing::warn!(error = %e, "failed to emit idle_sleep_completed event");
+                }
+
                 tracing::info!(
                     backoff_secs = backoff,
                     shutdown_checks_performed = shutdown_check_count,
@@ -2030,11 +2383,22 @@ impl Worker {
                     "idle sleep completed successfully, transitioning to SELECTING"
                 );
 
+                // Force-flush BEFORE state transition to ensure the diagnostic event
+                // is written even if the worker is killed during the transition.
+                let _ = self
+                    .telemetry
+                    .force_flush(std::time::Duration::from_secs(5));
+
                 // Emit telemetry to show idle sleep completed successfully
                 self.telemetry.emit(EventKind::StateTransition {
                     from: WorkerState::Exhausted,
                     to: WorkerState::Selecting,
                 })?;
+
+                // Force-flush AFTER state transition to ensure it's persisted.
+                let _ = self
+                    .telemetry
+                    .force_flush(std::time::Duration::from_secs(5));
 
                 // Update heartbeat after idle sleep completes before transitioning.
                 self.health.update_state(
@@ -2055,6 +2419,12 @@ impl Worker {
     /// Graceful stop: emit telemetry, deregister, and return terminal state.
     async fn stop(&mut self, reason: &str) -> Result<WorkerState> {
         let uptime = self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+
+        // Set worker.session span attributes before closing.
+        // Record attributes on the current span (which is the worker.session span).
+        tracing::Span::current().record("needle.beads_processed", self.beads_processed);
+        tracing::Span::current().record("needle.uptime_seconds", uptime);
+        tracing::Span::current().record("needle.exit_reason", reason);
 
         self.telemetry.emit(EventKind::WorkerStopped {
             reason: reason.to_string(),
@@ -2127,6 +2497,9 @@ impl Worker {
     fn set_state(&mut self, to: WorkerState) -> Result<()> {
         let from = self.state.clone();
         tracing::debug!(from = %from, to = %to, "state transition");
+
+        // Update atexit state so the handler has the most recent state info.
+        update_atexit_state(format!("{:?}", to));
 
         // Update handling_state_entered_at for HANDLING state watchdog.
         // Must be done before emitting the event since we need the from value.

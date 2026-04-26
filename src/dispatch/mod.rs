@@ -236,6 +236,15 @@ impl AgentAdapter {
             Duration::from_secs(secs)
         }
     }
+
+    /// Returns the GenAI system name for this adapter.
+    ///
+    /// Follows OTel semantic conventions for `gen_ai.system`, which identifies
+    /// the AI system/platform (e.g., "anthropic", "openai", "local").
+    /// Defaults to "local" if no provider is configured.
+    pub fn gen_ai_system(&self) -> &str {
+        self.provider.as_deref().unwrap_or("local")
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -515,6 +524,18 @@ impl Dispatcher {
     /// 5. Waits with timeout enforcement (kills on timeout, exit 124)
     /// 6. Captures stdout, stderr, exit code
     /// 7. Cleans up the temp file
+    #[tracing::instrument(
+        name = "agent.dispatch",
+        skip(self, bead_id, prompt, adapter, workspace),
+        fields(
+            needle.bead.id = %bead_id.as_ref(),
+            gen_ai.system = %adapter.gen_ai_system(),
+            gen_ai.operation.name = "chat",
+            gen_ai.request.id = %bead_id.as_ref(),
+            needle.agent.pid = tracing::field::Empty,
+            needle.agent.exit_code = tracing::field::Empty,
+        )
+    )]
     pub async fn dispatch(
         &self,
         bead_id: &BeadId,
@@ -522,6 +543,11 @@ impl Dispatcher {
         adapter: &AgentAdapter,
         workspace: &Path,
     ) -> Result<ExecutionResult> {
+        // Set gen_ai.request.model if available
+        if let Some(ref model) = adapter.model {
+            tracing::Span::current().record("gen_ai.request.model", model.as_str());
+        }
+
         self.telemetry.emit(EventKind::DispatchStarted {
             bead_id: bead_id.clone(),
             agent: adapter.name.clone(),
@@ -536,19 +562,50 @@ impl Dispatcher {
             .await;
 
         // Emit completion telemetry regardless of success/failure.
+        let agent_name = adapter.name.clone();
+        let agent_model = adapter.model.clone();
         match &result {
             Ok(exec) => {
+                tracing::Span::current().record("needle.agent.pid", exec.pid);
+                tracing::Span::current().record("needle.agent.exit_code", exec.exit_code);
+
+                // Extract token usage and set gen_ai.usage attributes
+                let usage = extract_tokens(&adapter.token_extraction, &exec.stdout, &exec.stderr);
+                if let Some(input_tokens) = usage.input_tokens {
+                    tracing::Span::current().record("gen_ai.usage.input_tokens", input_tokens);
+                }
+                if let Some(output_tokens) = usage.output_tokens {
+                    tracing::Span::current().record("gen_ai.usage.output_tokens", output_tokens);
+                }
+
+                // Set span status: Ok for exit_code 0, Error otherwise
+                if exec.exit_code != 0 {
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current().record(
+                        "otel.status_description",
+                        format!("exit_code: {}", exec.exit_code),
+                    );
+                }
+
                 let _ = self.telemetry.emit(EventKind::DispatchCompleted {
                     bead_id: bead_id.clone(),
                     exit_code: exec.exit_code,
                     duration_ms: exec.elapsed.as_millis() as u64,
+                    agent: agent_name,
+                    model: agent_model,
                 });
             }
             Err(_) => {
+                // Set span status on error
+                tracing::Span::current().record("otel.status_code", 2u64);
+                tracing::Span::current().record("otel.status_description", "dispatch_error");
+
                 let _ = self.telemetry.emit(EventKind::DispatchCompleted {
                     bead_id: bead_id.clone(),
                     exit_code: -1,
                     duration_ms: 0,
+                    agent: agent_name,
+                    model: agent_model,
                 });
             }
         }
@@ -577,6 +634,15 @@ impl Dispatcher {
     }
 
     /// Internal: spawn and manage the agent process.
+    #[tracing::instrument(
+        name = "agent.execution",
+        skip(self, bead_id, adapter, workspace, prompt_file),
+        fields(
+            needle.bead.id = %bead_id.as_ref(),
+            needle.agent.pid = tracing::field::Empty,
+            needle.agent.exit_code = tracing::field::Empty,
+        )
+    )]
     async fn run_process(
         &self,
         bead_id: &BeadId,
@@ -608,6 +674,7 @@ impl Dispatcher {
             .with_context(|| format!("failed to spawn agent: {}", adapter.name))?;
 
         let pid = child.id().unwrap_or(0);
+        tracing::Span::current().record("needle.agent.pid", pid);
         let start = Instant::now();
 
         // Read stdout/stderr concurrently to avoid pipe buffer deadlock.
@@ -773,6 +840,15 @@ impl Dispatcher {
                 }
             }
         };
+
+        tracing::Span::current().record("needle.agent.exit_code", exit_code);
+
+        // Set span status: Ok for exit_code 0, Error otherwise
+        if exit_code != 0 {
+            tracing::Span::current().record("otel.status_code", 2u64);
+            tracing::Span::current()
+                .record("otel.status_description", format!("exit_code: {exit_code}"));
+        }
 
         let elapsed = start.elapsed();
         // Await stdout/stderr readers; dropping transform_tx here closes the
@@ -2366,5 +2442,52 @@ output_transform: "needle-transform-custom"
         assert_eq!(actual_canonical, expected);
 
         let _ = std::fs::remove_dir_all(&workspace);
+    }
+
+    // ── GenAI semantic conventions ──
+
+    #[test]
+    fn claude_sonnet_adapter_has_genai_attributes() {
+        let adapter = builtin_claude_sonnet();
+        assert_eq!(adapter.provider, Some("anthropic".to_string()));
+        assert_eq!(adapter.model, Some("claude-sonnet-4-6".to_string()));
+    }
+
+    #[test]
+    fn claude_opus_adapter_has_genai_attributes() {
+        let adapter = builtin_claude_opus();
+        assert_eq!(adapter.provider, Some("anthropic".to_string()));
+        assert_eq!(adapter.model, Some("claude-opus-4-6".to_string()));
+    }
+
+    #[test]
+    fn codex_adapter_has_openai_provider() {
+        let adapter = builtin_codex();
+        assert_eq!(adapter.provider, Some("openai".to_string()));
+        assert_eq!(adapter.model, Some("gpt-4".to_string()));
+    }
+
+    #[test]
+    fn gen_ai_system_returns_provider_for_claude_sonnet() {
+        let adapter = builtin_claude_sonnet();
+        assert_eq!(adapter.gen_ai_system(), "anthropic");
+    }
+
+    #[test]
+    fn gen_ai_system_returns_provider_for_claude_opus() {
+        let adapter = builtin_claude_opus();
+        assert_eq!(adapter.gen_ai_system(), "anthropic");
+    }
+
+    #[test]
+    fn gen_ai_system_returns_provider_for_codex() {
+        let adapter = builtin_codex();
+        assert_eq!(adapter.gen_ai_system(), "openai");
+    }
+
+    #[test]
+    fn gen_ai_system_returns_local_for_adapter_without_provider() {
+        let adapter = builtin_opencode();
+        assert_eq!(adapter.gen_ai_system(), "local");
     }
 }
