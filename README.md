@@ -169,6 +169,38 @@ NEEDLE/
 
 ---
 
+## 🔍 Observability
+
+NEEDLE emits structured telemetry for every state transition, claim attempt, dispatch, and outcome. A silent worker is a broken worker.
+
+### Exported Signals
+
+| Signal | Description |
+|--------|-------------|
+| **Traces** | Spans for `worker.session`, `bead.lifecycle`, `bead.claim`, `agent.dispatch`, `strand.evaluated`, `outcome.handled` |
+| **Metrics** | `needle.beads.completed`, `needle.beads.duration`, `needle.agent.tokens.input`, `needle.cost.usd`, and more |
+| **Logs** | All events not represented as spans, with severity mapping (`ERROR` for failures, `WARN` for stale peers) |
+
+### OpenTelemetry (OTLP) Export
+
+NEEDLE can export telemetry to any OpenTelemetry-compatible backend (Jaeger, Tempo, Grafana, Honeycomb, Datadog, etc.) via OTLP.
+
+**Minimal configuration (`.needle.yaml`):**
+
+```yaml
+telemetry:
+  otlp_sink:
+    enabled: true
+    endpoint: "http://localhost:4317"  # gRPC, or :4318 for HTTP
+    protocol: "grpc"
+```
+
+**Semantic conventions:** NEEDLE follows OpenTelemetry's `gen_ai.*` semantic conventions for LLM telemetry, enabling out-of-the-box integration with GenAI dashboards (Grafana GenAI app, Langfuse, Honeycomb AI, etc.).
+
+See [`docs/plan/plan.md`](docs/plan/plan.md) for the complete semantic mapping table.
+
+---
+
 ## 📄 License
 
 MIT
