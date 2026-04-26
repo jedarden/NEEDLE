@@ -19,8 +19,9 @@ use opentelemetry_sdk::resource::{
 use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
 use std::collections::HashMap;
 use std::panic::catch_unwind;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "otlp")]
 use tracing_opentelemetry::OpenTelemetryLayer;
@@ -49,6 +50,8 @@ pub struct OtlpSink {
     session_id: String,
     /// Drop event counter (for tracking drops across all signals).
     drop_count: Arc<Mutex<DropCounter>>,
+    /// Observable state for gauges (heartbeat.age, queue.depth).
+    observable_state: Arc<ObservableState>,
 }
 
 /// Counter for tracking dropped events by signal type.
@@ -57,6 +60,15 @@ struct DropCounter {
     traces: u64,
     metrics: u64,
     logs: u64,
+}
+
+/// State for observable gauges.
+#[derive(Default)]
+struct ObservableState {
+    /// Last heartbeat timestamp (UNIX epoch seconds).
+    last_heartbeat_secs: AtomicU64,
+    /// Current queue depth (sampled at strand evaluation).
+    queue_depth: AtomicU64,
 }
 
 /// Cached metric instruments for efficient recording.
@@ -234,14 +246,18 @@ impl OtlpSink {
 
         // Add computed needle.* attributes if provided
         if let Some(agent_value) = agent {
-            builder = builder.with_attributes([KeyValue::new("needle.agent", agent_value.to_string())]);
+            builder =
+                builder.with_attributes([KeyValue::new("needle.agent", agent_value.to_string())]);
         }
         if let Some(model_value) = model {
-            builder = builder.with_attributes([KeyValue::new("needle.model", model_value.to_string())]);
+            builder =
+                builder.with_attributes([KeyValue::new("needle.model", model_value.to_string())]);
         }
         if let Some(workspace_value) = workspace {
-            builder =
-                builder.with_attributes([KeyValue::new("needle.workspace", workspace_value.to_string())]);
+            builder = builder.with_attributes([KeyValue::new(
+                "needle.workspace",
+                workspace_value.to_string(),
+            )]);
         }
 
         // Add resource attributes from config (KEY=VALUE pairs)
@@ -775,18 +791,25 @@ impl OtlpSink {
 ///
 /// Returns `None` if the OTLP feature is not enabled or if the layer
 /// cannot be created.
+///
+/// The `agent`, `model`, and `workspace` parameters are optional resource
+/// attributes for OpenTelemetry semantic conventions.
 #[cfg(feature = "otlp")]
 pub fn create_tracing_layer(
     worker_id: String,
     session_id: String,
     config: &OtlpSinkConfig,
+    agent: Option<&str>,
+    model: Option<&str>,
+    workspace: Option<&str>,
 ) -> Result<Option<OpenTelemetryLayer<Registry, opentelemetry_sdk::trace::Tracer>>> {
     if !config.enabled {
         return Ok(None);
     }
 
     // Build resource attributes from config + computed attributes
-    let resource = OtlpSink::build_resource(&worker_id, &session_id, config)?;
+    let resource =
+        OtlpSink::build_resource(&worker_id, &session_id, config, agent, model, workspace)?;
 
     // Build exporters based on protocol
     let (tracer_provider, ..) = match config.protocol.as_str() {
@@ -825,5 +848,132 @@ impl crate::telemetry::Sink for OtlpSink {
         logger_result.context("failed to flush logger provider")?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::OtlpSinkConfig;
+
+    fn make_test_config() -> OtlpSinkConfig {
+        OtlpSinkConfig {
+            enabled: true,
+            endpoint: "http://localhost:4317".to_string(),
+            protocol: "grpc".to_string(),
+            timeout_secs: 10,
+            compression: "gzip".to_string(),
+            tls: "none".to_string(),
+            headers: Vec::new(),
+            resource_attributes: Vec::new(),
+            metrics_interval_secs: 10,
+        }
+    }
+
+    #[test]
+    fn test_build_resource_has_all_required_attributes() {
+        let config = make_test_config();
+        let resource = OtlpSink::build_resource(
+            "test-worker-id",
+            "test-session-id",
+            &config,
+            Some("claude-anthropic-sonnet"),
+            Some("claude-sonnet-4-6"),
+            Some("/test/workspace"),
+        )
+        .expect("build_resource should succeed");
+
+        let attrs = resource.attributes();
+
+        let attr_keys: Vec<_> = attrs.iter().map(|kv| kv.key.as_str()).collect();
+
+        assert!(attr_keys.contains(&"service.name"), "missing service.name");
+        assert!(
+            attr_keys.contains(&"service.version"),
+            "missing service.version"
+        );
+        assert!(
+            attr_keys.contains(&"service.instance.id"),
+            "missing service.instance.id"
+        );
+        assert!(attr_keys.contains(&"host.name"), "missing host.name");
+        assert!(attr_keys.contains(&"process.pid"), "missing process.pid");
+        assert!(attr_keys.contains(&"needle.agent"), "missing needle.agent");
+        assert!(attr_keys.contains(&"needle.model"), "missing needle.model");
+        assert!(
+            attr_keys.contains(&"needle.session_id"),
+            "missing needle.session_id"
+        );
+        assert!(
+            attr_keys.contains(&"needle.workspace"),
+            "missing needle.workspace"
+        );
+    }
+
+    #[test]
+    fn test_deployment_environment_flows_through_from_config() {
+        let mut config = make_test_config();
+        config.resource_attributes = vec!["deployment.environment=production".to_string()];
+
+        let resource =
+            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None)
+                .expect("build_resource should succeed");
+
+        let attrs = resource.attributes();
+        let env_attr = attrs
+            .iter()
+            .find(|kv| kv.key.as_str() == "deployment.environment");
+
+        assert!(
+            env_attr.is_some(),
+            "deployment.environment should be present from config"
+        );
+        assert_eq!(
+            env_attr.unwrap().value.as_str(),
+            Some("production"),
+            "deployment.environment value should match config"
+        );
+    }
+
+    #[test]
+    fn test_cannot_override_service_instance_id_via_config() {
+        let mut config = make_test_config();
+        config
+            .resource_attributes
+            .push("service.instance.id=malicious-id".to_string());
+
+        let result =
+            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None);
+
+        assert!(
+            result.is_err(),
+            "should reject attempt to override service.instance.id"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("cannot override reserved resource attribute"),
+            "error should mention reserved attribute"
+        );
+    }
+
+    #[test]
+    fn test_cannot_override_service_name_via_config() {
+        let mut config = make_test_config();
+        config
+            .resource_attributes
+            .push("service.name=not-needle".to_string());
+
+        let result =
+            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None);
+
+        assert!(
+            result.is_err(),
+            "should reject attempt to override service.name"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("cannot override reserved resource attribute"),
+            "error should mention reserved attribute"
+        );
     }
 }
