@@ -20,9 +20,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::config::{
-    ColorMode, HookConfig, OtlpSinkConfig, StdoutFormat, StdoutSinkConfig, TelemetryConfig,
-};
+use crate::config::{ColorMode, HookConfig, StdoutFormat, StdoutSinkConfig, TelemetryConfig};
 use crate::types::{BeadId, WorkerId, WorkerState};
 
 // ─── OTLP Sink (feature-gated) ───────────────────────────────────────────────────
@@ -114,6 +112,16 @@ pub enum EventKind {
     WorkerIdle {
         backoff_seconds: u64,
     },
+    IdleSleepCompleted {
+        backoff_secs: u64,
+        elapsed_secs: u64,
+        shutdown_checks: u64,
+    },
+    IdleSleepEntered {
+        backoff_secs: u64,
+        beads_processed: u64,
+        uptime_secs: u64,
+    },
     StateTransition {
         from: WorkerState,
         to: WorkerState,
@@ -148,6 +156,8 @@ pub enum EventKind {
     },
     ClaimSuccess {
         bead_id: BeadId,
+        priority: i32,
+        strand: String,
     },
     ClaimRaceLost {
         bead_id: BeadId,
@@ -194,6 +204,8 @@ pub enum EventKind {
         bead_id: BeadId,
         exit_code: i32,
         duration_ms: u64,
+        agent: String,
+        model: Option<String>,
     },
     BuildTimeout {
         bead_id: BeadId,
@@ -497,6 +509,15 @@ pub enum EventKind {
     SinkError {
         message: String,
     },
+    OtlpDropped {
+        signal: String,
+        dropped_count: u64,
+        queue_full: bool,
+    },
+    OtlpShutdownTimeout {
+        flushed_batches: u64,
+        remaining_batches: u64,
+    },
 }
 
 impl EventKind {
@@ -509,6 +530,8 @@ impl EventKind {
             EventKind::WorkerErrored { .. } => "worker.errored",
             EventKind::WorkerExhausted { .. } => "worker.exhausted",
             EventKind::WorkerIdle { .. } => "worker.idle",
+            EventKind::IdleSleepCompleted { .. } => "worker.idle_sleep_completed",
+            EventKind::IdleSleepEntered { .. } => "worker.idle_sleep_entered",
             EventKind::StateTransition { .. } => "worker.state_transition",
             EventKind::InitStepStarted { .. } => "init.step.started",
             EventKind::InitStepCompleted { .. } => "init.step.completed",
@@ -589,6 +612,8 @@ impl EventKind {
             EventKind::TransformFailed { .. } => "transform.failed",
             EventKind::TransformSkipped { .. } => "transform.skipped",
             EventKind::SinkError { .. } => "telemetry.sink_error",
+            EventKind::OtlpDropped { .. } => "telemetry.otlp.dropped",
+            EventKind::OtlpShutdownTimeout { .. } => "telemetry.otlp.shutdown_timeout",
         }
     }
 
@@ -596,7 +621,7 @@ impl EventKind {
     pub fn bead_id(&self) -> Option<BeadId> {
         match self {
             EventKind::ClaimAttempt { bead_id, .. }
-            | EventKind::ClaimSuccess { bead_id }
+            | EventKind::ClaimSuccess { bead_id, .. }
             | EventKind::ClaimRaceLost { bead_id }
             | EventKind::ClaimFailed { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
@@ -636,6 +661,8 @@ impl EventKind {
             | EventKind::WorkerErrored { .. }
             | EventKind::WorkerExhausted { .. }
             | EventKind::WorkerIdle { .. }
+            | EventKind::IdleSleepCompleted { .. }
+            | EventKind::IdleSleepEntered { .. }
             | EventKind::StateTransition { .. }
             | EventKind::InitStepStarted { .. }
             | EventKind::InitStepCompleted { .. }
@@ -679,7 +706,9 @@ impl EventKind {
             | EventKind::CanaryPromoted { .. }
             | EventKind::CanaryRejected { .. }
             | EventKind::ClaimRaceLostSkipped { .. }
-            | EventKind::SinkError { .. } => None,
+            | EventKind::SinkError { .. }
+            | EventKind::OtlpDropped { .. }
+            | EventKind::OtlpShutdownTimeout { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
     }
@@ -772,8 +801,16 @@ impl EventKind {
             EventKind::ClaimAttempt { bead_id, attempt } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref(), "attempt": attempt })
             }
-            EventKind::ClaimSuccess { bead_id } => {
-                serde_json::json!({ "bead_id": bead_id.as_ref() })
+            EventKind::ClaimSuccess {
+                bead_id,
+                priority,
+                strand,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "priority": priority,
+                    "strand": strand,
+                })
             }
             EventKind::ClaimRaceLost { bead_id } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref() })
@@ -826,11 +863,15 @@ impl EventKind {
                 bead_id,
                 exit_code,
                 duration_ms,
+                agent,
+                model,
             } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
                     "exit_code": exit_code,
                     "duration_ms": duration_ms,
+                    "agent": agent,
+                    "model": model,
                 })
             }
             EventKind::BuildTimeout {
@@ -1322,6 +1363,40 @@ impl EventKind {
                 serde_json::json!({ "reason": reason })
             }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
+            EventKind::OtlpDropped {
+                signal,
+                dropped_count,
+                queue_full,
+            } => serde_json::json!({
+                "signal": signal,
+                "dropped_count": dropped_count,
+                "queue_full": queue_full,
+            }),
+            EventKind::OtlpShutdownTimeout {
+                flushed_batches,
+                remaining_batches,
+            } => serde_json::json!({
+                "flushed_batches": flushed_batches,
+                "remaining_batches": remaining_batches,
+            }),
+            EventKind::IdleSleepCompleted {
+                backoff_secs,
+                elapsed_secs,
+                shutdown_checks,
+            } => serde_json::json!({
+                "backoff_secs": backoff_secs,
+                "elapsed_secs": elapsed_secs,
+                "shutdown_checks": shutdown_checks,
+            }),
+            EventKind::IdleSleepEntered {
+                backoff_secs,
+                beads_processed,
+                uptime_secs,
+            } => serde_json::json!({
+                "backoff_secs": backoff_secs,
+                "beads_processed": beads_processed,
+                "uptime_secs": uptime_secs,
+            }),
         }
     }
 
@@ -1415,7 +1490,11 @@ impl EventKind {
             | EventKind::ReflectConsolidated { .. }
             | EventKind::ReflectSkipped { .. }
             | EventKind::MendZeroActivityLogCleaned { .. }
-            | EventKind::SinkError { .. } => None,
+            | EventKind::SinkError { .. }
+            | EventKind::OtlpDropped { .. }
+            | EventKind::OtlpShutdownTimeout { .. }
+            | EventKind::IdleSleepCompleted { .. }
+            | EventKind::IdleSleepEntered { .. } => None,
             EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
         }
     }
@@ -1436,6 +1515,18 @@ pub trait Sink: Send + Sync {
     /// Implementations should respect `deadline`: if flushing cannot complete
     /// within the duration, return an error rather than blocking indefinitely.
     fn flush(&self, deadline: std::time::Duration) -> Result<()>;
+}
+
+/// Blanket impl for Arc-wrapped sinks.
+/// This enables Arc<Sink> to be used wherever Sink is required.
+impl<T: Sink + ?Sized> Sink for Arc<T> {
+    fn accept(&self, event: &TelemetryEvent) -> Result<()> {
+        self.as_ref().accept(event)
+    }
+
+    fn flush(&self, deadline: std::time::Duration) -> Result<()> {
+        self.as_ref().flush(deadline)
+    }
 }
 
 // ─── FileSink ────────────────────────────────────────────────────────────────
@@ -2261,7 +2352,8 @@ impl Telemetry {
         let (sender, receiver) = mpsc::unbounded_channel();
 
         let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
-        let otlp_shutdown = None;
+        let mut otlp_shutdown = None;
+        let mut file_sink: Option<Arc<FileSink>> = None;
 
         // File sink is always created (fallback)
         match FileSink::new(&worker_id, &session_id) {
@@ -2270,7 +2362,11 @@ impl Telemetry {
                 if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
                     tracing::warn!(error = %e, "failed to write boot event directly to file");
                 }
-                sinks.push(Box::new(s));
+                file_sink = Some(Arc::new(s));
+                // Arc<FileSink> implements Sink via the blanket impl
+                if let Some(ref fs) = file_sink {
+                    sinks.push(Box::new(Arc::clone(fs)));
+                }
             }
             Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
@@ -2279,10 +2375,24 @@ impl Telemetry {
         #[cfg(feature = "otlp")]
         {
             if config.otlp_sink.enabled {
-                match OtlpSink::new(worker_id.clone(), session_id.clone(), &config.otlp_sink) {
+                // Convert Arc<FileSink> to Option<Box<dyn Sink>> for OtlpSink
+                let file_sink_for_otlp = file_sink
+                    .as_ref()
+                    .map(|fs| Box::new(Arc::clone(fs)) as Box<dyn Sink>);
+
+                match OtlpSink::new(
+                    worker_id.clone(),
+                    session_id.clone(),
+                    &config.otlp_sink,
+                    file_sink_for_otlp,
+                    None, // agent - not available at config time
+                    None, // model - not available at config time
+                    None, // workspace - not available at config time
+                ) {
                     Ok(otlp) => {
-                        sinks.push(Box::new(otlp.clone()));
-                        otlp_shutdown = Some(OtlpShutdown::Sink(Box::new(otlp)));
+                        let otlp_arc = Arc::new(otlp);
+                        sinks.push(Box::new(Arc::clone(&otlp_arc)));
+                        otlp_shutdown = Some(OtlpShutdown::Sink(otlp_arc));
                         tracing::info!("OTLP sink initialized: {}", config.otlp_sink.endpoint);
                     }
                     Err(e) => {
@@ -2711,6 +2821,26 @@ impl Telemetry {
         if let Some(s) = shutdown {
             if let Err(e) = s.shutdown().await {
                 tracing::warn!(error = %e, "OTLP shutdown failed");
+            }
+        }
+    }
+
+    /// Record the current queue depth for the `needle.queue.depth` observable gauge.
+    ///
+    /// This updates the per-priority counts that the observable gauge callback reads.
+    /// The queue depth should be sampled during strand evaluation (typically after
+    /// the Pluck strand returns candidates).
+    ///
+    /// The `depths` parameter maps priority level -> bead count at that priority.
+    ///
+    /// This is a no-op if the OTLP sink is not configured or if the `otlp`
+    /// feature is disabled.
+    pub fn record_queue_depth(&self, depths: std::collections::HashMap<u8, u64>) {
+        #[cfg(feature = "otlp")]
+        {
+            let shutdown = self.otlp_shutdown.lock().unwrap();
+            if let Some(OtlpShutdown::Sink(sink)) = &*shutdown {
+                sink.record_queue_depth(depths);
             }
         }
     }
@@ -3269,6 +3399,8 @@ mod tests {
         let id = BeadId::from("needle-xyz");
         let kind = EventKind::ClaimSuccess {
             bead_id: id.clone(),
+            priority: 1,
+            strand: "pluck".to_string(),
         };
         assert_eq!(kind.bead_id(), Some(id));
 
@@ -3305,6 +3437,8 @@ mod tests {
             bead_id: BeadId::from("nd-x"),
             exit_code: 0,
             duration_ms: 1234,
+            agent: "claude".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
         };
         assert_eq!(kind.duration_ms(), Some(1234));
 
@@ -3747,6 +3881,8 @@ mod tests {
             },
             EventKind::ClaimSuccess {
                 bead_id: id.clone(),
+                priority: 1,
+                strand: "pluck".to_string(),
             },
             EventKind::ClaimRaceLost {
                 bead_id: id.clone(),
@@ -3782,6 +3918,8 @@ mod tests {
                 bead_id: id.clone(),
                 exit_code: 0,
                 duration_ms: 3000,
+                agent: "claude".to_string(),
+                model: Some("claude-sonnet-4-6".to_string()),
             },
             EventKind::OutcomeClassified {
                 bead_id: id.clone(),
