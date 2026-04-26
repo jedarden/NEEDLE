@@ -20,8 +20,23 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::config::{ColorMode, HookConfig, StdoutFormat, StdoutSinkConfig, TelemetryConfig};
+use crate::config::{
+    ColorMode, HookConfig, OtlpSinkConfig, StdoutFormat, StdoutSinkConfig, TelemetryConfig,
+};
 use crate::types::{BeadId, WorkerId, WorkerState};
+
+// ─── OTLP Sink (feature-gated) ───────────────────────────────────────────────────
+
+#[cfg(feature = "otlp")]
+pub mod otlp;
+
+#[cfg(feature = "otlp")]
+pub use otlp::OtlpSink;
+
+// ─── Test Utilities ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+pub mod test_utils;
 
 // ─── TelemetryEvent ──────────────────────────────────────────────────────────
 
@@ -1258,7 +1273,10 @@ impl EventKind {
                     "age_secs": age_secs,
                 })
             }
-            EventKind::MendZeroActivityLogCleaned { worker_id, log_path } => {
+            EventKind::MendZeroActivityLogCleaned {
+                worker_id,
+                log_path,
+            } => {
                 serde_json::json!({
                     "worker_id": worker_id,
                     "log_path": log_path,
@@ -1461,6 +1479,42 @@ impl FileSink {
     /// Return the path to the log file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Write a boot event directly to the file, bypassing the normal channel.
+    ///
+    /// This is called immediately after FileSink creation to ensure that even if
+    /// the writer thread fails to start, we have a trace in the JSONL file.
+    /// The event is written synchronously and flushed to disk.
+    fn write_boot_event_direct(
+        &self,
+        worker_id: &str,
+        session_id: &str,
+        version: &str,
+    ) -> Result<()> {
+        use std::io::Write;
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "worker.booting".to_string(),
+            worker_id: worker_id.to_string(),
+            session_id: session_id.to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            duration_ms: None,
+            data: serde_json::json!({ "worker_name": worker_id, "version": version }),
+            trace_id: None,
+            span_id: None,
+        };
+        let line = serde_json::to_string(&event)?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
+        writeln!(writer, "{line}")?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        Ok(())
     }
 }
 
@@ -2012,6 +2066,9 @@ pub struct Telemetry {
     /// writer runs in its own dedicated thread with its own tokio runtime,
     /// ensuring it can process messages before the main runtime's block_on().
     writer_handle: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// OTLP sink shutdown handle (feature-gated).
+    /// Stored separately so we can call its async shutdown method.
+    otlp_shutdown: Arc<std::sync::Mutex<Option<OtlpShutdown>>>,
 }
 
 /// Internal message type for the writer task.
@@ -2027,18 +2084,65 @@ struct PendingWriter {
     sinks: Vec<Box<dyn Sink>>,
 }
 
+/// Holds an OTLP sink for async shutdown (feature-gated).
+enum OtlpShutdown {
+    #[cfg(feature = "otlp")]
+    Sink(std::sync::Arc<crate::telemetry::OtlpSink>),
+    #[cfg(not(feature = "otlp"))]
+    None,
+}
+
+impl OtlpShutdown {
+    /// Shutdown the OTLP sink gracefully.
+    ///
+    /// This drains all batched exports before returning.
+    #[cfg(feature = "otlp")]
+    async fn shutdown(self) -> Result<()> {
+        match self {
+            OtlpShutdown::Sink(sink) => {
+                // We need to extract the OtlpSink from Arc to call shutdown
+                // Try to unwrap the Arc - if there are other references, we'll force_flush instead
+                match std::sync::Arc::try_unwrap(sink) {
+                    Ok(otlp) => otlp.shutdown().await,
+                    Err(_) => {
+                        tracing::warn!("Cannot shutdown OTLP sink: Arc has multiple references");
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    /// No-op shutdown when OTLP feature is disabled.
+    #[cfg(not(feature = "otlp"))]
+    async fn shutdown(self) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl Telemetry {
     /// Create a telemetry emitter that writes to a `FileSink`.
     ///
     /// Does not spawn any async tasks. Call [`start()`](Self::start) from
     /// within a tokio runtime context before emitting events.
+    ///
+    /// Writes `worker.booting` directly to the file before returning, so even
+    /// if the writer thread fails to start, we have a trace in the JSONL log.
     pub fn new(worker_id: WorkerId) -> Self {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
         let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
         match FileSink::new(&worker_id, &session_id) {
-            Ok(s) => sinks.push(Box::new(s)),
+            Ok(s) => {
+                // Write boot event directly to file BEFORE spawning writer thread.
+                // This ensures we have a trace even if the writer thread fails to start.
+                let version = env!("CARGO_PKG_VERSION");
+                if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    tracing::warn!(error = %e, "failed to write boot event directly to file");
+                }
+                sinks.push(Box::new(s));
+            }
             Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
 
@@ -2052,6 +2156,7 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2059,13 +2164,23 @@ impl Telemetry {
     ///
     /// Does not spawn any async tasks. Call [`start()`](Self::start) from
     /// within a tokio runtime context before emitting events.
+    ///
+    /// Writes `worker.booting` directly to the file before returning, so even
+    /// if the writer thread fails to start, we have a trace in the JSONL log.
     pub fn with_stdout(worker_id: WorkerId, stdout_config: &StdoutSinkConfig) -> Self {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
         let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
         match FileSink::new(&worker_id, &session_id) {
-            Ok(s) => sinks.push(Box::new(s)),
+            Ok(s) => {
+                // Write boot event directly to file BEFORE spawning writer thread.
+                let version = env!("CARGO_PKG_VERSION");
+                if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    tracing::warn!(error = %e, "failed to write boot event directly to file");
+                }
+                sinks.push(Box::new(s));
+            }
             Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
         if stdout_config.enabled {
@@ -2082,6 +2197,7 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2089,6 +2205,9 @@ impl Telemetry {
     ///
     /// Does not spawn any async tasks. Call [`start()`](Self::start) from
     /// within a tokio runtime context before emitting events.
+    ///
+    /// Writes `worker.booting` directly to the file before returning, so even
+    /// if the writer thread fails to start, we have a trace in the JSONL log.
     pub fn with_hooks(
         worker_id: WorkerId,
         stdout_config: &StdoutSinkConfig,
@@ -2099,7 +2218,14 @@ impl Telemetry {
 
         let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
         match FileSink::new(&worker_id, &session_id) {
-            Ok(s) => sinks.push(Box::new(s)),
+            Ok(s) => {
+                // Write boot event directly to file BEFORE spawning writer thread.
+                let version = env!("CARGO_PKG_VERSION");
+                if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    tracing::warn!(error = %e, "failed to write boot event directly to file");
+                }
+                sinks.push(Box::new(s));
+            }
             Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
         if stdout_config.enabled {
@@ -2119,23 +2245,75 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
     /// Create a telemetry emitter from a `TelemetryConfig`.
     ///
     /// Selects the right constructor based on configured sinks:
-    /// - Hooks configured → [`with_hooks`](Self::with_hooks)
-    /// - Stdout enabled   → [`with_stdout`](Self::with_stdout)
-    /// - Otherwise        → [`new`](Self::new) (file sink only)
+    /// - OTLP enabled       → creates OTLP sink with async shutdown
+    /// - Hooks configured   → [`with_hooks`](Self::with_hooks)
+    /// - Stdout enabled     → [`with_stdout`](Self::with_stdout)
+    /// - Otherwise          → [`new`](Self::new) (file sink only)
     pub fn from_config(worker_id: WorkerId, config: &TelemetryConfig) -> Result<Self> {
-        if !config.hooks.is_empty() {
-            Self::with_hooks(worker_id, &config.stdout_sink, &config.hooks)
-        } else if config.stdout_sink.enabled {
-            Ok(Self::with_stdout(worker_id, &config.stdout_sink))
-        } else {
-            Ok(Self::new(worker_id))
+        let session_id = generate_session_id();
+        let (sender, receiver) = mpsc::unbounded_channel();
+
+        let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
+        let otlp_shutdown = None;
+
+        // File sink is always created (fallback)
+        match FileSink::new(&worker_id, &session_id) {
+            Ok(s) => {
+                let version = env!("CARGO_PKG_VERSION");
+                if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    tracing::warn!(error = %e, "failed to write boot event directly to file");
+                }
+                sinks.push(Box::new(s));
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
+
+        // OTLP sink (feature-gated)
+        #[cfg(feature = "otlp")]
+        {
+            if config.otlp_sink.enabled {
+                match OtlpSink::new(worker_id.clone(), session_id.clone(), &config.otlp_sink) {
+                    Ok(otlp) => {
+                        sinks.push(Box::new(otlp.clone()));
+                        otlp_shutdown = Some(OtlpShutdown::Sink(Box::new(otlp)));
+                        tracing::info!("OTLP sink initialized: {}", config.otlp_sink.endpoint);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to create OTLP sink, continuing without it");
+                    }
+                }
+            }
+        }
+
+        // Stdout sink
+        if config.stdout_sink.enabled {
+            sinks.push(Box::new(StdoutSink::new(&config.stdout_sink)));
+        }
+
+        // Hook sinks
+        if !config.hooks.is_empty() {
+            sinks.push(Box::new(HookSink::new(&config.hooks)?));
+        }
+
+        let sequence = Arc::new(AtomicU64::new(0));
+        let pending = PendingWriter { receiver, sinks };
+
+        Ok(Telemetry {
+            worker_id,
+            session_id,
+            sequence,
+            sender: Arc::new(std::sync::Mutex::new(Some(sender))),
+            pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
+            writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(otlp_shutdown)),
+        })
     }
 
     /// Create a telemetry emitter backed by a real `FileSink` in a custom
@@ -2154,6 +2332,9 @@ impl Telemetry {
         let (sender, receiver) = mpsc::unbounded_channel();
         let file_sink = FileSink::with_dir(log_dir, &worker_id, &session_id)?;
         let path = file_sink.path().to_path_buf();
+        // Write boot event directly to file (for consistency with production code).
+        let version = env!("CARGO_PKG_VERSION");
+        let _ = file_sink.write_boot_event_direct(&worker_id, &session_id, version);
         let sequence = Arc::new(AtomicU64::new(0));
         let sinks: Vec<Box<dyn Sink>> = vec![Box::new(file_sink)];
         let pending = PendingWriter { receiver, sinks };
@@ -2165,6 +2346,7 @@ impl Telemetry {
                 sender: Arc::new(std::sync::Mutex::new(Some(sender))),
                 pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
                 writer_handle: Arc::new(std::sync::Mutex::new(None)),
+                otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
             },
             path,
         ))
@@ -2184,6 +2366,7 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2212,6 +2395,7 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(None)),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2356,7 +2540,9 @@ impl Telemetry {
                 }
             }
             Err(_) => {
-                tracing::warn!("telemetry sender lock contended in force_flush_async, skipping flush");
+                tracing::warn!(
+                    "telemetry sender lock contended in force_flush_async, skipping flush"
+                );
                 return Ok(()); // Don't fail — the writer will eventually flush
             }
         }
@@ -2447,6 +2633,7 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2512,6 +2699,22 @@ impl Telemetry {
         }
     }
 
+    /// Shut down the OTLP sink gracefully (if enabled).
+    ///
+    /// This drains all batched OTLP exports before returning. Should be called
+    /// once at process exit, before the Tokio runtime is dropped.
+    ///
+    /// This is a no-op if the OTLP sink is not configured or if the `otlp`
+    /// feature is disabled.
+    pub async fn shutdown_otlp(&self) {
+        let shutdown = self.otlp_shutdown.lock().unwrap().take();
+        if let Some(s) = shutdown {
+            if let Err(e) = s.shutdown().await {
+                tracing::warn!(error = %e, "OTLP shutdown failed");
+            }
+        }
+    }
+
     /// Spawn background writer task draining the channel to all registered sinks.
     ///
     /// Spawns a dedicated thread with its own tokio runtime so the writer task
@@ -2531,7 +2734,10 @@ impl Telemetry {
                 Ok(r) => r,
                 Err(e) => {
                     // Fallback to stderr when tracing may not be initialized yet
-                    eprintln!("NEEDLE telemetry writer thread: FAILED to create tokio runtime: {}", e);
+                    eprintln!(
+                        "NEEDLE telemetry writer thread: FAILED to create tokio runtime: {}",
+                        e
+                    );
                     tracing::error!(error = %e, "failed to create writer runtime");
                     // Signal that we failed (by dropping the sender without sending)
                     drop(ready_signal);
@@ -3385,10 +3591,7 @@ mod tests {
 
         // emit() should return Ok(()) without blocking when lock is contended.
         let result = telemetry.emit(EventKind::QueueEmpty);
-        assert!(
-            result.is_ok(),
-            "emit should not error on contention"
-        );
+        assert!(result.is_ok(), "emit should not error on contention");
 
         // Drop the guard and cleanup.
         drop(_guard);
@@ -4705,11 +4908,15 @@ mod tests {
         assert_eq!(trace_id.len(), 32, "trace_id should be 32 hex chars");
         assert_eq!(span_id.len(), 16, "span_id should be 16 hex chars");
         assert!(
-            trace_id.chars().all(|c| c.is_ascii_hexdigit() && c.is_lowercase()),
+            trace_id
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && c.is_lowercase()),
             "trace_id should be lowercase hex"
         );
         assert!(
-            span_id.chars().all(|c| c.is_ascii_hexdigit() && c.is_lowercase()),
+            span_id
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && c.is_lowercase()),
             "span_id should be lowercase hex"
         );
     }

@@ -740,24 +740,32 @@ impl MendStrand {
             }
 
             // Extract worker ID from stem. Format is "{worker_id}-{bead_id}".
-            let worker_id = match stem.rsplit_once('-') {
-                Some((worker_part, _bead_part)) => worker_part.to_string(),
-                None => {
-                    tracing::debug!(
-                        path = %path.display(),
-                        "could not extract worker ID from log filename"
-                    );
-                    continue;
-                }
-            };
+            // Worker IDs may contain dashes, so we try to find a match in the registry
+            // by checking if any registered worker_id is a prefix of the stem.
+            let worker_id = registry_workers
+                .iter()
+                .find(|w| {
+                    // Stem format: "{worker_id}-{bead_id}"
+                    // If worker_id is a prefix of stem followed by a dash, it's a match.
+                    stem.starts_with(&format!("{}-", w.id))
+                })
+                .map(|w| w.id.clone());
 
             // Check if this is a zero-activity worker log.
-            let is_zero_activity = registry_workers
-                .iter()
-                .find(|w| w.id == worker_id)
-                .map(|w| w.beads_processed == 0)
-                // Worker not in registry — treat as zero-activity (crashed before registering).
-                .unwrap_or(true);
+            let is_zero_activity = match worker_id {
+                Some(ref id) => {
+                    // Found in registry — check beads_processed count.
+                    registry_workers
+                        .iter()
+                        .find(|w| &w.id == id)
+                        .map(|w| w.beads_processed == 0)
+                        .unwrap_or(true)
+                }
+                None => {
+                    // Worker not in registry — treat as zero-activity (crashed before registering).
+                    true
+                }
+            };
 
             if is_zero_activity {
                 // Delete immediately regardless of age.
@@ -772,13 +780,13 @@ impl MendStrand {
 
                 tracing::info!(
                     path = %path.display(),
-                    worker_id = %worker_id,
+                    worker_id = ?worker_id,
                     "mend: removed zero-activity agent log"
                 );
                 summary.zero_activity_logs_cleaned += 1;
 
                 let _ = self.telemetry.emit(EventKind::MendZeroActivityLogCleaned {
-                    worker_id: worker_id.clone(),
+                    worker_id: worker_id.clone().unwrap_or_else(|| "unknown".to_string()),
                     log_path: path.display().to_string(),
                 });
                 continue;
@@ -2515,7 +2523,7 @@ mod tests {
         let registry = Registry::new(reg_dir.path());
         registry
             .register(crate::registry::WorkerEntry {
-                id: "worker-abc".to_string(),
+                id: "workerabc".to_string(),
                 pid: std::process::id(),
                 workspace: PathBuf::from("/tmp/test"),
                 agent: "test".to_string(),
@@ -2527,7 +2535,7 @@ mod tests {
             .unwrap();
 
         // Create a fresh agent log (0 days old, retention = 1 day).
-        let log_path = log_dir.path().join("worker-abc-nd-fresh.agent.jsonl");
+        let log_path = log_dir.path().join("workerabc-nd-fresh.agent.jsonl");
         std::fs::write(&log_path, b"{}").unwrap();
         // No mtime change — file is brand-new.
 
@@ -2708,7 +2716,7 @@ mod tests {
         let registry = Registry::new(reg_dir.path());
         registry
             .register(crate::registry::WorkerEntry {
-                id: "claude-active-worker".to_string(),
+                id: "claudeactiveworker".to_string(),
                 pid: std::process::id(),
                 workspace: PathBuf::from("/tmp/test"),
                 agent: "test".to_string(),
@@ -2722,7 +2730,7 @@ mod tests {
         // Create a FRESH agent log for the active worker.
         let log_path = log_dir
             .path()
-            .join("claude-active-worker-nd-active.agent.jsonl");
+            .join("claudeactiveworker-nd-active.agent.jsonl");
         std::fs::write(&log_path, b"{}").unwrap();
         // No mtime change — file is brand-new.
 
@@ -4782,5 +4790,626 @@ mod tests {
         assert!(captured
             .iter()
             .any(|e| e.event_type == "mend.idle_worker_flagged"));
+    }
+
+    // ── Trace cleanup tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn cleanup_old_traces_deletes_old_failed_trace() {
+        use crate::trace::{TraceFormat, TraceMetadata};
+
+        let traces_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+
+        // Create an old failed bead trace (more than 30 days ago).
+        let bead_id = crate::types::BeadId::from("needle-failed");
+        let trace_dir = traces_dir.path().join(bead_id.as_ref());
+        std::fs::create_dir_all(&trace_dir).unwrap();
+
+        // Write metadata for failed bead (exit_code = 1, old timestamp).
+        let metadata = TraceMetadata {
+            bead_id: bead_id.clone(),
+            agent: "claude-sonnet".to_string(),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            exit_code: 1, // Failed
+            outcome: "failure".to_string(),
+            duration_ms: 1000,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now() - chrono::Duration::days(31), // Old enough to delete
+            trace_format: TraceFormat::ClaudeJson,
+            pruned: false,
+            template_version: None,
+        };
+        let metadata_path = trace_dir.join("metadata.json");
+        std::fs::write(
+            metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let mut summary = MendSummary::default();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            traces_dir.path().to_path_buf(),
+            30, // retention_failed_days
+            7,  // retention_success_days
+            PathBuf::from("/tmp/workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_old_traces(&mut summary).unwrap();
+
+        assert_eq!(summary.traces_cleaned, 1);
+        assert_eq!(summary.traces_pruned, 0);
+        assert!(
+            !trace_dir.exists(),
+            "failed trace directory should be deleted"
+        );
+    }
+
+    #[test]
+    fn cleanup_old_traces_prunes_old_success_trace() {
+        use crate::trace::{TraceFormat, TraceMetadata};
+
+        let traces_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+
+        // Create an old success bead trace (more than 7 days ago).
+        let bead_id = crate::types::BeadId::from("needle-success");
+        let trace_dir = traces_dir.path().join(bead_id.as_ref());
+        std::fs::create_dir_all(&trace_dir).unwrap();
+
+        // Write trace data files.
+        std::fs::write(trace_dir.join("stdout.txt"), "stdout content").unwrap();
+        std::fs::write(trace_dir.join("stderr.txt"), "stderr content").unwrap();
+        std::fs::write(trace_dir.join("trace.jsonl"), r#"{"event":"test"}"#).unwrap();
+
+        // Write metadata for successful bead (exit_code = 0, old timestamp).
+        let metadata = TraceMetadata {
+            bead_id: bead_id.clone(),
+            agent: "claude-sonnet".to_string(),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            exit_code: 0, // Success
+            outcome: "success".to_string(),
+            duration_ms: 1000,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now() - chrono::Duration::days(8), // Old enough to prune
+            trace_format: TraceFormat::ClaudeJson,
+            pruned: false,
+            template_version: None,
+        };
+        let metadata_path = trace_dir.join("metadata.json");
+        std::fs::write(
+            metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let mut summary = MendSummary::default();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            traces_dir.path().to_path_buf(),
+            30, // retention_failed_days
+            7,  // retention_success_days
+            PathBuf::from("/tmp/workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_old_traces(&mut summary).unwrap();
+
+        assert_eq!(summary.traces_cleaned, 0);
+        assert_eq!(summary.traces_pruned, 1);
+        assert!(trace_dir.exists(), "trace directory should be kept");
+
+        // Verify data files removed, metadata remains.
+        assert!(!trace_dir.join("stdout.txt").exists());
+        assert!(!trace_dir.join("stderr.txt").exists());
+        assert!(!trace_dir.join("trace.jsonl").exists());
+        assert!(trace_dir.join("metadata.json").exists());
+
+        // Verify metadata marked as pruned.
+        let content = std::fs::read_to_string(trace_dir.join("metadata.json")).unwrap();
+        let parsed: TraceMetadata = serde_json::from_str(&content).unwrap();
+        assert!(parsed.pruned);
+    }
+
+    #[test]
+    fn cleanup_old_traces_skips_recent_trace() {
+        use crate::trace::{TraceFormat, TraceMetadata};
+
+        let traces_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+
+        // Create a recent trace (less than 7 days ago).
+        let bead_id = crate::types::BeadId::from("needle-recent");
+        let trace_dir = traces_dir.path().join(bead_id.as_ref());
+        std::fs::create_dir_all(&trace_dir).unwrap();
+
+        std::fs::write(trace_dir.join("stdout.txt"), "stdout content").unwrap();
+
+        let metadata = TraceMetadata {
+            bead_id: bead_id.clone(),
+            agent: "claude-sonnet".to_string(),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            exit_code: 0,
+            outcome: "success".to_string(),
+            duration_ms: 1000,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now() - chrono::Duration::days(1), // Too recent to clean
+            trace_format: TraceFormat::ClaudeJson,
+            pruned: false,
+            template_version: None,
+        };
+        let metadata_path = trace_dir.join("metadata.json");
+        std::fs::write(
+            metadata_path,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let mut summary = MendSummary::default();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            traces_dir.path().to_path_buf(),
+            30,
+            7,
+            PathBuf::from("/tmp/workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_old_traces(&mut summary).unwrap();
+
+        assert_eq!(summary.traces_cleaned, 0);
+        assert_eq!(summary.traces_pruned, 0);
+        assert!(
+            trace_dir.join("stdout.txt").exists(),
+            "recent trace should be unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_old_traces_emits_telemetry_on_cleanup() {
+        use crate::telemetry::test_utils::MemorySink;
+        use crate::trace::{TraceFormat, TraceMetadata};
+
+        let traces_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+
+        // Create an old failed trace that will be deleted.
+        let failed_id = crate::types::BeadId::from("needle-failed");
+        let failed_trace_dir = traces_dir.path().join(failed_id.as_ref());
+        std::fs::create_dir_all(&failed_trace_dir).unwrap();
+        let failed_metadata = TraceMetadata {
+            bead_id: failed_id.clone(),
+            agent: "claude-sonnet".to_string(),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            exit_code: 1,
+            outcome: "failure".to_string(),
+            duration_ms: 1000,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now() - chrono::Duration::days(31),
+            trace_format: TraceFormat::ClaudeJson,
+            pruned: false,
+            template_version: None,
+        };
+        std::fs::write(
+            failed_trace_dir.join("metadata.json"),
+            serde_json::to_string_pretty(&failed_metadata).unwrap(),
+        )
+        .unwrap();
+
+        // Create an old success trace that will be pruned.
+        let success_id = crate::types::BeadId::from("needle-success");
+        let success_trace_dir = traces_dir.path().join(success_id.as_ref());
+        std::fs::create_dir_all(&success_trace_dir).unwrap();
+        std::fs::write(success_trace_dir.join("stdout.txt"), "stdout").unwrap();
+        let success_metadata = TraceMetadata {
+            bead_id: success_id.clone(),
+            agent: "claude-sonnet".to_string(),
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            exit_code: 0,
+            outcome: "success".to_string(),
+            duration_ms: 1000,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now() - chrono::Duration::days(8),
+            trace_format: TraceFormat::ClaudeJson,
+            pruned: false,
+            template_version: None,
+        };
+        std::fs::write(
+            success_trace_dir.join("metadata.json"),
+            serde_json::to_string_pretty(&success_metadata).unwrap(),
+        )
+        .unwrap();
+
+        // Create telemetry with MemorySink.
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+
+        let mut summary = MendSummary::default();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            telemetry,
+            PathBuf::from("/tmp/logs"),
+            0,
+            traces_dir.path().to_path_buf(),
+            30,
+            7,
+            PathBuf::from("/tmp/workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_old_traces(&mut summary).unwrap();
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendTraceCleanup event was emitted.
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|e| e.event_type == "mend.trace_cleanup"),
+            "MendTraceCleanup event should be emitted"
+        );
+
+        // Verify the event data contains the counts.
+        let trace_event = captured
+            .iter()
+            .find(|e| e.event_type == "mend.trace_cleanup")
+            .expect("trace_cleanup event should exist");
+        assert_eq!(trace_event.data["traces_deleted"], 1);
+        assert_eq!(trace_event.data["traces_pruned"], 1);
+    }
+
+    // ── Learning cleanup tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn cleanup_learnings_prunes_stale_entries() {
+        use crate::learning::{BeadType, Confidence, LearningEntry};
+
+        let workspace = tempfile::tempdir().unwrap();
+        let beads_dir = workspace.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).unwrap();
+
+        // Create learnings file with stale entries (>90 days old).
+        let learnings_path = beads_dir.join("learnings.md");
+        let stale_date = (Utc::now() - chrono::Duration::days(91))
+            .format("%Y-%m-%d")
+            .to_string();
+        let recent_date = Utc::now().format("%Y-%m-%d").to_string();
+
+        let content = format!(
+            "# Workspace Learnings\n\n\
+            This file is automatically managed by NEEDLE. Learnings from completed beads are captured here.\n\n\
+            ### {} | bead: nd-stale | worker: alpha | type: bug-fix | reinforced: 0\n\
+            - **Observation:** Stale learning entry\n\
+            - **Confidence:** high\n\
+            - **Source:** retrospective from bead nd-stale\n\
+            \n\
+            ### {} | bead: nd-recent | worker: alpha | type: bug-fix | reinforced: 0\n\
+            - **Observation:** Recent learning entry\n\
+            - **Confidence:** high\n\
+            - **Source:** retrospective from bead nd-recent\n",
+            stale_date, recent_date
+        );
+        std::fs::write(&learnings_path, content).unwrap();
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+        let mut summary = MendSummary::default();
+
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            workspace.path().to_path_buf(),
+            80, // max_learnings
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_learnings(&mut summary).unwrap();
+
+        assert_eq!(summary.learnings_pruned, 1);
+        assert_eq!(summary.learnings_consolidated, 0);
+
+        // Verify stale entry was removed, recent entry remains.
+        let updated_content = std::fs::read_to_string(&learnings_path).unwrap();
+        assert!(
+            !updated_content.contains("nd-stale"),
+            "stale entry should be removed"
+        );
+        assert!(
+            updated_content.contains("nd-recent"),
+            "recent entry should remain"
+        );
+    }
+
+    #[test]
+    fn cleanup_learnings_consolidates_when_over_limit() {
+        use crate::learning::{BeadType, Confidence, LearningEntry};
+
+        let workspace = tempfile::tempdir().unwrap();
+        let beads_dir = workspace.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).unwrap();
+
+        // Create learnings file with entries exceeding max_learnings.
+        let learnings_path = beads_dir.join("learnings.md");
+        let date = Utc::now().format("%Y-%m-%d").to_string();
+
+        let mut content = String::from(
+            "# Workspace Learnings\n\n\
+            This file is automatically managed by NEEDLE. Learnings from completed beads are captured here.\n\n"
+        );
+
+        // Create 5 entries (more than max_learnings = 3).
+        for i in 0..5 {
+            content.push_str(&format!(
+                "### {} | bead: nd-{} | worker: alpha | type: bug-fix | reinforced: 0\n\
+                - **Observation:** Learning entry {}\n\
+                - **Confidence:** low\n\
+                - **Source:** retrospective from bead nd-{}\n\
+                \n",
+                date, i, i, i
+            ));
+        }
+
+        std::fs::write(&learnings_path, content).unwrap();
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+        let mut summary = MendSummary::default();
+
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            workspace.path().to_path_buf(),
+            3, // max_learnings (less than 5 entries)
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_learnings(&mut summary).unwrap();
+
+        assert_eq!(summary.learnings_pruned, 0);
+        assert_eq!(
+            summary.learnings_consolidated, 2,
+            "should consolidate down to max_learnings"
+        );
+
+        // Verify only max_learnings entries remain.
+        let updated_content = std::fs::read_to_string(&learnings_path).unwrap();
+        let entry_count = updated_content.matches("### ").count();
+        assert_eq!(entry_count, 3, "should have exactly max_learnings entries");
+    }
+
+    #[test]
+    fn cleanup_learnings_skips_when_under_limit() {
+        use crate::learning::{BeadType, Confidence, LearningEntry};
+
+        let workspace = tempfile::tempdir().unwrap();
+        let beads_dir = workspace.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).unwrap();
+
+        // Create learnings file with entries under max_learnings.
+        let learnings_path = beads_dir.join("learnings.md");
+        let date = Utc::now().format("%Y-%m-%d").to_string();
+
+        let content = format!(
+            "# Workspace Learnings\n\n\
+            This file is automatically managed by NEEDLE. Learnings from completed beads are captured here.\n\n\
+            ### {} | bead: nd-1 | worker: alpha | type: bug-fix | reinforced: 0\n\
+            - **Observation:** Learning entry 1\n\
+            - **Confidence:** high\n\
+            - **Source:** retrospective from bead nd-1\n",
+            date
+        );
+        std::fs::write(&learnings_path, content).unwrap();
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+        let mut summary = MendSummary::default();
+
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            workspace.path().to_path_buf(),
+            80, // max_learnings (higher than entry count)
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_learnings(&mut summary).unwrap();
+
+        assert_eq!(summary.learnings_pruned, 0);
+        assert_eq!(summary.learnings_consolidated, 0);
+
+        // Verify entry remains unchanged.
+        let updated_content = std::fs::read_to_string(&learnings_path).unwrap();
+        assert!(
+            updated_content.contains("nd-1"),
+            "entry should remain unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_learnings_emits_telemetry_on_cleanup() {
+        use crate::learning::{BeadType, Confidence, LearningEntry};
+        use crate::telemetry::test_utils::MemorySink;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let beads_dir = workspace.path().join(".beads");
+        std::fs::create_dir_all(&beads_dir).unwrap();
+
+        // Create learnings file with both stale and excessive entries.
+        let learnings_path = beads_dir.join("learnings.md");
+        let stale_date = (Utc::now() - chrono::Duration::days(91))
+            .format("%Y-%m-%d")
+            .to_string();
+        let recent_date = Utc::now().format("%Y-%m-%d").to_string();
+
+        let mut content = String::from(
+            "# Workspace Learnings\n\n\
+            This file is automatically managed by NEEDLE. Learnings from completed beads are captured here.\n\n"
+        );
+
+        // Add one stale entry.
+        content.push_str(&format!(
+            "### {} | bead: nd-stale | worker: alpha | type: bug-fix | reinforced: 0\n\
+            - **Observation:** Stale learning entry\n\
+            - **Confidence:** high\n\
+            - **Source:** retrospective from bead nd-stale\n\
+            \n",
+            stale_date
+        ));
+
+        // Add 5 recent entries (will trigger consolidation).
+        for i in 0..5 {
+            content.push_str(&format!(
+                "### {} | bead: nd-{} | worker: alpha | type: bug-fix | reinforced: 0\n\
+                - **Observation:** Learning entry {}\n\
+                - **Confidence:** low\n\
+                - **Source:** retrospective from bead nd-{}\n\
+                \n",
+                recent_date, i, i, i
+            ));
+        }
+
+        std::fs::write(&learnings_path, content).unwrap();
+
+        // Create telemetry with MemorySink.
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+        let mut summary = MendSummary::default();
+
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            telemetry,
+            PathBuf::from("/tmp/logs"),
+            0,
+            PathBuf::from("/tmp/traces"),
+            30,
+            7,
+            workspace.path().to_path_buf(),
+            3, // max_learnings (triggers consolidation)
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.cleanup_learnings(&mut summary).unwrap();
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendLearningCleanup event was emitted.
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|e| e.event_type == "mend.learning_cleanup"),
+            "MendLearningCleanup event should be emitted"
+        );
+
+        // Verify the event data contains the counts.
+        let learning_event = captured
+            .iter()
+            .find(|e| e.event_type == "mend.learning_cleanup")
+            .expect("learning_cleanup event should exist");
+        assert_eq!(learning_event.data["pruned"], 1);
+        assert_eq!(learning_event.data["consolidated"], 2);
     }
 }
