@@ -2882,7 +2882,7 @@ mod tests {
     /// within 6 seconds even if the collector is hung.
     #[tokio::test]
     async fn test_acceptance_shutdown_completes_within_6s() {
-        const SHUTDOWN_DEADLINE_SECS: u64 = 5;
+        const _SHUTDOWN_DEADLINE_SECS: u64 = 5;
         const MAX_ACCEPTABLE_SECS: u64 = 6;
 
         let (sink, _events) = make_test_sink_with_file();

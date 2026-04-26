@@ -2,7 +2,7 @@
 
 This file is automatically managed by NEEDLE. Learnings from completed beads are captured here.
 
-### 2026-04-04 | bead: needle-wysd.2.3 | worker: bravo | type: other | reinforced: 413
+### 2026-04-04 | bead: needle-wysd.2.3 | worker: bravo | type: other | reinforced: 417
 - **Observation:** For new modules: create src/module/mod.rs, add to lib.rs, include tests in #[cfg(test)] module
 - **Confidence:** high
 - **Source:** reusable-pattern from needle-wysd.2.3
@@ -22,7 +22,7 @@ This file is automatically managed by NEEDLE. Learnings from completed beads are
 - **Confidence:** low
 - **Source:** what-didnt-work from needle-49vt
 
-### 2026-04-21 | bead: needle-jy7b | worker: india | type: other | reinforced: 81
+### 2026-04-21 | bead: needle-jy7b | worker: india | type: other | reinforced: 84
 - **Observation:** Following existing ReflectConfig patterns (default functions, serde attributes) made integration seamless; all 858 tests passed on first run
 - **Confidence:** medium
 - **Source:** what-worked from needle-jy7b
@@ -41,4 +41,14 @@ This file is automatically managed by NEEDLE. Learnings from completed beads are
 - **Observation:** Nothing failed; straightforward dependency addition.
 - **Confidence:** low
 - **Source:** what-didnt-work from needle-ry21.1
+
+### 2026-04-26 | bead: needle-9hu7 | worker: charlie | type: other | reinforced: 2
+- **Observation:** Found that the rate limiter uses the registry (which filters dead PIDs) for concurrency checks, so no explicit reconciliation is needed
+- **Confidence:** medium
+- **Source:** surprise from needle-9hu7
+
+### 2026-04-26 | bead: needle-vqm7 | worker: india | type: other | reinforced: 1
+- **Observation:** The telemetry infrastructure was already well-designed — the EventKind enum, event name mappings, and styling were all in place. Only the actual emission call was missing.
+- **Confidence:** medium
+- **Source:** what-worked from needle-vqm7
 

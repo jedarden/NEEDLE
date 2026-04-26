@@ -14,8 +14,8 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
@@ -140,6 +140,7 @@ struct AtexitWorkerState {
     beads_processed: u64,
     start_time: Instant,
     last_state: String,
+    log_file_path: Option<String>,
 }
 
 /// Register the atexit handler with worker state.
@@ -151,12 +152,14 @@ fn register_atexit_handler(
     beads_processed: u64,
     start_time: Instant,
     last_state: String,
+    log_file_path: Option<String>,
 ) {
     let state = AtexitWorkerState {
         worker_name,
         beads_processed,
         start_time,
         last_state,
+        log_file_path,
     };
     *ATEXIT_WORKER_STATE.lock().unwrap() = Some(state);
 
@@ -171,6 +174,31 @@ fn register_atexit_handler(
                 state.worker_name, state.last_state, state.beads_processed, uptime
             );
             eprintln!("This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)");
+
+            // Try to write a worker.stopped event to the JSONL log file.
+            // This provides diagnostic information even when the worker is killed abruptly.
+            if let Some(ref log_path) = state.log_file_path {
+                use std::fs::OpenOptions;
+                use std::io::Write;
+
+                let event = serde_json::json!({
+                    "event_type": "worker.stopped",
+                    "timestamp": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    "data": {
+                        "worker_id": state.worker_name,
+                        "reason": "external_kill",
+                        "beads_processed": state.beads_processed,
+                        "uptime_secs": uptime,
+                        "final_state": state.last_state,
+                        "via_atexit_handler": true
+                    }
+                });
+
+                if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+                    let _ = writeln!(file, "{}", event);
+                    let _ = file.flush();
+                }
+            }
         }
     }
 
@@ -184,7 +212,7 @@ fn register_atexit_handler(
 ///
 /// Called by `set_state` to keep the atexit handler's last state fresh.
 fn update_atexit_state(last_state: String) {
-    if let Some(mut state) = ATEXIT_WORKER_STATE.lock().unwrap().as_mut() {
+    if let Some(state) = ATEXIT_WORKER_STATE.lock().unwrap().as_mut() {
         state.last_state = last_state;
     }
 }
@@ -207,6 +235,7 @@ fn register_atexit_handler(
     _beads_processed: u64,
     _start_time: Instant,
     _last_state: String,
+    _log_file_path: Option<String>,
 ) {
     // No-op on non-Unix platforms
 }
@@ -863,6 +892,7 @@ impl Worker {
             self.beads_processed,
             start_time,
             format!("{:?}", self.state),
+            None, // log_file_path - not available during boot
         );
 
         #[cfg(unix)]
@@ -1363,7 +1393,7 @@ impl Worker {
         let model = adapter.model.as_deref();
 
         // Enter the agent.dispatch span for the dispatching phase.
-        let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
+        let _bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
         let dispatch_span = tracing::info_span!(
             "agent.dispatch",
             gen_ai.system = %provider.unwrap_or("unknown"),
@@ -2188,6 +2218,21 @@ impl Worker {
                     backoff_seconds: backoff,
                 })?;
 
+                // Emit diagnostic event BEFORE updating state to ensure we have
+                // a record even if the worker dies during the state update.
+                if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
+                    bead_id: None,
+                    state: "EXHAUSTED_PRE_IDLE".to_string(),
+                }) {
+                    tracing::warn!(error = %e, "failed to emit pre-idle heartbeat, continuing anyway");
+                }
+
+                // Force-flush to ensure the diagnostic event is written.
+                let _ = self
+                    .telemetry
+                    .force_flush_async(std::time::Duration::from_secs(1))
+                    .await;
+
                 // Update heartbeat immediately before entering idle sleep so external
                 // monitoring has a fresh timestamp. If the worker dies during the
                 // idle period, the heartbeat file will become stale and can be detected.
@@ -2196,6 +2241,20 @@ impl Worker {
                     None,
                     Some(self.current_workspace.as_path()),
                 );
+
+                // Emit diagnostic event AFTER state update to confirm it succeeded.
+                if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
+                    bead_id: None,
+                    state: "EXHAUSTED_POST_IDLE_UPDATE".to_string(),
+                }) {
+                    tracing::warn!(error = %e, "failed to emit post-update heartbeat, continuing anyway");
+                }
+
+                // Force-flush to ensure the diagnostic event is written.
+                let _ = self
+                    .telemetry
+                    .force_flush_async(std::time::Duration::from_secs(1))
+                    .await;
 
                 // Cancellable sleep: check shutdown flag every 1 second instead of
                 // sleeping for the full duration. This ensures the worker responds to
@@ -2209,19 +2268,12 @@ impl Worker {
                 // Emit an initial heartbeat to show we're entering idle sleep.
                 // This ensures there's at least one diagnostic event even if the
                 // worker dies before the first sleep iteration completes.
-                tracing::debug!(
-                    backoff_secs = backoff,
-                    check_interval_secs = check_interval,
-                    "about to emit initial idle heartbeat event"
-                );
                 if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
                     bead_id: None,
                     state: "EXHAUSTED_IDLE".to_string(),
                 }) {
                     tracing::warn!(error = %e, "failed to emit initial idle heartbeat, continuing anyway");
                 }
-
-                tracing::debug!(backoff_secs = backoff, "entering idle sleep loop");
 
                 // Emit diagnostic event to help identify external killer.
                 // This event is emitted before the sleep loop starts so that if the worker
@@ -2234,14 +2286,37 @@ impl Worker {
                     tracing::warn!(error = %e, "failed to emit idle_sleep_entered event");
                 }
 
+                // Write a marker file to indicate the worker has entered idle sleep.
+                // This provides diagnostic information even if telemetry is not flushed
+                // (e.g., if the worker is killed abruptly). The marker file is removed
+                // when the worker exits idle sleep.
+                let state_dir = self.config.workspace.home.join("state");
+                let idle_marker = state_dir.join(format!(
+                    "{}-idle-entered-{}.txt",
+                    self.qualified_id(),
+                    std::process::id()
+                ));
+                let _ = std::fs::write(
+                    &idle_marker,
+                    format!(
+                        "Worker entered idle sleep at {}\nBackoff: {} seconds\nBeads processed: {}\nUptime: {} seconds\nPID: {}\n",
+                        chrono::Utc::now().to_rfc3339(),
+                        backoff,
+                        self.beads_processed,
+                        self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                        std::process::id()
+                    )
+                );
+
                 while elapsed < backoff {
                     let remaining = backoff - elapsed;
                     let sleep_duration =
                         std::time::Duration::from_secs(remaining.min(check_interval));
 
-                    // Before sleeping, emit a heartbeat event to show the worker is alive
-                    // and in idle state. This helps diagnose cases where workers die during
-                    // idle sleep - the last event will show how long they survived.
+                    // CRITICAL: Emit heartbeat BEFORE sleeping, not after.
+                    // This ensures that if the worker is killed during sleep, we have
+                    // a record of how long it survived. The heartbeat event includes
+                    // the elapsed time, which helps identify when the worker died.
                     if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
                         bead_id: None,
                         state: "EXHAUSTED_IDLE".to_string(),
@@ -2249,12 +2324,32 @@ impl Worker {
                         tracing::warn!(error = %e, "failed to emit idle heartbeat, continuing anyway");
                     }
 
+                    // Force-flush the heartbeat event immediately to ensure it's written
+                    // to disk even if the worker is killed during the upcoming sleep.
+                    // This is critical for diagnosing cases where workers die mysteriously.
+                    // Use async version to avoid blocking in the async context.
+                    let _ = self
+                        .telemetry
+                        .force_flush_async(std::time::Duration::from_secs(1))
+                        .await;
+
                     // Update heartbeat state before sleeping to ensure the heartbeat file
                     // is fresh even if the worker dies during this sleep iteration.
                     self.health.update_state(
                         &WorkerState::Exhausted,
                         None,
                         Some(self.current_workspace.as_path()),
+                    );
+
+                    // Log before sleeping to help diagnose cases where workers die mysteriously.
+                    // The elapsed time in the log shows how long the worker has been in idle state.
+                    tracing::debug!(
+                        elapsed_secs = elapsed,
+                        backoff_secs = backoff,
+                        remaining_secs = remaining,
+                        sleep_duration_secs = sleep_duration.as_secs(),
+                        iteration = shutdown_check_count + 1,
+                        "about to sleep in idle loop"
                     );
 
                     // Race between sleep and shutdown flag to respond immediately to signals.
@@ -2320,9 +2415,11 @@ impl Worker {
                         // Force-flush telemetry before stopping to ensure the
                         // diagnostic event is written even if the stop() method
                         // fails or the process is killed immediately after.
+                        // Use async version to avoid blocking in the async context.
                         let _ = self
                             .telemetry
-                            .force_flush(std::time::Duration::from_secs(5));
+                            .force_flush_async(std::time::Duration::from_secs(5))
+                            .await;
 
                         return self.stop(&reason).await;
                     }
@@ -2376,6 +2473,35 @@ impl Worker {
                     tracing::warn!(error = %e, "failed to emit idle_sleep_completed event");
                 }
 
+                // Remove the idle marker file and write a completion marker.
+                // This provides diagnostic information even if telemetry is not flushed.
+                let state_dir = self.config.workspace.home.join("state");
+                let idle_marker = state_dir.join(format!(
+                    "{}-idle-entered-{}.txt",
+                    self.qualified_id(),
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_file(&idle_marker);
+
+                let completed_marker = state_dir.join(format!(
+                    "{}-idle-completed-{}.txt",
+                    self.qualified_id(),
+                    std::process::id()
+                ));
+                let _ = std::fs::write(
+                    &completed_marker,
+                    format!(
+                        "Worker completed idle sleep at {}\nBackoff: {} seconds\nElapsed: {} seconds\nShutdown checks: {}\nBeads processed: {}\nUptime: {} seconds\nPID: {}\n",
+                        chrono::Utc::now().to_rfc3339(),
+                        backoff,
+                        elapsed,
+                        shutdown_check_count,
+                        self.beads_processed,
+                        self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                        std::process::id()
+                    )
+                );
+
                 tracing::info!(
                     backoff_secs = backoff,
                     shutdown_checks_performed = shutdown_check_count,
@@ -2385,9 +2511,11 @@ impl Worker {
 
                 // Force-flush BEFORE state transition to ensure the diagnostic event
                 // is written even if the worker is killed during the transition.
+                // Use async version to avoid blocking in the async context.
                 let _ = self
                     .telemetry
-                    .force_flush(std::time::Duration::from_secs(5));
+                    .force_flush_async(std::time::Duration::from_secs(5))
+                    .await;
 
                 // Emit telemetry to show idle sleep completed successfully
                 self.telemetry.emit(EventKind::StateTransition {
@@ -2396,9 +2524,11 @@ impl Worker {
                 })?;
 
                 // Force-flush AFTER state transition to ensure it's persisted.
+                // Use async version to avoid blocking in the async context.
                 let _ = self
                     .telemetry
-                    .force_flush(std::time::Duration::from_secs(5));
+                    .force_flush_async(std::time::Duration::from_secs(5))
+                    .await;
 
                 // Update heartbeat after idle sleep completes before transitioning.
                 self.health.update_state(
@@ -2438,6 +2568,15 @@ impl Worker {
 
         // Stop heartbeat emitter and remove heartbeat file.
         self.health.stop();
+
+        // Clean up any idle marker files (best-effort).
+        let state_dir = self.config.workspace.home.join("state");
+        let qualified_id = self.qualified_id();
+        let pid = std::process::id();
+        let idle_marker = state_dir.join(format!("{}-idle-entered-{}.txt", qualified_id, pid));
+        let completed_marker = state_dir.join(format!("{}-idle-completed-{}.txt", qualified_id, pid));
+        let _ = std::fs::remove_file(idle_marker);
+        let _ = std::fs::remove_file(completed_marker);
 
         // Deregister from worker state registry (best-effort).
         let qualified_id = format!("{}-{}", self.config.agent.default, self.worker_name);

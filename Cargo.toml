@@ -29,6 +29,12 @@ otlp = [
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
     "dep:opentelemetry-semantic-conventions",
+    "dep:tonic",
+    "dep:tracing-opentelemetry",
+]
+integration = [
+    "otlp",
+    "testcontainers",
 ]
 
 [dependencies]
@@ -93,6 +99,15 @@ opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto"], optional = true }
 opentelemetry-semantic-conventions = { version = "0.31", optional = true }
+tonic = { version = "0.14", optional = true }
+
+# Additional OTLP dependencies
+tracing-opentelemetry = { version = "0.32", optional = true }
+futures = "0.3"
+gethostname = "0.4"
+
+# Integration test dependencies
+testcontainers = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

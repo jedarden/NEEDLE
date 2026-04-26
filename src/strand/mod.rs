@@ -23,6 +23,7 @@ use anyhow::Result;
 
 use crate::bead_store::BeadStore;
 use crate::config::Config;
+use crate::span::{attrs, strand_results};
 use crate::types::{Bead, BeadId, StrandResult};
 
 /// A single strand evaluation result.
@@ -51,6 +52,11 @@ pub struct SelectOutcome {
     /// All strand evaluations in order, across all waterfall passes.
     /// Each entry is (strand_name, result, duration_ms).
     pub strand_evaluations: Vec<StrandEvaluation>,
+    /// The strand span guard for the strand that found the bead.
+    /// This keeps the strand span active through the bead lifecycle.
+    /// Dropped when the bead lifecycle ends (in do_log).
+    #[allow(dead_code)]
+    pub strand_span_guard: Option<tracing::span::EnteredSpan>,
 }
 
 pub use explore::ExploreStrand;
@@ -242,27 +248,46 @@ impl StrandRunner {
 
         'waterfall: loop {
             for strand in &self.strands {
+                let strand_name = strand.name().to_string();
+                let strand_span = tracing::info_span!(
+                    "strand.{}",
+                    strand_name,
+                    needle.strand.name = %strand_name,
+                );
+                let strand_enter = strand_span.entered();
+
                 let start = Instant::now();
                 let result = strand.evaluate(store).await;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
 
-                // Record the evaluation for diagnostic purposes.
+                // Record strand evaluation result as span attribute.
                 let (result_str, should_record) = match &result {
                     StrandResult::BeadFound(beads) => {
                         let count = beads.len();
-                        ("bead_found".to_string(), count > 0)
+                        (
+                            format!("{}({})", strand_results::BEAD_FOUND, count),
+                            count > 0,
+                        )
                     }
-                    StrandResult::WorkCreated => ("work_created".to_string(), true),
-                    StrandResult::NoWork => ("no_work".to_string(), true),
-                    StrandResult::Error(_) => ("error".to_string(), true),
+                    StrandResult::WorkCreated => (strand_results::WORK_CREATED.to_string(), true),
+                    StrandResult::NoWork => (strand_results::NO_WORK.to_string(), true),
+                    StrandResult::Error(_) => (strand_results::ERROR.to_string(), true),
                 };
+                tracing::Span::current().record(attrs::NEEDLE_STRAND_RESULT, &result_str);
+                tracing::Span::current().record(attrs::NEEDLE_STRAND_DURATION_MS, elapsed_ms);
+
+                // Set strand span status: Error for strand errors, Ok for all other results
+                if matches!(result, StrandResult::Error(_)) {
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current().record("otel.status_description", &result_str);
+                }
 
                 // Only record evaluations that produced meaningful results.
                 // Skip recording empty BeadFound results since they don't
                 // represent actual strand activity.
                 if should_record {
                     strand_evaluations.push(StrandEvaluation {
-                        strand_name: strand.name().to_string(),
+                        strand_name: strand_name.clone(),
                         result: result_str.clone(),
                         duration_ms: elapsed_ms,
                     });
@@ -280,33 +305,50 @@ impl StrandRunner {
                             .filter(|b| !exclusions.contains(&b.id))
                             .collect();
                         let excluded_count = original_count.saturating_sub(filtered.len());
+
+                        // Record queue depth for the Pluck strand (after filtering).
+                        // This samples the current queue depth for the needle.queue.depth
+                        // observable gauge, which is measured at strand evaluation.
+                        // We report depth per priority level to enable filtered views.
+                        if strand_name == "pluck" {
+                            use std::collections::HashMap;
+                            let mut depths: HashMap<u8, u64> = HashMap::new();
+                            for bead in &filtered {
+                                *depths.entry(bead.priority).or_insert(0) += 1;
+                            }
+                            self.telemetry.record_queue_depth(depths);
+                        }
+
                         if let Err(e) =
                             self.telemetry
                                 .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand.name().to_string(),
+                                    strand_name: strand_name.clone(),
                                     result: "bead_found".to_string(),
                                     duration_ms: elapsed_ms,
                                 })
                         {
                             tracing::warn!(
-                                strand = strand.name(),
+                                strand = %strand_name,
                                 error = %e,
                                 "failed to emit strand evaluated telemetry"
                             );
                         }
                         tracing::info!(
-                            strand = strand.name(),
+                            strand = %strand_name,
                             candidates = filtered.len(),
                             excluded = excluded_count,
                             elapsed_ms,
                             "strand found candidates"
                         );
                         if let Some(bead) = filtered.into_iter().next() {
+                            // Keep the strand span active through the bead lifecycle.
+                            // The span guard will be dropped when the bead lifecycle ends.
                             return Ok(SelectOutcome {
-                                bead: Some((bead, strand.name().to_string())),
+                                bead: Some((bead, strand_name.clone())),
                                 waterfall_restarts: restarts,
                                 restart_triggers,
                                 strand_evaluations,
+                                strand_span_guard: Some(strand_enter),
                             });
                         }
                         continue;
@@ -315,22 +357,22 @@ impl StrandRunner {
                         if let Err(e) =
                             self.telemetry
                                 .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand.name().to_string(),
+                                    strand_name: strand_name.clone(),
                                     result: "work_created".to_string(),
                                     duration_ms: elapsed_ms,
                                 })
                         {
                             tracing::warn!(
-                                strand = strand.name(),
+                                strand = %strand_name,
                                 error = %e,
                                 "failed to emit strand evaluated telemetry"
                             );
                         }
                         restarts += 1;
-                        restart_triggers.push(strand.name().to_string());
+                        restart_triggers.push(strand_name.clone());
                         if restarts > MAX_RESTARTS {
                             tracing::warn!(
-                                strand = strand.name(),
+                                strand = %strand_name,
                                 max_restarts = MAX_RESTARTS,
                                 "waterfall restart cap reached, continuing to evaluate remaining strands"
                             );
@@ -340,7 +382,7 @@ impl StrandRunner {
                             continue;
                         }
                         tracing::info!(
-                            strand = strand.name(),
+                            strand = %strand_name,
                             elapsed_ms,
                             restart = restarts,
                             "strand created new work, restarting waterfall"
@@ -351,19 +393,19 @@ impl StrandRunner {
                         if let Err(e) =
                             self.telemetry
                                 .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand.name().to_string(),
+                                    strand_name: strand_name.clone(),
                                     result: "no_work".to_string(),
                                     duration_ms: elapsed_ms,
                                 })
                         {
                             tracing::warn!(
-                                strand = strand.name(),
+                                strand = %strand_name,
                                 error = %e,
                                 "failed to emit strand evaluated telemetry"
                             );
                         }
                         tracing::info!(
-                            strand = strand.name(),
+                            strand = %strand_name,
                             elapsed_ms,
                             "strand returned no work"
                         );
@@ -373,19 +415,19 @@ impl StrandRunner {
                         if let Err(te) =
                             self.telemetry
                                 .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand.name().to_string(),
+                                    strand_name: strand_name.clone(),
                                     result: "error".to_string(),
                                     duration_ms: elapsed_ms,
                                 })
                         {
                             tracing::warn!(
-                                strand = strand.name(),
+                                strand = %strand_name,
                                 error = %te,
                                 "failed to emit strand evaluated telemetry"
                             );
                         }
                         tracing::warn!(
-                            strand = strand.name(),
+                            strand = %strand_name,
                             error = %e,
                             elapsed_ms,
                             "strand error, continuing to next strand"
@@ -400,6 +442,7 @@ impl StrandRunner {
                 waterfall_restarts: restarts,
                 restart_triggers,
                 strand_evaluations,
+                strand_span_guard: None,
             });
         }
     }

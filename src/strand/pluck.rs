@@ -57,6 +57,14 @@ impl super::Strand for PluckStrand {
         "pluck"
     }
 
+    #[tracing::instrument(
+        name = "strand.pluck",
+        skip(self, store),
+        fields(
+            strand = "pluck",
+            exclude_labels = ?self.exclude_labels,
+        )
+    )]
     async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
         // 1. Query bead store for ready, unassigned beads.
         let filters = Filters {

@@ -200,6 +200,15 @@ impl OutcomeHandler {
     /// Uses `classify()` to determine the outcome, then dispatches to the
     /// per-outcome handler. Every `Outcome` variant has an explicit arm —
     /// no wildcards. Returns a `HandlerResult` describing what happened.
+    #[tracing::instrument(
+        name = "bead.outcome",
+        skip(self, store, bead, output),
+        fields(
+            needle.bead.id = %bead.id,
+            needle.outcome = tracing::field::Empty,
+            needle.outcome.action = tracing::field::Empty,
+        )
+    )]
     pub async fn handle(
         &self,
         store: &dyn BeadStore,
@@ -208,6 +217,9 @@ impl OutcomeHandler {
         was_interrupted: bool,
     ) -> Result<HandlerResult> {
         let outcome = classify(output.exit_code, was_interrupted);
+
+        // Set outcome as span attribute
+        tracing::Span::current().record("needle.outcome", outcome.as_str());
 
         tracing::info!(
             bead_id = %bead.id,
@@ -246,6 +258,15 @@ impl OutcomeHandler {
             outcome: outcome.as_str().to_string(),
             action: bead_action.to_string(),
         });
+
+        // Set action as span attribute
+        tracing::Span::current().record("needle.outcome.action", bead_action.to_string());
+
+        // Set span status: Ok for success, Error otherwise
+        if !matches!(outcome, Outcome::Success) {
+            tracing::Span::current().record("otel.status_code", 2u64);
+            tracing::Span::current().record("otel.status_description", outcome.as_str());
+        }
 
         Ok(HandlerResult {
             outcome,

@@ -1005,6 +1005,116 @@ pub struct HookConfig {
     pub url: Option<String>,
 }
 
+/// OTLP sink configuration for OpenTelemetry export.
+///
+/// When enabled, NEEDLE exports traces, metrics, and logs to any OTLP-compliant
+/// collector (e.g., Grafana Tempo, Jaeger, OpenTelemetry Collector).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OtlpSinkConfig {
+    /// Enable or disable the OTLP sink.
+    #[serde(default = "OtlpSinkConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// OTLP endpoint URL (e.g., `http://localhost:4317` for gRPC).
+    #[serde(default = "OtlpSinkConfig::default_endpoint")]
+    pub endpoint: String,
+
+    /// Protocol: "grpc" or "http".
+    #[serde(default = "OtlpSinkConfig::default_protocol")]
+    pub protocol: String,
+
+    /// Request timeout in seconds (default: 10).
+    #[serde(default = "OtlpSinkConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// Compression: "gzip", "none", or "zstd".
+    #[serde(default = "OtlpSinkConfig::default_compression")]
+    pub compression: String,
+
+    /// TLS configuration: "none", "tls", or "mtls".
+    #[serde(default = "OtlpSinkConfig::default_tls")]
+    pub tls: String,
+
+    /// HTTP headers to send with each request (format: "key: value").
+    #[serde(default)]
+    pub headers: Vec<String>,
+
+    /// Resource attributes attached to all exported signals (format: "key=value").
+    /// Reserved keys `service.name` and `service.instance.id` cannot be overridden.
+    #[serde(default)]
+    pub resource_attributes: Vec<String>,
+
+    /// Metrics export interval in seconds (default: 10).
+    #[serde(default = "OtlpSinkConfig::default_metrics_interval_secs")]
+    pub metrics_interval_secs: u64,
+
+    /// Service namespace for OpenTelemetry semantic conventions.
+    /// Defaults to "needle-fleet" if not specified.
+    #[serde(default = "OtlpSinkConfig::default_service_namespace")]
+    pub service_namespace: String,
+
+    /// Maximum queue size for batch processors (default: 2048).
+    /// When the queue fills, the OTel SDK drops the oldest items.
+    #[serde(default = "OtlpSinkConfig::default_max_queue_size")]
+    pub max_queue_size: usize,
+}
+
+impl Default for OtlpSinkConfig {
+    fn default() -> Self {
+        OtlpSinkConfig {
+            enabled: Self::default_enabled(),
+            endpoint: Self::default_endpoint(),
+            protocol: Self::default_protocol(),
+            timeout_secs: Self::default_timeout_secs(),
+            compression: Self::default_compression(),
+            tls: Self::default_tls(),
+            headers: Vec::new(),
+            resource_attributes: Vec::new(),
+            metrics_interval_secs: Self::default_metrics_interval_secs(),
+            service_namespace: Self::default_service_namespace(),
+            max_queue_size: Self::default_max_queue_size(),
+        }
+    }
+}
+
+impl OtlpSinkConfig {
+    fn default_enabled() -> bool {
+        false
+    }
+
+    fn default_endpoint() -> String {
+        "http://localhost:4317".to_string()
+    }
+
+    fn default_protocol() -> String {
+        "grpc".to_string()
+    }
+
+    fn default_timeout_secs() -> u64 {
+        10
+    }
+
+    fn default_compression() -> String {
+        "gzip".to_string()
+    }
+
+    fn default_tls() -> String {
+        "none".to_string()
+    }
+
+    fn default_metrics_interval_secs() -> u64 {
+        10
+    }
+
+    fn default_service_namespace() -> String {
+        "needle-fleet".to_string()
+    }
+
+    fn default_max_queue_size() -> usize {
+        2048
+    }
+}
+
 /// Telemetry configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TelemetryConfig {
@@ -1015,6 +1125,9 @@ pub struct TelemetryConfig {
     /// Optional hook sinks — dispatch matching events to external commands.
     #[serde(default)]
     pub hooks: Vec<HookConfig>,
+    /// Optional OTLP sink for OpenTelemetry export.
+    #[serde(default)]
+    pub otlp_sink: OtlpSinkConfig,
 }
 
 /// Health monitoring configuration (heartbeat, peer detection).

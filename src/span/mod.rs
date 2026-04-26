@@ -181,7 +181,10 @@ mod tests {
         assert_eq!(attrs::GEN_AI_OPERATION_NAME, "gen_ai.operation.name");
         assert_eq!(attrs::GEN_AI_SYSTEM, "gen_ai.system");
         assert_eq!(attrs::GEN_AI_REQUEST_MODEL, "gen_ai.request.model");
-        assert_eq!(attrs::GEN_AI_USAGE_INPUT_TOKENS, "gen_ai.usage.input_tokens");
+        assert_eq!(
+            attrs::GEN_AI_USAGE_INPUT_TOKENS,
+            "gen_ai.usage.input_tokens"
+        );
     }
 
     #[test]

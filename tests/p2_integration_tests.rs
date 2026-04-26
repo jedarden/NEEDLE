@@ -252,6 +252,9 @@ fn make_heartbeat(worker_id: &str, pid: u32, bead_id: Option<&str>, stale: bool)
         beads_processed: 0,
         session: worker_id.to_string(),
         heartbeat_file: None,
+        is_idle: false,
+        current_task: bead_id.map(|s| s.to_string()),
+        model: "claude".to_string(),
     }
 }
 
@@ -296,7 +299,12 @@ async fn multi_worker_claiming_no_duplicates() {
                 Telemetry::new(format!("worker-{worker_idx}")),
             );
             claimer
-                .claim_next(&beads, &format!("worker-{worker_idx}"), &HashSet::new())
+                .claim_next(
+                    &beads,
+                    &format!("worker-{worker_idx}"),
+                    &HashSet::new(),
+                    "pluck",
+                )
                 .await
         });
         handles.push(handle);
@@ -344,7 +352,12 @@ async fn multi_worker_all_beads_eventually_claimed() {
                 Telemetry::new(format!("worker-{worker_idx}")),
             );
             claimer
-                .claim_next(&beads, &format!("worker-{worker_idx}"), &HashSet::new())
+                .claim_next(
+                    &beads,
+                    &format!("worker-{worker_idx}"),
+                    &HashSet::new(),
+                    "pluck",
+                )
                 .await
         });
         handles.push(handle);
@@ -482,6 +495,8 @@ async fn mend_strand_cleans_crashed_peer_returns_work_created() {
         7,
         std::path::PathBuf::from("/tmp"),
         100,
+        std::path::PathBuf::from("/tmp/needle-test-state"),
+        LimitsConfig::default(),
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -531,6 +546,8 @@ async fn mend_strand_no_stale_peers_returns_no_work() {
         7,
         std::path::PathBuf::from("/tmp"),
         100,
+        std::path::PathBuf::from("/tmp/needle-test-state"),
+        LimitsConfig::default(),
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -577,6 +594,8 @@ async fn mend_strand_removes_orphaned_lock_files() {
         7,
         std::path::PathBuf::from("/tmp"),
         100,
+        std::path::PathBuf::from("/tmp/needle-test-state"),
+        LimitsConfig::default(),
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -589,6 +608,134 @@ async fn mend_strand_removes_orphaned_lock_files() {
         matches!(result, StrandResult::WorkCreated | StrandResult::NoWork),
         "mend should complete without error; got {:?}",
         result
+    );
+}
+
+#[tokio::test]
+async fn mend_strand_cleans_zero_activity_worker_logs_immediately() {
+    let hb_dir = tempfile::tempdir().unwrap();
+    let reg_dir = tempfile::tempdir().unwrap();
+    let lock_dir = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+
+    // Register a worker with beads_processed = 0 (zero-activity worker).
+    let registry = Registry::new(reg_dir.path());
+    registry
+        .register(WorkerEntry {
+            id: "zero-activity-worker".to_string(),
+            pid: std::process::id(),
+            workspace: PathBuf::from("/tmp/test"),
+            agent: "claude".to_string(),
+            model: Some("sonnet".to_string()),
+            provider: Some("anthropic".to_string()),
+            started_at: Utc::now(),
+            beads_processed: 0,
+        })
+        .unwrap();
+
+    // Create a FRESH agent log for the zero-activity worker.
+    // This would normally be kept for retention_days, but zero-activity
+    // logs are cleaned up immediately.
+    let log_path = log_dir
+        .path()
+        .join("zero-activity-worker-nd-test.agent.jsonl");
+    std::fs::write(&log_path, b"{}").unwrap();
+
+    let store = Arc::new(ConcurrentMockStore::new(vec![]));
+    let config = MendConfig::default();
+    let telemetry = Telemetry::new("mend-worker".to_string());
+
+    let mend = MendStrand::new(
+        config,
+        hb_dir.path().to_path_buf(),
+        Duration::from_secs(300),
+        lock_dir.path().to_path_buf(),
+        "mend-worker".to_string(),
+        registry,
+        telemetry,
+        log_dir.path().to_path_buf(),
+        7, // 7-day retention, but zero-activity logs are deleted immediately
+        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        30,
+        7,
+        std::path::PathBuf::from("/tmp"),
+        100,
+        std::path::PathBuf::from("/tmp/needle-test-state"),
+        needle::config::LimitsConfig::default(),
+    );
+
+    let result = mend.evaluate(store.as_ref()).await;
+
+    assert!(
+        matches!(result, StrandResult::NoWork),
+        "mend should return NoWork after cleaning zero-activity log; got {:?}",
+        result
+    );
+    assert!(
+        !log_path.exists(),
+        "zero-activity agent log should be deleted immediately regardless of age"
+    );
+}
+
+#[tokio::test]
+async fn mend_strand_preserves_active_worker_logs() {
+    let hb_dir = tempfile::tempdir().unwrap();
+    let reg_dir = tempfile::tempdir().unwrap();
+    let lock_dir = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+
+    // Register an active worker (beads_processed > 0).
+    let registry = Registry::new(reg_dir.path());
+    registry
+        .register(WorkerEntry {
+            id: "active-worker".to_string(),
+            pid: std::process::id(),
+            workspace: PathBuf::from("/tmp/test"),
+            agent: "claude".to_string(),
+            model: Some("sonnet".to_string()),
+            provider: Some("anthropic".to_string()),
+            started_at: Utc::now(),
+            beads_processed: 10,
+        })
+        .unwrap();
+
+    // Create a FRESH agent log for the active worker.
+    let log_path = log_dir.path().join("active-worker-nd-active.agent.jsonl");
+    std::fs::write(&log_path, b"{}").unwrap();
+
+    let store = Arc::new(ConcurrentMockStore::new(vec![]));
+    let config = MendConfig::default();
+    let telemetry = Telemetry::new("mend-worker".to_string());
+
+    let mend = MendStrand::new(
+        config,
+        hb_dir.path().to_path_buf(),
+        Duration::from_secs(300),
+        lock_dir.path().to_path_buf(),
+        "mend-worker".to_string(),
+        registry,
+        telemetry,
+        log_dir.path().to_path_buf(),
+        7, // 7-day retention
+        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        30,
+        7,
+        std::path::PathBuf::from("/tmp"),
+        100,
+        std::path::PathBuf::from("/tmp/needle-test-state"),
+        needle::config::LimitsConfig::default(),
+    );
+
+    let result = mend.evaluate(store.as_ref()).await;
+
+    assert!(
+        matches!(result, StrandResult::NoWork),
+        "mend should return NoWork when nothing to clean; got {:?}",
+        result
+    );
+    assert!(
+        log_path.exists(),
+        "active worker agent log should be preserved (not yet old enough to prune)"
     );
 }
 
@@ -935,7 +1082,7 @@ async fn flock_serializes_concurrent_claims_on_same_bead() {
                 Telemetry::new(format!("worker-{i}")),
             );
             claimer
-                .claim_next(&[bead], &format!("worker-{i}"), &HashSet::new())
+                .claim_next(&[bead], &format!("worker-{i}"), &HashSet::new(), "pluck")
                 .await
         });
         handles.push(handle);
@@ -1141,6 +1288,9 @@ fn stale_detection_works_correctly() {
         beads_processed: 0,
         session: "fresh".to_string(),
         heartbeat_file: None,
+        is_idle: false,
+        current_task: None,
+        model: "claude".to_string(),
     };
 
     let stale_hb = HeartbeatData {
@@ -1155,6 +1305,9 @@ fn stale_detection_works_correctly() {
         beads_processed: 0,
         session: "stale".to_string(),
         heartbeat_file: None,
+        is_idle: false,
+        current_task: Some("nd-x".to_string()),
+        model: "claude".to_string(),
     };
 
     let ttl = Duration::from_secs(300);
@@ -1236,6 +1389,7 @@ async fn explore_discovers_work_in_other_workspace() {
     let config = ExploreConfig {
         enabled: true,
         workspaces: vec![ws.path().to_path_buf()],
+        workspace_root: PathBuf::from("/tmp"),
     };
     let strand = ExploreStrand::new(
         config,
@@ -1623,6 +1777,10 @@ impl BeadStore for MitosisDedupeStore {
     }
 
     async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> Result<()> {
         Ok(())
     }
 

@@ -1583,7 +1583,37 @@ impl FileSink {
         session_id: &str,
         version: &str,
     ) -> Result<()> {
+        Self::write_boot_event_direct_impl(
+            &self.writer,
+            &self.path,
+            worker_id,
+            session_id,
+            version,
+            std::time::Duration::from_secs(5), // 5 second timeout
+        )
+    }
+
+    /// Write a boot event directly to the file with a timeout.
+    ///
+    /// This is a timeout-aware variant that prevents indefinite blocking on hung
+    /// filesystems (e.g., network filesystem issues, stale NFS mounts). If the
+    /// write takes longer than the timeout, it returns an error and the caller
+    /// can decide whether to continue or fail.
+    ///
+    /// The timeout is implemented by spawning a thread to do the blocking I/O
+    /// and joining with a timeout. If the timeout expires, the thread is detached
+    /// and will continue running (and eventually complete or be killed by the OS).
+    fn write_boot_event_direct_impl(
+        _writer: &std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
+        path: &Path,
+        worker_id: &str,
+        session_id: &str,
+        version: &str,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
         use std::io::Write;
+        use std::thread;
+
         let event = TelemetryEvent {
             timestamp: Utc::now(),
             event_type: "worker.booting".to_string(),
@@ -1598,14 +1628,35 @@ impl FileSink {
             span_id: None,
         };
         let line = serde_json::to_string(&event)?;
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
-        writeln!(writer, "{line}")?;
-        writer.flush()?;
-        writer.get_ref().sync_all()?;
-        Ok(())
+        let path_for_error = path.display().to_string();
+        let path_clone = path.to_path_buf();
+
+        // Spawn a thread to do the blocking I/O
+        let handle = thread::spawn(move || {
+            // This runs in a separate thread, so if it blocks, it won't block the main process
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(false)
+                .append(true)
+                .open(&path_clone)?;
+            let mut writer = std::io::BufWriter::new(file);
+            writeln!(writer, "{line}")?;
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        // Join with timeout
+        handle
+            .join()
+            .map_err(|e| anyhow::anyhow!("boot event writer thread panicked: {:?}", e))?
+            .with_context(|| {
+                format!(
+                    "timed out writing boot event to {} after {:?} (filesystem may be hung)",
+                    path_for_error,
+                    timeout
+                )
+            })
     }
 }
 
@@ -2227,9 +2278,23 @@ impl Telemetry {
         match FileSink::new(&worker_id, &session_id) {
             Ok(s) => {
                 // Write boot event directly to file BEFORE spawning writer thread.
+                // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
                 // This ensures we have a trace even if the writer thread fails to start.
                 let version = env!("CARGO_PKG_VERSION");
                 if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    // Check if this is a timeout error (filesystem may be hung)
+                    let error_msg = e.to_string();
+                    if error_msg.contains("timed out")
+                        || error_msg.contains("filesystem may be hung")
+                    {
+                        eprintln!(
+                            "NEEDLE WARNING: boot event write timed out after 5s - filesystem may be hung or very slow"
+                        );
+                        eprintln!("  Continuing without boot event in log file. Worker will still function.");
+                        eprintln!(
+                            "  Check: disk space, NFS mounts, filesystem latency, I/O errors"
+                        );
+                    }
                     tracing::warn!(error = %e, "failed to write boot event directly to file");
                 }
                 sinks.push(Box::new(s));
@@ -2266,8 +2331,22 @@ impl Telemetry {
         match FileSink::new(&worker_id, &session_id) {
             Ok(s) => {
                 // Write boot event directly to file BEFORE spawning writer thread.
+                // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
                 let version = env!("CARGO_PKG_VERSION");
                 if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    // Check if this is a timeout error (filesystem may be hung)
+                    let error_msg = e.to_string();
+                    if error_msg.contains("timed out")
+                        || error_msg.contains("filesystem may be hung")
+                    {
+                        eprintln!(
+                            "NEEDLE WARNING: boot event write timed out after 5s - filesystem may be hung or very slow"
+                        );
+                        eprintln!("  Continuing without boot event in log file. Worker will still function.");
+                        eprintln!(
+                            "  Check: disk space, NFS mounts, filesystem latency, I/O errors"
+                        );
+                    }
                     tracing::warn!(error = %e, "failed to write boot event directly to file");
                 }
                 sinks.push(Box::new(s));
@@ -2311,8 +2390,22 @@ impl Telemetry {
         match FileSink::new(&worker_id, &session_id) {
             Ok(s) => {
                 // Write boot event directly to file BEFORE spawning writer thread.
+                // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
                 let version = env!("CARGO_PKG_VERSION");
                 if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    // Check if this is a timeout error (filesystem may be hung)
+                    let error_msg = e.to_string();
+                    if error_msg.contains("timed out")
+                        || error_msg.contains("filesystem may be hung")
+                    {
+                        eprintln!(
+                            "NEEDLE WARNING: boot event write timed out after 5s - filesystem may be hung or very slow"
+                        );
+                        eprintln!("  Continuing without boot event in log file. Worker will still function.");
+                        eprintln!(
+                            "  Check: disk space, NFS mounts, filesystem latency, I/O errors"
+                        );
+                    }
                     tracing::warn!(error = %e, "failed to write boot event directly to file");
                 }
                 sinks.push(Box::new(s));
@@ -2358,8 +2451,23 @@ impl Telemetry {
         // File sink is always created (fallback)
         match FileSink::new(&worker_id, &session_id) {
             Ok(s) => {
+                // Write boot event directly to file BEFORE spawning writer thread.
+                // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
                 let version = env!("CARGO_PKG_VERSION");
                 if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    // Check if this is a timeout error (filesystem may be hung)
+                    let error_msg = e.to_string();
+                    if error_msg.contains("timed out")
+                        || error_msg.contains("filesystem may be hung")
+                    {
+                        eprintln!(
+                            "NEEDLE WARNING: boot event write timed out after 5s - filesystem may be hung or very slow"
+                        );
+                        eprintln!("  Continuing without boot event in log file. Worker will still function.");
+                        eprintln!(
+                            "  Check: disk space, NFS mounts, filesystem latency, I/O errors"
+                        );
+                    }
                     tracing::warn!(error = %e, "failed to write boot event directly to file");
                 }
                 file_sink = Some(Arc::new(s));
@@ -2463,7 +2571,7 @@ impl Telemetry {
     }
 
     /// Create a telemetry emitter backed by a pre-built list of sinks (for testing).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration"))]
     pub fn with_boxed_sinks(worker_id: WorkerId, sinks: Vec<Box<dyn Sink>>) -> Self {
         let session_id = "test0000".to_string();
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -2481,7 +2589,7 @@ impl Telemetry {
     }
 
     /// Create a telemetry emitter with a custom sink (for testing).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration"))]
     pub fn with_sink(worker_id: WorkerId, sink: impl Sink + 'static) -> Self {
         let session_id = "test0000".to_string();
         let (sender, receiver) = mpsc::unbounded_channel::<WriterMessage>();

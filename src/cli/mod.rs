@@ -635,26 +635,21 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
         });
     eprintln!("NEEDLE worker boot: telemetry created");
 
-    // Wait for the writer thread to be ready before emitting events.
-    // This fixes a race condition where emit() would send to the channel
-    // before the writer thread started processing, causing force_flush to timeout.
+    // Emit worker.booting SYNCHRONOUSLY before starting the async writer.
+    // This guarantees the event is written to disk even if start_and_wait() hangs.
+    // Fixes the silent pre-init deadlock where the JSONL file is created but empty.
+    eprintln!("NEEDLE worker boot: emitting worker.booting event (sync)...");
+    telemetry.emit_sync(EventKind::WorkerBooting {
+        worker_name: worker_name.clone(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })?;
+    eprintln!("NEEDLE worker boot: worker.booting written to disk");
+
+    // Start the async writer thread after worker.booting is on disk.
     eprintln!("NEEDLE worker boot: starting telemetry writer thread...");
     rt.block_on(telemetry.start_and_wait())
         .context("writer thread failed to start")?;
     eprintln!("NEEDLE worker boot: writer thread started");
-
-    eprintln!("NEEDLE worker boot: emitting worker.booting event...");
-    telemetry.emit(EventKind::WorkerBooting {
-        worker_name: worker_name.clone(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    })?;
-    eprintln!("NEEDLE worker boot: worker.booting emitted");
-
-    // Force-flush worker.booting to disk immediately so we get a trace even if
-    // subsequent init steps block indefinitely (e.g., db lock, network call).
-    eprintln!("NEEDLE worker boot: flushing worker.booting to disk...");
-    telemetry.force_flush(std::time::Duration::from_secs(5))?;
-    eprintln!("NEEDLE worker boot: worker.booting flushed");
 
     // Phase 1: bead store discovery.
     let store: Arc<dyn crate::bead_store::BeadStore> =
@@ -680,7 +675,9 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
         bail!("boot exceeded 60 s ({elapsed_ms} ms), aborting");
     }
 
-    eprintln!("NEEDLE worker boot: all init steps completed in {elapsed_ms}ms, starting worker loop...");
+    eprintln!(
+        "NEEDLE worker boot: all init steps completed in {elapsed_ms}ms, starting worker loop..."
+    );
     let result = rt.block_on(worker.run())?;
 
     tracing::info!(final_state = %result, "worker finished");
@@ -3929,6 +3926,9 @@ mod tests {
             started_at: chrono::Utc::now(),
             beads_processed: 0,
             session: "test-w".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
         std::fs::write(
@@ -3959,6 +3959,9 @@ mod tests {
             started_at: chrono::Utc::now(),
             beads_processed: 0,
             session: "test-rm".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
         let hb_path = tmp.path().join("test-rm.json");
