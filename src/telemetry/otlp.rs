@@ -18,7 +18,6 @@ use opentelemetry_sdk::resource::{
 };
 use opentelemetry_sdk::trace::{BatchSpanProcessor, SdkTracerProvider};
 use std::collections::HashMap;
-use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -94,6 +93,10 @@ struct Metrics {
     tokens_output: Counter<u64>,
     /// Counter: `needle.cost.usd`
     cost_usd: Counter<f64>,
+    /// ObservableGauge: `needle.heartbeat.age`
+    heartbeat_age: ObservableGauge<u64>,
+    /// ObservableGauge: `needle.queue.depth`
+    queue_depth: ObservableGauge<u64>,
     /// UpDownCounter: `needle.peers.stale`
     peers_stale: UpDownCounter<i64>,
     /// Counter: `needle.mitosis.children_created`
@@ -133,6 +136,42 @@ impl OtlpSink {
 
         // Build metric instruments
         let meter = meter_provider.meter("needle");
+        let observable_state = Arc::new(ObservableState::default());
+
+        // Clone Arc for each callback (they need to outlive this function)
+        let heartbeat_state = observable_state.clone();
+        let worker_id_for_callback = worker_id.clone();
+
+        // Register observable gauges with callbacks
+        let heartbeat_age = meter
+            .u64_observable_gauge("needle.heartbeat.age")
+            .with_unit("s")
+            .with_description("Seconds since last heartbeat emitted by this worker")
+            .with_callback(move |observer| {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let last = heartbeat_state.last_heartbeat_secs.load(Ordering::Relaxed);
+                if last > 0 && now > last {
+                    observer.observe(now - last, &[KeyValue::new("worker_id", worker_id_for_callback.clone())]);
+                }
+            })
+            .build();
+
+        // Clone Arc for queue depth callback
+        let queue_state = observable_state.clone();
+
+        let queue_depth = meter
+            .u64_observable_gauge("needle.queue.depth")
+            .with_unit("{bead}")
+            .with_description("Open beads visible to this worker (sampled at strand evaluation)")
+            .with_callback(move |observer| {
+                let depth = queue_state.queue_depth.load(Ordering::Relaxed);
+                observer.observe(depth, &[]);
+            })
+            .build();
+
         let metrics = Metrics {
             workers_active: meter
                 .i64_up_down_counter("needle.workers.active")
@@ -184,6 +223,8 @@ impl OtlpSink {
                 .with_unit("USD")
                 .with_description("Estimated cost accumulator")
                 .build(),
+            heartbeat_age,
+            queue_depth,
             peers_stale: meter
                 .i64_up_down_counter("needle.peers.stale")
                 .with_unit("{peer}")
@@ -205,6 +246,7 @@ impl OtlpSink {
             worker_id,
             session_id,
             drop_count: Arc::new(Mutex::new(DropCounter::default())),
+            observable_state,
         })
     }
 
@@ -230,6 +272,7 @@ impl OtlpSink {
 
         let mut builder = Resource::builder().with_attributes([
             KeyValue::new("service.name", "needle"),
+            KeyValue::new("service.namespace", config.service_namespace.clone()),
             KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
             KeyValue::new("service.instance.id", worker_id.to_string()),
             KeyValue::new("needle.session_id", session_id.to_string()),
@@ -466,25 +509,36 @@ impl OtlpSink {
 
             // Events that ARE spans - export as metrics only, NOT as logs
             "bead.claim.attempted" => {
-                if let Some(attempt) = event.data.get("attempt").and_then(|v| v.as_u64()) {
-                    self.metrics
-                        .claim_attempts
-                        .add(1, &[KeyValue::new("attempt", attempt.to_string())]);
-                }
+                // Track claim attempts with result="attempting"
+                self.metrics
+                    .claim_attempts
+                    .add(1, &[KeyValue::new("result", "attempting")]);
                 // Do NOT export as log - this is a span
             }
 
             "bead.claim.succeeded" => {
+                // Track claim attempts with result="succeeded"
+                self.metrics
+                    .claim_attempts
+                    .add(1, &[KeyValue::new("result", "succeeded")]);
                 self.metrics.beads_claimed.add(1, &[]);
                 // Do NOT export as log - this is a span
             }
 
             "bead.claim.race_lost" => {
+                // Track claim attempts with result="race_lost"
+                self.metrics
+                    .claim_attempts
+                    .add(1, &[KeyValue::new("result", "race_lost")]);
                 // Export as log with WARN severity
                 self.emit_log(event)?;
             }
 
             "bead.claim.failed" => {
+                // Track claim attempts with result="failed"
+                self.metrics
+                    .claim_attempts
+                    .add(1, &[KeyValue::new("result", "failed")]);
                 // Export as log with ERROR severity
                 self.emit_log(event)?;
             }
@@ -554,47 +608,51 @@ impl OtlpSink {
 
             // Span events - emit as span events, NOT as logs
             "heartbeat.emitted" | "build.heartbeat" => {
+                // Update heartbeat age observable state
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                self.observable_state.last_heartbeat_secs.store(now, Ordering::Relaxed);
                 self.emit_span_event(event)?;
                 // Do NOT export as log - this is a span event
             }
 
             // Metrics: effort.recorded (not a span, but metrics only)
             "effort.recorded" => {
+                let agent = event
+                    .data
+                    .get("agent_name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let model = event
+                    .data
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 if let Some(tokens_in) = event.data.get("tokens_in").and_then(|v| v.as_u64()) {
-                    let model = event
-                        .data
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    self.metrics
-                        .tokens_input
-                        .add(tokens_in, &[KeyValue::new("model", model.to_string())]);
+                    self.metrics.tokens_input.add(
+                        tokens_in,
+                        &[
+                            KeyValue::new("agent", agent.to_string()),
+                            KeyValue::new("model", model.to_string()),
+                        ],
+                    );
                 }
                 if let Some(tokens_out) = event.data.get("tokens_out").and_then(|v| v.as_u64()) {
-                    let model = event
-                        .data
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    self.metrics
-                        .tokens_output
-                        .add(tokens_out, &[KeyValue::new("model", model.to_string())]);
+                    self.metrics.tokens_output.add(
+                        tokens_out,
+                        &[
+                            KeyValue::new("agent", agent.to_string()),
+                            KeyValue::new("model", model.to_string()),
+                        ],
+                    );
                 }
                 if let Some(cost) = event
                     .data
                     .get("estimated_cost_usd")
                     .and_then(|v| v.as_f64())
                 {
-                    let agent = event
-                        .data
-                        .get("agent_name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
-                    let model = event
-                        .data
-                        .get("model")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown");
                     self.metrics.cost_usd.add(
                         cost,
                         &[
@@ -618,9 +676,15 @@ impl OtlpSink {
                 if let Some(children_created) =
                     event.data.get("children_created").and_then(|v| v.as_u64())
                 {
-                    self.metrics
-                        .mitosis_children_created
-                        .add(children_created, &[]);
+                    let parent_id = event
+                        .data
+                        .get("parent_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    self.metrics.mitosis_children_created.add(
+                        children_created,
+                        &[KeyValue::new("parent_id", parent_id.to_string())],
+                    );
                 }
                 // Also export as log for visibility
                 self.emit_log(event)?;
@@ -653,17 +717,16 @@ impl OtlpSink {
         log_record.set_body(AnyValue::from(body_str));
 
         // Set trace linkage using OTel LogRecord API (not as attributes)
-        if let Some(ref trace_id) = event.trace_id {
-            if let Ok(bytes) = hex::decode(trace_id) {
-                if let Ok(arr) = bytes.try_into().map(|b: [u8; 32]| b) {
-                    log_record.set_trace_id(TraceId::from_bytes(arr));
-                }
-            }
-        }
-        if let Some(ref span_id) = event.span_id {
-            if let Ok(bytes) = hex::decode(span_id) {
-                if let Ok(arr) = bytes.try_into().map(|b: [u8; 16]| b) {
-                    log_record.set_span_id(SpanId::from_bytes(arr));
+        // TraceId is 16 bytes (32 hex chars), SpanId is 8 bytes (16 hex chars)
+        if let (Some(ref trace_id), Some(ref span_id)) = (&event.trace_id, &event.span_id) {
+            if let (Ok(trace_bytes), Ok(span_bytes)) = (hex::decode(trace_id), hex::decode(span_id)) {
+                if let (Ok(trace_arr), Ok(span_arr)) = (
+                    trace_bytes.as_slice().try_into().map(|b: [u8; 16]| b),
+                    span_bytes.as_slice().try_into().map(|b: [u8; 8]| b),
+                ) {
+                    let trace_id = TraceId::from_bytes(trace_arr);
+                    let span_id = SpanId::from_bytes(span_arr);
+                    log_record.set_trace_context(trace_id, span_id, None);
                 }
             }
         }
@@ -709,16 +772,17 @@ impl OtlpSink {
         fields.push(("session_id", event.session_id.as_str()));
 
         if let Some(ref bead_id) = event.bead_id {
-            fields.push(("bead_id", bead_id.as_ref().as_str()));
+            fields.push(("bead_id", &**bead_id));
         }
 
         // Add any additional fields from the data JSON
-        if let Ok(data_map) = event.data.as_object() {
+        if let Some(data_map) = event.data.as_object() {
             for (key, value) in data_map {
                 if let Some(str_val) = value.as_str() {
                     fields.push((key.as_str(), str_val));
                 } else if let Some(num_val) = value.as_i64() {
-                    fields.push((key.as_str(), num_val.to_string().as_str()));
+                    let num_str = num_val.to_string();
+                    fields.push((key.as_str(), num_str.as_str()));
                 } else if let Some(bool_val) = value.as_bool() {
                     fields.push((key.as_str(), if bool_val { "true" } else { "false" }));
                 }
@@ -871,6 +935,66 @@ mod tests {
     }
 
     #[test]
+    fn test_service_namespace_has_default_value() {
+        let config = make_test_config();
+        let resource = OtlpSink::build_resource(
+            "test-worker-id",
+            "test-session-id",
+            &config,
+            None,
+            None,
+            None,
+        )
+        .expect("build_resource should succeed");
+
+        let attrs = resource.attributes();
+        let namespace_attr = attrs
+            .iter()
+            .find(|kv| kv.key.as_str() == "service.namespace");
+
+        assert!(
+            namespace_attr.is_some(),
+            "service.namespace should be present with default value"
+        );
+        assert_eq!(
+            namespace_attr.unwrap().value.as_str(),
+            Some("needle-fleet"),
+            "service.namespace should default to 'needle-fleet'"
+        );
+    }
+
+    #[test]
+    fn test_service_namespace_flows_through_from_config() {
+        let mut config = make_test_config();
+        config.service_namespace = "production-namespace".to_string();
+
+        let resource = OtlpSink::build_resource(
+            "test-worker-id",
+            "test-session-id",
+            &config,
+            None,
+            None,
+            None,
+        )
+        .expect("build_resource should succeed");
+
+        let attrs = resource.attributes();
+        let namespace_attr = attrs
+            .iter()
+            .find(|kv| kv.key.as_str() == "service.namespace");
+
+        assert!(
+            namespace_attr.is_some(),
+            "service.namespace should be present from config"
+        );
+        assert_eq!(
+            namespace_attr.unwrap().value.as_str(),
+            Some("production-namespace"),
+            "service.namespace value should match config"
+        );
+    }
+
+    #[test]
     fn test_build_resource_has_all_required_attributes() {
         let config = make_test_config();
         let resource = OtlpSink::build_resource(
@@ -888,6 +1012,10 @@ mod tests {
         let attr_keys: Vec<_> = attrs.iter().map(|kv| kv.key.as_str()).collect();
 
         assert!(attr_keys.contains(&"service.name"), "missing service.name");
+        assert!(
+            attr_keys.contains(&"service.namespace"),
+            "missing service.namespace"
+        );
         assert!(
             attr_keys.contains(&"service.version"),
             "missing service.version"
