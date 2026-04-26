@@ -4542,4 +4542,245 @@ mod tests {
             .iter()
             .any(|e| e.event_type == "mend.lock_remove_failed"));
     }
+
+    // ── flag_idle_workers tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn flag_idle_workers_skips_worker_with_beads_processed() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "active-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now() - chrono::Duration::seconds(600),
+                beads_processed: 5,
+            })
+            .unwrap();
+
+        let (telemetry, _events) = make_test_telemetry();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let mut summary = MendSummary::default();
+        mend.flag_idle_workers(&mut summary).unwrap();
+
+        assert_eq!(summary.idle_workers_flagged, 0);
+    }
+
+    #[tokio::test]
+    async fn flag_idle_workers_skips_worker_younger_than_idle_timeout() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "new-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now() - chrono::Duration::seconds(60),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        let (telemetry, _events) = make_test_telemetry();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let mut summary = MendSummary::default();
+        mend.flag_idle_workers(&mut summary).unwrap();
+
+        assert_eq!(summary.idle_workers_flagged, 0);
+    }
+
+    #[tokio::test]
+    async fn flag_idle_workers_flags_idle_worker() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "idle-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now() - chrono::Duration::seconds(600),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        let (telemetry, _events) = make_test_telemetry();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let mut summary = MendSummary::default();
+        mend.flag_idle_workers(&mut summary).unwrap();
+
+        assert_eq!(summary.idle_workers_flagged, 1);
+    }
+
+    #[tokio::test]
+    async fn flag_idle_workers_skips_worker_with_future_started_at() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "future-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now() + chrono::Duration::seconds(60),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        let (telemetry, _events) = make_test_telemetry();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let mut summary = MendSummary::default();
+        mend.flag_idle_workers(&mut summary).unwrap();
+
+        assert_eq!(summary.idle_workers_flagged, 0);
+    }
+
+    #[tokio::test]
+    async fn flag_idle_workers_emits_telemetry_when_flagging() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "stuck-worker".to_string(),
+                pid: 12345,
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "claude".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now() - chrono::Duration::seconds(600),
+                beads_processed: 0,
+            })
+            .unwrap();
+
+        let (telemetry, events) = make_test_telemetry();
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let mut summary = MendSummary::default();
+        mend.flag_idle_workers(&mut summary).unwrap();
+
+        assert_eq!(summary.idle_workers_flagged, 1);
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendIdleWorkerFlagged event was emitted.
+        let captured = events.lock().unwrap();
+        assert!(captured
+            .iter()
+            .any(|e| e.event_type == "mend.idle_worker_flagged"));
+    }
 }
