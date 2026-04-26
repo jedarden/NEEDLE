@@ -5122,7 +5122,6 @@ mod tests {
 
     #[test]
     fn cleanup_learnings_prunes_stale_entries() {
-        use crate::learning::{BeadType, Confidence, LearningEntry};
 
         let workspace = tempfile::tempdir().unwrap();
         let beads_dir = workspace.path().join(".beads");
@@ -5193,7 +5192,6 @@ mod tests {
 
     #[test]
     fn cleanup_learnings_consolidates_when_over_limit() {
-        use crate::learning::{BeadType, Confidence, LearningEntry};
 
         let workspace = tempfile::tempdir().unwrap();
         let beads_dir = workspace.path().join(".beads");
@@ -5261,7 +5259,6 @@ mod tests {
 
     #[test]
     fn cleanup_learnings_skips_when_under_limit() {
-        use crate::learning::{BeadType, Confidence, LearningEntry};
 
         let workspace = tempfile::tempdir().unwrap();
         let beads_dir = workspace.path().join(".beads");
@@ -5320,7 +5317,6 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_learnings_emits_telemetry_on_cleanup() {
-        use crate::learning::{BeadType, Confidence, LearningEntry};
         use crate::telemetry::test_utils::MemorySink;
 
         let workspace = tempfile::tempdir().unwrap();
