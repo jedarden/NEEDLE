@@ -238,7 +238,11 @@ impl BrCliBeadStore {
         // kill_on_drop ensures the process is killed if the wait_with_output
         // future is dropped (e.g., on timeout), preventing orphaned br processes.
         let mut cmd = tokio::process::Command::new(&self.br_path);
-        cmd.args(args).current_dir(dir).kill_on_drop(true);
+        cmd.args(args)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         let child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn br subprocess: {args:?}"))?;
@@ -289,7 +293,11 @@ impl BrCliBeadStore {
 
                 let sync_timeout = std::time::Duration::from_secs(60);
                 let mut sync_cmd = tokio::process::Command::new(&self.br_path);
-                sync_cmd.args(["sync"]).current_dir(dir).kill_on_drop(true);
+                sync_cmd.args(["sync"])
+                    .current_dir(dir)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
                 let sync_child = sync_cmd
                     .spawn()
                     .context("failed to spawn br sync during SYNC_CONFLICT recovery")?;
@@ -317,7 +325,11 @@ impl BrCliBeadStore {
 
                 // Retry the original command once with timeout.
                 let mut retry_cmd = tokio::process::Command::new(&self.br_path);
-                retry_cmd.args(args).current_dir(dir).kill_on_drop(true);
+                retry_cmd.args(args)
+                    .current_dir(dir)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
                 let retry_child = retry_cmd
                     .spawn()
                     .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
