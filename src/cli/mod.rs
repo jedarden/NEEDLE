@@ -36,6 +36,12 @@ const NATO_ALPHABET: &[&str] = &[
     "uniform", "victor", "whiskey", "xray", "yankee", "zulu",
 ];
 
+/// Tmux silently replaces dots with underscores in session names.
+/// Normalize consistently so creation and lookup agree.
+fn sanitize_session_name(name: &str) -> String {
+    name.replace('.', "_")
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // CLI definition
 // ──────────────────────────────────────────────────────────────────────────────
@@ -77,6 +83,10 @@ pub enum CliCommand {
         /// Resume an existing worker session (used by hot-reload).
         #[arg(long)]
         resume: bool,
+
+        /// Enable or disable hot-reload for this worker.
+        #[arg(long)]
+        hot_reload: Option<bool>,
     },
 
     /// Stop running worker(s).
@@ -86,6 +96,17 @@ pub enum CliCommand {
         all: bool,
 
         /// Identifier of the worker to stop.
+        #[arg(short = 'i', long)]
+        identifier: Option<String>,
+    },
+
+    /// Remove orphaned tmux sessions (sessions without active workers).
+    Cleanup {
+        /// Remove all needle sessions (even if workers are active).
+        #[arg(long)]
+        all: bool,
+
+        /// Session name pattern to match (partial match).
         #[arg(short = 'i', long)]
         identifier: Option<String>,
     },
@@ -316,8 +337,10 @@ pub fn run() -> Result<()> {
             identifier,
             timeout,
             resume,
-        } => cmd_run(workspace, agent, count, identifier, timeout, resume),
+            hot_reload,
+        } => cmd_run(workspace, agent, count, identifier, timeout, resume, hot_reload),
         CliCommand::Stop { all, identifier } => cmd_stop(all, identifier),
+        CliCommand::Cleanup { all, identifier } => cmd_cleanup(all, identifier),
         CliCommand::List { format } => cmd_list(format),
         CliCommand::Attach { identifier } => cmd_attach(&identifier),
         CliCommand::Status {
@@ -377,6 +400,7 @@ fn cmd_run(
     identifier: Option<String>,
     timeout: Option<u64>,
     resume: bool,
+    hot_reload: Option<bool>,
 ) -> Result<()> {
     // Determine workspace root (CLI arg → canonicalized, else global default).
     let workspace_root = if let Some(ref ws) = workspace {
@@ -397,6 +421,10 @@ fn cmd_run(
 
     if let Some(t) = timeout {
         config.agent.timeout = t;
+    }
+
+    if let Some(hr) = hot_reload {
+        config.self_modification.hot_reload = hr;
     }
 
     if resume {
@@ -453,12 +481,12 @@ fn cmd_run(
             .clone()
             .unwrap_or_else(|| NATO_ALPHABET[0].to_string());
         let agent_name = agent.as_deref().unwrap_or(&config.agent.default);
-        let session_name = format!("needle-{agent_name}-{worker_id}");
+        let session_name = sanitize_session_name(&format!("needle-{agent_name}-{worker_id}"));
         tracing::info!(worker = %worker_id, session = %session_name, "starting worker (inner re-entrant invocation)");
         run_worker(config, worker_id)
     } else {
         // Always create dedicated tmux sessions, even if already inside tmux.
-        launch_workers(config, workspace, agent, count, identifier, timeout)
+        launch_workers(config, workspace, agent, count, identifier, timeout, hot_reload)
     }
 }
 
@@ -470,6 +498,7 @@ fn launch_workers(
     count: u32,
     identifier: Option<String>,
     timeout: Option<u64>,
+    hot_reload: Option<bool>,
 ) -> Result<()> {
     let agent_name = agent
         .as_deref()
@@ -567,7 +596,7 @@ fn launch_workers(
     };
 
     for (seq, worker_id) in worker_ids.iter().enumerate() {
-        let session_name = format!("needle-{agent_name}-{worker_id}");
+        let session_name = sanitize_session_name(&format!("needle-{agent_name}-{worker_id}"));
 
         tracing::info!(
             worker_id = %worker_id,
@@ -588,6 +617,7 @@ fn launch_workers(
             agent.clone(),
             Some(worker_id.clone()),
             timeout,
+            hot_reload,
         )?;
 
         println!(
@@ -598,14 +628,15 @@ fn launch_workers(
         );
     }
 
+    let sanitized_agent = sanitize_session_name(&agent_name);
     if effective_count > 1 {
         println!(
             "\nStarted {effective_count} workers (stagger: {stagger_secs}s between launches)."
         );
-        println!("Attach to a worker with: tmux attach -t needle-{agent_name}-<name>");
+        println!("Attach to a worker with: tmux attach -t needle-{sanitized_agent}-<name>");
     } else {
         let worker_id = &worker_ids[0];
-        println!("Attach with: tmux attach -t needle-{agent_name}-{worker_id}");
+        println!("Attach with: tmux attach -t needle-{sanitized_agent}-{worker_id}");
     }
 
     Ok(())
@@ -723,6 +754,7 @@ fn launch_in_tmux(
     agent: Option<String>,
     identifier: Option<String>,
     timeout: Option<u64>,
+    hot_reload: Option<bool>,
 ) -> Result<()> {
     // Build the command that tmux will run inside the session.
     let self_exe = std::env::current_exe().context("failed to locate own binary")?;
@@ -747,21 +779,24 @@ fn launch_in_tmux(
         inner_args.push("--timeout".to_string());
         inner_args.push(t.to_string());
     }
+    if let Some(hr) = hot_reload {
+        inner_args.push("--hot-reload".to_string());
+        inner_args.push(hr.to_string());
+    }
 
     // Build stderr log path: ~/.needle/logs/<session_name>.stderr.log
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let stderr_log = format!("{home}/.needle/logs/{session_name}.stderr.log");
 
     let inner_cmd = format!(
-        "NEEDLE_INNER=1 {} {} 2>> {}; tmux kill-session -t {}",
+        "NEEDLE_INNER=1 {} {} 2>> {}",
         shell_escape(&self_exe.display().to_string()),
         inner_args
             .iter()
             .map(|a| shell_escape(a))
             .collect::<Vec<_>>()
             .join(" "),
-        shell_escape(&stderr_log),
-        shell_escape(session_name)
+        shell_escape(&stderr_log)
     );
 
     let status = ProcessCommand::new("tmux")
@@ -818,10 +853,88 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
             .with_context(|| format!("failed to send SIGTERM to session '{session}'"))?;
 
         if status.success() {
-            println!("Stopped: {session}");
+            // Wait up to 5 seconds for the worker to exit gracefully
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let session_exists = ProcessCommand::new("tmux")
+                    .args(["has-session", "-t", session])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if !session_exists {
+                    break;
+                }
+            }
+            // Kill the session to clean up (worker may have already exited)
+            let kill_status = ProcessCommand::new("tmux")
+                .args(["kill-session", "-t", session])
+                .status();
+            match kill_status {
+                Ok(s) if s.success() => println!("Stopped: {session}"),
+                Ok(_) => println!("Stopped: {session} (session already gone)"),
+                Err(e) => println!("Warning: stopped {session} but failed to kill session: {e}"),
+            }
         } else {
             println!("Warning: could not stop session '{session}' (status: {status})");
         }
+    }
+
+    Ok(())
+}
+
+/// `needle cleanup` — remove orphaned tmux sessions.
+///
+/// Finds and removes needle tmux sessions that no longer have active workers.
+/// With --all, removes all needle sessions regardless of worker status.
+fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
+    let sessions = list_needle_sessions()?;
+
+    if sessions.is_empty() {
+        println!("No needle sessions running.");
+        return Ok(());
+    }
+
+    let targets: Vec<&str> = if all {
+        sessions.iter().map(|s| s.name.as_str()).collect()
+    } else {
+        let id = identifier.as_deref().unwrap_or("");
+        sessions
+            .iter()
+            .filter(|s| id.is_empty() || s.name.contains(id))
+            .map(|s| s.name.as_str())
+            .collect()
+    };
+
+    if targets.is_empty() {
+        println!("No matching sessions found.");
+        return Ok(());
+    }
+
+    let mut cleaned = 0;
+    for session in &targets {
+        // Kill the session
+        let status = ProcessCommand::new("tmux")
+            .args(["kill-session", "-t", session])
+            .status();
+
+        match status {
+            Ok(s) if s.success() => {
+                println!("Cleaned up: {session}");
+                cleaned += 1;
+            }
+            Ok(_) => {
+                println!("Warning: session '{session}' already gone");
+            }
+            Err(e) => {
+                println!("Warning: failed to cleanup session '{session}': {e}");
+            }
+        }
+    }
+
+    if cleaned == 0 {
+        println!("No sessions cleaned up.");
+    } else {
+        println!("Cleaned up {cleaned} session(s).");
     }
 
     Ok(())
@@ -2647,7 +2760,7 @@ fn list_needle_sessions() -> Result<Vec<TmuxSession>> {
 /// the `{worker_id}` portion. Returns an empty set if no sessions are running
 /// or tmux is unavailable.
 fn occupied_worker_ids(agent: &str) -> Result<HashSet<String>> {
-    let prefix = format!("needle-{agent}-");
+    let prefix = sanitize_session_name(&format!("needle-{agent}-"));
     let sessions = list_needle_sessions()?;
     let ids = sessions
         .iter()
