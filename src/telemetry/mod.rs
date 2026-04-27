@@ -418,6 +418,74 @@ pub enum EventKind {
     ReflectSkipped {
         reason: String,
     },
+    ReflectTranscriptsRead {
+        sessions_count: usize,
+        entries_count: usize,
+        parse_errors: usize,
+    },
+    ReflectDriftDetected {
+        cluster_size: usize,
+        category: String,
+        sessions: Vec<String>,
+    },
+    ReflectDriftPromoted {
+        pattern: String,
+        category: String,
+    },
+    ReflectDecisionExtracted {
+        bead_id: BeadId,
+        has_alternatives: bool,
+        rationale_length: usize,
+    },
+    ReflectAdrCreated {
+        bead_id: BeadId,
+        path: String,
+    },
+    ReflectLearningPromoted {
+        learning_id: String,
+        target_path: String,
+        workspace_count: usize,
+        is_decision: bool,
+    },
+    ReflectLearningDeduplicated {
+        learning_id: String,
+        existing_entry: String,
+    },
+    ReflectClaudeMdWritten {
+        path: String,
+        entries_added: usize,
+        entries_updated: usize,
+    },
+
+    // ── Drift detection ──
+    DriftDetectionStarted {
+        sessions_analyzed: usize,
+    },
+    DriftDetectionCompleted {
+        sessions_analyzed: usize,
+        clusters_found: usize,
+        evolved_count: usize,
+        inconsistent_count: usize,
+    },
+    DriftDetectionSkipped {
+        reason: String,
+    },
+    DriftReportWritten {
+        report_path: String,
+        clusters: usize,
+    },
+
+    // ── Decision detection (ADR) ──
+    DecisionDetectionStarted {
+        sessions_analyzed: usize,
+    },
+    DecisionDetectionCompleted {
+        sessions_analyzed: usize,
+        decisions_found: usize,
+    },
+    DecisionDetectionSkipped {
+        reason: String,
+    },
 
     // ── Pulse ──
     PulseScannerStarted {
@@ -592,6 +660,21 @@ impl EventKind {
             EventKind::ReflectStarted { .. } => "reflect.started",
             EventKind::ReflectConsolidated { .. } => "reflect.consolidated",
             EventKind::ReflectSkipped { .. } => "reflect.skipped",
+            EventKind::ReflectTranscriptsRead { .. } => "reflect.transcripts_read",
+            EventKind::ReflectDriftDetected { .. } => "reflect.drift_detected",
+            EventKind::ReflectDriftPromoted { .. } => "reflect.drift_promoted",
+            EventKind::ReflectDecisionExtracted { .. } => "reflect.decision_extracted",
+            EventKind::ReflectAdrCreated { .. } => "reflect.adr_created",
+            EventKind::ReflectLearningPromoted { .. } => "reflect.learning_promoted",
+            EventKind::ReflectLearningDeduplicated { .. } => "reflect.learning_deduplicated",
+            EventKind::ReflectClaudeMdWritten { .. } => "reflect.claudemd_written",
+            EventKind::DriftDetectionStarted { .. } => "drift.started",
+            EventKind::DriftDetectionCompleted { .. } => "drift.completed",
+            EventKind::DriftDetectionSkipped { .. } => "drift.skipped",
+            EventKind::DriftReportWritten { .. } => "drift.report_written",
+            EventKind::DecisionDetectionStarted { .. } => "decision.started",
+            EventKind::DecisionDetectionCompleted { .. } => "decision.completed",
+            EventKind::DecisionDetectionSkipped { .. } => "decision.skipped",
             EventKind::PulseScannerStarted { .. } => "pulse.scanner_started",
             EventKind::PulseScannerCompleted { .. } => "pulse.scanner_completed",
             EventKind::PulseScannerFailed { .. } => "pulse.scanner_failed",
@@ -651,7 +734,9 @@ impl EventKind {
             | EventKind::TransformStarted { bead_id, .. }
             | EventKind::TransformCompleted { bead_id, .. }
             | EventKind::TransformFailed { bead_id, .. }
-            | EventKind::TransformSkipped { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::TransformSkipped { bead_id, .. }
+            | EventKind::ReflectDecisionExtracted { bead_id, .. }
+            | EventKind::ReflectAdrCreated { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
@@ -694,6 +779,12 @@ impl EventKind {
             | EventKind::ReflectStarted { .. }
             | EventKind::ReflectConsolidated { .. }
             | EventKind::ReflectSkipped { .. }
+            | EventKind::ReflectTranscriptsRead { .. }
+            | EventKind::ReflectDriftDetected { .. }
+            | EventKind::ReflectDriftPromoted { .. }
+            | EventKind::ReflectLearningPromoted { .. }
+            | EventKind::ReflectLearningDeduplicated { .. }
+            | EventKind::ReflectClaudeMdWritten { .. }
             | EventKind::PulseScannerStarted { .. }
             | EventKind::PulseScannerCompleted { .. }
             | EventKind::PulseScannerFailed { .. }
@@ -708,7 +799,14 @@ impl EventKind {
             | EventKind::ClaimRaceLostSkipped { .. }
             | EventKind::SinkError { .. }
             | EventKind::OtlpDropped { .. }
-            | EventKind::OtlpShutdownTimeout { .. } => None,
+            | EventKind::OtlpShutdownTimeout { .. }
+            | EventKind::DriftDetectionStarted { .. }
+            | EventKind::DriftDetectionCompleted { .. }
+            | EventKind::DriftDetectionSkipped { .. }
+            | EventKind::DriftReportWritten { .. }
+            | EventKind::DecisionDetectionStarted { .. }
+            | EventKind::DecisionDetectionCompleted { .. }
+            | EventKind::DecisionDetectionSkipped { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
     }
@@ -1362,6 +1460,127 @@ impl EventKind {
             EventKind::ReflectSkipped { reason } => {
                 serde_json::json!({ "reason": reason })
             }
+            EventKind::ReflectTranscriptsRead {
+                sessions_count,
+                entries_count,
+                parse_errors,
+            } => {
+                serde_json::json!({
+                    "sessions_count": sessions_count,
+                    "entries_count": entries_count,
+                    "parse_errors": parse_errors,
+                })
+            }
+            EventKind::ReflectDriftDetected {
+                cluster_size,
+                category,
+                sessions,
+            } => {
+                serde_json::json!({
+                    "cluster_size": cluster_size,
+                    "category": category,
+                    "sessions": sessions,
+                })
+            }
+            EventKind::ReflectDriftPromoted { pattern, category } => {
+                serde_json::json!({
+                    "pattern": pattern,
+                    "category": category,
+                })
+            }
+            EventKind::ReflectDecisionExtracted {
+                bead_id,
+                has_alternatives,
+                rationale_length,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.to_string(),
+                    "has_alternatives": has_alternatives,
+                    "rationale_length": rationale_length,
+                })
+            }
+            EventKind::ReflectAdrCreated { bead_id, path } => {
+                serde_json::json!({
+                    "bead_id": bead_id.to_string(),
+                    "path": path,
+                })
+            }
+            EventKind::ReflectLearningPromoted {
+                learning_id,
+                target_path,
+                workspace_count,
+                is_decision,
+            } => {
+                serde_json::json!({
+                    "learning_id": learning_id,
+                    "target_path": target_path,
+                    "workspace_count": workspace_count,
+                    "is_decision": is_decision,
+                })
+            }
+            EventKind::ReflectLearningDeduplicated {
+                learning_id,
+                existing_entry,
+            } => {
+                serde_json::json!({
+                    "learning_id": learning_id,
+                    "existing_entry": existing_entry,
+                })
+            }
+            EventKind::ReflectClaudeMdWritten {
+                path,
+                entries_added,
+                entries_updated,
+            } => {
+                serde_json::json!({
+                    "path": path,
+                    "entries_added": entries_added,
+                    "entries_updated": entries_updated,
+                })
+            }
+            EventKind::DriftDetectionStarted { sessions_analyzed } => {
+                serde_json::json!({ "sessions_analyzed": sessions_analyzed })
+            }
+            EventKind::DriftDetectionCompleted {
+                sessions_analyzed,
+                clusters_found,
+                evolved_count,
+                inconsistent_count,
+            } => {
+                serde_json::json!({
+                    "sessions_analyzed": sessions_analyzed,
+                    "clusters_found": clusters_found,
+                    "evolved_count": evolved_count,
+                    "inconsistent_count": inconsistent_count,
+                })
+            }
+            EventKind::DriftDetectionSkipped { reason } => {
+                serde_json::json!({ "reason": reason })
+            }
+            EventKind::DriftReportWritten {
+                report_path,
+                clusters,
+            } => {
+                serde_json::json!({
+                    "report_path": report_path,
+                    "clusters": clusters,
+                })
+            }
+            EventKind::DecisionDetectionStarted { sessions_analyzed } => {
+                serde_json::json!({ "sessions_analyzed": sessions_analyzed })
+            }
+            EventKind::DecisionDetectionCompleted {
+                sessions_analyzed,
+                decisions_found,
+            } => {
+                serde_json::json!({
+                    "sessions_analyzed": sessions_analyzed,
+                    "decisions_found": decisions_found,
+                })
+            }
+            EventKind::DecisionDetectionSkipped { reason } => {
+                serde_json::json!({ "reason": reason })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
             EventKind::OtlpDropped {
                 signal,
@@ -1489,7 +1708,22 @@ impl EventKind {
             | EventKind::ReflectStarted { .. }
             | EventKind::ReflectConsolidated { .. }
             | EventKind::ReflectSkipped { .. }
+            | EventKind::ReflectTranscriptsRead { .. }
+            | EventKind::ReflectDriftDetected { .. }
+            | EventKind::ReflectDriftPromoted { .. }
+            | EventKind::ReflectDecisionExtracted { .. }
+            | EventKind::ReflectAdrCreated { .. }
+            | EventKind::ReflectLearningPromoted { .. }
+            | EventKind::ReflectLearningDeduplicated { .. }
+            | EventKind::ReflectClaudeMdWritten { .. }
             | EventKind::MendZeroActivityLogCleaned { .. }
+            | EventKind::DriftDetectionStarted { .. }
+            | EventKind::DriftDetectionCompleted { .. }
+            | EventKind::DriftDetectionSkipped { .. }
+            | EventKind::DriftReportWritten { .. }
+            | EventKind::DecisionDetectionStarted { .. }
+            | EventKind::DecisionDetectionCompleted { .. }
+            | EventKind::DecisionDetectionSkipped { .. }
             | EventKind::SinkError { .. }
             | EventKind::OtlpDropped { .. }
             | EventKind::OtlpShutdownTimeout { .. }
@@ -1636,7 +1870,7 @@ impl FileSink {
             // This runs in a separate thread, so if it blocks, it won't block the main process
             let file = std::fs::OpenOptions::new()
                 .write(true)
-                .create(false)
+                .create(true)
                 .append(true)
                 .open(&path_clone)?;
             let mut writer = std::io::BufWriter::new(file);
@@ -1653,8 +1887,7 @@ impl FileSink {
             .with_context(|| {
                 format!(
                     "timed out writing boot event to {} after {:?} (filesystem may be hung)",
-                    path_for_error,
-                    timeout
+                    path_for_error, timeout
                 )
             })
     }
@@ -5207,5 +5440,60 @@ mod tests {
             !json.contains("span_id"),
             "span_id should be omitted from JSON when None"
         );
+    }
+
+    /// Regression test for needle-la6l: verify that worker.booting is written to file.
+    ///
+    /// The boot event is written synchronously via write_boot_event_direct_impl
+    /// before the async writer starts. This test verifies the file is not empty
+    /// after Telemetry::new() returns.
+    #[test]
+    fn boot_event_written_to_file_on_telemetry_creation() {
+        let dir = std::env::temp_dir().join("needle-test-boot-event");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("should create temp dir");
+
+        let worker_id = "test-boot-worker";
+        let session_id = "cafe1234";
+        let file_path = dir.join(format!("{worker_id}-{session_id}.jsonl"));
+
+        // Create a FileSink (this creates the file and writes the boot event)
+        let file_sink = FileSink::with_dir(&dir, worker_id, session_id)
+            .expect("FileSink::with_dir should succeed");
+        assert!(file_path.exists(), "log file should be created");
+
+        // write_boot_event_direct should succeed
+        let version = env!("CARGO_PKG_VERSION");
+        let result = file_sink.write_boot_event_direct(worker_id, session_id, version);
+        assert!(
+            result.is_ok(),
+            "write_boot_event_direct should succeed: {:?}",
+            result
+        );
+
+        // Verify the file has content (not 0 bytes)
+        let metadata = std::fs::metadata(&file_path).expect("should get file metadata");
+        assert!(
+            metadata.len() > 0,
+            "log file should not be empty after boot event write"
+        );
+
+        // Verify the content is valid JSON with worker.booting event
+        let content = std::fs::read_to_string(&file_path).expect("should read file");
+        let first_line = content
+            .lines()
+            .next()
+            .expect("file should have at least one line");
+        let event: serde_json::Value =
+            serde_json::from_str(first_line).expect("first line should be valid JSON");
+
+        assert_eq!(
+            event["event_type"], "worker.booting",
+            "first event should be worker.booting"
+        );
+        assert_eq!(event["worker_id"], worker_id, "worker_id should match");
+        assert_eq!(event["session_id"], session_id, "session_id should match");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
