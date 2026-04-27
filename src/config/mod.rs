@@ -615,6 +615,30 @@ pub struct ReflectConfig {
     /// Maximum beads to pass to the extraction agent per Reflect run (default: 5).
     #[serde(default = "ReflectConfig::default_max_extraction_per_run")]
     pub max_extraction_per_run: usize,
+
+    /// How far back to read session transcripts in days (default: 7).
+    #[serde(default = "ReflectConfig::default_transcript_recency_days")]
+    pub transcript_recency_days: u32,
+
+    /// Cap on sessions to analyze per transcript run (default: 50).
+    #[serde(default = "ReflectConfig::default_transcript_max_sessions")]
+    pub transcript_max_sessions: usize,
+
+    /// Jaccard similarity threshold for drift session clustering (default: 0.6).
+    #[serde(default = "ReflectConfig::default_drift_similarity_threshold")]
+    pub drift_similarity_threshold: f64,
+
+    /// Enable drift detection (default: true).
+    #[serde(default = "ReflectConfig::default_drift_enabled")]
+    pub drift_enabled: bool,
+
+    /// Enable ADR decision extraction (default: true).
+    #[serde(default = "ReflectConfig::default_adr_enabled")]
+    pub adr_enabled: bool,
+
+    /// Enable writing learnings to CLAUDE.md (default: true).
+    #[serde(default = "ReflectConfig::default_claude_md_placement")]
+    pub claude_md_placement: bool,
 }
 
 impl Default for ReflectConfig {
@@ -630,6 +654,12 @@ impl Default for ReflectConfig {
             extraction_agent: None,
             extraction_prompt_template: None,
             max_extraction_per_run: Self::default_max_extraction_per_run(),
+            transcript_recency_days: Self::default_transcript_recency_days(),
+            transcript_max_sessions: Self::default_transcript_max_sessions(),
+            drift_similarity_threshold: Self::default_drift_similarity_threshold(),
+            drift_enabled: Self::default_drift_enabled(),
+            adr_enabled: Self::default_adr_enabled(),
+            claude_md_placement: Self::default_claude_md_placement(),
         }
     }
 }
@@ -658,6 +688,24 @@ impl ReflectConfig {
     }
     fn default_max_extraction_per_run() -> usize {
         5
+    }
+    fn default_transcript_recency_days() -> u32 {
+        7
+    }
+    fn default_transcript_max_sessions() -> usize {
+        50
+    }
+    fn default_drift_similarity_threshold() -> f64 {
+        0.6
+    }
+    fn default_drift_enabled() -> bool {
+        true
+    }
+    fn default_adr_enabled() -> bool {
+        true
+    }
+    fn default_claude_md_placement() -> bool {
+        true
     }
 }
 
