@@ -156,9 +156,18 @@ impl Claimer {
 
             if current.status != BeadStatus::Open || current.assignee.is_some() {
                 drop(lock_file);
-                self.telemetry.emit(EventKind::ClaimRaceLost {
-                    bead_id: bead_id.clone(),
-                })?;
+                // Distinguish stale-assignee from race-lost: race_lost means another worker
+                // won the race (status changed), not that this bead has a leftover assignee.
+                if current.status == BeadStatus::Open && current.assignee.is_some() {
+                    self.telemetry.emit(EventKind::ClaimFailed {
+                        bead_id: bead_id.clone(),
+                        reason: "stale assignee".to_string(),
+                    })?;
+                } else {
+                    self.telemetry.emit(EventKind::ClaimRaceLost {
+                        bead_id: bead_id.clone(),
+                    })?;
+                }
                 // Apply backoff before trying next candidate (same as store.claim RaceLost path)
                 if attempts < self.max_retries {
                     tokio::time::sleep(Duration::from_millis(

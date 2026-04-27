@@ -89,11 +89,13 @@ impl super::Strand for PluckStrand {
         //    omits label fields for some beads.
         candidates.retain(|b| !b.labels.iter().any(|l| self.exclude_labels.contains(l)));
 
-        // 3. Filter: remove beads that are actively in_progress (claimed by another worker).
-        //    br ready returns open/claimable beads, but an open bead may have a stale
-        //    assignee string from a previous claim that was released. We only exclude
-        //    beads whose status is in_progress — not beads with a leftover assignee field.
-        candidates.retain(|b| !matches!(b.status, crate::types::BeadStatus::InProgress));
+        // 3. Filter: remove beads that are actively in_progress (claimed by another worker)
+        //    and Open beads with a stale assignee. These are never claimable — the claimer
+        //    will reject them every time, causing a hot loop.
+        candidates.retain(|b| {
+            !matches!(b.status, crate::types::BeadStatus::InProgress)
+                && !(b.status == crate::types::BeadStatus::Open && b.assignee.is_some())
+        });
 
         // 4. Sort: deterministic (priority, created_at, id).
         Self::sort_candidates(&mut candidates);
@@ -546,9 +548,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_bead_with_stale_assignee_is_claimable() {
-        // An open bead with a leftover assignee from a previous claim is still
-        // claimable. Only in_progress beads are filtered out.
+    async fn open_bead_with_stale_assignee_is_filtered() {
+        // An open bead with a leftover assignee from a previous claim is NOT claimable.
+        // The claimer would reject it every time, causing a hot loop, so we filter
+        // these beads out at the pluck stage.
         let store = MemoryStore {
             beads: vec![
                 make_bead_with_assignee("stale-assignee", "worker-1"),
@@ -561,7 +564,8 @@ mod tests {
 
         match result {
             StrandResult::BeadFound(beads) => {
-                assert_eq!(beads.len(), 2, "both open beads should be claimable");
+                assert_eq!(beads.len(), 1, "only unassigned open beads should be claimable");
+                assert_eq!(beads[0].id.as_ref(), "unassigned");
             }
             other => panic!("expected BeadFound, got: {other:?}"),
         }
