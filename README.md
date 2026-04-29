@@ -1,3 +1,5 @@
+![NEEDLE](docs/hero.png)
+
 # 🧵 NEEDLE
 
 **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
