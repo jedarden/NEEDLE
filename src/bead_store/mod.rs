@@ -118,6 +118,18 @@ pub trait BeadStore: Send + Sync {
     /// - `NotClaimable { reason }` — bead not in a claimable state.
     async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult>;
 
+    /// Atomically find and claim the next available bead (server-selected).
+    ///
+    /// This is the preferred method for multi-worker scenarios as it eliminates
+    /// race conditions: the server selects the bead and assigns it in a single
+    /// BEGIN IMMEDIATE transaction. Two workers calling this simultaneously will
+    /// always receive distinct beads.
+    ///
+    /// Returns a `ClaimResult` describing the outcome:
+    /// - `Claimed(bead)` — success, returns the full bead.
+    /// - `NotClaimable { reason }` — no beads available to claim.
+    async fn claim_auto(&self, actor: &str) -> Result<ClaimResult>;
+
     /// Release a claimed bead back to open (e.g., after agent failure).
     async fn release(&self, id: &BeadId) -> Result<()>;
 
@@ -704,6 +716,20 @@ impl BeadStore for BrCliBeadStore {
         tracing::info!("database fully rebuilt from JSONL — verified clean");
         Ok(())
     }
+
+    async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
+        // BrCliBeadStore doesn't support atomic claim_auto.
+        // Fall back to the old behavior: get ready list, try to claim first.
+        let filters = Filters::default();
+        let candidates = self.ready(&filters).await?;
+        if let Some(bead) = candidates.first() {
+            self.claim(&bead.id, actor).await
+        } else {
+            Ok(ClaimResult::NotClaimable {
+                reason: "no beads available".to_string(),
+            })
+        }
+    }
 }
 
 impl BrCliBeadStore {
@@ -755,6 +781,380 @@ impl BrCliBeadStore {
                 RecoveryOutcome::Failed(e)
             }
         }
+    }
+}
+
+// ─── BfCliBeadStore ─────────────────────────────────────────────────────────────
+
+/// `bf` CLI-backed bead store implementation.
+///
+/// Uses `bf claim` for atomic server-selected bead claiming. This eliminates
+/// the race condition in `BrCliBeadStore.claim()` where two workers could both
+/// see the same bead in `ready()` and race to claim it.
+///
+/// The key difference: `bf claim` atomically selects AND claims a bead in a
+/// single BEGIN IMMEDIATE transaction, guaranteeing that concurrent workers
+/// receive distinct beads.
+pub struct BfCliBeadStore {
+    /// Path to the `bf` binary.
+    pub bf_path: PathBuf,
+    /// Workspace root (directory containing `.beads/`).
+    pub workspace: PathBuf,
+    /// Model name for telemetry (e.g., "claude-opus-4-7").
+    pub model: Option<String>,
+    /// Harness name for telemetry (e.g., "needle").
+    pub harness: Option<String>,
+    /// Harness version for telemetry.
+    pub harness_version: Option<String>,
+}
+
+impl BfCliBeadStore {
+    /// Construct a new store, validating that the `bf` binary exists.
+    pub fn new(
+        bf_path: PathBuf,
+        workspace: PathBuf,
+        model: Option<String>,
+        harness: Option<String>,
+        harness_version: Option<String>,
+    ) -> Result<Self> {
+        if !bf_path.exists() {
+            bail!("bf binary not found at {}", bf_path.display());
+        }
+        Ok(BfCliBeadStore {
+            bf_path,
+            workspace,
+            model,
+            harness,
+            harness_version,
+        })
+    }
+
+    /// Try to find `bf` on PATH or the default install location.
+    pub fn discover(
+        workspace: PathBuf,
+        model: Option<String>,
+        harness: Option<String>,
+        harness_version: Option<String>,
+    ) -> Result<Self> {
+        let bf_path = which::which("bf")
+            .or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
+                if candidate.exists() {
+                    Ok(candidate)
+                } else {
+                    Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
+                }
+            })
+            .context("bf CLI not found; install bead-forge")?;
+        Ok(BfCliBeadStore {
+            bf_path,
+            workspace,
+            model,
+            harness,
+            harness_version,
+        })
+    }
+
+    /// Default timeout for bf subprocess calls (30 seconds).
+    const DEFAULT_BF_TIMEOUT_SECS: u64 = 30;
+
+    /// Run a `bf` subcommand in the workspace directory and return stdout.
+    async fn run_bf(&self, args: &[&str]) -> Result<String> {
+        self.run_bf_in(&self.workspace, args, Self::DEFAULT_BF_TIMEOUT_SECS)
+            .await
+    }
+
+    async fn run_bf_in(&self, dir: &Path, args: &[&str], timeout_secs: u64) -> Result<String> {
+        let timeout_duration = std::time::Duration::from_secs(timeout_secs);
+
+        let mut cmd = tokio::process::Command::new(&self.bf_path);
+        cmd.args(args)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn bf subprocess: {args:?}"))?;
+
+        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return Err(e).context(format!("bf subprocess failed: {args:?}"));
+            }
+            Err(_) => {
+                tracing::error!(
+                    args = ?args,
+                    timeout_secs,
+                    "bf subprocess timed out, killing process"
+                );
+                bail!("bf subprocess timed out after {timeout_secs}s: {args:?}");
+            }
+        };
+
+        let stdout = String::from_utf8(output.stdout).context("bf stdout was not valid UTF-8")?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if !output.status.success() {
+            let code = output.status.code().unwrap_or(-1);
+            bail!("bf {args:?} exited with code {code}\nstderr: {stderr}\nstdout: {stdout}");
+        }
+
+        Ok(stdout)
+    }
+
+    /// Parse a JSON array of beads from bf output.
+    fn parse_beads(json: &str, context: &str) -> Result<Vec<Bead>> {
+        if json.trim().is_empty() {
+            return Ok(vec![]);
+        }
+        serde_json::from_str::<Vec<Bead>>(json)
+            .with_context(|| format!("JSON parse error from {context}:\n{json}"))
+    }
+
+    /// Parse a single bead from a JSON array (first element).
+    fn parse_single_bead(json: &str, context: &str) -> Result<Bead> {
+        let beads = Self::parse_beads(json, context)?;
+        beads
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("{context} returned empty array"))
+    }
+}
+
+#[async_trait]
+impl BeadStore for BfCliBeadStore {
+    async fn list_all(&self) -> Result<Vec<Bead>> {
+        let stdout = self
+            .run_bf(&["list", "--json", "--limit", "0"])
+            .await
+            .context("bf list --json failed")?;
+        Self::parse_beads(&stdout, "bf list --json")
+    }
+
+    async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
+        let mut args = vec!["list", "--json", "--status", "open", "--limit", "0"];
+
+        // Build filter args — stored so they live long enough for the slice.
+        let assignee_arg;
+        if let Some(ref assignee) = filters.assignee {
+            args.push("--assignee");
+            assignee_arg = assignee.clone();
+            args.push(&assignee_arg);
+        }
+
+        let stdout = self.run_bf(&args).await.context("bf list failed")?;
+        let mut beads = Self::parse_beads(&stdout, "bf list --json")?;
+
+        // Apply label exclusion filter (bf CLI doesn't support this natively).
+        if !filters.exclude_labels.is_empty() {
+            beads.retain(|b| !b.labels.iter().any(|l| filters.exclude_labels.contains(l)));
+        }
+
+        Ok(beads)
+    }
+
+    async fn show(&self, id: &BeadId) -> Result<Bead> {
+        let id_str = id.as_ref();
+        let stdout = self
+            .run_bf(&["show", id_str, "--json"])
+            .await
+            .with_context(|| format!("bf show {id_str} failed"))?;
+        Self::parse_single_bead(&stdout, &format!("bf show {id_str} --json"))
+    }
+
+    async fn claim(&self, _id: &BeadId, actor: &str) -> Result<ClaimResult> {
+        // BfCliBeadStore uses atomic claim_auto() for all claim operations.
+        // This eliminates the race condition from the old br-style
+        // "update + show verify" pattern — two workers racing to claim
+        // the same bead will always receive distinct beads.
+        self.claim_auto(actor).await
+    }
+
+    async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
+        // Build bf claim args
+        let mut args = vec!["claim", "--assignee", actor, "--json"];
+
+        // Optional telemetry args
+        let model_arg;
+        let harness_arg;
+        let harness_version_arg;
+
+        if let Some(ref model) = self.model {
+            args.push("--model");
+            model_arg = model.as_str();
+            args.push(model_arg);
+        }
+        if let Some(ref harness) = self.harness {
+            args.push("--harness");
+            harness_arg = harness.as_str();
+            args.push(harness_arg);
+        }
+        if let Some(ref harness_version) = self.harness_version {
+            args.push("--harness-version");
+            harness_version_arg = harness_version.as_str();
+            args.push(harness_version_arg);
+        }
+
+        let stdout = self
+            .run_bf(&args)
+            .await
+            .context("bf claim failed")?;
+
+        // Parse JSON output: {"bead_id": "...", "reclaimed": 0, "assignee": "..."}
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .with_context(|| format!("bf claim returned invalid JSON: {stdout}"))?;
+
+        if let Some(bead_id) = json.get("bead_id").and_then(|v| v.as_str()) {
+            if bead_id.is_empty() || stdout.contains("No beads available") {
+                return Ok(ClaimResult::NotClaimable {
+                    reason: "no beads available".to_string(),
+                });
+            }
+            // Fetch the full bead details
+            let bead = self.show(&BeadId::from(bead_id)).await?;
+            Ok(ClaimResult::Claimed(bead))
+        } else {
+            Ok(ClaimResult::NotClaimable {
+                reason: "no beads available".to_string(),
+            })
+        }
+    }
+
+    async fn release(&self, id: &BeadId) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_bf(&["update", id_str, "--status", "open", "--assignee", ""])
+            .await
+            .with_context(|| format!("bf release {id_str} failed"))?;
+        Ok(())
+    }
+
+    async fn flush(&self) -> Result<()> {
+        self.run_bf(&["sync", "--flush-only"])
+            .await
+            .context("bf sync --flush-only failed")?;
+        Ok(())
+    }
+
+    async fn reopen(&self, id: &BeadId) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_bf(&["reopen", id_str])
+            .await
+            .with_context(|| format!("bf reopen {id_str} failed"))?;
+        Ok(())
+    }
+
+    async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+        let bead = self.show(id).await?;
+        Ok(bead.labels)
+    }
+
+    async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_bf(&["label", "add", id_str, label])
+            .await
+            .with_context(|| format!("bf label add {id_str} {label} failed"))?;
+        Ok(())
+    }
+
+    async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_bf(&["label", "remove", id_str, label])
+            .await
+            .with_context(|| format!("bf label remove {id_str} {label} failed"))?;
+        Ok(())
+    }
+
+    async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
+        let mut args: Vec<String> = vec![
+            "create".into(),
+            "--title".into(),
+            title.into(),
+            "--body".into(),
+            body.into(),
+            "--json".into(),
+        ];
+        if !labels.is_empty() {
+            args.push("--labels".into());
+            args.push(labels.join(","));
+        }
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let stdout = self.run_bf(&arg_refs).await.context("bf create failed")?;
+        let id_str = stdout.trim();
+        if id_str.is_empty() {
+            bail!("bf create returned empty ID");
+        }
+        Ok(BeadId::from(id_str))
+    }
+
+    async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+        let blocker = blocker_id.as_ref();
+        let blocked = blocked_id.as_ref();
+        self.run_bf(&["dep", "add", blocked, blocker, "--type", "blocks"])
+            .await
+            .with_context(|| format!("bf dep add {blocked} {blocker} --type blocks failed"))?;
+        Ok(())
+    }
+
+    async fn remove_dependency(&self, blocked_id: &BeadId, blocker_id: &BeadId) -> Result<()> {
+        let blocked = blocked_id.as_ref();
+        let blocker = blocker_id.as_ref();
+        self.run_bf(&["dep", "remove", blocked, blocker])
+            .await
+            .with_context(|| format!("bf dep remove {blocked} {blocker} failed"))?;
+        Ok(())
+    }
+
+    async fn doctor_repair(&self) -> Result<RepairReport> {
+        let stdout = self
+            .run_bf(&["doctor", "--repair"])
+            .await
+            .context("bf doctor --repair failed")?;
+        Ok(BrCliBeadStore::parse_doctor_output(&stdout))
+    }
+
+    async fn doctor_check(&self) -> Result<RepairReport> {
+        let stdout = self.run_bf(&["doctor"]).await.context("bf doctor failed")?;
+        Ok(BrCliBeadStore::parse_doctor_output(&stdout))
+    }
+
+    async fn full_rebuild(&self) -> Result<()> {
+        let db_path = self.workspace.join(".beads/beads.db");
+
+        if db_path.exists() {
+            tokio::fs::remove_file(&db_path)
+                .await
+                .with_context(|| format!("failed to remove {}", db_path.display()))?;
+            tracing::info!(path = %db_path.display(), "removed corrupt database file");
+        }
+
+        for suffix in &["-wal", "-shm"] {
+            let wal_path = self.workspace.join(format!(".beads/beads.db{suffix}"));
+            if wal_path.exists() {
+                let _ = tokio::fs::remove_file(&wal_path).await;
+            }
+        }
+
+        self.run_bf(&["sync", "--import-only"])
+            .await
+            .context("bf sync --import-only failed during full rebuild")?;
+
+        let verify = self
+            .run_bf(&["doctor"])
+            .await
+            .context("bf doctor verification failed after rebuild")?;
+        let report = BrCliBeadStore::parse_doctor_output(&verify);
+
+        if !report.warnings.is_empty() {
+            bail!(
+                "database still has issues after rebuild: {:?}",
+                report.warnings
+            );
+        }
+
+        tracing::info!("database fully rebuilt from JSONL — verified clean");
+        Ok(())
     }
 }
 
