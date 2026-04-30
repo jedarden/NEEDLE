@@ -85,6 +85,12 @@ ureq = "2"
 # Multi-pattern string search (sanitizer keyword pre-filter)
 aho-corasick = "1"
 
+# Conditional compilation
+cfg-if = "1"
+
+# Terminal detection (ANSI color support)
+atty = "0.2"
+
 # TOML parsing (gitleaks config)
 toml = "0.8"
 

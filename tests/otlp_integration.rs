@@ -90,6 +90,10 @@ service:
         let config_path = temp_dir.path().join("otel-collector-config.yaml");
         std::fs::write(&config_path, config)?;
 
+        // Create a temp directory for output inside the container
+        let output_container_dir = temp_dir.path().join("otel-output");
+        std::fs::create_dir_all(&output_container_dir)?;
+
         let output_dir = temp_dir.keep();
 
         // Start the container using docker with explicit port mapping.
@@ -110,6 +114,8 @@ service:
                 "-P", // Automatically map all exposed ports
                 "-v",
                 &format!("{}:/etc/otel-collector-config.yaml", config_path.display()),
+                "-v",
+                &format!("{}:/tmp/otel-output", output_container_dir.display()),
                 "otel/opentelemetry-collector-contrib:0.114.0",
                 "--config=/etc/otel-collector-config.yaml",
             ])
@@ -143,7 +149,9 @@ service:
         }
 
         let port_str = String::from_utf8(port_output.stdout)?;
-        let host_port = port_str
+        // docker port returns both IPv4 and IPv6 mappings; take the first line (IPv4).
+        let first_line = port_str.lines().next().context("no port mapping output")?;
+        let host_port = first_line
             .split(':')
             .nth(1)
             .and_then(|p| p.trim().parse::<u16>().ok())
@@ -168,23 +176,18 @@ service:
     fn copy_output_files(&self, dest_dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dest_dir)?;
 
-        for file in ["traces.json", "metrics.json", "logs.json"] {
-            let output = std::process::Command::new("docker")
-                .args([
-                    "cp",
-                    &format!("{}:/tmp/otel-output/{}", self.id, file),
-                    &dest_dir.join(file).to_string_lossy(),
-                ])
-                .output();
+        // The output directory is mounted directly, so files are already on the host
+        let src_output_dir = self.output_dir.join("otel-output");
 
-            // Ignore errors - the file may not exist if no data was exported.
-            if let Ok(o) = output {
-                if !o.status.success() {
-                    eprintln!(
-                        "warning: failed to copy {} from container: {}",
-                        file,
-                        String::from_utf8_lossy(&o.stderr)
-                    );
+        for file in ["traces.json", "metrics.json", "logs.json"] {
+            let src_file = src_output_dir.join(file);
+            let dest_file = dest_dir.join(file);
+
+            // Only copy if the source file exists and has content
+            if src_file.exists() {
+                let metadata = std::fs::metadata(&src_file)?;
+                if metadata.len() > 0 {
+                    std::fs::copy(&src_file, &dest_file)?;
                 }
             }
         }
@@ -752,10 +755,7 @@ async fn otlp_integration_happy_path() -> Result<()> {
         );
 
         // Assert: One `strand.pluck` child span.
-        let pluck_spans: Vec<_> = spans
-            .iter()
-            .filter(|s| s.name == "strand.pluck")
-            .collect();
+        let pluck_spans: Vec<_> = spans.iter().filter(|s| s.name == "strand.pluck").collect();
         assert!(
             !pluck_spans.is_empty(),
             "expected at least one strand.pluck span"
@@ -1009,7 +1009,8 @@ async fn otlp_integration_drop_path() -> Result<()> {
     telemetry.start();
 
     // Emit many telemetry events to trigger batch export attempts
-    for i in 0..10 {
+    // We need to trigger enough exports to cause 3+ consecutive failures
+    for i in 0..100 {
         telemetry
             .emit(needle::telemetry::EventKind::WorkerStarted {
                 worker_name: format!("test-worker-{}", i),
@@ -1020,7 +1021,8 @@ async fn otlp_integration_drop_path() -> Result<()> {
 
     // Give time for export failures to be detected and drop events emitted.
     // The batch processor flushes periodically, and we need 3+ consecutive failures.
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // With a short timeout and many events, failures should be detected quickly.
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     // Trigger shutdown to force flush
     telemetry.shutdown().await;
@@ -1032,13 +1034,14 @@ async fn otlp_integration_drop_path() -> Result<()> {
     // Assert: The file sink (used for drop events) contains `telemetry.otlp.dropped`.
     let drops_path = workspace_home.join("test-worker-drop-test.jsonl");
 
+    // List the directory for debugging
+    let entries: Vec<_> = std::fs::read_dir(workspace_home)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .collect();
+
     // First check if the file exists - if not, the file sink may not have been created properly
     if !drops_path.exists() {
-        // List the directory for debugging
-        let entries: Vec<_> = std::fs::read_dir(workspace_home)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .collect();
         panic!(
             "expected test-worker-drop-test.jsonl to exist. Found files: {:?}",
             entries

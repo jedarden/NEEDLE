@@ -1496,6 +1496,11 @@ mod tests {
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             anyhow::bail!("not implemented in mock")
         }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented in mock")
+        }
+
         async fn release(&self, id: &BeadId) -> Result<()> {
             // Only return Ok if the bead exists in all_beads.
             // This matches real bead store behavior where releasing a
@@ -1506,9 +1511,6 @@ mod tests {
             } else {
                 anyhow::bail!("bead not found: {}", id)
             }
-        }
-        async fn flush(&self) -> Result<()> {
-            Ok(())
         }
         async fn flush(&self) -> Result<()> {
             Ok(())
@@ -1579,6 +1581,11 @@ mod tests {
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             anyhow::bail!("store error")
         }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("store error")
+        }
+
         async fn release(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store error")
         }
@@ -4003,6 +4010,11 @@ mod tests {
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             anyhow::bail!("not implemented in mock")
         }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented in mock")
+        }
+
         async fn release(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("not implemented in mock")
         }

@@ -305,7 +305,8 @@ impl BrCliBeadStore {
 
                 let sync_timeout = std::time::Duration::from_secs(60);
                 let mut sync_cmd = tokio::process::Command::new(&self.br_path);
-                sync_cmd.args(["sync"])
+                sync_cmd
+                    .args(["sync"])
                     .current_dir(dir)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
@@ -337,7 +338,8 @@ impl BrCliBeadStore {
 
                 // Retry the original command once with timeout.
                 let mut retry_cmd = tokio::process::Command::new(&self.br_path);
-                retry_cmd.args(args)
+                retry_cmd
+                    .args(args)
                     .current_dir(dir)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
@@ -997,10 +999,7 @@ impl BeadStore for BfCliBeadStore {
             args.push(harness_version_arg);
         }
 
-        let stdout = self
-            .run_bf(&args)
-            .await
-            .context("bf claim failed")?;
+        let stdout = self.run_bf(&args).await.context("bf claim failed")?;
 
         // Parse JSON output: {"bead_id": "...", "reclaimed": 0, "assignee": "..."}
         let json: serde_json::Value = serde_json::from_str(&stdout)

@@ -1,0 +1,16 @@
+{
+  "bead_id": "needle-mbio",
+  "agent": "claude-code-glm-4.7",
+  "provider": "zai",
+  "model": "glm-4.7",
+  "exit_code": 0,
+  "outcome": "success",
+  "duration_ms": 6829,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-04-27T01:08:35.137792086Z",
+  "trace_format": "claude_json",
+  "pruned": false,
+  "template_version": null
+}

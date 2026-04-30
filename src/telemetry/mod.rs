@@ -5132,11 +5132,16 @@ mod tests {
         // the BufWriter is flushed before returning — no sleep required.
         telemetry.shutdown().await;
 
-        // The file must contain the 3 events.  If the BufWriter was never
+        // The file must contain the 4 events (worker.booting is written during init,
+        // plus the 3 events emitted by the test). If the BufWriter was never
         // flushed the file would be 0 bytes and this assertion would fail.
         let content = std::fs::read_to_string(&path).expect("log file must exist");
         let lines: Vec<&str> = content.lines().filter(|l| !l.is_empty()).collect();
-        assert_eq!(lines.len(), 3, "expected 3 JSONL lines after shutdown");
+        assert_eq!(
+            lines.len(),
+            4,
+            "expected 4 JSONL lines after shutdown (worker.booting + 3 emitted events)"
+        );
         for line in &lines {
             let v: serde_json::Value =
                 serde_json::from_str(line).expect("each line must be valid JSON");
@@ -5389,13 +5394,13 @@ mod tests {
         assert!(
             trace_id
                 .chars()
-                .all(|c| c.is_ascii_hexdigit() && c.is_lowercase()),
+                .all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_lowercase())),
             "trace_id should be lowercase hex"
         );
         assert!(
             span_id
                 .chars()
-                .all(|c| c.is_ascii_hexdigit() && c.is_lowercase()),
+                .all(|c| c.is_ascii_hexdigit() && (c.is_ascii_digit() || c.is_lowercase())),
             "span_id should be lowercase hex"
         );
     }

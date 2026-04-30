@@ -600,6 +600,13 @@ mod tests {
                 reason: "mock".to_string(),
             })
         }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::NotClaimable {
+                reason: "mock".to_string(),
+            })
+        }
+
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }

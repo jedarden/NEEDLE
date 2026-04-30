@@ -145,6 +145,12 @@ impl BeadStore for ConcurrentMockStore {
         Ok(ClaimResult::Claimed(bead))
     }
 
+    async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+        Ok(ClaimResult::NotClaimable {
+            reason: "claim_auto not supported in mock".to_string(),
+        })
+    }
+
     async fn release(&self, id: &BeadId) -> Result<()> {
         self.release_count.fetch_add(1, Ordering::Relaxed);
         let mut claims = self.claims.lock().unwrap();
@@ -1740,6 +1746,12 @@ impl BeadStore for MitosisDedupeStore {
     async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
         Ok(ClaimResult::NotClaimable {
             reason: "mock".to_string(),
+        })
+    }
+
+    async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+        Ok(ClaimResult::NotClaimable {
+            reason: "claim_auto not supported in mock".to_string(),
         })
     }
 

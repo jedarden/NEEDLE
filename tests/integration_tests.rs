@@ -13,6 +13,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -22,6 +23,7 @@ use chrono::Utc;
 use needle::bead_store::{BeadStore, Filters, RepairReport};
 use needle::config::Config;
 use needle::dispatch::{AgentAdapter, Dispatcher};
+use needle::strand::Strand;
 use needle::telemetry::Telemetry;
 use needle::types::{
     Bead, BeadId, BeadStatus, ClaimResult, IdleAction, InputMethod, Outcome, StrandResult,
@@ -108,6 +110,13 @@ impl BeadStore for IntegrationMockStore {
         }
     }
 
+    async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+        // Return NotClaimable for tests - auto-claim not supported in mock
+        Ok(ClaimResult::NotClaimable {
+            reason: "no beads available".to_string(),
+        })
+    }
+
     async fn release(&self, id: &BeadId) -> Result<()> {
         self.record(&format!("release:{id}"));
         // Remove released beads from the list to prevent infinite re-selection loops.
@@ -149,6 +158,10 @@ impl BeadStore for IntegrationMockStore {
 
     async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
         self.record(&format!("add_dep:{}:{}", blocker_id, blocked_id));
+        Ok(())
+    }
+
+    async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> Result<()> {
         Ok(())
     }
 
@@ -591,6 +604,12 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
             }
         }
 
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::NotClaimable {
+                reason: "no beads available".to_string(),
+            })
+        }
+
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -620,6 +639,14 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         }
 
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
             Ok(())
         }
 
@@ -1147,6 +1174,12 @@ impl BeadStore for ZombieMockStore {
         })
     }
 
+    async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+        Ok(ClaimResult::NotClaimable {
+            reason: "no beads available".to_string(),
+        })
+    }
+
     async fn release(&self, id: &BeadId) -> Result<()> {
         self.released.lock().unwrap().push(id.clone());
         // Update bead state: released beads become Open with no assignee.
@@ -1183,6 +1216,10 @@ impl BeadStore for ZombieMockStore {
     }
 
     async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> Result<()> {
         Ok(())
     }
 
@@ -1241,6 +1278,10 @@ impl BeadStore for MultiWorkspaceStore {
         self.home_store.claim(id, actor).await
     }
 
+    async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
+        self.home_store.claim_auto(actor).await
+    }
+
     async fn release(&self, id: &BeadId) -> Result<()> {
         self.home_store.release(id).await
     }
@@ -1271,6 +1312,12 @@ impl BeadStore for MultiWorkspaceStore {
 
     async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
         self.home_store.add_dependency(blocker_id, blocked_id).await
+    }
+
+    async fn remove_dependency(&self, blocked_id: &BeadId, blocker_id: &BeadId) -> Result<()> {
+        self.home_store
+            .remove_dependency(blocked_id, blocker_id)
+            .await
     }
 
     async fn doctor_repair(&self) -> Result<RepairReport> {
@@ -1349,7 +1396,8 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
 
     // Verify the bead is now in-progress and not in ready().
     let remote_store =
-        needle::bead_store::BrCliBeadStore::discover(remote_workspace.clone()).unwrap();
+        needle::bead_store::BrCliBeadStore::discover(remote_workspace.clone().to_path_buf())
+            .unwrap();
     let filters = Filters {
         assignee: None,
         exclude_labels: vec![
@@ -1372,6 +1420,7 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     let explore_config = ExploreConfig {
         enabled: true,
         workspaces: vec![remote_workspace.clone()],
+        workspace_root: PathBuf::from("/tmp"),
     };
 
     let explore = ExploreStrand::new(
@@ -1496,6 +1545,7 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     let explore_config = ExploreConfig {
         enabled: true,
         workspaces: vec![remote_workspace.clone()],
+        workspace_root: PathBuf::from("/tmp"),
     };
 
     let explore = ExploreStrand::new(
@@ -1525,7 +1575,8 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     }
 
     // Verify the bead is still assigned to the live worker.
-    let remote_store = needle::bead_store::BrCliBeadStore::discover(remote_workspace).unwrap();
+    let remote_store =
+        needle::bead_store::BrCliBeadStore::discover(remote_workspace.to_path_buf()).unwrap();
     let bead = remote_store.show(&bead_id).await.unwrap();
     assert_eq!(
         bead.assignee,
@@ -1599,6 +1650,7 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     let explore_config = ExploreConfig {
         enabled: true,
         workspaces: vec![remote_workspace.clone()],
+        workspace_root: PathBuf::from("/tmp"),
     };
 
     let explore = ExploreStrand::new(
@@ -1627,7 +1679,8 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     }
 
     // Verify the bead is still assigned to us.
-    let remote_store = needle::bead_store::BrCliBeadStore::discover(remote_workspace).unwrap();
+    let remote_store =
+        needle::bead_store::BrCliBeadStore::discover(remote_workspace.to_path_buf()).unwrap();
     let bead = remote_store.show(&bead_id).await.unwrap();
     assert_eq!(
         bead.assignee,
@@ -1703,7 +1756,7 @@ async fn mend_removes_stale_dependency_links() {
     assert!(dep_output.status.success(), "br dep add failed");
 
     // Verify the dependency exists and the blocked bead is... blocked.
-    let store = needle::bead_store::BrCliBeadStore::discover(workspace).unwrap();
+    let store = needle::bead_store::BrCliBeadStore::discover(workspace.to_path_buf()).unwrap();
     let blocked_bead = store
         .show(&needle::types::BeadId::from(blocked_id.clone()))
         .await
@@ -1712,7 +1765,7 @@ async fn mend_removes_stale_dependency_links() {
         !blocked_bead.dependencies.is_empty(),
         "dependency should exist"
     );
-    assert_eq!(blocked_bead.dependencies[0].id, blocker_id);
+    assert_eq!(blocked_bead.dependencies[0].id, blocker_id.as_str().into());
     assert_eq!(blocked_bead.dependencies[0].dependency_type, "blocks");
 
     // Verify the blocked bead does NOT appear in ready() (because it's blocked).

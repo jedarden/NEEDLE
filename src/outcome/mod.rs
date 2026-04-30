@@ -993,6 +993,13 @@ mod tests {
                 reason: "mock".to_string(),
             })
         }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::NotClaimable {
+                reason: "mock".to_string(),
+            })
+        }
+
         async fn release(&self, id: &BeadId) -> Result<()> {
             self.actions
                 .lock()
@@ -1543,6 +1550,11 @@ mod tests {
             async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
                 self.inner.claim(id, actor).await
             }
+
+            async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
+                self.inner.claim_auto(actor).await
+            }
+
             async fn release(&self, id: &BeadId) -> Result<()> {
                 self.inner.release(id).await
             }
@@ -1635,6 +1647,11 @@ mod tests {
             async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
                 self.inner.claim(id, actor).await
             }
+
+            async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
+                self.inner.claim_auto(actor).await
+            }
+
             async fn release(&self, _id: &BeadId) -> Result<()> {
                 // Simulate a slow release that times out.
                 tokio::time::sleep(std::time::Duration::from_secs(35)).await;

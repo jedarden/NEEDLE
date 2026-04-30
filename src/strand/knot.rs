@@ -306,6 +306,11 @@ mod tests {
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             anyhow::bail!("not implemented")
         }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -370,6 +375,11 @@ mod tests {
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             anyhow::bail!("store connection failed")
         }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("store connection failed")
+        }
+
         async fn release(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store connection failed")
         }

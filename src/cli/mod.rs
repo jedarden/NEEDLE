@@ -338,7 +338,9 @@ pub fn run() -> Result<()> {
             timeout,
             resume,
             hot_reload,
-        } => cmd_run(workspace, agent, count, identifier, timeout, resume, hot_reload),
+        } => cmd_run(
+            workspace, agent, count, identifier, timeout, resume, hot_reload,
+        ),
         CliCommand::Stop { all, identifier } => cmd_stop(all, identifier),
         CliCommand::Cleanup { all, identifier } => cmd_cleanup(all, identifier),
         CliCommand::List { format } => cmd_list(format),
@@ -486,7 +488,9 @@ fn cmd_run(
         run_worker(config, worker_id)
     } else {
         // Always create dedicated tmux sessions, even if already inside tmux.
-        launch_workers(config, workspace, agent, count, identifier, timeout, hot_reload)
+        launch_workers(
+            config, workspace, agent, count, identifier, timeout, hot_reload,
+        )
     }
 }
 
@@ -642,6 +646,136 @@ fn launch_workers(
     Ok(())
 }
 
+/// Initialize the tracing subscriber with OTLP layer if configured.
+///
+/// This must be called before any tracing spans are created so that the OTLP
+/// layer can export them to the configured collector.
+///
+/// Note: Shutdown is handled by the OtlpSink in the telemetry module, not here.
+#[cfg(feature = "otlp")]
+fn init_tracing_subscriber(
+    worker_id: String,
+    session_id: String,
+    config: &crate::config::Config,
+) -> Result<()> {
+    use opentelemetry::trace::TracerProvider;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    let use_ansi = use_ansi();
+
+    // Check if OTLP is enabled
+    if !config.telemetry.otlp_sink.enabled {
+        // No OTLP - just initialize with fmt layer
+        let fmt_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_ansi(use_ansi);
+        tracing_subscriber::registry()
+            .with(fmt_layer)
+            .try_init()
+            .context("failed to initialize tracing subscriber")?;
+        return Ok(());
+    }
+
+    // OTLP is enabled - create the OTLP layer inline
+    // We create it inline to avoid type erasure issues with boxed layers
+    let otlp_config = &config.telemetry.otlp_sink;
+
+    // Build resource attributes
+    let resource = crate::telemetry::otlp::OtlpSink::build_resource(
+        &worker_id,
+        &session_id,
+        otlp_config,
+        Some(&config.agent.default),
+        None, // model - not available in AgentConfig
+        config.workspace.default.to_str(),
+    )
+    .context("failed to build OTel resource")?;
+
+    // Create drop channel for tracing layer
+    let (drop_tx, mut drop_rx) =
+        tokio::sync::mpsc::unbounded_channel::<crate::telemetry::otlp::DropEvent>();
+    tokio::spawn(async move {
+        while let Some(drop) = drop_rx.recv().await {
+            tracing::warn!(
+                signal = drop.signal.as_str(),
+                dropped_count = drop.dropped_count,
+                "OTLP tracing layer export failure"
+            );
+        }
+    });
+
+    // Build exporters and tracer provider based on protocol
+    let (tracer_provider, ..) = match otlp_config.protocol.as_str() {
+        "grpc" => {
+            crate::telemetry::otlp::OtlpSink::build_grpc_providers(otlp_config, &resource, drop_tx)?
+        }
+        "http" | "http/protobuf" => {
+            crate::telemetry::otlp::OtlpSink::build_http_providers(otlp_config, &resource, drop_tx)?
+        }
+        other => anyhow::bail!("invalid OTLP protocol: {other}, must be 'grpc' or 'http'"),
+    };
+
+    // Create the OpenTelemetry tracing layer
+    let otlp_layer = tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("needle"));
+
+    // Create a fmt layer that works with any subscriber implementing LookupSpan
+    // We build this after the OTLP layer to ensure proper type compatibility
+    let subscriber = tracing_subscriber::registry().with(otlp_layer).with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_ansi(use_ansi),
+    );
+
+    subscriber
+        .try_init()
+        .context("failed to initialize tracing subscriber with OTLP")?;
+
+    Ok(())
+}
+
+/// No-op tracing initialization when OTLP feature is disabled.
+#[cfg(not(feature = "otlp"))]
+fn init_tracing_subscriber(
+    _worker_id: String,
+    _session_id: String,
+    _config: &crate::config::Config,
+) -> Result<()> {
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    let use_ansi = use_ansi();
+
+    // Initialize with just the stdout layer when OTLP is disabled
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(use_ansi),
+        )
+        .try_init()
+        .context("failed to initialize tracing subscriber")?;
+
+    Ok(())
+}
+
+/// Helper function to determine ANSI support (non-Android platforms).
+#[cfg(not(target_os = "android"))]
+fn use_ansi() -> bool {
+    atty::is(atty::Stream::Stderr)
+}
+
+/// Helper function for Android (no ANSI).
+#[cfg(target_os = "android")]
+fn use_ansi() -> bool {
+    false
+}
+
+/// Generate a session ID for a worker.
+///
+/// Uses the telemetry module's session ID generator.
+fn generate_session_id_for_worker() -> String {
+    crate::telemetry::generate_session_id()
+}
+
 /// Start the worker state machine (called when inside tmux or for direct mode).
 ///
 /// Creates telemetry and the tokio runtime *before* any other initialization
@@ -657,6 +791,11 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
     eprintln!("NEEDLE worker boot: creating tokio runtime...");
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     eprintln!("NEEDLE worker boot: tokio runtime created");
+
+    eprintln!("NEEDLE worker boot: initializing tracing subscriber...");
+    let session_id = generate_session_id_for_worker();
+    init_tracing_subscriber(qualified_id.clone(), session_id.clone(), &config)?;
+    eprintln!("NEEDLE worker boot: tracing subscriber initialized");
 
     eprintln!("NEEDLE worker boot: creating telemetry...");
     let telemetry =

@@ -471,6 +471,13 @@ mod tests {
             Ok(ClaimResult::Claimed(bead))
         }
 
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            // Return NotClaimable for tests unless overridden
+            Ok(ClaimResult::NotClaimable {
+                reason: "no beads available".to_string(),
+            })
+        }
+
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }

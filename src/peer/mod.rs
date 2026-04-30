@@ -322,6 +322,11 @@ mod tests {
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             anyhow::bail!("not implemented in mock")
         }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented in mock")
+        }
+
         async fn release(&self, _id: &BeadId) -> Result<()> {
             self.release_count.fetch_add(1, Ordering::Relaxed);
             Ok(())

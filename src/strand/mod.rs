@@ -588,6 +588,11 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn claim_auto(&self, _actor: &str) -> Result<crate::types::ClaimResult> {
+            Ok(crate::types::ClaimResult::NotClaimable {
+                reason: "claim_auto not supported in mock".to_string(),
+            })
+        }
     }
 
     #[tokio::test]

@@ -583,9 +583,6 @@ fn emitter_loop(
         let is_idle = state == WorkerState::Exhausted || current_bead.is_none();
         let current_task = current_bead.as_ref().map(|b| b.to_string());
 
-        // Use the current bead's workspace if set, otherwise fall back to home workspace.
-        let effective_workspace = current_workspace.unwrap_or_else(|| workspace.clone());
-
         let data = HeartbeatData {
             worker_id: worker_id.clone(),
             qualified_id: qualified_id.clone(),

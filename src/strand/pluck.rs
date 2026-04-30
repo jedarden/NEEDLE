@@ -213,6 +213,11 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::NotClaimable {
+                reason: "claim_auto not supported in mock".to_string(),
+            })
+        }
     }
 
     /// A store that returns all beads from `ready()` without any label filtering,
@@ -293,6 +298,11 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::NotClaimable {
+                reason: "claim_auto not supported in mock".to_string(),
+            })
+        }
     }
 
     /// Failing bead store for error-path tests.
@@ -361,6 +371,11 @@ mod tests {
             _blocker_id: &BeadId,
         ) -> Result<()> {
             Ok(())
+        }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::NotClaimable {
+                reason: "claim_auto not supported in mock".to_string(),
+            })
         }
     }
 
@@ -564,7 +579,11 @@ mod tests {
 
         match result {
             StrandResult::BeadFound(beads) => {
-                assert_eq!(beads.len(), 1, "only unassigned open beads should be claimable");
+                assert_eq!(
+                    beads.len(),
+                    1,
+                    "only unassigned open beads should be claimable"
+                );
                 assert_eq!(beads[0].id.as_ref(), "unassigned");
             }
             other => panic!("expected BeadFound, got: {other:?}"),

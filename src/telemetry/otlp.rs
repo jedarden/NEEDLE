@@ -29,22 +29,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::warn;
 
-#[cfg(feature = "otlp")]
-use tracing_opentelemetry::OpenTelemetryLayer;
-#[cfg(feature = "otlp")]
-use tracing_subscriber::Registry;
-
 /// Drop event signal type (traces, metrics, or logs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
-enum SignalType {
+pub enum SignalType {
     Traces,
     Metrics,
     Logs,
 }
 
 impl SignalType {
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             SignalType::Traces => "traces",
             SignalType::Metrics => "metrics",
@@ -55,9 +50,9 @@ impl SignalType {
 
 /// Event sent from exporter wrappers to the drop monitor task.
 #[derive(Debug, Clone)]
-pub(crate) struct DropEvent {
-    signal: SignalType,
-    dropped_count: u64,
+pub struct DropEvent {
+    pub signal: SignalType,
+    pub dropped_count: u64,
 }
 
 /// Shared state for tracking consecutive export failures.
@@ -676,7 +671,7 @@ impl OtlpSink {
     ///
     /// Reserved keys `service.name` and `service.instance.id` cannot be overridden
     /// via config - attempting to do so will return an error.
-    pub(crate) fn build_resource(
+    pub fn build_resource(
         worker_id: &str,
         session_id: &str,
         config: &OtlpSinkConfig,
@@ -745,7 +740,7 @@ impl OtlpSink {
     }
 
     /// Build providers using gRPC transport (tonic).
-    pub(crate) fn build_grpc_providers(
+    pub fn build_grpc_providers(
         config: &OtlpSinkConfig,
         resource: &Resource,
         drop_tx: mpsc::UnboundedSender<DropEvent>,
@@ -838,7 +833,7 @@ impl OtlpSink {
     }
 
     /// Build providers using HTTP/protobuf transport (reqwest).
-    pub(crate) fn build_http_providers(
+    pub fn build_http_providers(
         config: &OtlpSinkConfig,
         resource: &Resource,
         drop_tx: mpsc::UnboundedSender<DropEvent>,
@@ -1489,7 +1484,8 @@ pub fn create_tracing_layer(
     agent: Option<&str>,
     model: Option<&str>,
     workspace: Option<&str>,
-) -> Result<Option<OpenTelemetryLayer<Registry, opentelemetry_sdk::trace::Tracer>>> {
+) -> Result<Option<Box<dyn tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync>>>
+{
     if !config.enabled {
         return Ok(None);
     }
@@ -1520,10 +1516,9 @@ pub fn create_tracing_layer(
         other => anyhow::bail!("invalid OTLP protocol: {other}, must be 'grpc' or 'http'"),
     };
 
-    // Create the tracing layer with the tracer provider
+    // Create the tracing layer with the tracer provider, boxed for type erasure
     let layer = tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("needle"));
-
-    Ok(Some(layer))
+    Ok(Some(Box::new(layer)))
 }
 
 impl crate::telemetry::Sink for OtlpSink {

@@ -592,6 +592,11 @@ mod tests {
         async fn full_rebuild(&self) -> Result<()> {
             Ok(())
         }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::NotClaimable {
+                reason: "claim_auto not supported in mock".to_string(),
+            })
+        }
     }
 
     // ── State tests ─────────────────────────────────────────────────────

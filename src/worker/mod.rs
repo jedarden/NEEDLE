@@ -946,10 +946,7 @@ impl Worker {
         // This eliminates the race condition where two workers both see the same
         // bead in ready() and race to claim it.
         let strand = "auto";
-        let claim = self
-            .claimer
-            .claim_auto(&self.qualified_id(), strand)
-            .await;
+        let claim = self.claimer.claim_auto(&self.qualified_id(), strand).await;
 
         match claim {
             Ok(ClaimResult::Claimed(bead)) => {
@@ -961,7 +958,10 @@ impl Worker {
                 return Ok(());
             }
             Ok(ClaimResult::NotClaimable { reason }) => {
-                tracing::debug!(reason, "claim_auto returned no beads, falling back to strand waterfall");
+                tracing::debug!(
+                    reason,
+                    "claim_auto returned no beads, falling back to strand waterfall"
+                );
                 // Fall through to strand waterfall
             }
             Err(e) => {
@@ -969,7 +969,10 @@ impl Worker {
                 // Fall through to strand waterfall
             }
             Ok(other) => {
-                tracing::warn!(?other, "claim_auto returned unexpected result, falling back to strand waterfall");
+                tracing::warn!(
+                    ?other,
+                    "claim_auto returned unexpected result, falling back to strand waterfall"
+                );
                 // Fall through to strand waterfall
             }
         }
@@ -3020,6 +3023,18 @@ mod tests {
         async fn full_rebuild(&self) -> Result<()> {
             Ok(())
         }
+        async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
+            let mut beads = self.beads.lock().unwrap();
+            if let Some(bead) = beads.iter_mut().find(|b| b.status == BeadStatus::Open) {
+                bead.status = BeadStatus::InProgress;
+                bead.assignee = Some(actor.to_string());
+                Ok(ClaimResult::Claimed(bead.clone()))
+            } else {
+                Ok(ClaimResult::NotClaimable {
+                    reason: "no open beads".to_string(),
+                })
+            }
+        }
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -3225,6 +3240,11 @@ mod tests {
         async fn full_rebuild(&self) -> Result<()> {
             Ok(())
         }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::RaceLost {
+                claimed_by: "other-worker".to_string(),
+            })
+        }
         async fn add_dependency(&self, _a: &BeadId, _b: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -3297,6 +3317,11 @@ mod tests {
         }
         async fn full_rebuild(&self) -> Result<()> {
             Ok(())
+        }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::NotClaimable {
+                reason: "already closed".to_string(),
+            })
         }
         async fn add_dependency(&self, _a: &BeadId, _b: &BeadId) -> Result<()> {
             Ok(())
