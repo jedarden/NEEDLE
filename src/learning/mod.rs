@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Learning Entry Types
@@ -114,6 +115,29 @@ pub struct LearningEntry {
     /// Last time this entry was reinforced.
     #[serde(default)]
     pub last_reinforced: Option<DateTime<Utc>>,
+    /// Associated ADR decision ID (if this learning represents a decision).
+    #[serde(default)]
+    pub decision_id: Option<String>,
+    /// ADR decision context (if this learning represents a decision).
+    #[serde(default)]
+    pub decision_context: Option<DecisionContext>,
+}
+
+/// ADR-lite decision context for learnings that represent intentional decisions.
+///
+/// Captured when promoting a learning that originated from a decision point
+/// (agent chose between alternatives). Preserves the "why" not just the "what".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionContext {
+    /// The decision that was made (what was chosen).
+    pub decision: String,
+    /// Context/problem space (what situation led to the decision).
+    pub context: String,
+    /// Rationale (why this choice was made over alternatives).
+    pub rationale: String,
+    /// Alternatives considered (what other options were evaluated).
+    #[serde(default)]
+    pub alternatives: Vec<String>,
 }
 
 impl LearningEntry {
@@ -137,7 +161,68 @@ impl LearningEntry {
             source,
             reinforcement_count: 0,
             last_reinforced: None,
+            decision_id: None,
+            decision_context: None,
         }
+    }
+
+    /// Create a new learning entry with an associated decision.
+    pub fn with_decision(
+        bead_id: String,
+        worker: String,
+        bead_type: BeadType,
+        observation: String,
+        confidence: Confidence,
+        source: String,
+        decision_id: String,
+    ) -> Self {
+        let date = Utc::now().format("%Y-%m-%d").to_string();
+        LearningEntry {
+            date,
+            bead_id,
+            worker,
+            bead_type,
+            observation,
+            confidence,
+            source,
+            reinforcement_count: 0,
+            last_reinforced: None,
+            decision_id: Some(decision_id),
+            decision_context: None,
+        }
+    }
+
+    /// Create a new learning entry with full ADR decision context.
+    pub fn with_adr_context(
+        bead_id: String,
+        worker: String,
+        bead_type: BeadType,
+        observation: String,
+        confidence: Confidence,
+        source: String,
+        decision_context: DecisionContext,
+    ) -> Self {
+        let date = Utc::now().format("%Y-%m-%d").to_string();
+        // Generate a decision ID from the context
+        let decision_id = generate_decision_id(&decision_context.decision, &bead_id);
+        LearningEntry {
+            date,
+            bead_id,
+            worker,
+            bead_type,
+            observation,
+            confidence,
+            source,
+            reinforcement_count: 0,
+            last_reinforced: None,
+            decision_id: Some(decision_id),
+            decision_context: Some(decision_context),
+        }
+    }
+
+    /// Returns true if this entry represents a decision with an ADR.
+    pub fn is_decision(&self) -> bool {
+        self.decision_id.is_some()
     }
 
     /// Returns true if this entry is stale (older than 90 days without reinforcement).
@@ -168,12 +253,11 @@ impl LearningEntry {
 
     /// Format as markdown for the learnings.md file.
     pub fn to_markdown(&self) -> String {
-        format!(
+        let mut result = format!(
             "### {} | bead: {} | worker: {} | type: {} | reinforced: {}\
              \n- **Observation:** {}\
              \n- **Confidence:** {}\
-             \n- **Source:** {}\
-             \n",
+             \n- **Source:** {}",
             self.date,
             self.bead_id,
             self.worker,
@@ -182,7 +266,51 @@ impl LearningEntry {
             self.observation,
             self.confidence.as_str(),
             self.source
-        )
+        );
+
+        // Add decision_id if present
+        if let Some(ref decision_id) = self.decision_id {
+            result.push_str(&format!("\n- **Decision ID:** {}", decision_id));
+        }
+
+        // Add ADR context if present
+        if let Some(ref ctx) = self.decision_context {
+            result.push_str(&format!(
+                "\n- **Decision:** {}\
+                 \n- **Context:** {}\
+                 \n- **Rationale:** {}",
+                ctx.decision, ctx.context, ctx.rationale
+            ));
+            if !ctx.alternatives.is_empty() {
+                result.push_str(&format!("\n- **Alternatives:** {}", ctx.alternatives.join(", ")));
+            }
+        }
+
+        result.push_str("\n");
+        result
+    }
+
+    /// Format as ADR-style markdown for CLAUDE.md promotion.
+    ///
+    /// Returns None if this entry doesn't have ADR context.
+    pub fn to_adr_markdown(&self) -> Option<String> {
+        let ctx = self.decision_context.as_ref()?;
+
+        let mut result = format!(
+            "<!-- needle-learning -->\n- **Decision**: {}\n  **Context**: {}\n  **Rationale**: {}\n",
+            ctx.decision, ctx.context, ctx.rationale
+        );
+
+        // Add alternatives if present
+        if !ctx.alternatives.is_empty() {
+            result.push_str(&format!(
+                "  **Alternatives**: {}\n",
+                ctx.alternatives.join(", ")
+            ));
+        }
+
+        result.push_str("<!-- /needle-learning -->");
+        Some(result)
     }
 
     /// Parse a learning entry from markdown format.
@@ -192,6 +320,10 @@ impl LearningEntry {
         // - **Observation:** [what was discovered]
         // - **Confidence:** high/medium/low
         // - **Source:** retrospective from bead nd-a3f8
+        // - **Decision:** [what was chosen] (optional, for ADR entries)
+        // - **Context:** [problem space] (optional, for ADR entries)
+        // - **Rationale:** [why this choice] (optional, for ADR entries)
+        // - **Alternatives:** [option1, option2] (optional, for ADR entries)
 
         let lines: Vec<&str> = markdown.lines().collect();
         if lines.len() < 4 {
@@ -243,6 +375,11 @@ impl LearningEntry {
         let mut observation = None;
         let mut confidence = None;
         let mut source = None;
+        let mut decision_id = None;
+        let mut decision = None;
+        let mut context = None;
+        let mut rationale = None;
+        let mut alternatives = None;
 
         for line in &lines[1..] {
             if let Some(obs) = line.strip_prefix("- **Observation:**") {
@@ -251,12 +388,38 @@ impl LearningEntry {
                 confidence = Confidence::from_str(conf.trim());
             } else if let Some(src) = line.strip_prefix("- **Source:**") {
                 source = Some(src.trim().to_string());
+            } else if let Some(dec) = line.strip_prefix("- **Decision ID:**") {
+                decision_id = Some(dec.trim().to_string());
+            } else if let Some(d) = line.strip_prefix("- **Decision:**") {
+                decision = Some(d.trim().to_string());
+            } else if let Some(c) = line.strip_prefix("- **Context:**") {
+                context = Some(c.trim().to_string());
+            } else if let Some(r) = line.strip_prefix("- **Rationale:**") {
+                rationale = Some(r.trim().to_string());
+            } else if let Some(a) = line.strip_prefix("- **Alternatives:**") {
+                alternatives = Some(a.trim().to_string());
             }
         }
 
         let observation = observation.ok_or_else(|| anyhow::anyhow!("Missing observation"))?;
         let confidence = confidence.ok_or_else(|| anyhow::anyhow!("Missing confidence"))?;
         let source = source.ok_or_else(|| anyhow::anyhow!("Missing source"))?;
+
+        // Build decision_context if we have ADR fields
+        let decision_context = match (decision, context, rationale) {
+            (Some(d), Some(c), Some(r)) => Some(DecisionContext {
+                decision: d,
+                context: c,
+                rationale: r,
+                alternatives: alternatives
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect(),
+            }),
+            _ => None,
+        };
 
         Ok(LearningEntry {
             date,
@@ -268,6 +431,8 @@ impl LearningEntry {
             source,
             reinforcement_count,
             last_reinforced: None,
+            decision_id,
+            decision_context,
         })
     }
 }
@@ -700,6 +865,26 @@ impl Retrospective {
             || self.surprise.is_some()
             || self.reusable_pattern.is_some()
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Decision ID Generation
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Generate a stable decision ID from a decision and bead ID.
+///
+/// Uses SHA256 hash of the decision text + bead ID to create a stable
+/// identifier that can be used to track the same decision across learnings.
+fn generate_decision_id(decision: &str, bead_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(decision.as_bytes());
+    hasher.update(b":");
+    hasher.update(bead_id.as_bytes());
+    let hash = hasher.finalize();
+    // Use first 8 bytes of hash as hex string
+    format!("dec-{:016x}", u64::from_be_bytes(
+        hash.as_slice()[..8].try_into().unwrap_or([0u8; 8])
+    ))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

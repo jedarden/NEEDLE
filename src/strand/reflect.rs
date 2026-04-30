@@ -29,17 +29,20 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::bead_store::BeadStore;
+use crate::claude_md_placement::observations_similar;
 use crate::config::ReflectConfig;
+use crate::drift::DriftDetector;
 use crate::learning::{
     BeadType, Confidence, GlobalLearningsFile, LearningEntry, LearningsFile, Retrospective,
 };
 use crate::skill::{render_skill_file, SkillFrontmatter, SkillLibrary};
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{StrandError, StrandResult};
+use crate::transcript::{ParsedTranscript, TranscriptDiscovery};
+use crate::types::{BeadId, StrandError, StrandResult};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // ReflectAgent trait
@@ -234,6 +237,18 @@ pub struct ReflectSummary {
     pub global_learnings_promoted: usize,
     /// Number of retrospectives extracted by the agent.
     pub agent_extractions: usize,
+    /// Number of transcripts processed.
+    pub transcripts_processed: usize,
+    /// Number of learnings extracted from transcripts.
+    pub transcript_learnings_added: usize,
+    /// Number of learnings placed in CLAUDE.md files.
+    pub claude_md_placed: usize,
+    /// Number of drift clusters detected.
+    pub drift_clusters_found: usize,
+    /// Number of learnings extracted from drift clusters.
+    pub drift_learnings_added: usize,
+    /// Number of ADR decisions detected.
+    pub adr_decisions_detected: usize,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -423,6 +438,49 @@ impl ReflectStrand {
             "reflect: gathered retrospectives"
         );
 
+        // Gather transcripts and extract learning entries
+        let (transcripts, transcript_entries) = self.extract_from_transcripts()
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "reflect: transcript extraction failed, continuing without transcripts");
+                (Vec::new(), Vec::new())
+            });
+
+        let transcript_count = transcripts.len();
+
+        tracing::debug!(
+            transcript_count,
+            transcript_entries = transcript_entries.len(),
+            "reflect: gathered transcript entries"
+        );
+
+        // Detect drift across sessions
+        let (drift_clusters_found, drift_entries) =
+            self.detect_drift(&transcripts).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "reflect: drift detection failed, continuing");
+                (0, Vec::new())
+            });
+
+        if drift_clusters_found > 0 {
+            tracing::info!(
+                drift_clusters_found,
+                drift_learnings = drift_entries.len(),
+                "reflect: detected drift across sessions"
+            );
+        }
+
+        // Detect decision points for ADR records
+        let adr_decisions_detected = self.detect_decisions(&transcripts).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "reflect: ADR decision detection failed, continuing");
+            0
+        });
+
+        if adr_decisions_detected > 0 {
+            tracing::info!(
+                adr_decisions_detected,
+                "reflect: detected ADR decision points"
+            );
+        }
+
         // ── Phase 3: Consolidate ──────────────────────────────────────────────
         let mut learnings = LearningsFile::load(&self.workspace)?;
         let mut summary = ReflectSummary {
@@ -480,6 +538,13 @@ impl ReflectStrand {
             }
         }
 
+        // Add transcript-derived and drift-derived entries to candidates
+        let transcript_entry_count = transcript_entries.len();
+        let _drift_entry_count = drift_entries.len();
+        let retro_entry_count = candidate_entries.len();
+        candidate_entries.extend(transcript_entries);
+        candidate_entries.extend(drift_entries);
+
         // Reinforce existing entries that match any closed bead ID, then add
         // non-duplicate candidates up to max_learnings_per_run.
         for bead in &since_last {
@@ -487,7 +552,9 @@ impl ReflectStrand {
         }
 
         let mut added = 0usize;
-        for candidate in candidate_entries {
+        let mut transcript_added = 0usize;
+        let mut drift_added = 0usize;
+        for (idx, candidate) in candidate_entries.into_iter().enumerate() {
             if added >= self.config.max_learnings_per_run {
                 break;
             }
@@ -497,12 +564,26 @@ impl ReflectStrand {
                 // Reinforce the most similar entry instead of adding a duplicate.
                 let most_similar_id = similar[0].bead_id.clone();
                 let _ = learnings.reinforce_entry(&most_similar_id);
+                let _ = self.telemetry.emit(EventKind::ReflectLearningDeduplicated {
+                    learning_id: candidate.bead_id.clone(),
+                    existing_entry: most_similar_id,
+                });
                 continue;
             }
             learnings.add_entry(candidate)?;
             added += 1;
+            // Track source: transcript entries come after retro entries,
+            // drift entries come after transcript entries
+            if idx >= retro_entry_count && idx < retro_entry_count + transcript_entry_count {
+                transcript_added += 1;
+            } else if idx >= retro_entry_count + transcript_entry_count {
+                drift_added += 1;
+            }
         }
         summary.learnings_added = added;
+        summary.transcripts_processed = transcript_count;
+        summary.transcript_learnings_added = transcript_added;
+        summary.drift_learnings_added = drift_added;
 
         // Promote high-reinforcement entries to skill files.
         let promoted = self.promote_to_skills(learnings.entries())?;
@@ -511,7 +592,13 @@ impl ReflectStrand {
         // Promote cross-workspace patterns to global learnings.
         let global_promoted = self.promote_cross_workspace_patterns(&learnings)?;
         summary.global_learnings_promoted = global_promoted;
+
+        // Promote learnings to CLAUDE.md files at appropriate ancestor levels.
+        let claude_md_promoted = self.promote_to_claude_md(&learnings)?;
+        summary.claude_md_placed = claude_md_promoted;
         summary.agent_extractions = agent_extraction_count;
+        summary.drift_clusters_found = drift_clusters_found;
+        summary.adr_decisions_detected = adr_decisions_detected;
 
         // ── Phase 4: Prune ────────────────────────────────────────────────────
         let pruned = learnings.prune_stale()?;
@@ -683,6 +770,12 @@ impl ReflectStrand {
 
             if global.promote(entry.clone(), self.max_global_learnings) {
                 promoted += 1;
+                let _ = self.telemetry.emit(EventKind::ReflectLearningPromoted {
+                    learning_id: entry.bead_id.clone(),
+                    target_path: self.global_learnings_path.display().to_string(),
+                    workspace_count: self.known_workspaces.len() + 1,
+                    is_decision: entry.decision_context.is_some(),
+                });
                 tracing::info!(
                     bead_id = %entry.bead_id,
                     observation = %entry.observation,
@@ -696,6 +789,136 @@ impl ReflectStrand {
         }
 
         Ok(promoted)
+    }
+
+    /// Promote high-reinforcement learnings to CLAUDE.md files using the lowest common ancestor strategy.
+    ///
+    /// When a learning appears across multiple workspaces, it's written to the CLAUDE.md
+    /// at the lowest common ancestor directory covering all contributing workspaces.
+    /// Single-workspace learnings go to that workspace's CLAUDE.md.
+    fn promote_to_claude_md(&self, learnings: &LearningsFile) -> Result<usize> {
+        use crate::claude_md_placement::{ClaudeMdPlacer, PromotedLearning};
+
+        // Skip when not configured
+        if !self.config.claude_md_placement {
+            return Ok(0);
+        }
+
+        // Skip if no known workspaces configured
+        if self.known_workspaces.is_empty() {
+            return Ok(0);
+        }
+
+        // Build workspace list including current workspace
+        let mut all_workspaces = vec![self.workspace.clone()];
+        all_workspaces.extend(self.known_workspaces.clone());
+
+        // Create placer with all known workspaces
+        let placer = ClaudeMdPlacer::new(all_workspaces.clone());
+
+        // Load learnings from all workspaces to find cross-workspace patterns
+        let mut workspace_learnings: std::collections::HashMap<PathBuf, Vec<LearningEntry>> =
+            std::collections::HashMap::new();
+
+        for ws in &all_workspaces {
+            match LearningsFile::load(ws) {
+                Ok(lf) if !lf.entries().is_empty() => {
+                    workspace_learnings.insert(ws.clone(), lf.entries().to_vec());
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        workspace = %ws.display(),
+                        error = %e,
+                        "reflect: failed to load learnings for CLAUDE.md placement"
+                    );
+                }
+            }
+        }
+
+        let mut placed = 0usize;
+
+        // For each entry in current workspace, check if it appears in other workspaces
+        for entry in learnings.entries() {
+            // Only promote high-confidence or high-reinforcement entries
+            if entry.confidence != crate::learning::Confidence::High
+                && entry.reinforcement_count < 2
+            {
+                continue;
+            }
+
+            let mut matching_workspaces = vec![self.workspace.clone()];
+
+            for (ws, entries) in &workspace_learnings {
+                if ws == &self.workspace {
+                    continue;
+                }
+
+                // Check if any entry in this workspace is similar
+                let has_similar = entries
+                    .iter()
+                    .any(|e| observations_similar(&e.observation, &entry.observation));
+
+                if has_similar {
+                    matching_workspaces.push(ws.clone());
+                }
+            }
+
+            // Place the learning at the appropriate CLAUDE.md
+            let promoted = PromotedLearning::new(entry.clone(), matching_workspaces);
+            match placer.place_learning(&promoted) {
+                Ok(true) => {
+                    placed += 1;
+                    // The placer doesn't return the exact path, so we use the workspace info
+                    let target_path = if promoted.source_workspaces.len() > 1 {
+                        // Cross-workspace learning - would be placed at LCA
+                        format!("LCA of {} workspaces", promoted.source_workspaces.len())
+                    } else {
+                        self.workspace.join("CLAUDE.md").display().to_string()
+                    };
+                    let _ = self.telemetry.emit(EventKind::ReflectClaudeMdWritten {
+                        path: target_path,
+                        entries_added: 1,
+                        entries_updated: 0,
+                    });
+                    tracing::info!(
+                        bead_id = %entry.bead_id,
+                        observation = %entry.observation,
+                        workspaces = ?promoted.source_workspaces,
+                        "reflect: placed learning in CLAUDE.md"
+                    );
+                }
+                Ok(false) => {
+                    // Duplicate, skipped
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %entry.bead_id,
+                        error = %e,
+                        "reflect: failed to place learning in CLAUDE.md"
+                    );
+                }
+            }
+        }
+
+        Ok(placed)
+    }
+
+    /// Simple similarity check for observation text (shared with claude_md_placement).
+    fn observations_similar(a: &str, b: &str) -> bool {
+        use std::collections::HashSet;
+        let a_lower = a.to_lowercase();
+        let b_lower = b.to_lowercase();
+
+        let a_words: HashSet<&str> = a_lower.split_whitespace().collect();
+        let b_words: HashSet<&str> = b_lower.split_whitespace().collect();
+
+        let shared = a_words.intersection(&b_words).count();
+        let min_len = a_words.len().min(b_words.len());
+
+        shared >= 2 && (shared as f32) >= (min_len as f32 * 0.5)
+            || a_lower.contains(&b_lower)
+            || b_lower.contains(&a_lower)
     }
 
     /// Write a skill file for a promoted learning entry (YAML frontmatter format).
@@ -736,6 +959,360 @@ impl ReflectStrand {
             "reflect: promoted learning to skill file"
         );
         Ok(())
+    }
+
+    /// Discover and parse recent transcripts, extract learning entries from them.
+    ///
+    /// Returns a tuple of (transcripts, learning_entries).
+    fn extract_from_transcripts(&self) -> Result<(Vec<ParsedTranscript>, Vec<LearningEntry>)> {
+        use std::collections::HashMap;
+
+        // Create transcript discovery with recency cutoff
+        let recency_cutoff =
+            Utc::now() - Duration::days(self.config.transcript_recency_days as i64);
+        let discovery = TranscriptDiscovery::new(
+            &self.workspace,
+            None, // Use default ~/.claude
+            self.config.transcript_max_sessions,
+        )
+        .with_recency_cutoff(recency_cutoff);
+
+        // Discover and parse transcripts
+        let transcripts = discovery
+            .discover()
+            .with_context(|| "failed to discover transcripts")?;
+
+        if transcripts.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        tracing::debug!(
+            count = transcripts.len(),
+            "reflect: discovered recent transcripts"
+        );
+
+        let _ = self.telemetry.emit(EventKind::ReflectTranscriptsRead {
+            sessions_count: transcripts.len(),
+            entries_count: transcripts.iter().map(|t| t.actions.len()).sum(),
+            parse_errors: 0, // TODO: track parse errors if discovery reports them
+        });
+
+        let mut entries: Vec<LearningEntry> = Vec::new();
+        let mut tool_usage_counts: HashMap<String, usize> = HashMap::new();
+
+        for transcript in &transcripts {
+            // Count tool usage patterns
+            for action in &transcript.actions {
+                if let Some(ref tool_name) = action.tool_name {
+                    *tool_usage_counts.entry(tool_name.clone()).or_insert(0) += 1;
+                }
+            }
+
+            // Extract bead ID if present
+            let bead_id = transcript
+                .bead_id
+                .clone()
+                .unwrap_or_else(|| BeadId::from(format!("session-{}", transcript.session_id)));
+            let bead_id_str = bead_id.to_string();
+
+            // Infer worker from context or use "needle"
+            let worker = "needle".to_string();
+
+            // Detect decisions in this transcript (ADR-style extraction)
+            let decisions = crate::transcript::detect_decisions(transcript);
+            for decision in decisions {
+                let observation = format!("Decision: {}", truncate(&decision.decision, 200));
+
+                // Convert detected decision to learning entry with ADR context
+                let decision_context: crate::learning::DecisionContext = decision.clone().into();
+                let entry = LearningEntry::with_adr_context(
+                    bead_id_str.clone(),
+                    worker.clone(),
+                    BeadType::Feature, // Decisions often relate to feature choices
+                    observation,
+                    Confidence::Medium, // Decisions get medium confidence by default
+                    format!("transcript decision: {}", transcript.session_id),
+                    decision_context,
+                );
+                entries.push(entry);
+
+                let _ = self.telemetry.emit(EventKind::ReflectDecisionExtracted {
+                    bead_id: bead_id.clone(),
+                    has_alternatives: !decision.alternatives.is_empty(),
+                    rationale_length: decision.rationale.len(),
+                });
+
+                tracing::debug!(
+                    decision = %decision.decision,
+                    confidence = decision.confidence,
+                    "reflect: extracted decision from transcript"
+                );
+            }
+
+            // Extract learning entries from transcript actions (non-decision patterns)
+            for action in &transcript.actions {
+                let entry = match action.action_type {
+                    crate::transcript::ActionType::ToolUse => {
+                        // For tool use, create an entry about the tool usage pattern
+                        if let Some(ref tool_name) = action.tool_name {
+                            let observation = format!(
+                                "Tool usage pattern: {} — {}",
+                                tool_name, action.description
+                            );
+                            Some(LearningEntry::new(
+                                bead_id_str.clone(),
+                                worker.clone(),
+                                BeadType::Other,
+                                observation,
+                                Confidence::Medium,
+                                format!("transcript: {}", transcript.session_id),
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    crate::transcript::ActionType::Text => {
+                        // For text actions, look for patterns in the output
+                        if action.description.len() > 50 {
+                            // Only extract longer text responses as patterns
+                            let observation = format!(
+                                "Assistant response pattern: {}",
+                                truncate(&action.description, 200)
+                            );
+                            Some(LearningEntry::new(
+                                bead_id_str.clone(),
+                                worker.clone(),
+                                BeadType::Other,
+                                observation,
+                                Confidence::Low,
+                                format!("transcript: {}", transcript.session_id),
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                    crate::transcript::ActionType::Thinking => {
+                        // Thinking blocks may contain useful reasoning patterns
+                        // Note: decisions are already extracted above, so skip decision-heavy blocks
+                        if action.description.len() > 30 {
+                            let observation = format!(
+                                "Reasoning pattern: {}",
+                                truncate(&action.description, 200)
+                            );
+                            Some(LearningEntry::new(
+                                bead_id_str.clone(),
+                                worker.clone(),
+                                BeadType::Other,
+                                observation,
+                                Confidence::Low,
+                                format!("transcript: {}", transcript.session_id),
+                            ))
+                        } else {
+                            None
+                        }
+                    }
+                };
+
+                if let Some(entry) = entry {
+                    entries.push(entry);
+                }
+            }
+        }
+
+        // Log tool usage summary
+        if !tool_usage_counts.is_empty() {
+            let mut summary: Vec<_> = tool_usage_counts.iter().collect();
+            summary.sort_by(|a, b| b.1.cmp(a.1));
+            tracing::debug!(
+                top_tools = ?summary.iter().take(5).map(|(k, v)| (k, v)).collect::<Vec<_>>(),
+                "reflect: transcript tool usage summary"
+            );
+        }
+
+        Ok((transcripts, entries))
+    }
+
+    /// Detect drift across sessions and write a drift report.
+    ///
+    /// Returns the number of drift clusters found and the learning entries
+    /// extracted from drift patterns for feeding into the consolidation pipeline.
+    fn detect_drift(
+        &self,
+        transcripts: &[ParsedTranscript],
+    ) -> Result<(usize, Vec<LearningEntry>)> {
+        if !self.config.drift_enabled {
+            let _ = self.telemetry.emit(EventKind::DriftDetectionSkipped {
+                reason: "drift detection disabled in config".to_string(),
+            });
+            return Ok((0, Vec::new()));
+        }
+
+        if transcripts.len() < 2 {
+            let _ = self.telemetry.emit(EventKind::DriftDetectionSkipped {
+                reason: format!("need at least 2 sessions, got {}", transcripts.len()),
+            });
+            return Ok((0, Vec::new()));
+        }
+
+        let _ = self.telemetry.emit(EventKind::DriftDetectionStarted {
+            sessions_analyzed: transcripts.len(),
+        });
+
+        // Create drift detector with configured similarity threshold
+        let detector = DriftDetector::new(self.config.drift_similarity_threshold);
+
+        // Detect drift
+        let report = detector.detect(transcripts)?;
+
+        // Categorize clusters
+        let evolved_count = report
+            .clusters
+            .iter()
+            .filter(|c| c.category == crate::drift::DriftCategory::Evolved)
+            .count();
+        let inconsistent_count = report
+            .clusters
+            .iter()
+            .filter(|c| c.category == crate::drift::DriftCategory::Inconsistent)
+            .count();
+
+        let _ = self.telemetry.emit(EventKind::DriftDetectionCompleted {
+            sessions_analyzed: report.sessions_analyzed,
+            clusters_found: report.clusters_detected,
+            evolved_count,
+            inconsistent_count,
+        });
+
+        // Emit ReflectDriftDetected for each cluster
+        for cluster in &report.clusters {
+            let sessions: Vec<String> = cluster
+                .sessions
+                .iter()
+                .map(|s| s.session_id.clone())
+                .collect();
+            let _ = self.telemetry.emit(EventKind::ReflectDriftDetected {
+                cluster_size: cluster.sessions.len(),
+                category: cluster.category.as_str().to_string(),
+                sessions,
+            });
+        }
+
+        // Extract learning entries from drift clusters
+        let drift_entries = report.to_learning_entries();
+
+        // Emit ReflectDriftPromoted for each drift cluster that produced learning entries
+        for cluster in &report.clusters {
+            let pattern = match cluster.category {
+                crate::drift::DriftCategory::Evolved => "evolved-solution-pattern".to_string(),
+                crate::drift::DriftCategory::Inconsistent => {
+                    "inconsistent-approach-pattern".to_string()
+                }
+                crate::drift::DriftCategory::Unknown => "divergent-approach-pattern".to_string(),
+            };
+            let _ = self.telemetry.emit(EventKind::ReflectDriftPromoted {
+                pattern: pattern.clone(),
+                category: cluster.category.as_str().to_string(),
+            });
+        }
+
+        // Write drift report if any clusters were found
+        if report.clusters_detected > 0 {
+            let drifts_dir = self.workspace.join(".beads").join("drifts");
+            let timestamp = Utc::now().format("%Y%m%d-%H%M%S");
+            let report_path = drifts_dir.join(format!("drift-{}.md", timestamp));
+
+            report.write(&report_path)?;
+
+            let _ = self.telemetry.emit(EventKind::DriftReportWritten {
+                report_path: report_path.display().to_string(),
+                clusters: report.clusters_detected,
+            });
+
+            tracing::info!(
+                report_path = %report_path.display(),
+                clusters = report.clusters_detected,
+                evolved = evolved_count,
+                inconsistent = inconsistent_count,
+                drift_learnings = drift_entries.len(),
+                "reflect: drift detection complete"
+            );
+        }
+
+        Ok((report.clusters_detected, drift_entries))
+    }
+
+    /// Detect decision points in transcripts and write ADR records.
+    ///
+    /// Returns the number of decisions detected.
+    fn detect_decisions(&self, transcripts: &[ParsedTranscript]) -> Result<usize> {
+        if !self.config.adr_enabled {
+            let _ = self.telemetry.emit(EventKind::DecisionDetectionSkipped {
+                reason: "ADR decision extraction disabled in config".to_string(),
+            });
+            return Ok(0);
+        }
+
+        if transcripts.is_empty() {
+            let _ = self.telemetry.emit(EventKind::DecisionDetectionSkipped {
+                reason: "no transcripts to analyze".to_string(),
+            });
+            return Ok(0);
+        }
+
+        let _ = self.telemetry.emit(EventKind::DecisionDetectionStarted {
+            sessions_analyzed: transcripts.len(),
+        });
+
+        // Create decision detector
+        let detector = crate::decision::DecisionDetector::new();
+
+        // Detect decisions
+        let analysis = detector.analyze(transcripts)?;
+
+        let _ = self.telemetry.emit(EventKind::DecisionDetectionCompleted {
+            sessions_analyzed: analysis.transcripts_analyzed,
+            decisions_found: analysis.decisions.len(),
+        });
+
+        // Write ADR records if any decisions were found
+        if !analysis.decisions.is_empty() {
+            let decisions_dir = self.workspace.join(".beads").join("decisions");
+            std::fs::create_dir_all(&decisions_dir).with_context(|| {
+                format!(
+                    "failed to create decisions dir: {}",
+                    decisions_dir.display()
+                )
+            })?;
+
+            for decision in &analysis.decisions {
+                let path = decisions_dir.join(format!("{}.md", decision.id));
+                let content = decision.to_adr_markdown();
+                std::fs::write(&path, content)
+                    .with_context(|| format!("failed to write ADR: {}", path.display()))?;
+
+                let bead_id = decision
+                    .bead_id
+                    .clone()
+                    .unwrap_or_else(|| BeadId::from(format!("session-{}", decision.session_id)));
+                let _ = self.telemetry.emit(EventKind::ReflectAdrCreated {
+                    bead_id,
+                    path: path.display().to_string(),
+                });
+
+                tracing::debug!(
+                    decision_id = %decision.id,
+                    title = %decision.title,
+                    "reflect: wrote ADR record"
+                );
+            }
+
+            tracing::info!(
+                decisions_count = analysis.decisions.len(),
+                "reflect: ADR decision detection complete"
+            );
+        }
+
+        Ok(analysis.decisions.len())
     }
 }
 
@@ -910,6 +1487,13 @@ mod tests {
                 &self,
                 _bl: &crate::types::BeadId,
                 _bd: &crate::types::BeadId,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn remove_dependency(
+                &self,
+                _blocked_id: &crate::types::BeadId,
+                _blocker_id: &crate::types::BeadId,
             ) -> anyhow::Result<()> {
                 Ok(())
             }

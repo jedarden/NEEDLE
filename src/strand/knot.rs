@@ -195,11 +195,31 @@ impl super::Strand for KnotStrand {
     async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
         let cycle = self.increment_exhaustion();
 
+        // Enter the strand.knot span for the exhaustion diagnosis.
+        let knot_span = tracing::info_span!(
+            "strand.knot",
+            needle.strand.name = "knot",
+            needle.strand.result = tracing::field::Empty, // Will be set based on diagnosis
+            needle.strand.diagnosis = tracing::field::Empty, // Will be set based on diagnosis
+            needle.strand.exhaustion_count = cycle,
+        );
+        let _knot_enter = knot_span.enter();
+
         // Diagnose the exhaustion reason using a different code path from Pluck.
         let diagnosis = match self.diagnose(store).await {
             Ok(d) => d,
-            Err(e) => return StrandResult::Error(e),
+            Err(e) => {
+                // Record error on the span
+                tracing::Span::current().record("needle.strand.result", "error");
+                tracing::Span::current().record("otel.status_code", 2u64);
+                tracing::Span::current().record("otel.status_description", format!("{e}"));
+                return StrandResult::Error(e);
+            }
         };
+
+        // Record the diagnosis result on the span
+        tracing::Span::current().record("needle.strand.result", "no_work");
+        tracing::Span::current().record("needle.strand.diagnosis", diagnosis.as_str());
 
         tracing::info!(
             strand = "knot",
@@ -324,6 +344,13 @@ mod tests {
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Failing store for error-path tests.
@@ -375,6 +402,13 @@ mod tests {
         }
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            anyhow::bail!("store connection failed")
         }
     }
 

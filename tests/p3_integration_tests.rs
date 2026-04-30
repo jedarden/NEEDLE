@@ -218,11 +218,13 @@ async fn weave_creates_beads_from_agent_response() {
     let agent = Box::new(MockWeaveAgent {
         response: agent_response.to_string(),
     });
+    let telemetry = Telemetry::new("test-weave".to_string());
     let strand = WeaveStrand::new(
         config,
         workspace.path().to_path_buf(),
         state_dir.path().to_path_buf(),
         agent,
+        telemetry,
     );
 
     let result = strand.evaluate(store.as_ref()).await;
@@ -277,11 +279,13 @@ async fn weave_respects_max_beads_guardrail() {
     let agent = Box::new(MockWeaveAgent {
         response: agent_response.to_string(),
     });
+    let telemetry = Telemetry::new("test-weave".to_string());
     let strand = WeaveStrand::new(
         config,
         workspace.path().to_path_buf(),
         state_dir.path().to_path_buf(),
         agent,
+        telemetry,
     );
 
     strand.evaluate(store.as_ref()).await;
@@ -305,11 +309,13 @@ async fn weave_disabled_returns_no_work() {
     let agent = Box::new(MockWeaveAgent {
         response: "should not be called".to_string(),
     });
+    let telemetry = Telemetry::new("test-weave".to_string());
     let strand = WeaveStrand::new(
         config,
         workspace.path().to_path_buf(),
         state_dir.path().to_path_buf(),
         agent,
+        telemetry,
     );
 
     let result = strand.evaluate(store.as_ref()).await;

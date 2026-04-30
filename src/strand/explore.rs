@@ -5,11 +5,15 @@
 //! configured workspaces for claimable beads.
 //!
 //! Design constraints (from v1 lessons):
-//! - **No filesystem scanning.** Workspaces must be explicitly configured.
 //! - **No upward traversal.** Only configured paths are checked.
 //! - **Static workspace list.** Read from config at boot, not re-evaluated.
 //! - **No permanent relocation.** Workers process one bead then return home.
+//!
+//! Workspace discovery:
+//! - Empty `workspaces` config → auto-discover all dirs with `.beads/` under `workspace_root`.
+//! - Explicit `workspaces` list → only scan those paths.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::bead_store::{BeadStore, BrCliBeadStore, Filters};
@@ -38,6 +42,8 @@ impl ExploreStrand {
     /// Create a new ExploreStrand from config.
     ///
     /// The workspace list is captured at construction time and never re-read.
+    /// If `workspaces` is empty, auto-discovers all dirs with `.beads/` under
+    /// the configured `workspace_root`.
     pub fn new(
         config: ExploreConfig,
         home_workspace: PathBuf,
@@ -45,14 +51,66 @@ impl ExploreStrand {
         telemetry: Telemetry,
         qualified_id: String,
     ) -> Self {
+        // If workspaces is empty, auto-discover under workspace_root.
+        let workspaces = if config.workspaces.is_empty() {
+            Self::discover_workspaces(&config.workspace_root)
+        } else {
+            config.workspaces
+        };
+
         ExploreStrand {
             enabled: config.enabled,
-            workspaces: config.workspaces,
+            workspaces,
             home_workspace,
             registry,
             telemetry,
             qualified_id,
         }
+    }
+
+    /// Discover all workspaces under a root path.
+    ///
+    /// A workspace is any directory containing a `.beads/` subdirectory.
+    /// Returns an empty vector if the root doesn't exist or cannot be read.
+    fn discover_workspaces(root: &Path) -> Vec<PathBuf> {
+        let mut discovered = Vec::new();
+
+        // If root doesn't exist, return empty (not an error).
+        if !root.exists() {
+            tracing::debug!(root = %root.display(), "workspace root does not exist, no workspaces discovered");
+            return discovered;
+        }
+
+        // Read the directory; non-existent or unreadable dirs return empty.
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::debug!(root = %root.display(), error = %e, "failed to read workspace root");
+                return discovered;
+            }
+        };
+
+        // Filter for entries containing a `.beads/` subdirectory.
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+
+            let path = entry.path();
+            if path.is_dir() && Self::has_beads_dir(&path) {
+                tracing::debug!(workspace = %path.display(), "discovered workspace");
+                discovered.push(path);
+            }
+        }
+
+        tracing::debug!(
+            root = %root.display(),
+            count = discovered.len(),
+            "workspace discovery complete"
+        );
+
+        discovered
     }
 
     /// Check if a workspace path has a `.beads/` directory.
@@ -73,7 +131,7 @@ impl super::Strand for ExploreStrand {
     }
 
     async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
-        // If disabled or no workspaces configured, nothing to explore.
+        // If disabled, nothing to explore.
         if !self.enabled {
             let _ = self
                 .telemetry
@@ -83,12 +141,14 @@ impl super::Strand for ExploreStrand {
                 });
             return StrandResult::NoWork;
         }
+
+        // Empty workspaces (after discovery attempt) means no workspaces found.
         if self.workspaces.is_empty() {
             let _ = self
                 .telemetry
                 .emit(crate::telemetry::EventKind::StrandSkipped {
                     strand_name: "explore".to_string(),
-                    reason: "no_workspaces_configured".to_string(),
+                    reason: "no_workspaces_discovered".to_string(),
                 });
             return StrandResult::NoWork;
         }
@@ -183,6 +243,17 @@ impl super::Strand for ExploreStrand {
 
                                             return StrandResult::BeadFound(retry_candidates);
                                         }
+
+                                        // Orphans were released but re-query found no candidates.
+                                        // Do NOT return WorkCreated — the beads will become available
+                                        // in the next natural selection cycle when Pluck re-scans the
+                                        // ready queue. Returning WorkCreated here causes restart loops
+                                        // when released beads don't pass filters (e.g., still blocked).
+                                        tracing::info!(
+                                            workspace = %workspace.display(),
+                                            released,
+                                            "cross-workspace mend released orphans but re-query found no candidates (beads may not pass filters), continuing to next workspace"
+                                        );
                                     }
                                     Err(e) => {
                                         tracing::warn!(
@@ -246,7 +317,12 @@ impl super::Strand for ExploreStrand {
             }
         }
 
-        tracing::debug!("explore: no candidates in any configured workspace");
+        let _ = self
+            .telemetry
+            .emit(crate::telemetry::EventKind::StrandSkipped {
+                strand_name: "explore".to_string(),
+                reason: "no_candidates_in_any_workspace".to_string(),
+            });
         StrandResult::NoWork
     }
 }
@@ -267,6 +343,19 @@ mod tests {
         ExploreConfig {
             enabled,
             workspaces,
+            workspace_root: PathBuf::from("/tmp/needle-test-root"),
+        }
+    }
+
+    fn make_explore_config_with_root(
+        enabled: bool,
+        workspaces: Vec<PathBuf>,
+        root: PathBuf,
+    ) -> ExploreConfig {
+        ExploreConfig {
+            enabled,
+            workspaces,
+            workspace_root: root,
         }
     }
 
@@ -338,6 +427,13 @@ mod tests {
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     use super::super::Strand;
@@ -364,6 +460,8 @@ mod tests {
 
     #[tokio::test]
     async fn empty_workspace_list_returns_no_work() {
+        // With empty workspaces, discovery runs under /tmp/needle-test-root,
+        // which doesn't exist or has no .beads/ dirs, so NoWork is returned.
         let strand = make_test_explore_strand(true, vec![], PathBuf::from("/home/test"));
         let store = DummyStore;
         let result = strand.evaluate(&store).await;
@@ -435,5 +533,82 @@ mod tests {
         let config = ExploreConfig::default();
         assert!(config.enabled);
         assert!(config.workspaces.is_empty());
+    }
+
+    #[test]
+    fn discover_workspaces_finds_dirs_with_beads_subdir() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create some directories, only some with .beads/
+        let ws1 = root.path().join("workspace1");
+        let ws2 = root.path().join("workspace2");
+        let ws3 = root.path().join("workspace3");
+        let not_a_ws = root.path().join("not-a-workspace");
+
+        fs::create_dir(&ws1).unwrap();
+        fs::create_dir(&ws2).unwrap();
+        fs::create_dir(&ws3).unwrap();
+        fs::create_dir(&not_a_ws).unwrap();
+
+        // Only ws1 and ws3 have .beads/
+        fs::create_dir(ws1.join(".beads")).unwrap();
+        fs::create_dir(ws3.join(".beads")).unwrap();
+
+        let discovered = ExploreStrand::discover_workspaces(root.path());
+
+        // Should find ws1 and ws3, but not ws2 or not_a_ws
+        assert_eq!(discovered.len(), 2);
+        assert!(discovered.contains(&ws1));
+        assert!(discovered.contains(&ws3));
+        assert!(!discovered.contains(&ws2));
+        assert!(!discovered.contains(&not_a_ws));
+    }
+
+    #[test]
+    fn discover_workspaces_returns_empty_for_nonexistent_root() {
+        let discovered = ExploreStrand::discover_workspaces(Path::new("/nonexistent/path/xyz"));
+        assert!(discovered.is_empty());
+    }
+
+    #[test]
+    fn empty_workspaces_config_triggers_discovery() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create a workspace with .beads/
+        let ws1 = root.path().join("workspace1");
+        fs::create_dir(&ws1).unwrap();
+        fs::create_dir(ws1.join(".beads")).unwrap();
+
+        // Empty workspaces list with a valid root should trigger discovery
+        let config = make_explore_config_with_root(true, vec![], root.path().to_path_buf());
+        let home = PathBuf::from("/some/other/home");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // The discovered workspace should be in the list
+        assert_eq!(strand.workspaces.len(), 1);
+        assert!(strand.workspaces.contains(&ws1));
+    }
+
+    #[test]
+    fn explicit_workspaces_list_skips_discovery() {
+        let explicit_workspaces = vec![
+            PathBuf::from("/explicit/workspace1"),
+            PathBuf::from("/explicit/workspace2"),
+        ];
+
+        let config = make_explore_config(true, explicit_workspaces.clone());
+        let home = PathBuf::from("/some/other/home");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // Should use the explicit list, not discovery
+        assert_eq!(strand.workspaces, explicit_workspaces);
     }
 }

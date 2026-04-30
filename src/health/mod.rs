@@ -29,6 +29,9 @@ use crate::types::{BeadId, WorkerState};
 /// Data written to the heartbeat JSON file on disk.
 ///
 /// Path: `~/.needle/state/heartbeats/<qualified-id>.json`
+///
+/// This structure is compatible with cgov's Heartbeat format to ensure
+/// proper worker state detection and scaling decisions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatData {
     /// Bare NATO name (e.g., "alpha", "foxtrot").
@@ -44,6 +47,23 @@ pub struct HeartbeatData {
     pub started_at: DateTime<Utc>,
     pub beads_processed: u64,
     pub session: String,
+    /// Whether the worker is currently idle (no active task).
+    ///
+    /// A worker is considered idle when it's in EXHAUSTED state (all strands
+    /// returned NoWork) or when it has no current bead. This field is used by
+    /// cgov to determine which workers to scale down first.
+    #[serde(default)]
+    pub is_idle: bool,
+    /// Current task ID if any (cgov compatibility field).
+    ///
+    /// This maps the bead_id to cgov's expected current_task field.
+    #[serde(default)]
+    pub current_task: Option<String>,
+    /// Model being used (cgov compatibility field).
+    ///
+    /// Derived from the adapter configuration.
+    #[serde(default)]
+    pub model: String,
     /// The filename that produced this heartbeat (set during read, not serialized).
     #[serde(skip)]
     pub heartbeat_file: Option<PathBuf>,
@@ -60,6 +80,8 @@ struct SharedHeartbeatState {
     beads_processed: u64,
     /// The workspace of the current bead (updates dynamically during cross-workspace work).
     current_workspace: Option<PathBuf>,
+    /// Model being used (from adapter configuration).
+    model: String,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -122,6 +144,7 @@ impl HealthMonitor {
                 current_bead: None,
                 beads_processed: 0,
                 current_workspace: None,
+                model: config.agent.default.clone(),
             })),
             shutdown: shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             emitter_handle: None,
@@ -378,7 +401,7 @@ impl HealthMonitor {
 
     /// Write a heartbeat file atomically (write temp, then rename).
     fn write_heartbeat(&self) -> Result<()> {
-        let (state, current_bead, beads_processed, current_workspace) = {
+        let (state, current_bead, beads_processed, current_workspace, model) = {
             let guard = self
                 .shared_state
                 .lock()
@@ -388,11 +411,15 @@ impl HealthMonitor {
                 guard.current_bead.clone(),
                 guard.beads_processed,
                 guard.current_workspace.clone(),
+                guard.model.clone(),
             )
         };
 
         // Use the current bead's workspace if set, otherwise fall back to home workspace.
         let effective_workspace = current_workspace.unwrap_or_else(|| self.workspace.clone());
+
+        let is_idle = state == WorkerState::Exhausted || current_bead.is_none();
+        let current_task = current_bead.as_ref().map(|b| b.to_string());
 
         let data = HeartbeatData {
             worker_id: self.worker_id.clone(),
@@ -405,6 +432,9 @@ impl HealthMonitor {
             started_at: self.started_at,
             beads_processed,
             session: self.worker_id.clone(),
+            is_idle,
+            current_task,
+            model,
             heartbeat_file: None,
         };
 
@@ -468,6 +498,14 @@ pub struct StalePeer {
 /// Maximum sleep between heartbeat attempts when backing off on failure.
 const MAX_HEARTBEAT_BACKOFF: Duration = Duration::from_secs(5 * 60);
 
+/// Sleep interval for interruptible sleep — check shutdown flag every 100ms.
+///
+/// This ensures the heartbeat emitter responds to shutdown signals within 100ms
+/// instead of sleeping for the full heartbeat interval (default 60s). When the
+/// worker is killed (e.g., by the capacity governor), this gives the atexit
+/// handler a better chance to emit worker.stopped telemetry.
+const INTERRUPTIBLE_SLEEP_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Background emitter loop. Writes heartbeat at each interval.
 ///
 /// Circuit breaker: after `max_consecutive_failures` consecutive write failures
@@ -476,6 +514,8 @@ const MAX_HEARTBEAT_BACKOFF: Duration = Duration::from_secs(5 * 60);
 ///
 /// Backoff: each consecutive failure doubles the inter-attempt sleep, capped at
 /// [`MAX_HEARTBEAT_BACKOFF`].
+///
+/// Uses an interruptible sleep pattern to respond quickly to shutdown signals.
 #[allow(clippy::too_many_arguments)]
 fn emitter_loop(
     shared_state: Arc<Mutex<SharedHeartbeatState>>,
@@ -500,31 +540,51 @@ fn emitter_loop(
 
     let mut consecutive_failures: u32 = 0;
     let mut current_sleep = interval;
+    let mut elapsed = Duration::ZERO;
 
     loop {
-        std::thread::sleep(current_sleep);
-
-        if shutdown.load(Ordering::SeqCst) {
-            tracing::debug!(worker = %worker_id, "heartbeat emitter shutting down");
-            return;
-        }
-
-        let (state, current_bead, beads_processed, current_workspace) = match shared_state.lock() {
-            Ok(guard) => (
-                guard.state.clone(),
-                guard.current_bead.clone(),
-                guard.beads_processed,
-                guard.current_workspace.clone(),
-            ),
-            Err(_) => {
-                // Mutex poisoned — the main thread panicked. Exit.
-                tracing::error!(
-                    worker = %worker_id,
-                    "shared state mutex poisoned, heartbeat emitter exiting"
-                );
+        // Interruptible sleep: check shutdown flag every 100ms instead of
+        // sleeping for the full interval. This ensures the emitter responds
+        // to shutdown signals quickly, giving the atexit handler a chance to
+        // emit worker.stopped telemetry even if the process is killed.
+        while elapsed < current_sleep {
+            if shutdown.load(Ordering::SeqCst) {
+                tracing::debug!(worker = %worker_id, "heartbeat emitter shutting down");
                 return;
             }
-        };
+            let sleep_dur = std::cmp::min(
+                INTERRUPTIBLE_SLEEP_INTERVAL,
+                current_sleep - elapsed,
+            );
+            std::thread::sleep(sleep_dur);
+            elapsed += sleep_dur;
+        }
+        elapsed = Duration::ZERO;
+
+        let (state, current_bead, beads_processed, current_workspace, model) =
+            match shared_state.lock() {
+                Ok(guard) => (
+                    guard.state.clone(),
+                    guard.current_bead.clone(),
+                    guard.beads_processed,
+                    guard.current_workspace.clone(),
+                    guard.model.clone(),
+                ),
+                Err(_) => {
+                    // Mutex poisoned — the main thread panicked. Exit.
+                    tracing::error!(
+                        worker = %worker_id,
+                        "shared state mutex poisoned, heartbeat emitter exiting"
+                    );
+                    return;
+                }
+            };
+
+        // Use the current bead's workspace if set, otherwise fall back to home workspace.
+        let effective_workspace = current_workspace.unwrap_or_else(|| workspace.clone());
+
+        let is_idle = state == WorkerState::Exhausted || current_bead.is_none();
+        let current_task = current_bead.as_ref().map(|b| b.to_string());
 
         // Use the current bead's workspace if set, otherwise fall back to home workspace.
         let effective_workspace = current_workspace.unwrap_or_else(|| workspace.clone());
@@ -540,6 +600,9 @@ fn emitter_loop(
             started_at,
             beads_processed,
             session: worker_id.clone(),
+            is_idle,
+            current_task,
+            model,
             heartbeat_file: None,
         };
 
@@ -722,6 +785,9 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             session: "worker-a".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
         let hb2 = HeartbeatData {
@@ -735,6 +801,9 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 3,
             session: "worker-b".to_string(),
+            is_idle: false,
+            current_task: Some("nd-x".to_string()),
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
 
@@ -775,6 +844,9 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             session: "test".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
 
@@ -844,6 +916,9 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 10,
             session: "test-rt".to_string(),
+            is_idle: false,
+            current_task: Some("nd-abc".to_string()),
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
 
@@ -882,6 +957,9 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             session: "self-worker".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
         std::fs::write(
@@ -912,6 +990,7 @@ mod tests {
             current_bead: None,
             beads_processed: 0,
             current_workspace: None,
+            model: "claude-sonnet-4".to_string(),
         }));
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -1064,5 +1143,44 @@ mod tests {
 
         monitor1.stop();
         monitor2.stop();
+    }
+
+    #[tokio::test]
+    async fn heartbeat_uses_cross_workspace_bead_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        let home_workspace = dir.path().join("home");
+        let remote_workspace = dir.path().join("remote");
+
+        let mut config = test_config(&hb_dir);
+        config.workspace.home = home_workspace.clone();
+
+        let mut monitor = HealthMonitor::new(
+            config,
+            "cross-ws-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        monitor.start_emitter().unwrap();
+
+        // Simulate processing a bead from a different workspace
+        monitor.update_state(
+            &WorkerState::Executing,
+            Some(&BeadId::from("needle-abc")),
+            Some(remote_workspace.as_path()),
+        );
+
+        // Wait for the emitter to write a new heartbeat
+        std::thread::sleep(Duration::from_millis(1500));
+
+        let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
+        let data: HeartbeatData = serde_json::from_str(&content).unwrap();
+
+        // The heartbeat should report the remote workspace, not the home workspace
+        assert_eq!(data.workspace, remote_workspace);
+        assert_ne!(data.workspace, home_workspace);
+
+        monitor.stop();
     }
 }

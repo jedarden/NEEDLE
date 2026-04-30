@@ -65,16 +65,25 @@ impl Claimer {
     /// set. For each candidate, acquires a per-workspace flock, verifies the
     /// bead is still claimable, and attempts the claim.
     ///
+    /// The `strand` parameter is the name of the strand that initiated the claim
+    /// (e.g., "pluck", "mend"). This is emitted in telemetry for the
+    /// `needle.beads.claimed` metric's `strand` attribute.
+    ///
     /// Returns:
     /// - `Claimed(bead)`: successfully claimed a bead
     /// - `AllRaceLost`: tried candidates, all race-lost
     /// - `NoCandidates`: no candidates after filtering exclusions
     /// - `StoreError(e)`: bead store or flock error
+    ///
+    /// NOTE: The caller is responsible for creating the `bead.claim` span
+    /// to ensure proper parent/child hierarchy (bead.claim should be a child
+    /// of bead.lifecycle, not strand.{name}).
     pub async fn claim_next(
         &self,
         candidates: &[Bead],
         actor: &str,
         exclusions: &HashSet<BeadId>,
+        strand: &str,
     ) -> Result<ClaimOutcome> {
         let eligible: Vec<&Bead> = candidates
             .iter()
@@ -89,11 +98,19 @@ impl Claimer {
 
         for candidate in &eligible {
             if attempts >= self.max_retries {
+                tracing::Span::current().record("needle.claim.result", "max_retries_exceeded");
+                // Set Error status on the bead.claim span
+                tracing::Span::current().record("otel.status_code", 2u64);
+                tracing::Span::current().record("otel.status_description", "max_retries_exceeded");
                 return Ok(ClaimOutcome::AllRaceLost);
             }
 
             attempts += 1;
             let bead_id = &candidate.id;
+
+            // Set bead_id and retry_number as span attributes.
+            tracing::Span::current().record("needle.bead.id", bead_id.as_ref());
+            tracing::Span::current().record("needle.claim.retry_number", attempts);
 
             self.telemetry.emit(EventKind::ClaimAttempt {
                 bead_id: bead_id.clone(),
@@ -112,6 +129,10 @@ impl Claimer {
                         bead_id: bead_id.clone(),
                         reason: format!("flock timeout: {e}"),
                     })?;
+                    // Set Error status on the bead.claim span
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current()
+                        .record("otel.status_description", format!("flock timeout: {e}"));
                     return Ok(ClaimOutcome::StoreError(e));
                 }
             };
@@ -125,15 +146,29 @@ impl Claimer {
                         bead_id: bead_id.clone(),
                         reason: format!("verify failed: {e}"),
                     })?;
+                    // Set Error status on the bead.claim span
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current()
+                        .record("otel.status_description", format!("verify failed: {e}"));
                     return Ok(ClaimOutcome::StoreError(e));
                 }
             };
 
             if current.status != BeadStatus::Open || current.assignee.is_some() {
                 drop(lock_file);
-                self.telemetry.emit(EventKind::ClaimRaceLost {
-                    bead_id: bead_id.clone(),
-                })?;
+                // Distinguish stale-assignee from race-lost: race_lost means another worker
+                // won the race (status changed), not that this bead has a leftover assignee.
+                if current.status == BeadStatus::Open && current.assignee.is_some() {
+                    self.telemetry.emit(EventKind::ClaimFailed {
+                        bead_id: bead_id.clone(),
+                        reason: "stale assignee".to_string(),
+                    })?;
+                } else {
+                    self.telemetry.emit(EventKind::ClaimRaceLost {
+                        bead_id: bead_id.clone(),
+                    })?;
+                }
+                // Apply backoff before trying next candidate (same as store.claim RaceLost path)
                 if attempts < self.max_retries {
                     tokio::time::sleep(Duration::from_millis(
                         self.retry_backoff_ms * u64::from(attempts),
@@ -149,12 +184,16 @@ impl Claimer {
 
             match result {
                 Ok(ClaimResult::Claimed(bead)) => {
+                    tracing::Span::current().record("needle.claim.result", "succeeded");
                     self.telemetry.emit(EventKind::ClaimSuccess {
                         bead_id: bead_id.clone(),
+                        priority: candidate.priority as i32,
+                        strand: strand.to_string(),
                     })?;
                     return Ok(ClaimOutcome::Claimed(bead));
                 }
                 Ok(ClaimResult::RaceLost { .. }) => {
+                    tracing::Span::current().record("needle.claim.result", "race_lost");
                     self.telemetry.emit(EventKind::ClaimRaceLost {
                         bead_id: bead_id.clone(),
                     })?;
@@ -167,6 +206,7 @@ impl Claimer {
                     continue;
                 }
                 Ok(ClaimResult::NotClaimable { reason }) => {
+                    tracing::Span::current().record("needle.claim.result", &reason);
                     self.telemetry.emit(EventKind::ClaimFailed {
                         bead_id: bead_id.clone(),
                         reason: reason.clone(),
@@ -174,25 +214,58 @@ impl Claimer {
                     continue;
                 }
                 Err(e) => {
+                    let reason = format!("store error: {e}");
+                    tracing::Span::current().record("needle.claim.result", &reason);
                     self.telemetry.emit(EventKind::ClaimFailed {
                         bead_id: bead_id.clone(),
-                        reason: format!("store error: {e}"),
+                        reason: reason.clone(),
                     })?;
+                    // Set Error status on the bead.claim span
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current().record("otel.status_description", reason);
                     return Ok(ClaimOutcome::StoreError(e));
                 }
             }
         }
 
         // Exhausted all eligible candidates without success
+        tracing::Span::current().record("needle.claim.result", "all_race_lost");
+        // Set Error status on the bead.claim span
+        tracing::Span::current().record("otel.status_code", 2u64);
+        tracing::Span::current().record("otel.status_description", "all_race_lost");
         Ok(ClaimOutcome::AllRaceLost)
     }
 
     /// Convenience: claim a single bead by ID (fetches the bead, then delegates
     /// to `claim_next` with a single-element candidate list).
-    pub async fn claim_one(&self, bead_id: &BeadId, actor: &str) -> Result<ClaimResult> {
+    ///
+    /// The `exclusions` parameter allows the caller to pass beads that should
+    /// be skipped (e.g., beads that recently lost a claim race). This prevents
+    /// tight loops when multiple workers are racing on the same bead.
+    ///
+    /// The `strand` parameter is optional; if not provided, defaults to "unknown".
+    pub async fn claim_one(
+        &self,
+        bead_id: &BeadId,
+        actor: &str,
+        exclusions: &HashSet<BeadId>,
+        strand: Option<&str>,
+    ) -> Result<ClaimResult> {
         let bead = self.store.show(bead_id).await?;
-        let exclusions = HashSet::new();
-        match self.claim_next(&[bead], actor, &exclusions).await? {
+
+        // If the bead is in the exclusion set, return NotClaimable immediately
+        // without attempting the claim. This prevents tight loops when the worker
+        // has already lost a race on this bead.
+        if exclusions.contains(bead_id) {
+            return Ok(ClaimResult::NotClaimable {
+                reason: "bead is excluded".to_string(),
+            });
+        }
+
+        match self
+            .claim_next(&[bead], actor, exclusions, strand.unwrap_or("unknown"))
+            .await?
+        {
             ClaimOutcome::Claimed(b) => Ok(ClaimResult::Claimed(b)),
             ClaimOutcome::AllRaceLost => Ok(ClaimResult::RaceLost {
                 claimed_by: "(race)".to_string(),
@@ -347,6 +420,14 @@ mod tests {
             Ok(())
         }
 
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
@@ -396,7 +477,7 @@ mod tests {
         let store = Arc::new(MockBeadStore::new(vec![]));
         let claimer = make_claimer(store);
         let result = claimer
-            .claim_next(&[], "worker-1", &HashSet::new())
+            .claim_next(&[], "worker-1", &HashSet::new(), "test-strand")
             .await
             .unwrap();
         assert!(matches!(result, ClaimOutcome::NoCandidates));
@@ -411,7 +492,7 @@ mod tests {
         exclusions.insert(BeadId::from("needle-abc"));
 
         let result = claimer
-            .claim_next(&[bead], "worker-1", &exclusions)
+            .claim_next(&[bead], "worker-1", &exclusions, "test-strand")
             .await
             .unwrap();
         assert!(matches!(result, ClaimOutcome::NoCandidates));
@@ -424,7 +505,7 @@ mod tests {
         let claimer = make_claimer(store);
 
         let result = claimer
-            .claim_next(&[bead], "worker-1", &HashSet::new())
+            .claim_next(&[bead], "worker-1", &HashSet::new(), "test-strand")
             .await
             .unwrap();
         match result {
@@ -451,7 +532,7 @@ mod tests {
         let claimer = make_claimer(store);
 
         let result = claimer
-            .claim_next(&[bead1, bead2], "worker-1", &HashSet::new())
+            .claim_next(&[bead1, bead2], "worker-1", &HashSet::new(), "test-strand")
             .await
             .unwrap();
         match result {
@@ -479,7 +560,7 @@ mod tests {
         let claimer = make_claimer(store);
 
         let result = claimer
-            .claim_next(&[bead1, bead2], "worker-1", &HashSet::new())
+            .claim_next(&[bead1, bead2], "worker-1", &HashSet::new(), "test-strand")
             .await
             .unwrap();
         assert!(matches!(result, ClaimOutcome::AllRaceLost));
@@ -500,7 +581,7 @@ mod tests {
         let claimer = make_claimer(store);
 
         let result = claimer
-            .claim_next(&[bead1, bead2], "worker-1", &HashSet::new())
+            .claim_next(&[bead1, bead2], "worker-1", &HashSet::new(), "test-strand")
             .await
             .unwrap();
         match result {
@@ -518,7 +599,12 @@ mod tests {
         let claimer = make_claimer(store);
 
         let result = claimer
-            .claim_one(&BeadId::from("needle-abc"), "worker-1")
+            .claim_one(
+                &BeadId::from("needle-abc"),
+                "worker-1",
+                &HashSet::new(),
+                Some("test-strand"),
+            )
             .await
             .unwrap();
         assert!(matches!(result, ClaimResult::Claimed(_)));
@@ -575,7 +661,7 @@ mod tests {
         exclusions.insert(BeadId::from("needle-abc"));
 
         let result = claimer
-            .claim_next(&[bead], "worker-1", &exclusions)
+            .claim_next(&[bead], "worker-1", &exclusions, "test-strand")
             .await
             .unwrap();
         assert!(matches!(result, ClaimOutcome::NoCandidates));
@@ -603,7 +689,7 @@ mod tests {
         );
 
         let result = claimer
-            .claim_next(&beads, "worker-1", &HashSet::new())
+            .claim_next(&beads, "worker-1", &HashSet::new(), "test-strand")
             .await
             .unwrap();
         assert!(matches!(result, ClaimOutcome::AllRaceLost));

@@ -356,6 +356,13 @@ mod tests {
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
@@ -384,17 +391,23 @@ mod tests {
             Utc::now()
         };
 
+        let current_bead = bead_id.map(BeadId::from);
+        let is_idle = current_bead.is_none();
+
         HeartbeatData {
             worker_id: worker_id.to_string(),
             qualified_id: format!("claude-{}", worker_id),
             pid,
             state: WorkerState::Executing,
-            current_bead: bead_id.map(BeadId::from),
+            current_bead,
             workspace: PathBuf::from("/tmp/test"),
             last_heartbeat,
             started_at: Utc::now() - chrono::Duration::seconds(3600),
             beads_processed: 0,
             session: worker_id.to_string(),
+            is_idle,
+            current_task: bead_id.map(|s| s.to_string()),
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         }
     }

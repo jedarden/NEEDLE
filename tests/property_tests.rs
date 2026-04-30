@@ -284,6 +284,9 @@ proptest! {
             beads_processed: 0,
             session: "test".to_string(),
             heartbeat_file: None,
+            is_idle: false,
+            current_task: None,
+            model: "claude".to_string(),
         };
 
         let ttl = std::time::Duration::from_secs(ttl_secs);
@@ -309,6 +312,9 @@ proptest! {
             beads_processed: 0,
             session: "test".to_string(),
             heartbeat_file: None,
+            is_idle: false,
+            current_task: None,
+            model: "claude".to_string(),
         };
 
         let ttl = std::time::Duration::from_secs(ttl_secs);

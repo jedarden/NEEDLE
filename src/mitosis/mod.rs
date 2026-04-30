@@ -238,6 +238,16 @@ impl MitosisEvaluator {
         parent: &Bead,
         proposed: &[ProposedChild],
     ) -> Result<MitosisResult> {
+        // Enter the bead.mitosis span for the mitosis operation.
+        let mitosis_span = tracing::info_span!(
+            "bead.mitosis",
+            needle.bead.id = %parent.id,
+            needle.mitosis.proposed_children = proposed.len() as u32,
+            needle.mitosis.children_created = tracing::field::Empty, // Will be set based on result
+            needle.mitosis.children_skipped = tracing::field::Empty, // Will be set based on result
+        );
+        let _mitosis_enter = mitosis_span.enter();
+
         // Read parent's existing children (dependencies where child blocks parent).
         let existing = self.get_existing_children(store, &parent.id).await?;
         let existing_titles: Vec<String> = existing.iter().map(|t| t.to_lowercase()).collect();
@@ -313,6 +323,11 @@ impl MitosisEvaluator {
             children_skipped: skipped,
             child_ids: created_ids.clone(),
         })?;
+
+        // Record the final counts on the bead.mitosis span
+        tracing::Span::current()
+            .record("needle.mitosis.children_created", created_ids.len() as u32);
+        tracing::Span::current().record("needle.mitosis.children_skipped", skipped);
 
         tracing::info!(
             parent_id = %parent.id,
@@ -616,6 +631,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((blocker_id.to_string(), blocked_id.to_string()));
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
             Ok(())
         }
         async fn doctor_repair(&self) -> Result<RepairReport> {

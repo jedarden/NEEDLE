@@ -238,7 +238,12 @@ async fn real_br_multi_worker_claiming_no_duplicates() {
         );
 
         let result = claimer
-            .claim_next(&beads, &format!("worker-{worker_idx}"), &already_claimed)
+            .claim_next(
+                &beads,
+                &format!("worker-{worker_idx}"),
+                &already_claimed,
+                "test-strand",
+            )
             .await
             .unwrap();
 
@@ -287,7 +292,12 @@ async fn real_br_all_beads_eventually_claimed() {
         );
 
         let result = claimer
-            .claim_next(&beads, &format!("worker-{worker_idx}"), &already_claimed)
+            .claim_next(
+                &beads,
+                &format!("worker-{worker_idx}"),
+                &already_claimed,
+                "test-strand",
+            )
             .await
             .unwrap();
 
@@ -333,6 +343,9 @@ async fn real_br_crashed_worker_bead_released_by_peer() {
         started_at: Utc::now() - chrono::Duration::seconds(3600),
         beads_processed: 1,
         session: "crashed-worker".to_string(),
+        is_idle: false,
+        current_task: Some(bead_id.to_string()),
+        model: "test-model".to_string(),
         heartbeat_file: None,
     };
     let hb_path = hb_dir.path().join("crashed-worker.json");
@@ -387,6 +400,7 @@ async fn real_br_explore_discovers_remote_workspace() {
     let config = ExploreConfig {
         enabled: true,
         workspaces: vec![remote_workspace.path().to_path_buf()],
+        workspace_root: PathBuf::from("/tmp"),
     };
 
     let explore = ExploreStrand::new(
@@ -424,6 +438,7 @@ async fn real_br_explore_skips_home_workspace() {
     let config = ExploreConfig {
         enabled: true,
         workspaces: vec![home_workspace.path().to_path_buf()],
+        workspace_root: PathBuf::from("/tmp"),
     };
 
     let reg_dir = tempfile::tempdir().unwrap();
@@ -458,6 +473,7 @@ async fn real_br_explore_disabled_returns_no_work() {
     let config = ExploreConfig {
         enabled: false,
         workspaces: vec![remote_workspace.path().to_path_buf()],
+        workspace_root: PathBuf::from("/tmp"),
     };
 
     let explore = ExploreStrand::new(
@@ -504,6 +520,9 @@ async fn real_br_mend_cleans_crashed_peer() {
         started_at: Utc::now() - chrono::Duration::seconds(3600),
         beads_processed: 1,
         session: "dead-peer".to_string(),
+        is_idle: false,
+        current_task: Some(bead_id.to_string()),
+        model: "claude-sonnet-4".to_string(),
         heartbeat_file: None,
     };
     let hb_path = hb_dir.path().join("dead-peer.json");
@@ -529,6 +548,8 @@ async fn real_br_mend_cleans_crashed_peer() {
         7,
         std::path::PathBuf::from("/tmp"),
         100,
+        std::path::PathBuf::from("/tmp/needle-test-state"),
+        needle::config::LimitsConfig::default(),
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -568,6 +589,9 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
         started_at: Utc::now() - chrono::Duration::seconds(60),
         beads_processed: 0,
         session: "healthy-peer".to_string(),
+        is_idle: false,
+        current_task: None,
+        model: "claude-sonnet-4".to_string(),
         heartbeat_file: None,
     };
     let hb_path = hb_dir.path().join("healthy-peer.json");
@@ -599,6 +623,8 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
         7,
         workspace.path().to_path_buf(),
         100,
+        std::path::PathBuf::from("/tmp/needle-test-state"),
+        needle::config::LimitsConfig::default(),
     );
 
     let result = mend.evaluate(store.as_ref()).await;
@@ -610,6 +636,156 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
         matches!(result, StrandResult::NoWork),
         "Mend should return NoWork when no stale peers; got {:?}",
         result
+    );
+}
+
+#[tokio::test]
+async fn real_br_mend_removes_orphaned_heartbeat() {
+    let workspace = create_test_workspace("mend-orphan-hb").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+    let hb_dir = tempfile::tempdir().unwrap();
+    let reg_dir = tempfile::tempdir().unwrap();
+    let lock_dir = tempfile::tempdir().unwrap();
+
+    // Write a stale heartbeat for a worker that is NOT registered.
+    let heartbeat_data = needle::health::HeartbeatData {
+        worker_id: "ghost-worker".to_string(),
+        qualified_id: "claude-ghost-worker".to_string(),
+        pid: 99_999_999,
+        state: needle::types::WorkerState::Executing,
+        current_bead: None,
+        workspace: workspace.path().to_path_buf(),
+        last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
+        started_at: Utc::now() - chrono::Duration::seconds(3600),
+        beads_processed: 0,
+        session: "ghost-worker".to_string(),
+        is_idle: false,
+        current_task: None,
+        model: "claude-sonnet-4".to_string(),
+        heartbeat_file: None,
+    };
+    let hb_path = hb_dir.path().join("claude-ghost-worker.json");
+    std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();
+
+    // Run Mend strand.
+    let config = MendConfig::default();
+    let registry = Registry::new(reg_dir.path());
+    let telemetry = Telemetry::new("mend-worker".to_string());
+
+    let mend = MendStrand::new(
+        config,
+        hb_dir.path().to_path_buf(),
+        Duration::from_secs(300),
+        lock_dir.path().to_path_buf(),
+        "mend-worker".to_string(),
+        registry,
+        telemetry,
+        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        0,
+        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        30,
+        7,
+        workspace.path().to_path_buf(),
+        100,
+        std::path::PathBuf::from("/tmp/needle-test-state"),
+        needle::config::LimitsConfig::default(),
+    );
+
+    let result = mend.evaluate(store.as_ref()).await;
+
+    // Orphaned heartbeat cleanup is maintenance, not work creation.
+    assert!(
+        matches!(result, StrandResult::NoWork),
+        "Mend should return NoWork after removing orphaned heartbeat (maintenance); got {:?}",
+        result
+    );
+
+    // Verify heartbeat file was removed.
+    assert!(
+        !hb_path.exists(),
+        "orphaned heartbeat file should have been removed"
+    );
+}
+
+#[tokio::test]
+async fn real_br_mend_keeps_registered_heartbeat() {
+    let workspace = create_test_workspace("mend-keep-hb").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+    let hb_dir = tempfile::tempdir().unwrap();
+    let reg_dir = tempfile::tempdir().unwrap();
+    let lock_dir = tempfile::tempdir().unwrap();
+
+    // Write a stale heartbeat for a worker that IS registered.
+    let heartbeat_data = needle::health::HeartbeatData {
+        worker_id: "registered-worker".to_string(),
+        qualified_id: "claude-registered-worker".to_string(),
+        pid: std::process::id(),
+        state: needle::types::WorkerState::Executing,
+        current_bead: None,
+        workspace: workspace.path().to_path_buf(),
+        last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
+        started_at: Utc::now() - chrono::Duration::seconds(3600),
+        beads_processed: 0,
+        session: "registered-worker".to_string(),
+        is_idle: false,
+        current_task: None,
+        model: "claude-sonnet-4".to_string(),
+        heartbeat_file: None,
+    };
+    let hb_path = hb_dir.path().join("claude-registered-worker.json");
+    std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();
+
+    // Register the worker.
+    let registry = Registry::new(reg_dir.path());
+    registry
+        .register(needle::registry::WorkerEntry {
+            id: "claude-registered-worker".to_string(),
+            pid: std::process::id(),
+            workspace: workspace.path().to_path_buf(),
+            agent: "test".to_string(),
+            model: None,
+            provider: None,
+            started_at: Utc::now(),
+            beads_processed: 0,
+        })
+        .unwrap();
+
+    // Run Mend strand.
+    let config = MendConfig::default();
+    let telemetry = Telemetry::new("mend-worker".to_string());
+
+    let mend = MendStrand::new(
+        config,
+        hb_dir.path().to_path_buf(),
+        Duration::from_secs(300),
+        lock_dir.path().to_path_buf(),
+        "mend-worker".to_string(),
+        registry,
+        telemetry,
+        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        0,
+        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        30,
+        7,
+        workspace.path().to_path_buf(),
+        100,
+        std::path::PathBuf::from("/tmp/needle-test-state"),
+        needle::config::LimitsConfig::default(),
+    );
+
+    let result = mend.evaluate(store.as_ref()).await;
+
+    // No work should be created.
+    assert!(
+        matches!(result, StrandResult::NoWork),
+        "Mend should return NoWork when heartbeat is registered; got {:?}",
+        result
+    );
+
+    // Verify heartbeat file was NOT removed (worker is registered).
+    assert!(
+        hb_path.exists(),
+        "registered heartbeat file should NOT be removed"
     );
 }
 

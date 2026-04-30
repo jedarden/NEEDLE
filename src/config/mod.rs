@@ -228,6 +228,10 @@ pub struct MendConfig {
     /// Run `br doctor` after every N beads processed (0 = disabled).
     #[serde(default = "MendConfig::default_db_check_interval")]
     pub db_check_interval: u64,
+
+    /// Workers with 0 beads processed longer than this (seconds) are flagged.
+    #[serde(default = "MendConfig::default_idle_timeout")]
+    pub idle_timeout: u64,
 }
 
 impl Default for MendConfig {
@@ -236,6 +240,7 @@ impl Default for MendConfig {
             stuck_threshold_secs: Self::default_stuck_threshold_secs(),
             lock_ttl_secs: Self::default_lock_ttl_secs(),
             db_check_interval: Self::default_db_check_interval(),
+            idle_timeout: Self::default_idle_timeout(),
         }
     }
 }
@@ -250,6 +255,9 @@ impl MendConfig {
     fn default_db_check_interval() -> u64 {
         50
     }
+    fn default_idle_timeout() -> u64 {
+        120
+    }
 }
 
 /// Explore strand configuration (multi-workspace discovery).
@@ -260,9 +268,15 @@ pub struct ExploreConfig {
     pub enabled: bool,
 
     /// Explicit workspace paths to search for beads.
-    /// No filesystem scanning — only these paths are checked.
+    /// When empty, workspaces are auto-discovered under `workspace_root`.
     #[serde(default)]
     pub workspaces: Vec<PathBuf>,
+
+    /// Root path for workspace auto-discovery (when `workspaces` is empty).
+    /// All directories under this path containing a `.beads/` subdirectory
+    /// are treated as workspaces.
+    #[serde(default = "ExploreConfig::default_workspace_root")]
+    pub workspace_root: PathBuf,
 }
 
 impl Default for ExploreConfig {
@@ -270,6 +284,7 @@ impl Default for ExploreConfig {
         ExploreConfig {
             enabled: Self::default_enabled(),
             workspaces: Vec::new(),
+            workspace_root: Self::default_workspace_root(),
         }
     }
 }
@@ -277,6 +292,10 @@ impl Default for ExploreConfig {
 impl ExploreConfig {
     fn default_enabled() -> bool {
         true
+    }
+
+    fn default_workspace_root() -> PathBuf {
+        dirs_or_home("")
     }
 }
 
@@ -596,6 +615,30 @@ pub struct ReflectConfig {
     /// Maximum beads to pass to the extraction agent per Reflect run (default: 5).
     #[serde(default = "ReflectConfig::default_max_extraction_per_run")]
     pub max_extraction_per_run: usize,
+
+    /// How far back to read session transcripts in days (default: 7).
+    #[serde(default = "ReflectConfig::default_transcript_recency_days")]
+    pub transcript_recency_days: u32,
+
+    /// Cap on sessions to analyze per transcript run (default: 50).
+    #[serde(default = "ReflectConfig::default_transcript_max_sessions")]
+    pub transcript_max_sessions: usize,
+
+    /// Jaccard similarity threshold for drift session clustering (default: 0.6).
+    #[serde(default = "ReflectConfig::default_drift_similarity_threshold")]
+    pub drift_similarity_threshold: f64,
+
+    /// Enable drift detection (default: true).
+    #[serde(default = "ReflectConfig::default_drift_enabled")]
+    pub drift_enabled: bool,
+
+    /// Enable ADR decision extraction (default: true).
+    #[serde(default = "ReflectConfig::default_adr_enabled")]
+    pub adr_enabled: bool,
+
+    /// Enable writing learnings to CLAUDE.md (default: true).
+    #[serde(default = "ReflectConfig::default_claude_md_placement")]
+    pub claude_md_placement: bool,
 }
 
 impl Default for ReflectConfig {
@@ -611,6 +654,12 @@ impl Default for ReflectConfig {
             extraction_agent: None,
             extraction_prompt_template: None,
             max_extraction_per_run: Self::default_max_extraction_per_run(),
+            transcript_recency_days: Self::default_transcript_recency_days(),
+            transcript_max_sessions: Self::default_transcript_max_sessions(),
+            drift_similarity_threshold: Self::default_drift_similarity_threshold(),
+            drift_enabled: Self::default_drift_enabled(),
+            adr_enabled: Self::default_adr_enabled(),
+            claude_md_placement: Self::default_claude_md_placement(),
         }
     }
 }
@@ -639,6 +688,105 @@ impl ReflectConfig {
     }
     fn default_max_extraction_per_run() -> usize {
         5
+    }
+    fn default_transcript_recency_days() -> u32 {
+        7
+    }
+    fn default_transcript_max_sessions() -> usize {
+        50
+    }
+    fn default_drift_similarity_threshold() -> f64 {
+        0.6
+    }
+    fn default_drift_enabled() -> bool {
+        true
+    }
+    fn default_adr_enabled() -> bool {
+        true
+    }
+    fn default_claude_md_placement() -> bool {
+        true
+    }
+}
+
+/// Splice strand configuration (worker failure documentation).
+///
+/// Splice detects dead workers (stale heartbeat) and live-but-looping workers
+/// (fresh heartbeat, stuck in a tight event loop). Both are documented as
+/// failure beads in the configured report workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpliceConfig {
+    /// Whether the Splice strand is enabled (default: true).
+    #[serde(default = "SpliceConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Seconds since last heartbeat before a worker is considered stale (default: 300).
+    #[serde(default = "SpliceConfig::default_stale_threshold_secs")]
+    pub stale_threshold_secs: u64,
+
+    /// Path to the workspace where worker failure beads are created.
+    /// When `None`, uses the current bead store (no separate workspace).
+    #[serde(default)]
+    pub report_workspace: Option<PathBuf>,
+
+    /// Whether to scan live workers' JSONL for stuck-loop patterns (default: true).
+    #[serde(default = "SpliceConfig::default_detect_live_loops")]
+    pub detect_live_loops: bool,
+
+    /// Max events to scan from JSONL tail per worker (default: 200).
+    #[serde(default = "SpliceConfig::default_live_loop_scan_events")]
+    pub live_loop_scan_events: usize,
+
+    /// Min same-bead `bead.claim.race_lost` events to flag as claim churn (default: 20).
+    #[serde(default = "SpliceConfig::default_claim_churn_threshold")]
+    pub claim_churn_threshold: u32,
+
+    /// Max JSONL growth (bytes) in `live_loop_window_secs` without `agent.completed`
+    /// before flagging as log runaway (default: 10 MiB).
+    #[serde(default = "SpliceConfig::default_log_runaway_bytes")]
+    pub log_runaway_bytes: u64,
+
+    /// Window for the log-rate runaway check in seconds (default: 300).
+    #[serde(default = "SpliceConfig::default_live_loop_window_secs")]
+    pub live_loop_window_secs: u64,
+}
+
+impl Default for SpliceConfig {
+    fn default() -> Self {
+        SpliceConfig {
+            enabled: Self::default_enabled(),
+            stale_threshold_secs: Self::default_stale_threshold_secs(),
+            report_workspace: None,
+            detect_live_loops: Self::default_detect_live_loops(),
+            live_loop_scan_events: Self::default_live_loop_scan_events(),
+            claim_churn_threshold: Self::default_claim_churn_threshold(),
+            log_runaway_bytes: Self::default_log_runaway_bytes(),
+            live_loop_window_secs: Self::default_live_loop_window_secs(),
+        }
+    }
+}
+
+impl SpliceConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_stale_threshold_secs() -> u64 {
+        300
+    }
+    fn default_detect_live_loops() -> bool {
+        true
+    }
+    fn default_live_loop_scan_events() -> usize {
+        200
+    }
+    fn default_claim_churn_threshold() -> u32 {
+        20
+    }
+    fn default_log_runaway_bytes() -> u64 {
+        10 * 1024 * 1024 // 10 MiB
+    }
+    fn default_live_loop_window_secs() -> u64 {
+        300
     }
 }
 
@@ -986,6 +1134,116 @@ pub struct HookConfig {
     pub url: Option<String>,
 }
 
+/// OTLP sink configuration for OpenTelemetry export.
+///
+/// When enabled, NEEDLE exports traces, metrics, and logs to any OTLP-compliant
+/// collector (e.g., Grafana Tempo, Jaeger, OpenTelemetry Collector).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OtlpSinkConfig {
+    /// Enable or disable the OTLP sink.
+    #[serde(default = "OtlpSinkConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// OTLP endpoint URL (e.g., `http://localhost:4317` for gRPC).
+    #[serde(default = "OtlpSinkConfig::default_endpoint")]
+    pub endpoint: String,
+
+    /// Protocol: "grpc" or "http".
+    #[serde(default = "OtlpSinkConfig::default_protocol")]
+    pub protocol: String,
+
+    /// Request timeout in seconds (default: 10).
+    #[serde(default = "OtlpSinkConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+
+    /// Compression: "gzip", "none", or "zstd".
+    #[serde(default = "OtlpSinkConfig::default_compression")]
+    pub compression: String,
+
+    /// TLS configuration: "none", "tls", or "mtls".
+    #[serde(default = "OtlpSinkConfig::default_tls")]
+    pub tls: String,
+
+    /// HTTP headers to send with each request (format: "key: value").
+    #[serde(default)]
+    pub headers: Vec<String>,
+
+    /// Resource attributes attached to all exported signals (format: "key=value").
+    /// Reserved keys `service.name` and `service.instance.id` cannot be overridden.
+    #[serde(default)]
+    pub resource_attributes: Vec<String>,
+
+    /// Metrics export interval in seconds (default: 10).
+    #[serde(default = "OtlpSinkConfig::default_metrics_interval_secs")]
+    pub metrics_interval_secs: u64,
+
+    /// Service namespace for OpenTelemetry semantic conventions.
+    /// Defaults to "needle-fleet" if not specified.
+    #[serde(default = "OtlpSinkConfig::default_service_namespace")]
+    pub service_namespace: String,
+
+    /// Maximum queue size for batch processors (default: 2048).
+    /// When the queue fills, the OTel SDK drops the oldest items.
+    #[serde(default = "OtlpSinkConfig::default_max_queue_size")]
+    pub max_queue_size: usize,
+}
+
+impl Default for OtlpSinkConfig {
+    fn default() -> Self {
+        OtlpSinkConfig {
+            enabled: Self::default_enabled(),
+            endpoint: Self::default_endpoint(),
+            protocol: Self::default_protocol(),
+            timeout_secs: Self::default_timeout_secs(),
+            compression: Self::default_compression(),
+            tls: Self::default_tls(),
+            headers: Vec::new(),
+            resource_attributes: Vec::new(),
+            metrics_interval_secs: Self::default_metrics_interval_secs(),
+            service_namespace: Self::default_service_namespace(),
+            max_queue_size: Self::default_max_queue_size(),
+        }
+    }
+}
+
+impl OtlpSinkConfig {
+    fn default_enabled() -> bool {
+        false
+    }
+
+    fn default_endpoint() -> String {
+        "http://localhost:4317".to_string()
+    }
+
+    fn default_protocol() -> String {
+        "grpc".to_string()
+    }
+
+    fn default_timeout_secs() -> u64 {
+        10
+    }
+
+    fn default_compression() -> String {
+        "gzip".to_string()
+    }
+
+    fn default_tls() -> String {
+        "none".to_string()
+    }
+
+    fn default_metrics_interval_secs() -> u64 {
+        10
+    }
+
+    fn default_service_namespace() -> String {
+        "needle-fleet".to_string()
+    }
+
+    fn default_max_queue_size() -> usize {
+        2048
+    }
+}
+
 /// Telemetry configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TelemetryConfig {
@@ -996,6 +1254,9 @@ pub struct TelemetryConfig {
     /// Optional hook sinks — dispatch matching events to external commands.
     #[serde(default)]
     pub hooks: Vec<HookConfig>,
+    /// Optional OTLP sink for OpenTelemetry export.
+    #[serde(default)]
+    pub otlp_sink: OtlpSinkConfig,
 }
 
 /// Health monitoring configuration (heartbeat, peer detection).

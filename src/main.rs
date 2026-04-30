@@ -1,11 +1,9 @@
 //! NEEDLE — Navigates Every Enqueued Deliverable, Logs Effort.
 
 use anyhow::Result;
-use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    // Don't set a global tracing subscriber here.
+    // The CLI layer will initialize it with OTel support after loading config.
     needle::cli::run()
 }

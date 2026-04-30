@@ -410,6 +410,16 @@ impl PromptBuilder {
     ///
     /// `extra_vars` is a slice of `(variable_name, value)` pairs for
     /// strand-specific substitutions (e.g., `("{doc_files}", "...")` for weave).
+    #[tracing::instrument(
+        name = "bead.prompt_build",
+        skip(self, bead, workspace, extra_vars),
+        fields(
+            needle.bead.id = %bead.id,
+            needle.prompt.template_name = %template_name,
+            needle.prompt.template_version = tracing::field::Empty,
+            needle.prompt.token_estimate = tracing::field::Empty,
+        )
+    )]
     pub fn build_with_vars(
         &self,
         bead: &Bead,
@@ -468,6 +478,10 @@ impl PromptBuilder {
 
         let hash = hex_sha256(&content);
         let token_estimate = content.len() as u64 / 4;
+
+        // Record span attributes
+        tracing::Span::current().record("needle.prompt.template_version", &template_version);
+        tracing::Span::current().record("needle.prompt.token_estimate", token_estimate);
 
         Ok(BuiltPrompt {
             content,

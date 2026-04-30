@@ -36,6 +36,12 @@ const NATO_ALPHABET: &[&str] = &[
     "uniform", "victor", "whiskey", "xray", "yankee", "zulu",
 ];
 
+/// Tmux silently replaces dots with underscores in session names.
+/// Normalize consistently so creation and lookup agree.
+fn sanitize_session_name(name: &str) -> String {
+    name.replace('.', "_")
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // CLI definition
 // ──────────────────────────────────────────────────────────────────────────────
@@ -77,6 +83,10 @@ pub enum CliCommand {
         /// Resume an existing worker session (used by hot-reload).
         #[arg(long)]
         resume: bool,
+
+        /// Enable or disable hot-reload for this worker.
+        #[arg(long)]
+        hot_reload: Option<bool>,
     },
 
     /// Stop running worker(s).
@@ -86,6 +96,17 @@ pub enum CliCommand {
         all: bool,
 
         /// Identifier of the worker to stop.
+        #[arg(short = 'i', long)]
+        identifier: Option<String>,
+    },
+
+    /// Remove orphaned tmux sessions (sessions without active workers).
+    Cleanup {
+        /// Remove all needle sessions (even if workers are active).
+        #[arg(long)]
+        all: bool,
+
+        /// Session name pattern to match (partial match).
         #[arg(short = 'i', long)]
         identifier: Option<String>,
     },
@@ -316,8 +337,10 @@ pub fn run() -> Result<()> {
             identifier,
             timeout,
             resume,
-        } => cmd_run(workspace, agent, count, identifier, timeout, resume),
+            hot_reload,
+        } => cmd_run(workspace, agent, count, identifier, timeout, resume, hot_reload),
         CliCommand::Stop { all, identifier } => cmd_stop(all, identifier),
+        CliCommand::Cleanup { all, identifier } => cmd_cleanup(all, identifier),
         CliCommand::List { format } => cmd_list(format),
         CliCommand::Attach { identifier } => cmd_attach(&identifier),
         CliCommand::Status {
@@ -377,6 +400,7 @@ fn cmd_run(
     identifier: Option<String>,
     timeout: Option<u64>,
     resume: bool,
+    hot_reload: Option<bool>,
 ) -> Result<()> {
     // Determine workspace root (CLI arg → canonicalized, else global default).
     let workspace_root = if let Some(ref ws) = workspace {
@@ -397,6 +421,10 @@ fn cmd_run(
 
     if let Some(t) = timeout {
         config.agent.timeout = t;
+    }
+
+    if let Some(hr) = hot_reload {
+        config.self_modification.hot_reload = hr;
     }
 
     if resume {
@@ -453,12 +481,12 @@ fn cmd_run(
             .clone()
             .unwrap_or_else(|| NATO_ALPHABET[0].to_string());
         let agent_name = agent.as_deref().unwrap_or(&config.agent.default);
-        let session_name = format!("needle-{agent_name}-{worker_id}");
+        let session_name = sanitize_session_name(&format!("needle-{agent_name}-{worker_id}"));
         tracing::info!(worker = %worker_id, session = %session_name, "starting worker (inner re-entrant invocation)");
         run_worker(config, worker_id)
     } else {
         // Always create dedicated tmux sessions, even if already inside tmux.
-        launch_workers(config, workspace, agent, count, identifier, timeout)
+        launch_workers(config, workspace, agent, count, identifier, timeout, hot_reload)
     }
 }
 
@@ -470,6 +498,7 @@ fn launch_workers(
     count: u32,
     identifier: Option<String>,
     timeout: Option<u64>,
+    hot_reload: Option<bool>,
 ) -> Result<()> {
     let agent_name = agent
         .as_deref()
@@ -567,7 +596,7 @@ fn launch_workers(
     };
 
     for (seq, worker_id) in worker_ids.iter().enumerate() {
-        let session_name = format!("needle-{agent_name}-{worker_id}");
+        let session_name = sanitize_session_name(&format!("needle-{agent_name}-{worker_id}"));
 
         tracing::info!(
             worker_id = %worker_id,
@@ -588,6 +617,7 @@ fn launch_workers(
             agent.clone(),
             Some(worker_id.clone()),
             timeout,
+            hot_reload,
         )?;
 
         println!(
@@ -598,14 +628,15 @@ fn launch_workers(
         );
     }
 
+    let sanitized_agent = sanitize_session_name(&agent_name);
     if effective_count > 1 {
         println!(
             "\nStarted {effective_count} workers (stagger: {stagger_secs}s between launches)."
         );
-        println!("Attach to a worker with: tmux attach -t needle-{agent_name}-<name>");
+        println!("Attach to a worker with: tmux attach -t needle-{sanitized_agent}-<name>");
     } else {
         let worker_id = &worker_ids[0];
-        println!("Attach with: tmux attach -t needle-{agent_name}-{worker_id}");
+        println!("Attach with: tmux attach -t needle-{sanitized_agent}-{worker_id}");
     }
 
     Ok(())
@@ -622,20 +653,34 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
     let qualified_id = format!("{}-{}", config.agent.default, worker_name);
 
     // Phase 0: create tokio runtime + telemetry, emit worker.booting immediately.
+    // Emit eprintln diagnostics before each step so hangs are visible even if telemetry fails.
+    eprintln!("NEEDLE worker boot: creating tokio runtime...");
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
+    eprintln!("NEEDLE worker boot: tokio runtime created");
+
+    eprintln!("NEEDLE worker boot: creating telemetry...");
     let telemetry =
         Telemetry::from_config(qualified_id.clone(), &config.telemetry).unwrap_or_else(|e| {
             tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
             Telemetry::new(qualified_id.clone())
         });
-    telemetry.start();
-    telemetry.emit(EventKind::WorkerBooting {
+    eprintln!("NEEDLE worker boot: telemetry created");
+
+    // Emit worker.booting SYNCHRONOUSLY before starting the async writer.
+    // This guarantees the event is written to disk even if start_and_wait() hangs.
+    // Fixes the silent pre-init deadlock where the JSONL file is created but empty.
+    eprintln!("NEEDLE worker boot: emitting worker.booting event (sync)...");
+    telemetry.emit_sync(EventKind::WorkerBooting {
         worker_name: worker_name.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     })?;
-    // Force-flush worker.booting to disk immediately so we get a trace even if
-    // subsequent init steps block indefinitely (e.g., db lock, network call).
-    telemetry.force_flush(std::time::Duration::from_secs(5))?;
+    eprintln!("NEEDLE worker boot: worker.booting written to disk");
+
+    // Start the async writer thread after worker.booting is on disk.
+    eprintln!("NEEDLE worker boot: starting telemetry writer thread...");
+    rt.block_on(telemetry.start_and_wait())
+        .context("writer thread failed to start")?;
+    eprintln!("NEEDLE worker boot: writer thread started");
 
     // Phase 1: bead store discovery.
     let store: Arc<dyn crate::bead_store::BeadStore> =
@@ -661,6 +706,9 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
         bail!("boot exceeded 60 s ({elapsed_ms} ms), aborting");
     }
 
+    eprintln!(
+        "NEEDLE worker boot: all init steps completed in {elapsed_ms}ms, starting worker loop..."
+    );
     let result = rt.block_on(worker.run())?;
 
     tracing::info!(final_state = %result, "worker finished");
@@ -671,10 +719,12 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
 ///
 /// Each step's completion is force-flushed to disk so that if a subsequent
 /// step blocks indefinitely, the telemetry log shows exactly where it stopped.
+/// Also emits eprintln diagnostics for visibility even if telemetry hangs.
 fn init_step<T, F>(name: &str, tel: &Telemetry, f: F) -> Result<T>
 where
     F: FnOnce() -> Result<T>,
 {
+    eprintln!("NEEDLE worker boot: starting init step '{name}'...");
     tel.emit(EventKind::InitStepStarted {
         step: name.to_string(),
     })?;
@@ -685,6 +735,7 @@ where
         step: name.to_string(),
         duration_ms: elapsed,
     })?;
+    eprintln!("NEEDLE worker boot: init step '{name}' completed in {elapsed}ms");
     // Force-flush so the step completion is visible before the next (potentially blocking) step.
     tel.force_flush(std::time::Duration::from_secs(1))?;
     result
@@ -703,6 +754,7 @@ fn launch_in_tmux(
     agent: Option<String>,
     identifier: Option<String>,
     timeout: Option<u64>,
+    hot_reload: Option<bool>,
 ) -> Result<()> {
     // Build the command that tmux will run inside the session.
     let self_exe = std::env::current_exe().context("failed to locate own binary")?;
@@ -727,21 +779,24 @@ fn launch_in_tmux(
         inner_args.push("--timeout".to_string());
         inner_args.push(t.to_string());
     }
+    if let Some(hr) = hot_reload {
+        inner_args.push("--hot-reload".to_string());
+        inner_args.push(hr.to_string());
+    }
 
     // Build stderr log path: ~/.needle/logs/<session_name>.stderr.log
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let stderr_log = format!("{home}/.needle/logs/{session_name}.stderr.log");
 
     let inner_cmd = format!(
-        "NEEDLE_INNER=1 {} {} 2>> {}; tmux kill-session -t {}",
+        "NEEDLE_INNER=1 {} {} 2>> {}",
         shell_escape(&self_exe.display().to_string()),
         inner_args
             .iter()
             .map(|a| shell_escape(a))
             .collect::<Vec<_>>()
             .join(" "),
-        shell_escape(&stderr_log),
-        shell_escape(session_name)
+        shell_escape(&stderr_log)
     );
 
     let status = ProcessCommand::new("tmux")
@@ -798,10 +853,88 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
             .with_context(|| format!("failed to send SIGTERM to session '{session}'"))?;
 
         if status.success() {
-            println!("Stopped: {session}");
+            // Wait up to 5 seconds for the worker to exit gracefully
+            for _ in 0..50 {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let session_exists = ProcessCommand::new("tmux")
+                    .args(["has-session", "-t", session])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if !session_exists {
+                    break;
+                }
+            }
+            // Kill the session to clean up (worker may have already exited)
+            let kill_status = ProcessCommand::new("tmux")
+                .args(["kill-session", "-t", session])
+                .status();
+            match kill_status {
+                Ok(s) if s.success() => println!("Stopped: {session}"),
+                Ok(_) => println!("Stopped: {session} (session already gone)"),
+                Err(e) => println!("Warning: stopped {session} but failed to kill session: {e}"),
+            }
         } else {
             println!("Warning: could not stop session '{session}' (status: {status})");
         }
+    }
+
+    Ok(())
+}
+
+/// `needle cleanup` — remove orphaned tmux sessions.
+///
+/// Finds and removes needle tmux sessions that no longer have active workers.
+/// With --all, removes all needle sessions regardless of worker status.
+fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
+    let sessions = list_needle_sessions()?;
+
+    if sessions.is_empty() {
+        println!("No needle sessions running.");
+        return Ok(());
+    }
+
+    let targets: Vec<&str> = if all {
+        sessions.iter().map(|s| s.name.as_str()).collect()
+    } else {
+        let id = identifier.as_deref().unwrap_or("");
+        sessions
+            .iter()
+            .filter(|s| id.is_empty() || s.name.contains(id))
+            .map(|s| s.name.as_str())
+            .collect()
+    };
+
+    if targets.is_empty() {
+        println!("No matching sessions found.");
+        return Ok(());
+    }
+
+    let mut cleaned = 0;
+    for session in &targets {
+        // Kill the session
+        let status = ProcessCommand::new("tmux")
+            .args(["kill-session", "-t", session])
+            .status();
+
+        match status {
+            Ok(s) if s.success() => {
+                println!("Cleaned up: {session}");
+                cleaned += 1;
+            }
+            Ok(_) => {
+                println!("Warning: session '{session}' already gone");
+            }
+            Err(e) => {
+                println!("Warning: failed to cleanup session '{session}': {e}");
+            }
+        }
+    }
+
+    if cleaned == 0 {
+        println!("No sessions cleaned up.");
+    } else {
+        println!("Cleaned up {cleaned} session(s).");
     }
 
     Ok(())
@@ -2627,7 +2760,7 @@ fn list_needle_sessions() -> Result<Vec<TmuxSession>> {
 /// the `{worker_id}` portion. Returns an empty set if no sessions are running
 /// or tmux is unavailable.
 fn occupied_worker_ids(agent: &str) -> Result<HashSet<String>> {
-    let prefix = format!("needle-{agent}-");
+    let prefix = sanitize_session_name(&format!("needle-{agent}-"));
     let sessions = list_needle_sessions()?;
     let ids = sessions
         .iter()
@@ -3906,6 +4039,9 @@ mod tests {
             started_at: chrono::Utc::now(),
             beads_processed: 0,
             session: "test-w".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
         std::fs::write(
@@ -3936,6 +4072,9 @@ mod tests {
             started_at: chrono::Utc::now(),
             beads_processed: 0,
             session: "test-rm".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
         };
         let hb_path = tmp.path().join("test-rm.json");

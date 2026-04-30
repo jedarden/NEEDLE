@@ -1635,3 +1635,405 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
         "bead should still be assigned to us"
     );
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 13: Mend removes stale dependency links, making beads claimable
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn mend_removes_stale_dependency_links() {
+    use needle::config::MendConfig;
+    use needle::strand::MendStrand;
+    use std::time::Duration;
+
+    // Create a temporary workspace for the test.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path();
+
+    // Initialize br workspace.
+    let init_output = std::process::Command::new("/home/coding/.local/bin/br")
+        .arg("init")
+        .current_dir(workspace)
+        .output()
+        .expect("br init failed");
+    assert!(init_output.status.success(), "br init failed");
+
+    // Create blocker bead.
+    let blocker_output = std::process::Command::new("/home/coding/.local/bin/br")
+        .args(["create", "Blocker bead", "--body=This is the blocker"])
+        .current_dir(workspace)
+        .output()
+        .expect("br create failed");
+    assert!(blocker_output.status.success(), "br create failed");
+
+    let blocker_id = String::from_utf8_lossy(&blocker_output.stdout)
+        .lines()
+        .find(|l| l.contains("Created"))
+        .and_then(|l| l.split("Created ").nth(1).and_then(|s| s.split(':').next()))
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Create blocked bead.
+    let blocked_output = std::process::Command::new("/home/coding/.local/bin/br")
+        .args([
+            "create",
+            "Blocked bead",
+            "--body=This bead depends on the blocker",
+        ])
+        .current_dir(workspace)
+        .output()
+        .expect("br create failed");
+    assert!(blocked_output.status.success(), "br create failed");
+
+    let blocked_id = String::from_utf8_lossy(&blocked_output.stdout)
+        .lines()
+        .find(|l| l.contains("Created"))
+        .and_then(|l| l.split("Created ").nth(1).and_then(|s| s.split(':').next()))
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Add dependency: blocked depends on blocker.
+    let dep_output = std::process::Command::new("/home/coding/.local/bin/br")
+        .args(["dep", "add", &blocked_id, &blocker_id, "--type", "blocks"])
+        .current_dir(workspace)
+        .output()
+        .expect("br dep add failed");
+    assert!(dep_output.status.success(), "br dep add failed");
+
+    // Verify the dependency exists and the blocked bead is... blocked.
+    let store = needle::bead_store::BrCliBeadStore::discover(workspace).unwrap();
+    let blocked_bead = store
+        .show(&needle::types::BeadId::from(blocked_id.clone()))
+        .await
+        .unwrap();
+    assert!(
+        !blocked_bead.dependencies.is_empty(),
+        "dependency should exist"
+    );
+    assert_eq!(blocked_bead.dependencies[0].id, blocker_id);
+    assert_eq!(blocked_bead.dependencies[0].dependency_type, "blocks");
+
+    // Verify the blocked bead does NOT appear in ready() (because it's blocked).
+    let filters = Filters {
+        assignee: None,
+        exclude_labels: vec!["deferred".to_string(), "human".to_string()],
+    };
+    let ready_before = store.ready(&filters).await.unwrap();
+    assert!(
+        !ready_before.iter().any(|b| b.id.as_ref() == blocked_id),
+        "blocked bead should not appear in ready() before blocker is closed"
+    );
+
+    // Close the blocker bead.
+    let close_output = std::process::Command::new("/home/coding/.local/bin/br")
+        .args(["close", &blocker_id, "--body=Blocker completed"])
+        .current_dir(workspace)
+        .output()
+        .expect("br close failed");
+    assert!(close_output.status.success(), "br close failed");
+
+    // Verify the blocker is closed but the dependency still exists (stale link).
+    let blocked_bead_after = store
+        .show(&needle::types::BeadId::from(blocked_id.clone()))
+        .await
+        .unwrap();
+    assert!(
+        !blocked_bead_after.dependencies.is_empty(),
+        "dependency should still exist after blocker is closed (stale link)"
+    );
+    assert_eq!(blocked_bead_after.dependencies[0].status, "closed");
+
+    // Run Mend to clean up the stale dependency.
+    let hb_dir = tempfile::tempdir().unwrap();
+    let lock_dir = tempfile::tempdir().unwrap();
+    let reg_dir = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let traces_dir = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+    let telemetry = Telemetry::new("test-worker".to_string());
+
+    let mend_config = MendConfig {
+        stuck_threshold_secs: 300,
+        lock_ttl_secs: 3600,
+        db_check_interval: 0,
+        idle_timeout: 120,
+    };
+
+    let registry = needle::registry::Registry::new(reg_dir.path());
+
+    let mend = MendStrand::new(
+        mend_config,
+        hb_dir.path().to_path_buf(),
+        Duration::from_secs(300),
+        lock_dir.path().to_path_buf(),
+        "test-worker".to_string(),
+        registry,
+        telemetry,
+        log_dir.path().to_path_buf(),
+        7,
+        traces_dir.path().to_path_buf(),
+        7,
+        1,
+        workspace.to_path_buf(),
+        1000,
+        state_dir.path().to_path_buf(),
+        needle::config::LimitsConfig::default(),
+    );
+
+    let result = mend.evaluate(&store).await;
+
+    // Mend should have returned WorkCreated because it removed a stale dependency.
+    assert!(
+        matches!(result, StrandResult::WorkCreated),
+        "expected WorkCreated after removing stale dependency, got: {result:?}"
+    );
+
+    // Verify the dependency was actually removed from the bead.
+    let blocked_bead_final = store
+        .show(&needle::types::BeadId::from(blocked_id.clone()))
+        .await
+        .unwrap();
+    assert!(
+        blocked_bead_final.dependencies.is_empty(),
+        "dependency should be removed after mend cleanup"
+    );
+
+    // Verify the blocked bead now appears in ready() (it's claimable again).
+    let ready_after = store.ready(&filters).await.unwrap();
+    assert!(
+        ready_after.iter().any(|b| b.id.as_ref() == blocked_id),
+        "blocked bead should appear in ready() after stale dependency is removed"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 7: Idle worker flagging
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn idle_worker_flagging_detects_stuck_workers() {
+    use needle::config::{LimitsConfig, MendConfig};
+    use needle::registry::Registry;
+    use needle::strand::{MendStrand, Strand};
+    use std::time::Duration;
+
+    let workspace = tempfile::tempdir().unwrap();
+    let hb_dir = tempfile::tempdir().unwrap();
+    let lock_dir = tempfile::tempdir().unwrap();
+    let reg_dir = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let traces_dir = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+
+    // Create a MendStrand with a short idle timeout.
+    let telemetry = Telemetry::new("test-worker".to_string());
+
+    let mend_config = MendConfig {
+        stuck_threshold_secs: 300,
+        lock_ttl_secs: 3600,
+        db_check_interval: 0,
+        idle_timeout: 60, // 60 second timeout
+    };
+
+    let registry = needle::registry::Registry::new(reg_dir.path());
+
+    // Register an active worker (beads_processed > 0).
+    let active_entry = needle::registry::WorkerEntry {
+        id: "claude-active-worker".to_string(),
+        pid: std::process::id(),
+        workspace: workspace.path().to_path_buf(),
+        agent: "claude".to_string(),
+        model: Some("sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        started_at: Utc::now() - chrono::Duration::seconds(300),
+        beads_processed: 10,
+    };
+    registry.register(active_entry).unwrap();
+
+    // Register a worker with 0 beads but started recently (under timeout).
+    let recent_entry = needle::registry::WorkerEntry {
+        id: "claude-recent-worker".to_string(),
+        pid: std::process::id(),
+        workspace: workspace.path().to_path_buf(),
+        agent: "claude".to_string(),
+        model: Some("sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        started_at: Utc::now() - chrono::Duration::seconds(30),
+        beads_processed: 0,
+    };
+    registry.register(recent_entry).unwrap();
+
+    // Register an idle worker (0 beads, started long ago).
+    let idle_entry = needle::registry::WorkerEntry {
+        id: "claude-idle-worker".to_string(),
+        pid: std::process::id(),
+        workspace: workspace.path().to_path_buf(),
+        agent: "claude".to_string(),
+        model: Some("sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        started_at: Utc::now() - chrono::Duration::seconds(300),
+        beads_processed: 0,
+    };
+    registry.register(idle_entry).unwrap();
+
+    // Create a minimal br workspace for the bead store.
+    let ws_path = workspace.path().join("ws");
+    std::fs::create_dir_all(&ws_path).unwrap();
+    let init_output = std::process::Command::new("/home/coding/.local/bin/br")
+        .arg("init")
+        .current_dir(&ws_path)
+        .output()
+        .expect("br init failed");
+    assert!(init_output.status.success(), "br init failed");
+
+    let store = needle::bead_store::BrCliBeadStore::discover(ws_path.to_path_buf()).unwrap();
+
+    let registry2 = Registry::new(reg_dir.path());
+    let mend = MendStrand::new(
+        mend_config,
+        hb_dir.path().to_path_buf(),
+        Duration::from_secs(300),
+        lock_dir.path().to_path_buf(),
+        "test-worker".to_string(),
+        registry2,
+        telemetry,
+        log_dir.path().to_path_buf(),
+        7,
+        traces_dir.path().to_path_buf(),
+        7,
+        1,
+        workspace.path().to_path_buf(),
+        1000,
+        state_dir.path().to_path_buf(),
+        LimitsConfig::default(),
+    );
+
+    let result = mend.evaluate(&store).await;
+
+    // Mend should return NoWork since idle worker flagging doesn't create work.
+    assert!(
+        matches!(result, StrandResult::NoWork),
+        "expected NoWork from idle worker flagging, got: {result:?}"
+    );
+
+    // Verify all workers are still registered (flagging doesn't deregister).
+    let workers = registry.list().unwrap();
+    assert_eq!(workers.len(), 3, "all workers should still be registered");
+
+    // Verify the idle worker is in the registry.
+    let idle_worker = workers.iter().find(|w| w.id == "claude-idle-worker");
+    assert!(
+        idle_worker.is_some(),
+        "idle worker should still be registered"
+    );
+}
+
+#[tokio::test]
+async fn dead_worker_cleanup_integration() {
+    // Integration test: verify that dead workers are proactively cleaned up
+    // from the registry file during the mend strand cycle.
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let reg_dir = temp_dir.path().join("registry");
+    std::fs::create_dir_all(&reg_dir).unwrap();
+
+    let registry = needle::registry::Registry::new(&reg_dir);
+
+    // Register a live worker.
+    let live_entry = needle::registry::WorkerEntry {
+        id: "claude-live-worker".to_string(),
+        pid: std::process::id(),
+        workspace: workspace.clone(),
+        agent: "claude".to_string(),
+        model: Some("sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        started_at: Utc::now() - chrono::Duration::seconds(300),
+        beads_processed: 10,
+    };
+    registry.register(live_entry.clone()).unwrap();
+
+    // Register a dead worker with a PID that does not exist.
+    let dead_entry = needle::registry::WorkerEntry {
+        id: "claude-dead-worker".to_string(),
+        pid: 99_999_999,
+        workspace: workspace.clone(),
+        agent: "claude".to_string(),
+        model: Some("sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        started_at: Utc::now() - chrono::Duration::seconds(300),
+        beads_processed: 5,
+    };
+    registry.register(dead_entry).unwrap();
+
+    // Verify both workers are in the registry file.
+    let workers_before = registry.list().unwrap();
+    assert_eq!(
+        workers_before.len(),
+        2,
+        "both workers should be registered initially"
+    );
+
+    // Read the registry file directly to verify the dead worker is on disk.
+    let reg_path = registry.path();
+    let raw_content = std::fs::read_to_string(reg_path).unwrap();
+    let raw_reg: needle::registry::RegistryFile = serde_json::from_str(&raw_content).unwrap();
+    assert_eq!(
+        raw_reg.workers.len(),
+        2,
+        "both workers should be in the file"
+    );
+
+    // Run the needle worker with a single mend cycle.
+    let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
+    let mut cmd = Command::new(&bin_path);
+    cmd.arg("worker")
+        .arg("--once")
+        .arg("--adapter=claude")
+        .arg("--model=test")
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--registry")
+        .arg(&reg_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = cmd.output().unwrap();
+
+    // The worker should exit successfully.
+    assert!(
+        output.status.success(),
+        "needle worker failed: stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Verify the dead worker was removed from the registry.
+    let workers_after = registry.list().unwrap();
+    assert_eq!(
+        workers_after.len(),
+        1,
+        "only the live worker should remain in registry"
+    );
+    assert_eq!(
+        workers_after[0].id, "claude-live-worker",
+        "the live worker should still be present"
+    );
+
+    // Verify the cleanup was persisted to the file.
+    let raw_content_after = std::fs::read_to_string(reg_path).unwrap();
+    let raw_reg_after: needle::registry::RegistryFile =
+        serde_json::from_str(&raw_content_after).unwrap();
+    assert_eq!(
+        raw_reg_after.workers.len(),
+        1,
+        "only the live worker should remain in the file"
+    );
+    assert_eq!(
+        raw_reg_after.workers[0].id, "claude-live-worker",
+        "the live worker should be in the file"
+    );
+}

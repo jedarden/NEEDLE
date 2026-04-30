@@ -339,9 +339,35 @@ pub fn cleanup_traces(
             .unwrap_or(u64::MAX);
 
         let is_failed = metadata.as_ref().map(|m| m.exit_code != 0).unwrap_or(false);
+        let is_pruned = metadata.as_ref().map(|m| m.pruned).unwrap_or(false);
+
+        // Check if trace data files actually exist before attempting to prune.
+        // This prevents counting a trace as "pruned" when the data files were
+        // already removed in a previous run but the metadata update failed
+        // or was interrupted. This check is crucial for preventing infinite
+        // loops where the same trace is counted repeatedly.
+        let has_data_files = ["trace.jsonl", "stdout.txt", "stderr.txt"]
+            .iter()
+            .any(|file| path.join(file).exists());
 
         let should_delete = is_failed && age_days > retention_days_failed as u64;
-        let should_prune = !is_failed && age_days > retention_days_success as u64;
+        // Only prune if metadata says not pruned AND data files actually exist.
+        // If files are gone but metadata says not pruned, we have a partial
+        // state from an interrupted run - fix the metadata and skip counting.
+        let should_prune =
+            !is_failed && !is_pruned && has_data_files && age_days > retention_days_success as u64;
+
+        // Fix up metadata for traces that were partially pruned (files gone
+        // but metadata not updated). This prevents infinite loops.
+        if !is_failed && !is_pruned && !has_data_files && age_days > retention_days_success as u64 {
+            if let Err(e) = fix_pruned_metadata(&path) {
+                tracing::debug!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to fix pruned metadata for partially-pruned trace"
+                );
+            }
+        }
 
         if should_delete {
             // Delete entire trace directory.
@@ -371,17 +397,40 @@ pub fn cleanup_traces(
     Ok(summary)
 }
 
-/// Prune trace data files in a directory, keeping only metadata.json.
-fn prune_trace_dir(trace_dir: &Path) -> Result<()> {
-    for file in ["trace.jsonl", "stdout.txt", "stderr.txt"] {
-        let path = trace_dir.join(file);
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("failed to prune trace file: {}", path.display()))?;
-        }
+/// Fix metadata for a trace that was partially pruned (data files gone but
+/// metadata not updated). This is a recovery operation for interrupted pruning.
+fn fix_pruned_metadata(trace_dir: &Path) -> Result<()> {
+    let metadata_path = trace_dir.join("metadata.json");
+    if !metadata_path.exists() {
+        return Ok(());
     }
 
-    // Update metadata to mark as pruned.
+    let content = std::fs::read_to_string(&metadata_path)?;
+    if let Ok(mut metadata) = serde_json::from_str::<TraceMetadata>(&content) {
+        if !metadata.pruned {
+            metadata.pruned = true;
+            let json = serde_json::to_string_pretty(&metadata)?;
+            std::fs::write(&metadata_path, json)?;
+            tracing::debug!(
+                path = %trace_dir.display(),
+                "fixed pruned metadata for partially-pruned trace"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Prune trace data files in a directory, keeping only metadata.json.
+///
+/// Updates metadata FIRST to mark as pruned, then removes data files.
+/// This order is critical: if the process is interrupted after metadata
+/// update but before file removal, the next cleanup will skip this trace
+/// (because is_pruned=true) and only remove remaining files. This prevents
+/// infinite loops where the same traces are counted as "pruned" repeatedly.
+fn prune_trace_dir(trace_dir: &Path) -> Result<()> {
+    // Step 1: Update metadata to mark as pruned BEFORE removing files.
+    // This prevents the same trace from being counted as pruned multiple times
+    // if the process is interrupted between metadata update and file removal.
     let metadata_path = trace_dir.join("metadata.json");
     if metadata_path.exists() {
         let content = std::fs::read_to_string(&metadata_path)?;
@@ -389,6 +438,17 @@ fn prune_trace_dir(trace_dir: &Path) -> Result<()> {
             metadata.pruned = true;
             let json = serde_json::to_string_pretty(&metadata)?;
             std::fs::write(&metadata_path, json)?;
+        }
+    }
+
+    // Step 2: Remove trace data files after metadata is updated.
+    // Use ? to propagate errors - if file removal fails, the operator should
+    // know so they can investigate. Files that don't exist are skipped.
+    for file in ["trace.jsonl", "stdout.txt", "stderr.txt"] {
+        let path = trace_dir.join(file);
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed to prune trace file: {}", path.display()))?;
         }
     }
 
@@ -772,5 +832,180 @@ mod tests {
         let summary = cleanup_traces(&traces_dir, 30, 7).unwrap();
         assert_eq!(summary.traces_deleted, 0);
         assert_eq!(summary.traces_pruned, 0);
+    }
+
+    #[test]
+    fn trace_cleanup_already_pruned_trace_skipped() {
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        std::fs::create_dir_all(&traces_dir).unwrap();
+
+        // Create an old success trace that's already marked as pruned.
+        let bead_dir = traces_dir.join("needle-already-pruned");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+
+        // Metadata shows pruned: true
+        let pruned_metadata = TraceMetadata {
+            bead_id: BeadId::from("needle-already-pruned"),
+            agent: "test".to_string(),
+            provider: None,
+            model: None,
+            exit_code: 0,
+            outcome: "success".to_string(),
+            duration_ms: 100,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now() - chrono::Duration::days(8), // Old enough to prune
+            trace_format: TraceFormat::RawText,
+            pruned: true, // Already pruned
+            template_version: None,
+        };
+        let metadata_path = bead_dir.join("metadata.json");
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_string(&pruned_metadata).unwrap(),
+        )
+        .unwrap();
+
+        // First cleanup: should skip the already-pruned trace.
+        let summary1 = cleanup_traces(&traces_dir, 30, 7).unwrap();
+        assert_eq!(summary1.traces_deleted, 0);
+        assert_eq!(
+            summary1.traces_pruned, 0,
+            "already-pruned trace should not be counted"
+        );
+
+        // Second cleanup: should still skip.
+        let summary2 = cleanup_traces(&traces_dir, 30, 7).unwrap();
+        assert_eq!(summary2.traces_deleted, 0);
+        assert_eq!(
+            summary2.traces_pruned, 0,
+            "already-pruned trace should not be counted again"
+        );
+    }
+
+    #[test]
+    fn trace_cleanup_pruned_then_not_counted_again() {
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        std::fs::create_dir_all(&traces_dir).unwrap();
+
+        // Create an old success trace that needs pruning.
+        let bead_dir = traces_dir.join("needle-will-be-pruned");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+
+        std::fs::write(bead_dir.join("stdout.txt"), "stdout").unwrap();
+        std::fs::write(bead_dir.join("stderr.txt"), "stderr").unwrap();
+
+        let old_metadata = TraceMetadata {
+            bead_id: BeadId::from("needle-will-be-pruned"),
+            agent: "test".to_string(),
+            provider: None,
+            model: None,
+            exit_code: 0,
+            outcome: "success".to_string(),
+            duration_ms: 100,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now() - chrono::Duration::days(8), // Old enough to prune
+            trace_format: TraceFormat::RawText,
+            pruned: false, // Not yet pruned
+            template_version: None,
+        };
+        let metadata_path = bead_dir.join("metadata.json");
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_string(&old_metadata).unwrap(),
+        )
+        .unwrap();
+
+        // First cleanup: should prune the trace.
+        let summary1 = cleanup_traces(&traces_dir, 30, 7).unwrap();
+        assert_eq!(summary1.traces_deleted, 0);
+        assert_eq!(
+            summary1.traces_pruned, 1,
+            "trace should be pruned on first cleanup"
+        );
+
+        // Verify files were removed and metadata marked as pruned.
+        assert!(!bead_dir.join("stdout.txt").exists());
+        assert!(!bead_dir.join("stderr.txt").exists());
+        let content = std::fs::read_to_string(&metadata_path).unwrap();
+        let parsed: TraceMetadata = serde_json::from_str(&content).unwrap();
+        assert!(parsed.pruned, "metadata should be marked as pruned");
+
+        // Second cleanup: should NOT count the same trace again.
+        let summary2 = cleanup_traces(&traces_dir, 30, 7).unwrap();
+        assert_eq!(summary2.traces_deleted, 0);
+        assert_eq!(
+            summary2.traces_pruned, 0,
+            "already-pruned trace should not be counted again"
+        );
+    }
+
+    #[test]
+    fn trace_cleanup_partially_pruned_trace_fixed_and_not_counted() {
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        std::fs::create_dir_all(&traces_dir).unwrap();
+
+        // Create a trace in a partially-pruned state:
+        // - Data files are gone (simulating interrupted prune after file removal)
+        // - Metadata still shows pruned: false
+        let bead_dir = traces_dir.join("needle-partial");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+
+        // DO NOT create data files - simulate they were already removed
+        // in a previous interrupted prune operation
+
+        let old_metadata = TraceMetadata {
+            bead_id: BeadId::from("needle-partial"),
+            agent: "test".to_string(),
+            provider: None,
+            model: None,
+            exit_code: 0,
+            outcome: "success".to_string(),
+            duration_ms: 100,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now() - chrono::Duration::days(8), // Old enough to prune
+            trace_format: TraceFormat::RawText,
+            pruned: false, // NOT marked as pruned (partial state)
+            template_version: None,
+        };
+        let metadata_path = bead_dir.join("metadata.json");
+        std::fs::write(
+            &metadata_path,
+            serde_json::to_string(&old_metadata).unwrap(),
+        )
+        .unwrap();
+
+        // First cleanup: should fix metadata and NOT count as pruned
+        // (because no data files were actually removed)
+        let summary1 = cleanup_traces(&traces_dir, 30, 7).unwrap();
+        assert_eq!(summary1.traces_deleted, 0);
+        assert_eq!(
+            summary1.traces_pruned, 0,
+            "partially-pruned trace should not be counted"
+        );
+
+        // Verify metadata was fixed
+        let content = std::fs::read_to_string(&metadata_path).unwrap();
+        let parsed: TraceMetadata = serde_json::from_str(&content).unwrap();
+        assert!(
+            parsed.pruned,
+            "metadata should be marked as pruned after fix"
+        );
+
+        // Second cleanup: should still skip (now properly marked as pruned)
+        let summary2 = cleanup_traces(&traces_dir, 30, 7).unwrap();
+        assert_eq!(summary2.traces_deleted, 0);
+        assert_eq!(
+            summary2.traces_pruned, 0,
+            "fixed trace should not be counted again"
+        );
     }
 }

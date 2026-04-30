@@ -151,6 +151,11 @@ pub trait BeadStore: Send + Sync {
     /// Uses `br dep add <blocker_id> --blocks <blocked_id>`.
     async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()>;
 
+    /// Remove a dependency link: `blocker_id` blocks `blocked_id`.
+    ///
+    /// Uses `br dep remove <blocked_id> <blocker_id>`.
+    async fn remove_dependency(&self, blocked_id: &BeadId, blocker_id: &BeadId) -> Result<()>;
+
     /// Run `br doctor --repair` and return the report.
     async fn doctor_repair(&self) -> Result<RepairReport>;
 
@@ -233,7 +238,11 @@ impl BrCliBeadStore {
         // kill_on_drop ensures the process is killed if the wait_with_output
         // future is dropped (e.g., on timeout), preventing orphaned br processes.
         let mut cmd = tokio::process::Command::new(&self.br_path);
-        cmd.args(args).current_dir(dir).kill_on_drop(true);
+        cmd.args(args)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
         let child = cmd
             .spawn()
             .with_context(|| format!("failed to spawn br subprocess: {args:?}"))?;
@@ -284,7 +293,11 @@ impl BrCliBeadStore {
 
                 let sync_timeout = std::time::Duration::from_secs(60);
                 let mut sync_cmd = tokio::process::Command::new(&self.br_path);
-                sync_cmd.args(["sync"]).current_dir(dir).kill_on_drop(true);
+                sync_cmd.args(["sync"])
+                    .current_dir(dir)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
                 let sync_child = sync_cmd
                     .spawn()
                     .context("failed to spawn br sync during SYNC_CONFLICT recovery")?;
@@ -312,7 +325,11 @@ impl BrCliBeadStore {
 
                 // Retry the original command once with timeout.
                 let mut retry_cmd = tokio::process::Command::new(&self.br_path);
-                retry_cmd.args(args).current_dir(dir).kill_on_drop(true);
+                retry_cmd.args(args)
+                    .current_dir(dir)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
                 let retry_child = retry_cmd
                     .spawn()
                     .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
@@ -619,6 +636,17 @@ impl BeadStore for BrCliBeadStore {
         self.run_br(&["dep", "add", blocked, blocker, "--type", "blocks"])
             .await
             .with_context(|| format!("br dep add {blocked} {blocker} --type blocks failed"))?;
+        Ok(())
+    }
+
+    async fn remove_dependency(&self, blocked_id: &BeadId, blocker_id: &BeadId) -> Result<()> {
+        // Remove the dependency: blocked_id depends on blocker_id
+        // br dep remove <ISSUE> <DEPENDENCY>
+        let blocked = blocked_id.as_ref();
+        let blocker = blocker_id.as_ref();
+        self.run_br(&["dep", "remove", blocked, blocker])
+            .await
+            .with_context(|| format!("br dep remove {blocked} {blocker} failed"))?;
         Ok(())
     }
 

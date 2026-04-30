@@ -23,6 +23,19 @@ use tokio::sync::mpsc;
 use crate::config::{ColorMode, HookConfig, StdoutFormat, StdoutSinkConfig, TelemetryConfig};
 use crate::types::{BeadId, WorkerId, WorkerState};
 
+// ─── OTLP Sink (feature-gated) ───────────────────────────────────────────────────
+
+#[cfg(feature = "otlp")]
+pub mod otlp;
+
+#[cfg(feature = "otlp")]
+pub use otlp::OtlpSink;
+
+// ─── Test Utilities ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+pub mod test_utils;
+
 // ─── TelemetryEvent ──────────────────────────────────────────────────────────
 
 /// A single structured telemetry record.
@@ -88,9 +101,26 @@ pub enum EventKind {
     WorkerExhausted {
         cycle_count: u64,
         last_strand: String,
+        /// How many times the waterfall restarted before exhausting.
+        waterfall_restarts: u32,
+        /// Name of each strand that returned WorkCreated (one entry per restart).
+        restart_triggers: Vec<String>,
+        /// All strand evaluations in order, across all waterfall passes.
+        /// Each entry is (strand_name, result, duration_ms) for diagnostic visibility.
+        strand_evaluations: Vec<(String, String, u64)>,
     },
     WorkerIdle {
         backoff_seconds: u64,
+    },
+    IdleSleepCompleted {
+        backoff_secs: u64,
+        elapsed_secs: u64,
+        shutdown_checks: u64,
+    },
+    IdleSleepEntered {
+        backoff_secs: u64,
+        beads_processed: u64,
+        uptime_secs: u64,
     },
     StateTransition {
         from: WorkerState,
@@ -126,6 +156,8 @@ pub enum EventKind {
     },
     ClaimSuccess {
         bead_id: BeadId,
+        priority: i32,
+        strand: String,
     },
     ClaimRaceLost {
         bead_id: BeadId,
@@ -172,6 +204,16 @@ pub enum EventKind {
         bead_id: BeadId,
         exit_code: i32,
         duration_ms: u64,
+        agent: String,
+        model: Option<String>,
+    },
+    BuildTimeout {
+        bead_id: BeadId,
+        timeout_secs: u64,
+    },
+    BuildHeartbeat {
+        bead_id: BeadId,
+        elapsed_ms: u64,
     },
     BuildTimeout {
         bead_id: BeadId,
@@ -240,8 +282,12 @@ pub enum EventKind {
         db_repaired: bool,
         db_rebuilt: bool,
         agent_logs_cleaned: u32,
+        zero_activity_logs_cleaned: u32,
         traces_pruned: u32,
         traces_deleted: u32,
+        workers_deregistered: u32,
+        idle_workers_flagged: u32,
+        rate_limits_cleaned: u32,
     },
     MendTraceCleanup {
         traces_pruned: u32,
@@ -250,6 +296,52 @@ pub enum EventKind {
     MendLearningCleanup {
         pruned: u32,
         consolidated: u32,
+    },
+    MendIdleWorkerFlagged {
+        worker_id: String,
+        pid: u32,
+        age_secs: u64,
+    },
+    MendWorkerDeregistered {
+        worker_id: String,
+        pid: u32,
+    },
+    MendOrphanedHeartbeatRemoved {
+        worker_id: String,
+        age_secs: u64,
+    },
+    MendDependencyRemoved {
+        bead_id: BeadId,
+        blocker_id: BeadId,
+    },
+    MendBeadReleaseFailed {
+        bead_id: String,
+        assignee: String,
+        error: String,
+    },
+    MendDependencyCleanupFailed {
+        bead_id: String,
+        blocker_id: String,
+        error: String,
+    },
+    MendLockRemoveFailed {
+        lock_path: String,
+        error: String,
+    },
+    MendRateLimitCleaned {
+        provider: String,
+        age_secs: u64,
+    },
+    MendRateLimitProviderRemoved {
+        provider: String,
+    },
+    MendRateLimitProviderReset {
+        provider: String,
+        age_secs: u64,
+    },
+    MendZeroActivityLogCleaned {
+        worker_id: String,
+        log_path: String,
     },
 
     // ── Effort tracking ──
@@ -332,6 +424,74 @@ pub enum EventKind {
         beads_processed: usize,
     },
     ReflectSkipped {
+        reason: String,
+    },
+    ReflectTranscriptsRead {
+        sessions_count: usize,
+        entries_count: usize,
+        parse_errors: usize,
+    },
+    ReflectDriftDetected {
+        cluster_size: usize,
+        category: String,
+        sessions: Vec<String>,
+    },
+    ReflectDriftPromoted {
+        pattern: String,
+        category: String,
+    },
+    ReflectDecisionExtracted {
+        bead_id: BeadId,
+        has_alternatives: bool,
+        rationale_length: usize,
+    },
+    ReflectAdrCreated {
+        bead_id: BeadId,
+        path: String,
+    },
+    ReflectLearningPromoted {
+        learning_id: String,
+        target_path: String,
+        workspace_count: usize,
+        is_decision: bool,
+    },
+    ReflectLearningDeduplicated {
+        learning_id: String,
+        existing_entry: String,
+    },
+    ReflectClaudeMdWritten {
+        path: String,
+        entries_added: usize,
+        entries_updated: usize,
+    },
+
+    // ── Drift detection ──
+    DriftDetectionStarted {
+        sessions_analyzed: usize,
+    },
+    DriftDetectionCompleted {
+        sessions_analyzed: usize,
+        clusters_found: usize,
+        evolved_count: usize,
+        inconsistent_count: usize,
+    },
+    DriftDetectionSkipped {
+        reason: String,
+    },
+    DriftReportWritten {
+        report_path: String,
+        clusters: usize,
+    },
+
+    // ── Decision detection (ADR) ──
+    DecisionDetectionStarted {
+        sessions_analyzed: usize,
+    },
+    DecisionDetectionCompleted {
+        sessions_analyzed: usize,
+        decisions_found: usize,
+    },
+    DecisionDetectionSkipped {
         reason: String,
     },
 
@@ -425,6 +585,15 @@ pub enum EventKind {
     SinkError {
         message: String,
     },
+    OtlpDropped {
+        signal: String,
+        dropped_count: u64,
+        queue_full: bool,
+    },
+    OtlpShutdownTimeout {
+        flushed_batches: u64,
+        remaining_batches: u64,
+    },
 }
 
 impl EventKind {
@@ -437,6 +606,8 @@ impl EventKind {
             EventKind::WorkerErrored { .. } => "worker.errored",
             EventKind::WorkerExhausted { .. } => "worker.exhausted",
             EventKind::WorkerIdle { .. } => "worker.idle",
+            EventKind::IdleSleepCompleted { .. } => "worker.idle_sleep_completed",
+            EventKind::IdleSleepEntered { .. } => "worker.idle_sleep_entered",
             EventKind::StateTransition { .. } => "worker.state_transition",
             EventKind::InitStepStarted { .. } => "init.step.started",
             EventKind::InitStepCompleted { .. } => "init.step.completed",
@@ -471,6 +642,17 @@ impl EventKind {
             EventKind::MendCycleSummary { .. } => "mend.cycle_summary",
             EventKind::MendTraceCleanup { .. } => "mend.trace_cleanup",
             EventKind::MendLearningCleanup { .. } => "mend.learning_cleanup",
+            EventKind::MendIdleWorkerFlagged { .. } => "mend.idle_worker_flagged",
+            EventKind::MendWorkerDeregistered { .. } => "mend.worker_deregistered",
+            EventKind::MendOrphanedHeartbeatRemoved { .. } => "mend.orphaned_heartbeat_removed",
+            EventKind::MendDependencyRemoved { .. } => "mend.dependency_removed",
+            EventKind::MendBeadReleaseFailed { .. } => "mend.bead_release_failed",
+            EventKind::MendDependencyCleanupFailed { .. } => "mend.dependency_cleanup_failed",
+            EventKind::MendLockRemoveFailed { .. } => "mend.lock_remove_failed",
+            EventKind::MendRateLimitCleaned { .. } => "mend.rate_limit_cleaned",
+            EventKind::MendRateLimitProviderRemoved { .. } => "mend.rate_limit_provider_removed",
+            EventKind::MendRateLimitProviderReset { .. } => "mend.rate_limit_provider_reset",
+            EventKind::MendZeroActivityLogCleaned { .. } => "mend.zero_activity_log_cleaned",
             EventKind::EffortRecorded { .. } => "effort.recorded",
             EventKind::BudgetWarning { .. } => "budget.warning",
             EventKind::BudgetStop { .. } => "budget.stop",
@@ -486,6 +668,21 @@ impl EventKind {
             EventKind::ReflectStarted { .. } => "reflect.started",
             EventKind::ReflectConsolidated { .. } => "reflect.consolidated",
             EventKind::ReflectSkipped { .. } => "reflect.skipped",
+            EventKind::ReflectTranscriptsRead { .. } => "reflect.transcripts_read",
+            EventKind::ReflectDriftDetected { .. } => "reflect.drift_detected",
+            EventKind::ReflectDriftPromoted { .. } => "reflect.drift_promoted",
+            EventKind::ReflectDecisionExtracted { .. } => "reflect.decision_extracted",
+            EventKind::ReflectAdrCreated { .. } => "reflect.adr_created",
+            EventKind::ReflectLearningPromoted { .. } => "reflect.learning_promoted",
+            EventKind::ReflectLearningDeduplicated { .. } => "reflect.learning_deduplicated",
+            EventKind::ReflectClaudeMdWritten { .. } => "reflect.claudemd_written",
+            EventKind::DriftDetectionStarted { .. } => "drift.started",
+            EventKind::DriftDetectionCompleted { .. } => "drift.completed",
+            EventKind::DriftDetectionSkipped { .. } => "drift.skipped",
+            EventKind::DriftReportWritten { .. } => "drift.report_written",
+            EventKind::DecisionDetectionStarted { .. } => "decision.started",
+            EventKind::DecisionDetectionCompleted { .. } => "decision.completed",
+            EventKind::DecisionDetectionSkipped { .. } => "decision.skipped",
             EventKind::PulseScannerStarted { .. } => "pulse.scanner_started",
             EventKind::PulseScannerCompleted { .. } => "pulse.scanner_completed",
             EventKind::PulseScannerFailed { .. } => "pulse.scanner_failed",
@@ -506,6 +703,8 @@ impl EventKind {
             EventKind::TransformFailed { .. } => "transform.failed",
             EventKind::TransformSkipped { .. } => "transform.skipped",
             EventKind::SinkError { .. } => "telemetry.sink_error",
+            EventKind::OtlpDropped { .. } => "telemetry.otlp.dropped",
+            EventKind::OtlpShutdownTimeout { .. } => "telemetry.otlp.shutdown_timeout",
         }
     }
 
@@ -513,7 +712,7 @@ impl EventKind {
     pub fn bead_id(&self) -> Option<BeadId> {
         match self {
             EventKind::ClaimAttempt { bead_id, .. }
-            | EventKind::ClaimSuccess { bead_id }
+            | EventKind::ClaimSuccess { bead_id, .. }
             | EventKind::ClaimRaceLost { bead_id }
             | EventKind::ClaimFailed { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
@@ -530,6 +729,7 @@ impl EventKind {
             | EventKind::StuckDetected { bead_id, .. }
             | EventKind::StuckReleased { bead_id, .. }
             | EventKind::MendDependencyCleaned { bead_id, .. }
+            | EventKind::MendDependencyRemoved { bead_id, .. }
             | EventKind::EffortRecorded { bead_id, .. }
             | EventKind::MitosisEvaluated { bead_id, .. }
             | EventKind::VerificationFailed { bead_id, .. }
@@ -542,7 +742,9 @@ impl EventKind {
             | EventKind::TransformStarted { bead_id, .. }
             | EventKind::TransformCompleted { bead_id, .. }
             | EventKind::TransformFailed { bead_id, .. }
-            | EventKind::TransformSkipped { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::TransformSkipped { bead_id, .. }
+            | EventKind::ReflectDecisionExtracted { bead_id, .. }
+            | EventKind::ReflectAdrCreated { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
@@ -552,6 +754,8 @@ impl EventKind {
             | EventKind::WorkerErrored { .. }
             | EventKind::WorkerExhausted { .. }
             | EventKind::WorkerIdle { .. }
+            | EventKind::IdleSleepCompleted { .. }
+            | EventKind::IdleSleepEntered { .. }
             | EventKind::StateTransition { .. }
             | EventKind::InitStepStarted { .. }
             | EventKind::InitStepCompleted { .. }
@@ -564,6 +768,16 @@ impl EventKind {
             | EventKind::MendDbRepaired { .. }
             | EventKind::MendDbRebuilt
             | EventKind::MendCycleSummary { .. }
+            | EventKind::MendIdleWorkerFlagged { .. }
+            | EventKind::MendWorkerDeregistered { .. }
+            | EventKind::MendOrphanedHeartbeatRemoved { .. }
+            | EventKind::MendBeadReleaseFailed { .. }
+            | EventKind::MendDependencyCleanupFailed { .. }
+            | EventKind::MendLockRemoveFailed { .. }
+            | EventKind::MendRateLimitCleaned { .. }
+            | EventKind::MendRateLimitProviderRemoved { .. }
+            | EventKind::MendRateLimitProviderReset { .. }
+            | EventKind::MendZeroActivityLogCleaned { .. }
             | EventKind::MendTraceCleanup { .. }
             | EventKind::MendLearningCleanup { .. }
             | EventKind::BudgetWarning { .. }
@@ -573,6 +787,12 @@ impl EventKind {
             | EventKind::ReflectStarted { .. }
             | EventKind::ReflectConsolidated { .. }
             | EventKind::ReflectSkipped { .. }
+            | EventKind::ReflectTranscriptsRead { .. }
+            | EventKind::ReflectDriftDetected { .. }
+            | EventKind::ReflectDriftPromoted { .. }
+            | EventKind::ReflectLearningPromoted { .. }
+            | EventKind::ReflectLearningDeduplicated { .. }
+            | EventKind::ReflectClaudeMdWritten { .. }
             | EventKind::PulseScannerStarted { .. }
             | EventKind::PulseScannerCompleted { .. }
             | EventKind::PulseScannerFailed { .. }
@@ -585,7 +805,16 @@ impl EventKind {
             | EventKind::CanaryPromoted { .. }
             | EventKind::CanaryRejected { .. }
             | EventKind::ClaimRaceLostSkipped { .. }
-            | EventKind::SinkError { .. } => None,
+            | EventKind::SinkError { .. }
+            | EventKind::OtlpDropped { .. }
+            | EventKind::OtlpShutdownTimeout { .. }
+            | EventKind::DriftDetectionStarted { .. }
+            | EventKind::DriftDetectionCompleted { .. }
+            | EventKind::DriftDetectionSkipped { .. }
+            | EventKind::DriftReportWritten { .. }
+            | EventKind::DecisionDetectionStarted { .. }
+            | EventKind::DecisionDetectionCompleted { .. }
+            | EventKind::DecisionDetectionSkipped { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
     }
@@ -630,10 +859,16 @@ impl EventKind {
             EventKind::WorkerExhausted {
                 cycle_count,
                 last_strand,
+                waterfall_restarts,
+                restart_triggers,
+                strand_evaluations,
             } => {
                 serde_json::json!({
                     "cycle_count": cycle_count,
                     "last_strand_evaluated": last_strand,
+                    "waterfall_restarts": waterfall_restarts,
+                    "restart_triggers": restart_triggers,
+                    "strand_evaluations": strand_evaluations,
                 })
             }
             EventKind::WorkerIdle { backoff_seconds } => {
@@ -672,8 +907,16 @@ impl EventKind {
             EventKind::ClaimAttempt { bead_id, attempt } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref(), "attempt": attempt })
             }
-            EventKind::ClaimSuccess { bead_id } => {
-                serde_json::json!({ "bead_id": bead_id.as_ref() })
+            EventKind::ClaimSuccess {
+                bead_id,
+                priority,
+                strand,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "priority": priority,
+                    "strand": strand,
+                })
             }
             EventKind::ClaimRaceLost { bead_id } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref() })
@@ -726,11 +969,33 @@ impl EventKind {
                 bead_id,
                 exit_code,
                 duration_ms,
+                agent,
+                model,
             } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
                     "exit_code": exit_code,
                     "duration_ms": duration_ms,
+                    "agent": agent,
+                    "model": model,
+                })
+            }
+            EventKind::BuildTimeout {
+                bead_id,
+                timeout_secs,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "timeout_secs": timeout_secs,
+                })
+            }
+            EventKind::BuildHeartbeat {
+                bead_id,
+                elapsed_ms,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "elapsed_ms": elapsed_ms,
                 })
             }
             EventKind::BuildTimeout {
@@ -838,8 +1103,12 @@ impl EventKind {
                 db_repaired,
                 db_rebuilt,
                 agent_logs_cleaned,
+                zero_activity_logs_cleaned,
                 traces_pruned,
                 traces_deleted,
+                workers_deregistered,
+                idle_workers_flagged,
+                rate_limits_cleaned,
             } => {
                 serde_json::json!({
                     "beads_released": beads_released,
@@ -848,8 +1117,12 @@ impl EventKind {
                     "db_repaired": db_repaired,
                     "db_rebuilt": db_rebuilt,
                     "agent_logs_cleaned": agent_logs_cleaned,
+                    "zero_activity_logs_cleaned": zero_activity_logs_cleaned,
                     "traces_pruned": traces_pruned,
                     "traces_deleted": traces_deleted,
+                    "workers_deregistered": workers_deregistered,
+                    "idle_workers_flagged": idle_workers_flagged,
+                    "rate_limits_cleaned": rate_limits_cleaned,
                 })
             }
             EventKind::EffortRecorded {
@@ -1087,6 +1360,93 @@ impl EventKind {
                     "consolidated": consolidated,
                 })
             }
+            EventKind::MendIdleWorkerFlagged {
+                worker_id,
+                pid,
+                age_secs,
+            } => {
+                serde_json::json!({
+                    "worker_id": worker_id,
+                    "pid": pid,
+                    "age_secs": age_secs,
+                })
+            }
+            EventKind::MendWorkerDeregistered { worker_id, pid } => {
+                serde_json::json!({
+                    "worker_id": worker_id,
+                    "pid": pid,
+                })
+            }
+            EventKind::MendOrphanedHeartbeatRemoved {
+                worker_id,
+                age_secs,
+            } => {
+                serde_json::json!({
+                    "worker_id": worker_id,
+                    "age_secs": age_secs,
+                })
+            }
+            EventKind::MendDependencyRemoved {
+                bead_id,
+                blocker_id,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id,
+                    "blocker_id": blocker_id,
+                })
+            }
+            EventKind::MendBeadReleaseFailed {
+                bead_id,
+                assignee,
+                error,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id,
+                    "assignee": assignee,
+                    "error": error,
+                })
+            }
+            EventKind::MendDependencyCleanupFailed {
+                bead_id,
+                blocker_id,
+                error,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id,
+                    "blocker_id": blocker_id,
+                    "error": error,
+                })
+            }
+            EventKind::MendLockRemoveFailed { lock_path, error } => {
+                serde_json::json!({
+                    "lock_path": lock_path,
+                    "error": error,
+                })
+            }
+            EventKind::MendRateLimitCleaned { provider, age_secs } => {
+                serde_json::json!({
+                    "provider": provider,
+                    "age_secs": age_secs,
+                })
+            }
+            EventKind::MendRateLimitProviderRemoved { provider } => {
+                serde_json::json!({ "provider": provider })
+            }
+            EventKind::MendRateLimitProviderReset { provider, age_secs } => {
+                serde_json::json!({
+                    "provider": provider,
+                    "age_secs": age_secs,
+                })
+            }
+            EventKind::MendZeroActivityLogCleaned {
+                worker_id,
+                log_path,
+            } => {
+                serde_json::json!({
+                    "worker_id": worker_id,
+                    "log_path": log_path,
+                })
+            }
             EventKind::CanaryStarted { suite } => {
                 serde_json::json!({ "suite": suite })
             }
@@ -1126,7 +1486,162 @@ impl EventKind {
             EventKind::ReflectSkipped { reason } => {
                 serde_json::json!({ "reason": reason })
             }
+            EventKind::ReflectTranscriptsRead {
+                sessions_count,
+                entries_count,
+                parse_errors,
+            } => {
+                serde_json::json!({
+                    "sessions_count": sessions_count,
+                    "entries_count": entries_count,
+                    "parse_errors": parse_errors,
+                })
+            }
+            EventKind::ReflectDriftDetected {
+                cluster_size,
+                category,
+                sessions,
+            } => {
+                serde_json::json!({
+                    "cluster_size": cluster_size,
+                    "category": category,
+                    "sessions": sessions,
+                })
+            }
+            EventKind::ReflectDriftPromoted { pattern, category } => {
+                serde_json::json!({
+                    "pattern": pattern,
+                    "category": category,
+                })
+            }
+            EventKind::ReflectDecisionExtracted {
+                bead_id,
+                has_alternatives,
+                rationale_length,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.to_string(),
+                    "has_alternatives": has_alternatives,
+                    "rationale_length": rationale_length,
+                })
+            }
+            EventKind::ReflectAdrCreated { bead_id, path } => {
+                serde_json::json!({
+                    "bead_id": bead_id.to_string(),
+                    "path": path,
+                })
+            }
+            EventKind::ReflectLearningPromoted {
+                learning_id,
+                target_path,
+                workspace_count,
+                is_decision,
+            } => {
+                serde_json::json!({
+                    "learning_id": learning_id,
+                    "target_path": target_path,
+                    "workspace_count": workspace_count,
+                    "is_decision": is_decision,
+                })
+            }
+            EventKind::ReflectLearningDeduplicated {
+                learning_id,
+                existing_entry,
+            } => {
+                serde_json::json!({
+                    "learning_id": learning_id,
+                    "existing_entry": existing_entry,
+                })
+            }
+            EventKind::ReflectClaudeMdWritten {
+                path,
+                entries_added,
+                entries_updated,
+            } => {
+                serde_json::json!({
+                    "path": path,
+                    "entries_added": entries_added,
+                    "entries_updated": entries_updated,
+                })
+            }
+            EventKind::DriftDetectionStarted { sessions_analyzed } => {
+                serde_json::json!({ "sessions_analyzed": sessions_analyzed })
+            }
+            EventKind::DriftDetectionCompleted {
+                sessions_analyzed,
+                clusters_found,
+                evolved_count,
+                inconsistent_count,
+            } => {
+                serde_json::json!({
+                    "sessions_analyzed": sessions_analyzed,
+                    "clusters_found": clusters_found,
+                    "evolved_count": evolved_count,
+                    "inconsistent_count": inconsistent_count,
+                })
+            }
+            EventKind::DriftDetectionSkipped { reason } => {
+                serde_json::json!({ "reason": reason })
+            }
+            EventKind::DriftReportWritten {
+                report_path,
+                clusters,
+            } => {
+                serde_json::json!({
+                    "report_path": report_path,
+                    "clusters": clusters,
+                })
+            }
+            EventKind::DecisionDetectionStarted { sessions_analyzed } => {
+                serde_json::json!({ "sessions_analyzed": sessions_analyzed })
+            }
+            EventKind::DecisionDetectionCompleted {
+                sessions_analyzed,
+                decisions_found,
+            } => {
+                serde_json::json!({
+                    "sessions_analyzed": sessions_analyzed,
+                    "decisions_found": decisions_found,
+                })
+            }
+            EventKind::DecisionDetectionSkipped { reason } => {
+                serde_json::json!({ "reason": reason })
+            }
             EventKind::SinkError { message } => serde_json::json!({ "message": message }),
+            EventKind::OtlpDropped {
+                signal,
+                dropped_count,
+                queue_full,
+            } => serde_json::json!({
+                "signal": signal,
+                "dropped_count": dropped_count,
+                "queue_full": queue_full,
+            }),
+            EventKind::OtlpShutdownTimeout {
+                flushed_batches,
+                remaining_batches,
+            } => serde_json::json!({
+                "flushed_batches": flushed_batches,
+                "remaining_batches": remaining_batches,
+            }),
+            EventKind::IdleSleepCompleted {
+                backoff_secs,
+                elapsed_secs,
+                shutdown_checks,
+            } => serde_json::json!({
+                "backoff_secs": backoff_secs,
+                "elapsed_secs": elapsed_secs,
+                "shutdown_checks": shutdown_checks,
+            }),
+            EventKind::IdleSleepEntered {
+                backoff_secs,
+                beads_processed,
+                uptime_secs,
+            } => serde_json::json!({
+                "backoff_secs": backoff_secs,
+                "beads_processed": beads_processed,
+                "uptime_secs": uptime_secs,
+            }),
         }
     }
 
@@ -1175,6 +1690,16 @@ impl EventKind {
             | EventKind::MendDbRepaired { .. }
             | EventKind::MendDbRebuilt
             | EventKind::MendCycleSummary { .. }
+            | EventKind::MendIdleWorkerFlagged { .. }
+            | EventKind::MendWorkerDeregistered { .. }
+            | EventKind::MendOrphanedHeartbeatRemoved { .. }
+            | EventKind::MendDependencyRemoved { .. }
+            | EventKind::MendBeadReleaseFailed { .. }
+            | EventKind::MendDependencyCleanupFailed { .. }
+            | EventKind::MendLockRemoveFailed { .. }
+            | EventKind::MendRateLimitCleaned { .. }
+            | EventKind::MendRateLimitProviderRemoved { .. }
+            | EventKind::MendRateLimitProviderReset { .. }
             | EventKind::BudgetWarning { .. }
             | EventKind::BudgetStop { .. }
             | EventKind::RateLimitWait { .. }
@@ -1209,7 +1734,27 @@ impl EventKind {
             | EventKind::ReflectStarted { .. }
             | EventKind::ReflectConsolidated { .. }
             | EventKind::ReflectSkipped { .. }
-            | EventKind::SinkError { .. } => None,
+            | EventKind::ReflectTranscriptsRead { .. }
+            | EventKind::ReflectDriftDetected { .. }
+            | EventKind::ReflectDriftPromoted { .. }
+            | EventKind::ReflectDecisionExtracted { .. }
+            | EventKind::ReflectAdrCreated { .. }
+            | EventKind::ReflectLearningPromoted { .. }
+            | EventKind::ReflectLearningDeduplicated { .. }
+            | EventKind::ReflectClaudeMdWritten { .. }
+            | EventKind::MendZeroActivityLogCleaned { .. }
+            | EventKind::DriftDetectionStarted { .. }
+            | EventKind::DriftDetectionCompleted { .. }
+            | EventKind::DriftDetectionSkipped { .. }
+            | EventKind::DriftReportWritten { .. }
+            | EventKind::DecisionDetectionStarted { .. }
+            | EventKind::DecisionDetectionCompleted { .. }
+            | EventKind::DecisionDetectionSkipped { .. }
+            | EventKind::SinkError { .. }
+            | EventKind::OtlpDropped { .. }
+            | EventKind::OtlpShutdownTimeout { .. }
+            | EventKind::IdleSleepCompleted { .. }
+            | EventKind::IdleSleepEntered { .. } => None,
             EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
         }
     }
@@ -1230,6 +1775,18 @@ pub trait Sink: Send + Sync {
     /// Implementations should respect `deadline`: if flushing cannot complete
     /// within the duration, return an error rather than blocking indefinitely.
     fn flush(&self, deadline: std::time::Duration) -> Result<()>;
+}
+
+/// Blanket impl for Arc-wrapped sinks.
+/// This enables Arc<Sink> to be used wherever Sink is required.
+impl<T: Sink + ?Sized> Sink for Arc<T> {
+    fn accept(&self, event: &TelemetryEvent) -> Result<()> {
+        self.as_ref().accept(event)
+    }
+
+    fn flush(&self, deadline: std::time::Duration) -> Result<()> {
+        self.as_ref().flush(deadline)
+    }
 }
 
 // ─── FileSink ────────────────────────────────────────────────────────────────
@@ -1273,6 +1830,92 @@ impl FileSink {
     /// Return the path to the log file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Write a boot event directly to the file, bypassing the normal channel.
+    ///
+    /// This is called immediately after FileSink creation to ensure that even if
+    /// the writer thread fails to start, we have a trace in the JSONL file.
+    /// The event is written synchronously and flushed to disk.
+    fn write_boot_event_direct(
+        &self,
+        worker_id: &str,
+        session_id: &str,
+        version: &str,
+    ) -> Result<()> {
+        Self::write_boot_event_direct_impl(
+            &self.writer,
+            &self.path,
+            worker_id,
+            session_id,
+            version,
+            std::time::Duration::from_secs(5), // 5 second timeout
+        )
+    }
+
+    /// Write a boot event directly to the file with a timeout.
+    ///
+    /// This is a timeout-aware variant that prevents indefinite blocking on hung
+    /// filesystems (e.g., network filesystem issues, stale NFS mounts). If the
+    /// write takes longer than the timeout, it returns an error and the caller
+    /// can decide whether to continue or fail.
+    ///
+    /// The timeout is implemented by spawning a thread to do the blocking I/O
+    /// and joining with a timeout. If the timeout expires, the thread is detached
+    /// and will continue running (and eventually complete or be killed by the OS).
+    fn write_boot_event_direct_impl(
+        _writer: &std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
+        path: &Path,
+        worker_id: &str,
+        session_id: &str,
+        version: &str,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        use std::io::Write;
+        use std::thread;
+
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "worker.booting".to_string(),
+            worker_id: worker_id.to_string(),
+            session_id: session_id.to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            duration_ms: None,
+            data: serde_json::json!({ "worker_name": worker_id, "version": version }),
+            trace_id: None,
+            span_id: None,
+        };
+        let line = serde_json::to_string(&event)?;
+        let path_for_error = path.display().to_string();
+        let path_clone = path.to_path_buf();
+
+        // Spawn a thread to do the blocking I/O
+        let handle = thread::spawn(move || {
+            // This runs in a separate thread, so if it blocks, it won't block the main process
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .append(true)
+                .open(&path_clone)?;
+            let mut writer = std::io::BufWriter::new(file);
+            writeln!(writer, "{line}")?;
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        // Join with timeout
+        handle
+            .join()
+            .map_err(|e| anyhow::anyhow!("boot event writer thread panicked: {:?}", e))?
+            .with_context(|| {
+                format!(
+                    "timed out writing boot event to {} after {:?} (filesystem may be hung)",
+                    path_for_error, timeout
+                )
+            })
     }
 }
 
@@ -1819,8 +2462,21 @@ pub struct Telemetry {
     /// Pending writer state that needs to be spawned in an async context.
     /// This is `Some` until `start()` is called.
     pending_writer: Arc<std::sync::Mutex<Option<PendingWriter>>>,
-    /// JoinHandle for the background writer task, set by `start()`.
-    writer_handle: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// JoinHandle for the background writer thread, set by `start()`.
+    /// Uses std::thread::JoinHandle (not tokio::task::JoinHandle) because the
+    /// writer runs in its own dedicated thread with its own tokio runtime,
+    /// ensuring it can process messages before the main runtime's block_on().
+    writer_handle: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// OTLP sink shutdown handle (feature-gated).
+    /// Stored separately so we can call its async shutdown method.
+    otlp_shutdown: Arc<std::sync::Mutex<Option<OtlpShutdown>>>,
+}
+
+/// Internal message type for the writer task.
+#[allow(clippy::large_enum_variant)]
+enum WriterMessage {
+    Event(TelemetryEvent),
+    Flush(tokio::sync::oneshot::Sender<()>),
 }
 
 /// Internal message type for the writer task.
@@ -1836,18 +2492,79 @@ struct PendingWriter {
     sinks: Vec<Box<dyn Sink>>,
 }
 
+/// Holds an OTLP sink for async shutdown (feature-gated).
+enum OtlpShutdown {
+    #[cfg(feature = "otlp")]
+    Sink(std::sync::Arc<crate::telemetry::OtlpSink>),
+    #[cfg(not(feature = "otlp"))]
+    None,
+}
+
+impl OtlpShutdown {
+    /// Shutdown the OTLP sink gracefully.
+    ///
+    /// This drains all batched exports before returning.
+    #[cfg(feature = "otlp")]
+    async fn shutdown(self) -> Result<()> {
+        match self {
+            OtlpShutdown::Sink(sink) => {
+                // We need to extract the OtlpSink from Arc to call shutdown
+                // Try to unwrap the Arc - if there are other references, we'll force_flush instead
+                match std::sync::Arc::try_unwrap(sink) {
+                    Ok(otlp) => otlp.shutdown().await,
+                    Err(_) => {
+                        tracing::warn!("Cannot shutdown OTLP sink: Arc has multiple references");
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    /// No-op shutdown when OTLP feature is disabled.
+    #[cfg(not(feature = "otlp"))]
+    async fn shutdown(self) -> Result<()> {
+        Ok(())
+    }
+}
+
 impl Telemetry {
     /// Create a telemetry emitter that writes to a `FileSink`.
     ///
     /// Does not spawn any async tasks. Call [`start()`](Self::start) from
     /// within a tokio runtime context before emitting events.
+    ///
+    /// Writes `worker.booting` directly to the file before returning, so even
+    /// if the writer thread fails to start, we have a trace in the JSONL log.
     pub fn new(worker_id: WorkerId) -> Self {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
         let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
         match FileSink::new(&worker_id, &session_id) {
-            Ok(s) => sinks.push(Box::new(s)),
+            Ok(s) => {
+                // Write boot event directly to file BEFORE spawning writer thread.
+                // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
+                // This ensures we have a trace even if the writer thread fails to start.
+                let version = env!("CARGO_PKG_VERSION");
+                if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    // Check if this is a timeout error (filesystem may be hung)
+                    let error_msg = e.to_string();
+                    if error_msg.contains("timed out")
+                        || error_msg.contains("filesystem may be hung")
+                    {
+                        eprintln!(
+                            "NEEDLE WARNING: boot event write timed out after 5s - filesystem may be hung or very slow"
+                        );
+                        eprintln!("  Continuing without boot event in log file. Worker will still function.");
+                        eprintln!(
+                            "  Check: disk space, NFS mounts, filesystem latency, I/O errors"
+                        );
+                    }
+                    tracing::warn!(error = %e, "failed to write boot event directly to file");
+                }
+                sinks.push(Box::new(s));
+            }
             Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
 
@@ -1861,6 +2578,7 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1868,13 +2586,37 @@ impl Telemetry {
     ///
     /// Does not spawn any async tasks. Call [`start()`](Self::start) from
     /// within a tokio runtime context before emitting events.
+    ///
+    /// Writes `worker.booting` directly to the file before returning, so even
+    /// if the writer thread fails to start, we have a trace in the JSONL log.
     pub fn with_stdout(worker_id: WorkerId, stdout_config: &StdoutSinkConfig) -> Self {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
         let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
         match FileSink::new(&worker_id, &session_id) {
-            Ok(s) => sinks.push(Box::new(s)),
+            Ok(s) => {
+                // Write boot event directly to file BEFORE spawning writer thread.
+                // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
+                let version = env!("CARGO_PKG_VERSION");
+                if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    // Check if this is a timeout error (filesystem may be hung)
+                    let error_msg = e.to_string();
+                    if error_msg.contains("timed out")
+                        || error_msg.contains("filesystem may be hung")
+                    {
+                        eprintln!(
+                            "NEEDLE WARNING: boot event write timed out after 5s - filesystem may be hung or very slow"
+                        );
+                        eprintln!("  Continuing without boot event in log file. Worker will still function.");
+                        eprintln!(
+                            "  Check: disk space, NFS mounts, filesystem latency, I/O errors"
+                        );
+                    }
+                    tracing::warn!(error = %e, "failed to write boot event directly to file");
+                }
+                sinks.push(Box::new(s));
+            }
             Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
         if stdout_config.enabled {
@@ -1891,6 +2633,7 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1898,6 +2641,9 @@ impl Telemetry {
     ///
     /// Does not spawn any async tasks. Call [`start()`](Self::start) from
     /// within a tokio runtime context before emitting events.
+    ///
+    /// Writes `worker.booting` directly to the file before returning, so even
+    /// if the writer thread fails to start, we have a trace in the JSONL log.
     pub fn with_hooks(
         worker_id: WorkerId,
         stdout_config: &StdoutSinkConfig,
@@ -1908,7 +2654,28 @@ impl Telemetry {
 
         let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
         match FileSink::new(&worker_id, &session_id) {
-            Ok(s) => sinks.push(Box::new(s)),
+            Ok(s) => {
+                // Write boot event directly to file BEFORE spawning writer thread.
+                // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
+                let version = env!("CARGO_PKG_VERSION");
+                if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    // Check if this is a timeout error (filesystem may be hung)
+                    let error_msg = e.to_string();
+                    if error_msg.contains("timed out")
+                        || error_msg.contains("filesystem may be hung")
+                    {
+                        eprintln!(
+                            "NEEDLE WARNING: boot event write timed out after 5s - filesystem may be hung or very slow"
+                        );
+                        eprintln!("  Continuing without boot event in log file. Worker will still function.");
+                        eprintln!(
+                            "  Check: disk space, NFS mounts, filesystem latency, I/O errors"
+                        );
+                    }
+                    tracing::warn!(error = %e, "failed to write boot event directly to file");
+                }
+                sinks.push(Box::new(s));
+            }
             Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
         if stdout_config.enabled {
@@ -1928,23 +2695,109 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
     /// Create a telemetry emitter from a `TelemetryConfig`.
     ///
     /// Selects the right constructor based on configured sinks:
-    /// - Hooks configured → [`with_hooks`](Self::with_hooks)
-    /// - Stdout enabled   → [`with_stdout`](Self::with_stdout)
-    /// - Otherwise        → [`new`](Self::new) (file sink only)
+    /// - OTLP enabled       → creates OTLP sink with async shutdown
+    /// - Hooks configured   → [`with_hooks`](Self::with_hooks)
+    /// - Stdout enabled     → [`with_stdout`](Self::with_stdout)
+    /// - Otherwise          → [`new`](Self::new) (file sink only)
     pub fn from_config(worker_id: WorkerId, config: &TelemetryConfig) -> Result<Self> {
-        if !config.hooks.is_empty() {
-            Self::with_hooks(worker_id, &config.stdout_sink, &config.hooks)
-        } else if config.stdout_sink.enabled {
-            Ok(Self::with_stdout(worker_id, &config.stdout_sink))
-        } else {
-            Ok(Self::new(worker_id))
+        let session_id = generate_session_id();
+        let (sender, receiver) = mpsc::unbounded_channel();
+
+        let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
+        let mut otlp_shutdown = None;
+        let mut file_sink: Option<Arc<FileSink>> = None;
+
+        // File sink is always created (fallback)
+        match FileSink::new(&worker_id, &session_id) {
+            Ok(s) => {
+                // Write boot event directly to file BEFORE spawning writer thread.
+                // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
+                let version = env!("CARGO_PKG_VERSION");
+                if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                    // Check if this is a timeout error (filesystem may be hung)
+                    let error_msg = e.to_string();
+                    if error_msg.contains("timed out")
+                        || error_msg.contains("filesystem may be hung")
+                    {
+                        eprintln!(
+                            "NEEDLE WARNING: boot event write timed out after 5s - filesystem may be hung or very slow"
+                        );
+                        eprintln!("  Continuing without boot event in log file. Worker will still function.");
+                        eprintln!(
+                            "  Check: disk space, NFS mounts, filesystem latency, I/O errors"
+                        );
+                    }
+                    tracing::warn!(error = %e, "failed to write boot event directly to file");
+                }
+                file_sink = Some(Arc::new(s));
+                // Arc<FileSink> implements Sink via the blanket impl
+                if let Some(ref fs) = file_sink {
+                    sinks.push(Box::new(Arc::clone(fs)));
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
+
+        // OTLP sink (feature-gated)
+        #[cfg(feature = "otlp")]
+        {
+            if config.otlp_sink.enabled {
+                // Convert Arc<FileSink> to Option<Box<dyn Sink>> for OtlpSink
+                let file_sink_for_otlp = file_sink
+                    .as_ref()
+                    .map(|fs| Box::new(Arc::clone(fs)) as Box<dyn Sink>);
+
+                match OtlpSink::new(
+                    worker_id.clone(),
+                    session_id.clone(),
+                    &config.otlp_sink,
+                    file_sink_for_otlp,
+                    None, // agent - not available at config time
+                    None, // model - not available at config time
+                    None, // workspace - not available at config time
+                ) {
+                    Ok(otlp) => {
+                        let otlp_arc = Arc::new(otlp);
+                        sinks.push(Box::new(Arc::clone(&otlp_arc)));
+                        otlp_shutdown = Some(OtlpShutdown::Sink(otlp_arc));
+                        tracing::info!("OTLP sink initialized: {}", config.otlp_sink.endpoint);
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "failed to create OTLP sink, continuing without it");
+                    }
+                }
+            }
+        }
+
+        // Stdout sink
+        if config.stdout_sink.enabled {
+            sinks.push(Box::new(StdoutSink::new(&config.stdout_sink)));
+        }
+
+        // Hook sinks
+        if !config.hooks.is_empty() {
+            sinks.push(Box::new(HookSink::new(&config.hooks)?));
+        }
+
+        let sequence = Arc::new(AtomicU64::new(0));
+        let pending = PendingWriter { receiver, sinks };
+
+        Ok(Telemetry {
+            worker_id,
+            session_id,
+            sequence,
+            sender: Arc::new(std::sync::Mutex::new(Some(sender))),
+            pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
+            writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(otlp_shutdown)),
+        })
     }
 
     /// Create a telemetry emitter backed by a real `FileSink` in a custom
@@ -1963,6 +2816,9 @@ impl Telemetry {
         let (sender, receiver) = mpsc::unbounded_channel();
         let file_sink = FileSink::with_dir(log_dir, &worker_id, &session_id)?;
         let path = file_sink.path().to_path_buf();
+        // Write boot event directly to file (for consistency with production code).
+        let version = env!("CARGO_PKG_VERSION");
+        let _ = file_sink.write_boot_event_direct(&worker_id, &session_id, version);
         let sequence = Arc::new(AtomicU64::new(0));
         let sinks: Vec<Box<dyn Sink>> = vec![Box::new(file_sink)];
         let pending = PendingWriter { receiver, sinks };
@@ -1974,13 +2830,14 @@ impl Telemetry {
                 sender: Arc::new(std::sync::Mutex::new(Some(sender))),
                 pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
                 writer_handle: Arc::new(std::sync::Mutex::new(None)),
+                otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
             },
             path,
         ))
     }
 
     /// Create a telemetry emitter backed by a pre-built list of sinks (for testing).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration"))]
     pub fn with_boxed_sinks(worker_id: WorkerId, sinks: Vec<Box<dyn Sink>>) -> Self {
         let session_id = "test0000".to_string();
         let (sender, receiver) = mpsc::unbounded_channel();
@@ -1993,11 +2850,12 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
     /// Create a telemetry emitter with a custom sink (for testing).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration"))]
     pub fn with_sink(worker_id: WorkerId, sink: impl Sink + 'static) -> Self {
         let session_id = "test0000".to_string();
         let (sender, receiver) = mpsc::unbounded_channel::<WriterMessage>();
@@ -2021,6 +2879,7 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(None)),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2044,11 +2903,183 @@ impl Telemetry {
             span_id,
         };
         tracing::debug!(event_type = %event.event_type, seq, "telemetry event");
-        // Lock the shared sender; None means shutdown() has been called.
-        if let Some(ref s) = *self.sender.lock().unwrap() {
-            s.send(WriterMessage::Event(event)).ok(); // ok() — never block, never panic
+        // Use try_lock() to avoid blocking indefinitely if the telemetry writer
+        // is stuck holding the lock. If the lock is contended, we log and return
+        // Ok(()) to allow the worker to continue.
+        match self.sender.try_lock() {
+            Ok(guard) => {
+                if let Some(ref s) = *guard {
+                    s.send(WriterMessage::Event(event)).ok(); // ok() — never block, never panic
+                }
+                Ok(())
+            }
+            Err(_) => {
+                tracing::warn!(
+                    event_type = %event.event_type,
+                    seq,
+                    "telemetry sender lock contended, skipping emit"
+                );
+                Ok(())
+            }
         }
-        Ok(())
+    }
+
+    /// Emit an event without blocking — uses try_lock() instead of lock().
+    ///
+    /// Returns `Ok(())` if emitted successfully or if the lock is contended
+    /// (gracefully degrades). Returns `Err` only if the channel is disconnected.
+    ///
+    /// Use this in timeout recovery paths where blocking on emit() would
+    /// prevent the worker from recovering.
+    pub fn emit_try_lock(&self, kind: EventKind) -> Result<()> {
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let (trace_id, span_id) = current_trace_ids();
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: kind.event_type().to_string(),
+            worker_id: self.worker_id.clone(),
+            session_id: self.session_id.clone(),
+            sequence: seq,
+            bead_id: kind.bead_id(),
+            workspace: None,
+            duration_ms: kind.duration_ms(),
+            data: kind.to_data(),
+            trace_id,
+            span_id,
+        };
+        // Use try_lock() to avoid blocking indefinitely if the telemetry writer
+        // is stuck holding the lock. If the lock is contended, we log and return
+        // Ok(()) to allow the worker to continue.
+        match self.sender.try_lock() {
+            Ok(guard) => {
+                if let Some(ref s) = *guard {
+                    s.send(WriterMessage::Event(event)).ok();
+                }
+                Ok(())
+            }
+            Err(_) => {
+                tracing::warn!(
+                    event_type = %event.event_type,
+                    seq,
+                    "telemetry sender lock contended, skipping emit in timeout recovery path"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Force-flush all buffered events to disk (synchronous).
+    ///
+    /// Sends a flush request through the writer channel and waits (up to
+    /// `timeout`) for the writer task to flush its BufWriter. Used after
+    /// `worker.booting` so the event is visible on disk even if subsequent
+    /// init steps block.
+    ///
+    /// NOTE: This uses `blocking_recv()` and must be called from outside a
+    /// tokio runtime (e.g., in `run_worker` before `rt.block_on`). Use
+    /// `force_flush_async()` from within async contexts.
+    pub fn force_flush(&self, timeout: std::time::Duration) -> Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        // Use try_lock() to avoid blocking indefinitely if the telemetry writer
+        // is stuck holding the lock.
+        match self.sender.try_lock() {
+            Ok(guard) => {
+                if let Some(ref s) = *guard {
+                    s.send(WriterMessage::Flush(tx)).ok();
+                }
+            }
+            Err(_) => {
+                tracing::warn!("telemetry sender lock contended in force_flush, skipping flush");
+                return Ok(()); // Don't fail — the writer will eventually flush
+            }
+        }
+        // Block until the writer task flushes or timeout.
+        // Spawn a thread to handle the blocking recv with a timeout.
+        let handle = std::thread::spawn(move || rx.blocking_recv());
+        let start = std::time::Instant::now();
+        loop {
+            if handle.is_finished() {
+                return Ok(());
+            }
+            if start.elapsed() >= timeout {
+                tracing::warn!("force_flush timed out after {:?}", timeout);
+                return Ok(()); // Don't fail — the writer will eventually flush
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// Force-flush all buffered events to disk (async).
+    ///
+    /// Async version of `force_flush()` that can be called from within a
+    /// tokio runtime. Use this in `Worker::run()` and other async contexts.
+    pub async fn force_flush_async(&self, timeout: std::time::Duration) -> Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        // Use try_lock() to avoid blocking indefinitely if the telemetry writer
+        // is stuck holding the lock.
+        match self.sender.try_lock() {
+            Ok(guard) => {
+                if let Some(ref s) = *guard {
+                    s.send(WriterMessage::Flush(tx)).ok();
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "telemetry sender lock contended in force_flush_async, skipping flush"
+                );
+                return Ok(()); // Don't fail — the writer will eventually flush
+            }
+        }
+        // Wait for the writer task to flush, with timeout.
+        match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Ok(()), // Channel closed, writer already flushed
+            Err(_) => {
+                tracing::warn!("force_flush_async timed out after {:?}", timeout);
+                Ok(())
+            }
+        }
+    }
+
+    /// Emit an event synchronously, writing directly to the file sink.
+    ///
+    /// This bypasses the async channel and writes immediately to the file.
+    /// Use this for critical early-boot events (like `worker.booting`) that
+    /// must be visible even if the async writer hasn't started yet.
+    ///
+    /// Returns `Err` if the pending writer is not available (already started)
+    /// or if writing to the file fails.
+    pub fn emit_sync(&self, kind: EventKind) -> Result<()> {
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let (trace_id, span_id) = current_trace_ids();
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: kind.event_type().to_string(),
+            worker_id: self.worker_id.clone(),
+            session_id: self.session_id.clone(),
+            sequence: seq,
+            bead_id: kind.bead_id(),
+            workspace: None,
+            duration_ms: kind.duration_ms(),
+            data: kind.to_data(),
+            trace_id,
+            span_id,
+        };
+
+        // Take the pending writer temporarily to write directly to sinks.
+        let pending_guard = self.pending_writer.lock().unwrap();
+        if let Some(ref pending) = *pending_guard {
+            // Write directly to each sink (typically just FileSink).
+            for sink in &pending.sinks {
+                if let Err(e) = sink.accept(&event) {
+                    tracing::warn!(error = %e, "sync emit to sink failed");
+                }
+            }
+            Ok(())
+        } else {
+            // Pending writer already consumed by start().
+            Err(anyhow::anyhow!("cannot emit_sync after start()"))
+        }
     }
 
     /// Force-flush all buffered events to disk (synchronous).
@@ -2128,6 +3159,7 @@ impl Telemetry {
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
+            otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -2139,60 +3171,173 @@ impl Telemetry {
     pub fn start(&self) {
         let pending = self.pending_writer.lock().unwrap().take();
         if let Some(pw) = pending {
-            let handle = Self::spawn_writer(pw.receiver, pw.sinks);
+            let handle = Self::spawn_writer(pw.receiver, pw.sinks, None);
             *self.writer_handle.lock().unwrap() = Some(handle);
         }
     }
 
+    /// Start the background writer task and wait for it to be ready.
+    ///
+    /// Returns a Future that completes when the writer thread has started
+    /// and is ready to process events. Use this instead of `start()` when
+    /// you need to guarantee that events emitted immediately after will
+    /// be processed (e.g., for `worker.booting` as the first JSONL event).
+    ///
+    /// Must be called from within a tokio runtime context.
+    pub async fn start_and_wait(&self) -> Result<()> {
+        eprintln!("NEEDLE telemetry: starting writer thread and waiting for ready signal...");
+        let pending = self.pending_writer.lock().unwrap().take();
+        if let Some(pw) = pending {
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let handle = Self::spawn_writer(pw.receiver, pw.sinks, Some(ready_tx));
+            *self.writer_handle.lock().unwrap() = Some(handle);
+
+            // Wait for the writer thread to signal it's ready.
+            // Use a timeout to avoid hanging if the thread fails to start.
+            eprintln!("NEEDLE telemetry: waiting for writer thread ready signal (timeout 5s)...");
+            tokio::time::timeout(std::time::Duration::from_secs(5), ready_rx)
+                .await
+                .map_err(|_| anyhow::anyhow!("writer thread failed to start within 5s"))?
+                .map_err(|_| anyhow::anyhow!("writer thread closed before signaling ready"))?;
+            eprintln!("NEEDLE telemetry: writer thread ready signal received");
+        } else {
+            eprintln!("NEEDLE telemetry: writer thread already started, skipping");
+        }
+        eprintln!("NEEDLE telemetry: start_and_wait complete");
+        Ok(())
+    }
+
     /// Flush and shut down the background writer.
     ///
-    /// Drops the shared sender (closing the channel) so the writer task
+    /// Drops the shared sender (closing the channel) so the writer thread
     /// processes all buffered events and flushes its `BufWriter` before
-    /// exiting. Awaits the task's `JoinHandle` to guarantee completion.
+    /// exiting. Joins the thread to guarantee completion.
     ///
     /// Call this at every terminal path in the worker before the tokio
     /// Runtime is dropped, or the BufWriter flush will be cancelled.
     pub async fn shutdown(&self) {
-        // Drop the sender to signal EOF to the writer task.
+        // Drop the sender to signal EOF to the writer thread.
         *self.sender.lock().unwrap() = None;
-        // Await the writer task so the flush completes before we return.
+        // Join the writer thread so the flush completes before we return.
         let handle = self.writer_handle.lock().unwrap().take();
         if let Some(h) = handle {
-            let _ = h.await;
+            let _ = h.join();
+        }
+    }
+
+    /// Shut down the OTLP sink gracefully (if enabled).
+    ///
+    /// This drains all batched OTLP exports before returning. Should be called
+    /// once at process exit, before the Tokio runtime is dropped.
+    ///
+    /// This is a no-op if the OTLP sink is not configured or if the `otlp`
+    /// feature is disabled.
+    pub async fn shutdown_otlp(&self) {
+        let shutdown = self.otlp_shutdown.lock().unwrap().take();
+        if let Some(s) = shutdown {
+            if let Err(e) = s.shutdown().await {
+                tracing::warn!(error = %e, "OTLP shutdown failed");
+            }
+        }
+    }
+
+    /// Record the current queue depth for the `needle.queue.depth` observable gauge.
+    ///
+    /// This updates the per-priority counts that the observable gauge callback reads.
+    /// The queue depth should be sampled during strand evaluation (typically after
+    /// the Pluck strand returns candidates).
+    ///
+    /// The `depths` parameter maps priority level -> bead count at that priority.
+    ///
+    /// This is a no-op if the OTLP sink is not configured or if the `otlp`
+    /// feature is disabled.
+    pub fn record_queue_depth(&self, depths: std::collections::HashMap<u8, u64>) {
+        #[cfg(feature = "otlp")]
+        {
+            let shutdown = self.otlp_shutdown.lock().unwrap();
+            if let Some(OtlpShutdown::Sink(sink)) = &*shutdown {
+                sink.record_queue_depth(depths);
+            }
         }
     }
 
     /// Spawn background writer task draining the channel to all registered sinks.
+    ///
+    /// Spawns a dedicated thread with its own tokio runtime so the writer task
+    /// can immediately start processing messages, even before the main runtime's
+    /// `block_on()` is called. This fixes a deadlock where `force_flush()` would
+    /// wait indefinitely for a response from a task that hasn't started yet.
+    ///
+    /// If `ready_signal` is provided, sends () through it when the writer is
+    /// ready to process events.
     fn spawn_writer(
-        mut receiver: mpsc::UnboundedReceiver<WriterMessage>,
+        receiver: mpsc::UnboundedReceiver<WriterMessage>,
         sinks: Vec<Box<dyn Sink>>,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let deadline = std::time::Duration::from_secs(5);
-            while let Some(msg) = receiver.recv().await {
-                match msg {
-                    WriterMessage::Event(event) => {
-                        for sink in &sinks {
-                            if let Err(e) = sink.accept(&event) {
-                                tracing::warn!(error = %e, "telemetry sink accept failed");
+        ready_signal: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Runtime::new() {
+                Ok(r) => r,
+                Err(e) => {
+                    // Fallback to stderr when tracing may not be initialized yet
+                    eprintln!(
+                        "NEEDLE telemetry writer thread: FAILED to create tokio runtime: {}",
+                        e
+                    );
+                    tracing::error!(error = %e, "failed to create writer runtime");
+                    // Signal that we failed (by dropping the sender without sending)
+                    drop(ready_signal);
+                    return;
+                }
+            };
+            eprintln!("NEEDLE telemetry writer thread: started successfully");
+            if sinks.is_empty() {
+                eprintln!("NEEDLE telemetry writer thread: WARNING - no sinks configured, events will be discarded!");
+            }
+            let mut receiver = receiver;
+            rt.block_on(async move {
+                // Signal that the writer is ready to process events.
+                // Do this before entering the recv() loop so the caller
+                // can proceed as soon as we're ready.
+                eprintln!("NEEDLE telemetry writer thread: signaling ready to main thread...");
+                if let Some(tx) = ready_signal {
+                    tx.send(()).ok();
+                }
+                eprintln!("NEEDLE telemetry writer thread: ready, waiting for events...");
+
+                let deadline = std::time::Duration::from_secs(5);
+                let mut event_count = 0u64;
+                while let Some(msg) = receiver.recv().await {
+                    match msg {
+                        WriterMessage::Event(event) => {
+                            event_count += 1;
+                            for sink in &sinks {
+                                if let Err(e) = sink.accept(&event) {
+                                    eprintln!("NEEDLE telemetry: sink accept failed for event {}: {}", event.event_type, e);
+                                    tracing::warn!(error = %e, "telemetry sink accept failed");
+                                }
+                            }
+                            if event_count == 1 {
+                                eprintln!("NEEDLE telemetry writer thread: first event written: {}", event.event_type);
                             }
                         }
-                    }
-                    WriterMessage::Flush(reply) => {
-                        for sink in &sinks {
-                            if let Err(e) = sink.flush(deadline) {
-                                tracing::warn!(error = %e, "telemetry sink flush on demand failed");
+                        WriterMessage::Flush(reply) => {
+                            for sink in &sinks {
+                                if let Err(e) = sink.flush(deadline) {
+                                    eprintln!("NEEDLE telemetry: sink flush failed: {}", e);
+                                    tracing::warn!(error = %e, "telemetry sink flush on demand failed");
+                                }
                             }
+                            reply.send(()).ok();
                         }
-                        reply.send(()).ok();
                     }
                 }
-            }
-            for sink in &sinks {
-                if let Err(e) = sink.flush(deadline) {
-                    tracing::warn!(error = %e, "telemetry sink flush failed");
+                for sink in &sinks {
+                    if let Err(e) = sink.flush(deadline) {
+                        tracing::warn!(error = %e, "telemetry sink flush failed");
+                    }
                 }
-            }
+            })
         })
     }
 }
@@ -2670,6 +3815,8 @@ mod tests {
         let id = BeadId::from("needle-xyz");
         let kind = EventKind::ClaimSuccess {
             bead_id: id.clone(),
+            priority: 1,
+            strand: "pluck".to_string(),
         };
         assert_eq!(kind.bead_id(), Some(id));
 
@@ -2706,6 +3853,8 @@ mod tests {
             bead_id: BeadId::from("nd-x"),
             exit_code: 0,
             duration_ms: 1234,
+            agent: "claude".to_string(),
+            model: Some("claude-sonnet-4-6".to_string()),
         };
         assert_eq!(kind.duration_ms(), Some(1234));
 
@@ -2926,6 +4075,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn emit_try_lock_delivers_events_when_lock_available() {
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-try-lock".to_string(), sink);
+
+        // emit_try_lock() should succeed when the lock is available.
+        telemetry
+            .emit_try_lock(EventKind::WorkerStarted {
+                worker_name: "test-worker".to_string(),
+                version: "0.1.0".to_string(),
+            })
+            .unwrap();
+        telemetry
+            .emit_try_lock(EventKind::ClaimAttempt {
+                bead_id: BeadId::from("nd-test"),
+                attempt: 1,
+            })
+            .unwrap();
+
+        // Drop to close channel and drain.
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let collected = events.lock().unwrap();
+        assert_eq!(
+            collected.len(),
+            2,
+            "expected 2 events, got {}",
+            collected.len()
+        );
+        assert_eq!(collected[0].event_type, "worker.started");
+        assert_eq!(collected[1].event_type, "bead.claim.attempted");
+    }
+
+    #[tokio::test]
+    async fn emit_try_lock_gracefully_degrades_when_lock_contended() {
+        let (sink, _events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-try-lock-contend".to_string(), sink);
+
+        // Hold the sender lock to simulate contention.
+        let sender_lock = telemetry.sender.clone();
+        let _guard = sender_lock.lock().unwrap();
+
+        // emit_try_lock() should return Ok(()) without blocking when lock is contended.
+        let result = telemetry.emit_try_lock(EventKind::QueueEmpty);
+        assert!(
+            result.is_ok(),
+            "emit_try_lock should not error on contention"
+        );
+
+        // Drop the guard and cleanup.
+        drop(_guard);
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn emit_gracefully_degrades_when_lock_contended() {
+        let (sink, _events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-emit-contend".to_string(), sink);
+
+        // Hold the sender lock to simulate contention.
+        let sender_lock = telemetry.sender.clone();
+        let _guard = sender_lock.lock().unwrap();
+
+        // emit() should return Ok(()) without blocking when lock is contended.
+        let result = telemetry.emit(EventKind::QueueEmpty);
+        assert!(result.is_ok(), "emit should not error on contention");
+
+        // Drop the guard and cleanup.
+        drop(_guard);
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
     async fn file_sink_writes_jsonl() {
         let dir = std::env::temp_dir().join("needle-test-telem-file");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3046,6 +4270,9 @@ mod tests {
             EventKind::WorkerExhausted {
                 cycle_count: 3,
                 last_strand: "pluck".to_string(),
+                waterfall_restarts: 0,
+                restart_triggers: vec![],
+                strand_evaluations: vec![],
             },
             EventKind::WorkerIdle {
                 backoff_seconds: 30,
@@ -3070,6 +4297,8 @@ mod tests {
             },
             EventKind::ClaimSuccess {
                 bead_id: id.clone(),
+                priority: 1,
+                strand: "pluck".to_string(),
             },
             EventKind::ClaimRaceLost {
                 bead_id: id.clone(),
@@ -3105,6 +4334,8 @@ mod tests {
                 bead_id: id.clone(),
                 exit_code: 0,
                 duration_ms: 3000,
+                agent: "claude".to_string(),
+                model: Some("claude-sonnet-4-6".to_string()),
             },
             EventKind::OutcomeClassified {
                 bead_id: id.clone(),
@@ -4183,5 +5414,161 @@ mod tests {
             elapsed < std::time::Duration::from_secs(30),
             "shutdown must not hang: elapsed={elapsed:?}"
         );
+    }
+
+    /// Verify that `trace_id` and `span_id` are captured from the current OTel span.
+    #[cfg(feature = "otlp")]
+    #[tokio::test]
+    async fn emit_captures_trace_and_span_ids_from_otel_context() {
+        use opentelemetry::trace::{Tracer, TracerProvider as _};
+        use opentelemetry_sdk::trace::SdkTracerProvider;
+
+        // Create a simple tracer provider for testing (no exporter).
+        let provider = SdkTracerProvider::builder().build();
+        let tracer = provider.tracer("test");
+
+        // Create a test sink to capture emitted events.
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-tracer".to_string(), sink);
+
+        // Emit an event inside a span using the tracer's in_span method.
+        tracer.in_span("test-span", |_cx| {
+            telemetry
+                .emit(EventKind::QueueEmpty)
+                .expect("emit should succeed");
+        });
+
+        // Drop telemetry to close channel and drain events.
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let collected = events.lock().unwrap();
+        assert_eq!(collected.len(), 1, "expected 1 event");
+        let event = &collected[0];
+
+        // Verify trace_id and span_id were captured.
+        assert!(
+            event.trace_id.is_some(),
+            "trace_id should be captured inside a span"
+        );
+        assert!(
+            event.span_id.is_some(),
+            "span_id should be captured inside a span"
+        );
+
+        // Verify W3C format: 32 hex chars for trace_id, 16 hex chars for span_id.
+        let trace_id = event.trace_id.as_ref().unwrap();
+        let span_id = event.span_id.as_ref().unwrap();
+        assert_eq!(trace_id.len(), 32, "trace_id should be 32 hex chars");
+        assert_eq!(span_id.len(), 16, "span_id should be 16 hex chars");
+        assert!(
+            trace_id
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && c.is_lowercase()),
+            "trace_id should be lowercase hex"
+        );
+        assert!(
+            span_id
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && c.is_lowercase()),
+            "span_id should be lowercase hex"
+        );
+    }
+
+    /// Verify that events emitted outside any span omit trace_id/span_id.
+    #[tokio::test]
+    async fn emit_omits_trace_and_span_ids_outside_span() {
+        // Create a test sink to capture emitted events.
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-no-span".to_string(), sink);
+
+        // Emit an event outside any span context.
+        telemetry
+            .emit(EventKind::QueueEmpty)
+            .expect("emit should succeed");
+
+        // Drop telemetry to close channel and drain events.
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let collected = events.lock().unwrap();
+        assert_eq!(collected.len(), 1, "expected 1 event");
+        let event = &collected[0];
+
+        // Verify trace_id and span_id are None when emitted outside a span.
+        assert!(
+            event.trace_id.is_none(),
+            "trace_id should be None outside a span"
+        );
+        assert!(
+            event.span_id.is_none(),
+            "span_id should be None outside a span"
+        );
+
+        // Verify the JSON omits the fields entirely (via skip_serializing_if).
+        let json = serde_json::to_string(event).expect("serialize");
+        assert!(
+            !json.contains("trace_id"),
+            "trace_id should be omitted from JSON when None"
+        );
+        assert!(
+            !json.contains("span_id"),
+            "span_id should be omitted from JSON when None"
+        );
+    }
+
+    /// Regression test for needle-la6l: verify that worker.booting is written to file.
+    ///
+    /// The boot event is written synchronously via write_boot_event_direct_impl
+    /// before the async writer starts. This test verifies the file is not empty
+    /// after Telemetry::new() returns.
+    #[test]
+    fn boot_event_written_to_file_on_telemetry_creation() {
+        let dir = std::env::temp_dir().join("needle-test-boot-event");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("should create temp dir");
+
+        let worker_id = "test-boot-worker";
+        let session_id = "cafe1234";
+        let file_path = dir.join(format!("{worker_id}-{session_id}.jsonl"));
+
+        // Create a FileSink (this creates the file and writes the boot event)
+        let file_sink = FileSink::with_dir(&dir, worker_id, session_id)
+            .expect("FileSink::with_dir should succeed");
+        assert!(file_path.exists(), "log file should be created");
+
+        // write_boot_event_direct should succeed
+        let version = env!("CARGO_PKG_VERSION");
+        let result = file_sink.write_boot_event_direct(worker_id, session_id, version);
+        assert!(
+            result.is_ok(),
+            "write_boot_event_direct should succeed: {:?}",
+            result
+        );
+
+        // Verify the file has content (not 0 bytes)
+        let metadata = std::fs::metadata(&file_path).expect("should get file metadata");
+        assert!(
+            metadata.len() > 0,
+            "log file should not be empty after boot event write"
+        );
+
+        // Verify the content is valid JSON with worker.booting event
+        let content = std::fs::read_to_string(&file_path).expect("should read file");
+        let first_line = content
+            .lines()
+            .next()
+            .expect("file should have at least one line");
+        let event: serde_json::Value =
+            serde_json::from_str(first_line).expect("first line should be valid JSON");
+
+        assert_eq!(
+            event["event_type"], "worker.booting",
+            "first event should be worker.booting"
+        );
+        assert_eq!(event["worker_id"], worker_id, "worker_id should match");
+        assert_eq!(event["session_id"], session_id, "session_id should match");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

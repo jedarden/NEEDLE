@@ -995,6 +995,13 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &crate::types::BeadId,
+            _blocker_id: &crate::types::BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 
     #[test]

@@ -26,10 +26,7 @@ pub async fn inject_bead_id_trailer(
     bead_id: &BeadId,
     pre_dispatch_head: &str,
 ) -> Result<()> {
-    let ws = workspace
-        .to_str()
-        .unwrap_or(".")
-        .to_string();
+    let ws = workspace.to_str().unwrap_or(".").to_string();
 
     // Get current HEAD — if it fails, workspace is not a git repo.
     let current_head = match git_head(&ws).await {
@@ -48,19 +45,25 @@ pub async fn inject_bead_id_trailer(
     }
 
     // Amend the latest commit to add the Bead-Id trailer.
+    // Wrapped in a 30-second timeout to prevent indefinite hangs if git
+    // subprocess hangs (e.g., due to filesystem issues or network mounts).
     let trailer_arg = format!("Bead-Id: {}", bead_id);
-    let out = Command::new("git")
-        .args([
-            "-C",
-            &ws,
-            "commit",
-            "--amend",
-            "--no-edit",
-            "--trailer",
-            &trailer_arg,
-        ])
-        .output()
-        .await?;
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        Command::new("git")
+            .args([
+                "-C",
+                &ws,
+                "commit",
+                "--amend",
+                "--no-edit",
+                "--trailer",
+                &trailer_arg,
+            ])
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("git commit --amend timed out after 30s in {}", ws))??;
 
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -81,11 +84,19 @@ pub async fn inject_bead_id_trailer(
 // ---------------------------------------------------------------------------
 
 /// Return the current HEAD SHA for `workspace`.
+///
+/// Wrapped in a 10-second timeout to prevent indefinite hangs if git
+/// subprocess hangs (e.g., due to filesystem issues or network mounts).
 pub(crate) async fn git_head(workspace: &str) -> Result<String> {
-    let out = Command::new("git")
-        .args(["-C", workspace, "rev-parse", "HEAD"])
-        .output()
-        .await?;
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        Command::new("git")
+            .args(["-C", workspace, "rev-parse", "HEAD"])
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("git rev-parse HEAD timed out after 10s in {}", workspace))??;
+
     if !out.status.success() {
         anyhow::bail!("git rev-parse HEAD failed in {}", workspace);
     }
@@ -93,26 +104,31 @@ pub(crate) async fn git_head(workspace: &str) -> Result<String> {
 }
 
 /// Check whether the latest commit already carries `Bead-Id: <bead_id>`.
+///
+/// Wrapped in a 10-second timeout to prevent indefinite hangs if git
+/// subprocess hangs (e.g., due to filesystem issues or network mounts).
 async fn already_has_trailer(workspace: &str, bead_id: &BeadId) -> Result<bool> {
-    let out = Command::new("git")
-        .args([
-            "-C",
-            workspace,
-            "log",
-            "-1",
-            "--format=%(trailers:key=Bead-Id,valueonly,separator=,)",
-        ])
-        .output()
-        .await?;
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        Command::new("git")
+            .args([
+                "-C",
+                workspace,
+                "log",
+                "-1",
+                "--format=%(trailers:key=Bead-Id,valueonly,separator=,)",
+            ])
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("git log timed out after 10s in {}", workspace))??;
 
     if !out.status.success() {
         return Ok(false);
     }
 
     let text = String::from_utf8_lossy(&out.stdout);
-    Ok(text
-        .split(',')
-        .any(|v| v.trim() == bead_id.as_ref()))
+    Ok(text.split(',').any(|v| v.trim() == bead_id.as_ref()))
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +137,6 @@ async fn already_has_trailer(workspace: &str, bead_id: &BeadId) -> Result<bool> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn already_has_trailer_logic() {
