@@ -3168,6 +3168,237 @@ strands:
 | `reflect.consolidated` | `learnings_added`, `learnings_pruned`, `skills_promoted`, `contradictions_resolved` |
 | `reflect.skipped` | `reason` (cooldown, insufficient data) |
 
+## Session Transcript Analysis
+
+### Motivation
+
+Bead close bodies are structured summaries written by the agent at the end of a task. They capture *what was done* but lose the process: failed attempts, tool call sequences, recovery strategies, and decision points. The full session transcript — stored by Claude Code as JSONL files in `.claude/projects/` — contains this richer signal.
+
+Reflect should analyze both sources: closed bead bodies for structured outcomes, and session transcripts for the decision-making process that led to those outcomes.
+
+### Transcript Discovery
+
+Claude Code stores session transcripts as JSONL files under `.claude/projects/<project-hash>/<session-uuid>.jsonl`. Each line is a JSON object with role, content, tool calls, and timestamps.
+
+```rust
+struct TranscriptSession {
+    path: PathBuf,
+    workspace: PathBuf,
+    mtime: DateTime<Utc>,
+    entries: Vec<TranscriptEntry>,
+}
+
+struct TranscriptEntry {
+    role: String,
+    content: String,
+    tool_calls: Vec<ToolCall>,
+    timestamp: Option<DateTime<Utc>>,
+}
+```
+
+**Discovery algorithm:**
+
+1. Map workspace path to `.claude/projects/` subdirectory (hash-based mapping)
+2. Enumerate all JSONL files, sorted by mtime descending
+3. Filter to sessions within configurable recency window (default: 7 days)
+4. Stream-parse each file, skipping malformed lines
+5. Return `Vec<TranscriptSession>`
+
+**Streaming:** Transcript files can be large. Parse line-by-line rather than loading entire files. Skip tool_result blocks containing base64 or binary content (truncate at 1KB).
+
+### Action-Outcome Extraction
+
+Raw transcript entries are too verbose for pattern extraction. Reflect distills them into structured action-outcome pairs:
+
+```rust
+struct ActionOutcome {
+    action_type: String,       // tool name (Read, Edit, Bash, etc.)
+    target: String,            // file path, command, or query
+    outcome: Outcome,          // Success, Failure, Error, Retry, Workaround
+    reasoning: String,         // agent's text between tool calls (truncated to 200 chars)
+    timestamp: DateTime<Utc>,
+}
+
+enum Outcome { Success, Failure, Error, Retry, Workaround }
+```
+
+**Extraction algorithm:**
+
+1. Walk transcript entries, identify tool_call → tool_result pairs
+2. Classify outcomes: success (exit 0), failure (non-zero exit), retry (same tool, same target), workaround (different tool after failure)
+3. Capture agent reasoning text between consecutive tool calls
+4. Group consecutive related actions into logical "attempts"
+
+**Key patterns to extract:**
+- Failed tool calls followed by retries (friction points)
+- Successful workarounds after failures (actionable learnings)
+- Repeated tool call patterns (workflow habits)
+- Error messages encountered (common failure modes)
+
+### Pattern Merging
+
+Reflect merges patterns from both sources — bead bodies and transcripts — into a unified set:
+
+1. Run existing bead-body retrospective extraction (unchanged)
+2. Run transcript action-outcome extraction (new)
+3. Deduplicate on semantic similarity:
+   - Exact match: same pattern text → merge counts
+   - Near match: same tool + same outcome + similar reasoning → merge with combined context
+   - Unique to one source: keep as-is with lower confidence score
+4. Weight by frequency across both sources — a pattern seen in beads AND transcripts is higher confidence
+5. Pass merged pattern set to existing promotion logic (learnings.md → skill files)
+
+## Drift Detection
+
+### Motivation
+
+When multiple workers solve the same class of problem, they may converge on different approaches. Some drift is healthy (evolving better solutions over time), some is harmful (inconsistent behavior with no progression). Detecting drift turns scattered session data into actionable standardization signals.
+
+### Session Similarity Matching
+
+Before comparing approaches, reflect must identify which sessions solved comparable problems.
+
+**Fingerprint per session:**
+
+```rust
+struct SessionFingerprint {
+    file_paths: HashSet<PathBuf>,      // normalized, deduplicated by directory
+    tool_outcomes: HashSet<(String, Outcome)>,  // (tool_name, outcome)
+    bead_types: HashSet<String>,        // types of beads claimed/closed
+    error_patterns: HashSet<String>,    // normalized error substrings
+}
+```
+
+Similarity is computed as Jaccard overlap on these sets. Sessions sharing >60% overlap (configurable) are grouped into clusters.
+
+### Approach Divergence Detection
+
+For each session cluster, reflect extracts the solution approach per session and compares them:
+
+| Divergence Category | Meaning | Action |
+|---------------------|---------|--------|
+| **Evolved** | Approaches improve over time (fewer retries, shorter paths) | Promote latest approach as learned pattern |
+| **Inconsistent** | Approaches differ with no clear progression | Flag for human review, suggest standardizing |
+| **Degraded** | Later sessions solve the same problem worse than earlier | Flag as regression, include earlier approach as reference |
+
+**Output:** `DriftReport` per cluster, fed into the consolidation pipeline alongside normal pattern extraction.
+
+**Telemetry:**
+
+| Event Type | Data Fields |
+|------------|-------------|
+| `reflect.drift.detected` | `cluster_size`, `category`, `sessions` |
+| `reflect.drift.promoted` | `pattern`, `category` |
+
+## ADR Decision Records
+
+### Motivation
+
+Current learnings capture *what* the agent did. But "use `br doctor --repair` for corruption" is less useful than knowing *why*: "chose doctor --repair over `rm` + `sync --import-only` because the former preserves bead history." Reflect should preserve decision rationale alongside patterns.
+
+Not all learnings are decisions. Repeated successful habits ("agent ran `cargo fmt` before committing") don't need ADR treatment. Only learnings that involve a choice between alternatives warrant the richer format.
+
+### Decision Point Detection
+
+Reflect detects decision points in transcript action-outcome sequences:
+
+**Signals that indicate a decision:**
+- Attempt → failure → different approach → success (implicit choice)
+- Agent reasoning text contains "instead", "alternatively", "better approach", "let me try"
+- Agent evaluated multiple options before acting (read two files, then chose one to edit)
+- Failed tool call followed by a different tool call (not a retry)
+
+```rust
+struct DecisionPoint {
+    attempted_first: String,    // what was tried
+    failed_with: String,        // error or reason for failure
+    chose_instead: String,      // what was chosen after failure
+    rationale: String,          // agent's reasoning between failure and new approach
+    succeeded: bool,
+}
+```
+
+### ADR-Lite Format in CLAUDE.md
+
+When a promoted learning has an associated DecisionPoint, it is written in ADR-lite format. Habit/workflow patterns use the simpler flat format. Both are wrapped in HTML comment markers for identification and future updates.
+
+**Decision-type learning:**
+
+```html
+<!-- needle-learning:nd-a3f8 -->
+- **Decision**: Use `br doctor --repair` before `rm` + `sync --import-only`
+  **Context**: FrankenSQLite corruption in `.beads/` databases
+  **Rationale**: `doctor --repair` preserves bead history; full rebuild loses in-progress state
+  **ADR**: `.beads/decisions/nd-a3f8.md`
+<!-- /needle-learning:nd-a3f8 -->
+```
+
+**Habit-type learning (unchanged from current format):**
+
+```html
+<!-- needle-learning:nd-b7c2 -->
+- Always run `cargo fmt` before committing Rust code in this workspace
+<!-- /needle-learning:nd-b7c2 -->
+```
+
+### ADR Condensation into CLAUDE.md
+
+Full ADRs are stored in `.beads/decisions/<bead-id>.md` with complete context (alternatives considered, full reasoning, outcomes). CLAUDE.md entries are **condensed summaries** — the decision, context, and rationale in 2-3 lines — with a reference back to the full ADR via the `**ADR:**` line.
+
+This keeps CLAUDE.md compact (it's loaded into every system prompt) while preserving the full decision record for deeper review.
+
+**Full ADR file** (`.beads/decisions/nd-a3f8.md`):
+
+```markdown
+# ADR: Database Recovery Strategy
+
+## Context
+FrankenSQLite corruption in .beads/ databases causes "database disk image is malformed" errors during br operations.
+
+## Alternatives Considered
+1. `br doctor --repair` — reconstructs DB from JSONL, preserves in-progress state
+2. `rm .beads/beads.db` + `br sync --import-only` — full rebuild, loses in-progress claims
+3. Manual SQLite `PRAGMA integrity_check` + targeted repair — fragile, version-specific
+
+## Decision
+Use `br doctor --repair` as first-line recovery.
+
+## Rationale
+- Preserves bead history and in-progress claim state
+- JSONL is always authoritative — repair reconstructs from source of truth
+- `rm + sync` is a fallback only when repair itself fails
+
+## Outcome
+Resolved corruption for workers alpha, echo, foxtrot, hotel on 2026-04-26.
+```
+
+### Placement: Lowest Common Ancestor CLAUDE.md
+
+Promoted learnings are placed in the CLAUDE.md at the **lowest common ancestor** directory covering all workspaces where the pattern was observed. This ensures the learning appears in the system prompt only when working in relevant projects.
+
+**Resolution algorithm:**
+
+1. Track which workspaces contributed each pattern during extraction
+2. Find the deepest directory that is a parent of all contributing workspaces
+3. Check for an existing CLAUDE.md at that directory
+4. If no CLAUDE.md exists, create one with a `## NEEDLE Learnings` section
+5. If a learning applies to a single workspace only, write to that workspace's CLAUDE.md
+6. If a learning applies across all workspaces, write to `~/CLAUDE.md`
+
+**Edge cases:**
+- Pattern observed in repos under `~/ardenone-cluster/` → write to `~/ardenone-cluster/CLAUDE.md`
+- Pattern observed in repos spanning multiple top-level directories → write to `~/CLAUDE.md`
+- CLAUDE.md doesn't exist at target level → create it
+
+**Deduplication:** Before appending, check for existing needle-learning entries with similar content (fuzzy match on first line). Update rather than duplicate.
+
+**Telemetry:**
+
+| Event Type | Data Fields |
+|------------|-------------|
+| `reflect.learning.promoted` | `learning_id`, `target_path`, `workspace_count`, `is_decision` |
+| `reflect.learning.deduplicated` | `learning_id`, `existing_entry` |
+
 ## Skill Library
 
 ### Structure
@@ -3362,6 +3593,10 @@ Following AutoAgent's architecture:
 | **Global learnings** | Cross-workspace learning promotion |
 | **Label-based skill sharing** | Cross-workspace skill retrieval by label match |
 | **Trace retention** | Configurable cleanup of trace files |
+| **Session transcript analysis** | Parse Claude Code JSONL transcripts, extract action-outcome pairs, merge with bead-body patterns |
+| **Drift detection** | Session similarity clustering, approach divergence classification (evolved/inconsistent/degraded) |
+| **ADR decision records** | Decision point detection from transcripts, ADR-lite format in CLAUDE.md, full ADRs in `.beads/decisions/` |
+| **CLAUDE.md placement** | Lowest-common-ancestor directory resolution for promoted learnings, auto-create if missing |
 
 ### Success Criteria
 
@@ -3381,10 +3616,18 @@ Following AutoAgent's architecture:
 - [ ] Trace retention automatically cleans old traces per configured policy
 - [ ] A worker that encounters a previously-solved failure mode receives the relevant skill in its prompt
 - [ ] Fleet-wide pass rate measurably improves over a 30-day period (tracked via `needle stats`)
+- [ ] Reflect parses Claude Code session JSONL transcripts and extracts action-outcome pairs
+- [ ] Transcript-derived patterns are merged with bead-body patterns, deduplicated by semantic similarity
+- [ ] Reflect detects session clusters solving similar problems and classifies approach divergence
+- [ ] Drift reports categorize as evolved (promote latest), inconsistent (flag for review), or degraded (flag regression)
+- [ ] Decision points are detected from transcripts (failure → different approach → success sequences)
+- [ ] Promoted learnings with decision context are written in ADR-lite format in CLAUDE.md
+- [ ] Full ADRs stored in `.beads/decisions/<bead-id>.md`, CLAUDE.md entries reference them via `**ADR:**` line
+- [ ] Promoted learnings are placed in the CLAUDE.md at the lowest common ancestor of contributing workspaces
 
 ### Estimated Scope
 
-~8 additional source files, ~3,500 additional LOC.
+~12 additional source files, ~5,200 additional LOC.
 
 New module additions:
 ```
@@ -3393,13 +3636,21 @@ needle (binary)
 ├── learning/          Retrospective extraction, learnings management
 ├── skill/             Skill library, retrieval, promotion
 ├── trace/             Trace capture, storage, retention
+├── transcript/        Session JSONL parsing, action-outcome extraction
+├── drift/             Session similarity, clustering, divergence detection
+├── decision/          Decision point detection, ADR management
+├── placement/         CLAUDE.md lowest-common-ancestor resolution
 └── stats/             Aggregation engine, A/B comparison
 ```
 
 Dependency additions:
 ```
-learning ──► bead_store, telemetry, types
-skill    ──► bead_store, config, types
-trace    ──► dispatch, config, types
-stats    ──► telemetry, config, types
+learning    ──► bead_store, telemetry, types
+skill       ──► bead_store, config, types
+trace       ──► dispatch, config, types
+transcript  ──► config, types
+drift       ──► transcript, telemetry, types
+decision    ──► transcript, types
+placement   ──► config, types
+stats       ──► telemetry, config, types
 ```

@@ -5004,6 +5004,188 @@ mod tests {
             .any(|e| e.event_type == "mend.idle_worker_flagged"));
     }
 
+    #[tokio::test]
+    async fn flag_idle_workers_boundary_age_equals_timeout_not_flagged() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+
+        // Create a worker with age exactly equal to idle_timeout (60 seconds).
+        // This should NOT be flagged since the condition is `age > idle_timeout`.
+        let entry = crate::registry::WorkerEntry {
+            id: "boundary-worker".to_string(),
+            pid: 12345,
+            workspace: PathBuf::from("/tmp/test"),
+            agent: "claude".to_string(),
+            model: None,
+            provider: None,
+            started_at: Utc::now() - chrono::Duration::seconds(60), // Exactly at timeout
+            beads_processed: 0,
+        };
+        registry.register(entry).unwrap();
+
+        let (telemetry, _events) = make_test_telemetry();
+        let mend = MendStrand::new(
+            MendConfig {
+                idle_timeout: 60, // 60 second timeout
+                ..Default::default()
+            },
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let mut summary = MendSummary::default();
+        mend.flag_idle_workers(&mut summary).unwrap();
+
+        // Worker at exact boundary should NOT be flagged.
+        assert_eq!(summary.idle_workers_flagged, 0);
+    }
+
+    #[test]
+    fn flag_idle_workers_returns_error_when_registry_list_fails() {
+        // Create a registry directory with corrupted/unreadable state.
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Create an invalid registry file that will cause list() to fail.
+        let registry_path = reg_dir.path().join("workers.json");
+        std::fs::write(&registry_path, "invalid json content {{{").unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let mut summary = MendSummary::default();
+        let result = mend.flag_idle_workers(&mut summary);
+
+        // Should return an error when registry.list() fails.
+        assert!(result.is_err());
+        assert_eq!(summary.idle_workers_flagged, 0);
+    }
+
+    #[tokio::test]
+    async fn flag_idle_workers_emits_telemetry_for_each_idle_worker() {
+        use crate::telemetry::test_utils::MemorySink;
+
+        let reg_dir = tempfile::tempdir().unwrap();
+        let registry = Registry::new(reg_dir.path());
+
+        // Register multiple idle workers.
+        for i in 0..3 {
+            let entry = crate::registry::WorkerEntry {
+                id: format!("idle-worker-{}", i),
+                pid: 12340 + i as u32,
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "claude".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now() - chrono::Duration::seconds(300),
+                beads_processed: 0,
+            };
+            registry.register(entry).unwrap();
+        }
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let limits_config = LimitsConfig::default();
+        let mut summary = MendSummary::default();
+
+        // Create telemetry with MemorySink to capture events.
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+
+        let mend = MendStrand::new(
+            MendConfig {
+                idle_timeout: 60,
+                ..Default::default()
+            },
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            state_dir.path().to_path_buf(),
+            limits_config,
+        );
+
+        mend.flag_idle_workers(&mut summary).unwrap();
+
+        // All three workers should be flagged.
+        assert_eq!(summary.idle_workers_flagged, 3);
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify three MendIdleWorkerFlagged telemetry events were emitted.
+        let captured_events = events.lock().unwrap();
+        let idle_worker_events: Vec<_> = captured_events
+            .iter()
+            .filter(|e| e.event_type == "mend.idle_worker_flagged")
+            .collect();
+
+        assert_eq!(idle_worker_events.len(), 3);
+
+        // Verify each event has unique worker_id and correct age_secs.
+        let worker_ids: Vec<_> = idle_worker_events
+            .iter()
+            .map(|e| e.data["worker_id"].as_str().unwrap())
+            .collect();
+
+        assert!(worker_ids.contains(&"idle-worker-0"));
+        assert!(worker_ids.contains(&"idle-worker-1"));
+        assert!(worker_ids.contains(&"idle-worker-2"));
+
+        // Verify age_secs is approximately 300 for all workers.
+        for event in &idle_worker_events {
+            let age_secs = event.data["age_secs"]
+                .as_u64()
+                .expect("age_secs should be u64");
+            assert!((295..=305).contains(&age_secs));
+        }
+    }
+
     // ── Trace cleanup tests ───────────────────────────────────────────────────────
 
     #[test]

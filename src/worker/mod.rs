@@ -942,6 +942,39 @@ impl Worker {
             Some(self.config.workspace.default.as_path()),
         );
 
+        // Try atomic claim_auto first (server-selected bead in one transaction).
+        // This eliminates the race condition where two workers both see the same
+        // bead in ready() and race to claim it.
+        let strand = "auto";
+        let claim = self
+            .claimer
+            .claim_auto(&self.qualified_id(), strand)
+            .await;
+
+        match claim {
+            Ok(ClaimResult::Claimed(bead)) => {
+                tracing::info!(bead_id = %bead.id, "atomically claimed bead via claim_auto");
+                self.current_bead = Some(bead);
+                self.current_strand = Some(strand.to_string());
+                self.consecutive_race_lost = 0;
+                self.set_state(WorkerState::Building)?;
+                return Ok(());
+            }
+            Ok(ClaimResult::NotClaimable { reason }) => {
+                tracing::debug!(reason, "claim_auto returned no beads, falling back to strand waterfall");
+                // Fall through to strand waterfall
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "claim_auto failed, falling back to strand waterfall");
+                // Fall through to strand waterfall
+            }
+            Ok(other) => {
+                tracing::warn!(?other, "claim_auto returned unexpected result, falling back to strand waterfall");
+                // Fall through to strand waterfall
+            }
+        }
+
+        // Fallback: run strand waterfall to find a candidate bead.
         let exclusions = self.current_exclusions();
         let candidate = self
             .strands
@@ -1621,12 +1654,25 @@ impl Worker {
         let bead_id_for_heartbeat = bead.id.clone();
         let telemetry_for_heartbeat = self.telemetry.clone();
         let cancelled_for_heartbeat = cancelled.clone();
+        let watchdog_for_heartbeat = self.watchdog_triggered.clone();
         let heartbeat_task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
                 interval.tick().await;
                 // Check if we've been cancelled and stop emitting if so.
                 if cancelled_for_heartbeat.load(Ordering::Relaxed) {
+                    break;
+                }
+                // Check if the watchdog has triggered and force recovery if so.
+                // This allows the watchdog thread to interrupt HANDLING state even if
+                // the tokio runtime is wedged (the watchdog runs in a separate thread).
+                if watchdog_for_heartbeat.load(Ordering::Relaxed) {
+                    tracing::error!(
+                        bead_id = %bead_id_for_heartbeat,
+                        "heartbeat task detected watchdog trigger, forcing cancellation"
+                    );
+                    // Set the cancelled flag to abort any in-flight br calls.
+                    cancelled_for_heartbeat.store(true, Ordering::Release);
                     break;
                 }
                 // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
@@ -1825,6 +1871,37 @@ impl Worker {
                 return Ok(());
             }
         };
+
+        // Check if the watchdog triggered during HANDLING state.
+        // This can happen if the heartbeat task detected the watchdog trigger and
+        // set the cancelled flag, or if the watchdog thread set the flag directly.
+        if self.watchdog_triggered.load(Ordering::Relaxed) {
+            tracing::error!(
+                bead_id = %bead.id,
+                "watchdog detected during HANDLING state, forcing recovery to LOGGING"
+            );
+            // Clear the watchdog trigger.
+            self.watchdog_triggered.store(false, Ordering::Release);
+            self.handling_state_entered_at = None;
+            // Emit critical timeout event.
+            let _ = self
+                .telemetry
+                .emit_try_lock(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "unknown".to_string(),
+                    operation: "watchdog".to_string(),
+                    error: format!(
+                        "HANDLING state exceeded {}s timeout",
+                        HANDLING_WATCHDOG_TIMEOUT_SECS
+                    ),
+                });
+            // Force transition to LOGGING to recover.
+            self.set_state(WorkerState::Logging)?;
+            // Stop the heartbeat task.
+            cancelled.store(true, Ordering::Release);
+            heartbeat_task.abort();
+            return Ok(());
+        }
 
         // Emit a heartbeat after the outcome handler completes to signal we're
         // still alive. This helps detect hangs in post-handler code (commit hook,
@@ -2574,7 +2651,8 @@ impl Worker {
         let qualified_id = self.qualified_id();
         let pid = std::process::id();
         let idle_marker = state_dir.join(format!("{}-idle-entered-{}.txt", qualified_id, pid));
-        let completed_marker = state_dir.join(format!("{}-idle-completed-{}.txt", qualified_id, pid));
+        let completed_marker =
+            state_dir.join(format!("{}-idle-completed-{}.txt", qualified_id, pid));
         let _ = std::fs::remove_file(idle_marker);
         let _ = std::fs::remove_file(completed_marker);
 

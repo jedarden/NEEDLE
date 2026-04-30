@@ -984,7 +984,7 @@ impl OtlpSink {
                 self.metrics
                     .claim_attempts
                     .add(1, &[KeyValue::new("result", "race_lost")]);
-                // Export as log with WARN severity
+                // Export as log with INFO severity
                 self.emit_log(event)?;
             }
 
@@ -1290,22 +1290,21 @@ impl OtlpSink {
             // ERROR events
             "worker.errored"
             | "bead.claim.failed"
-            | "build.timeout"        // agent timeout
-            | "telemetry.sink_error" // general sink errors
+            | "build.timeout"           // agent timeout
+            | "telemetry.otlp.dropped"  // OTLP export drops
+            | "telemetry.sink_error"    // Sink errors (e.g., hook failures)
             => (Severity::Error, "ERROR"),
 
             // WARN events
-            "peer.stale"              // StuckDetected
-            | "peer.crashed"          // StuckReleased
-            | "bead.claim.race_lost"
-            | "telemetry.otlp.dropped"        // OTLP export drops
-            | "telemetry.otlp.shutdown_timeout" // OTLP shutdown timeout
+            "peer.stale"   // StuckDetected
+            | "peer.crashed" // StuckReleased
             => (Severity::Warn, "WARN"),
 
             // INFO events (default)
             // Includes: worker.started, worker.stopped, health.check, effort.recorded,
-            //           bead.orphaned, budget.warning, rate_limit.wait, bead.released,
-            //           transform.failed, worker.handling.timeout, and everything else
+            //           bead.orphaned, bead.claim.race_lost, budget.warning, rate_limit.wait,
+            //           bead.released, transform.failed, worker.handling.timeout,
+            //           telemetry.otlp.shutdown_timeout, and everything else
             _ => (Severity::Info, "INFO"),
         }
     }
@@ -2593,23 +2592,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_severity_for_otlp_dropped_is_warn() {
+    async fn test_severity_for_otlp_dropped_is_error() {
         let sink = make_test_sink();
 
-        // Test that telemetry.otlp.dropped is WARN severity
+        // Test that telemetry.otlp.dropped is ERROR severity
         let (severity, text) = sink.severity_for_event("telemetry.otlp.dropped");
-        assert_eq!(severity, Severity::Warn);
-        assert_eq!(text, "WARN");
+        assert_eq!(severity, Severity::Error);
+        assert_eq!(text, "ERROR");
     }
 
     #[tokio::test]
-    async fn test_severity_for_otlp_shutdown_timeout_is_warn() {
+    async fn test_severity_for_otlp_shutdown_timeout_is_info() {
         let sink = make_test_sink();
 
-        // Test that telemetry.otlp.shutdown_timeout is WARN severity
+        // Test that telemetry.otlp.shutdown_timeout is INFO severity (default)
         let (severity, text) = sink.severity_for_event("telemetry.otlp.shutdown_timeout");
-        assert_eq!(severity, Severity::Warn);
-        assert_eq!(text, "WARN");
+        assert_eq!(severity, Severity::Info);
+        assert_eq!(text, "INFO");
     }
 
     #[tokio::test]
@@ -2620,6 +2619,16 @@ mod tests {
         let (severity, text) = sink.severity_for_event("telemetry.sink_error");
         assert_eq!(severity, Severity::Error);
         assert_eq!(text, "ERROR");
+    }
+
+    #[tokio::test]
+    async fn test_severity_for_bead_claim_race_lost_is_info() {
+        let sink = make_test_sink();
+
+        // Test that bead.claim.race_lost is INFO severity (default)
+        let (severity, text) = sink.severity_for_event("bead.claim.race_lost");
+        assert_eq!(severity, Severity::Info);
+        assert_eq!(text, "INFO");
     }
 
     #[tokio::test]
@@ -2687,14 +2696,11 @@ mod tests {
             event_data.get("deadline_secs").unwrap().as_f64().unwrap(),
             5.0
         );
-        assert_eq!(
-            event_data
-                .get("abandoned_batches")
-                .unwrap()
-                .as_bool()
-                .unwrap(),
-            true
-        );
+        assert!(event_data
+            .get("abandoned_batches")
+            .unwrap()
+            .as_bool()
+            .unwrap());
     }
 
     #[tokio::test]

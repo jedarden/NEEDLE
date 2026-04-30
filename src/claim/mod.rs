@@ -276,6 +276,65 @@ impl Claimer {
             ClaimOutcome::StoreError(e) => Err(e),
         }
     }
+
+    /// Atomically claim the next available bead using server-side selection.
+    ///
+    /// This is the preferred method for multi-worker scenarios. It calls
+    /// `BeadStore::claim_auto()` which atomically finds and claims a bead in
+    /// a single transaction, guaranteeing that concurrent workers receive
+    /// distinct beads.
+    ///
+    /// The `strand` parameter is the name of the strand that initiated the claim
+    /// (e.g., "pluck", "mend"). This is emitted in telemetry for the
+    /// `needle.beads.claimed` metric's `strand` attribute.
+    ///
+    /// Returns:
+    /// - `Claimed(bead)`: successfully claimed a bead
+    /// - `NotClaimable(reason)`: no beads available to claim
+    /// - `StoreError(e)`: bead store error
+    pub async fn claim_auto(&self, actor: &str, strand: &str) -> Result<ClaimResult> {
+        self.telemetry.emit(EventKind::ClaimAttempt {
+            bead_id: BeadId::from("(auto)".to_string()),
+            attempt: 1,
+        })?;
+
+        match self.store.claim_auto(actor).await {
+            Ok(ClaimResult::Claimed(bead)) => {
+                tracing::Span::current().record("needle.bead.id", bead.id.as_ref());
+                tracing::Span::current().record("needle.claim.result", "succeeded");
+                self.telemetry.emit(EventKind::ClaimSuccess {
+                    bead_id: bead.id.clone(),
+                    priority: bead.priority as i32,
+                    strand: strand.to_string(),
+                })?;
+                Ok(ClaimResult::Claimed(bead))
+            }
+            Ok(ClaimResult::NotClaimable { reason }) => {
+                tracing::Span::current().record("needle.claim.result", &reason);
+                self.telemetry.emit(EventKind::ClaimFailed {
+                    bead_id: BeadId::from("(auto)".to_string()),
+                    reason: reason.clone(),
+                })?;
+                Ok(ClaimResult::NotClaimable { reason })
+            }
+            Ok(other) => {
+                // RaceLost shouldn't happen with claim_auto, but handle it
+                tracing::warn!(?other, "claim_auto returned unexpected result");
+                Ok(other)
+            }
+            Err(e) => {
+                let reason = format!("store error: {e}");
+                tracing::Span::current().record("needle.claim.result", &reason);
+                tracing::Span::current().record("otel.status_code", 2u64);
+                tracing::Span::current().record("otel.status_description", &reason);
+                self.telemetry.emit(EventKind::ClaimFailed {
+                    bead_id: BeadId::from("(auto)".to_string()),
+                    reason: reason.clone(),
+                })?;
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Compute a deterministic lock file path for a workspace.

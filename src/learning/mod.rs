@@ -282,7 +282,10 @@ impl LearningEntry {
                 ctx.decision, ctx.context, ctx.rationale
             ));
             if !ctx.alternatives.is_empty() {
-                result.push_str(&format!("\n- **Alternatives:** {}", ctx.alternatives.join(", ")));
+                result.push_str(&format!(
+                    "\n- **Alternatives:** {}",
+                    ctx.alternatives.join(", ")
+                ));
             }
         }
 
@@ -882,9 +885,10 @@ fn generate_decision_id(decision: &str, bead_id: &str) -> String {
     hasher.update(bead_id.as_bytes());
     let hash = hasher.finalize();
     // Use first 8 bytes of hash as hex string
-    format!("dec-{:016x}", u64::from_be_bytes(
-        hash.as_slice()[..8].try_into().unwrap_or([0u8; 8])
-    ))
+    format!(
+        "dec-{:016x}",
+        u64::from_be_bytes(hash.as_slice()[..8].try_into().unwrap_or([0u8; 8]))
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

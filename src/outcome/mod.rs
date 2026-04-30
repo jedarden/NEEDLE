@@ -1519,4 +1519,210 @@ mod tests {
 
         assert_eq!(result.bead_action, BeadAction::Released);
     }
+
+    // ── timeout and resilience tests ──
+
+    #[tokio::test]
+    async fn handle_failure_with_flush_timeout_continues_gracefully() {
+        // Test that flush timeout doesn't block the worker in HANDLING state.
+        struct SlowFlushStore {
+            inner: MockBeadStore,
+        }
+
+        #[async_trait]
+        impl BeadStore for SlowFlushStore {
+            async fn list_all(&self) -> Result<Vec<Bead>> {
+                self.inner.list_all().await
+            }
+            async fn ready(&self, filters: &crate::bead_store::Filters) -> Result<Vec<Bead>> {
+                self.inner.ready(filters).await
+            }
+            async fn show(&self, id: &BeadId) -> Result<Bead> {
+                self.inner.show(id).await
+            }
+            async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
+                self.inner.claim(id, actor).await
+            }
+            async fn release(&self, id: &BeadId) -> Result<()> {
+                self.inner.release(id).await
+            }
+            async fn flush(&self) -> Result<()> {
+                // Simulate a slow flush that times out.
+                tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+                Ok(())
+            }
+            async fn reopen(&self, id: &BeadId) -> Result<()> {
+                self.inner.reopen(id).await
+            }
+            async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+                self.inner.labels(id).await
+            }
+            async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+                self.inner.add_label(id, label).await
+            }
+            async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+                self.inner.remove_label(id, label).await
+            }
+            async fn create_bead(
+                &self,
+                title: &str,
+                body: &str,
+                labels: &[&str],
+            ) -> Result<BeadId> {
+                self.inner.create_bead(title, body, labels).await
+            }
+            async fn doctor_repair(&self) -> Result<crate::bead_store::RepairReport> {
+                self.inner.doctor_repair().await
+            }
+            async fn doctor_check(&self) -> Result<crate::bead_store::RepairReport> {
+                self.inner.doctor_check().await
+            }
+            async fn full_rebuild(&self) -> Result<()> {
+                self.inner.full_rebuild().await
+            }
+            async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+                self.inner.add_dependency(blocker_id, blocked_id).await
+            }
+            async fn remove_dependency(
+                &self,
+                blocked_id: &BeadId,
+                blocker_id: &BeadId,
+            ) -> Result<()> {
+                self.inner.remove_dependency(blocked_id, blocker_id).await
+            }
+        }
+
+        let handler = test_handler();
+        let store = SlowFlushStore {
+            inner: MockBeadStore::new(BeadStatus::InProgress),
+        };
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+
+        // Should still complete with Released action despite flush timeout.
+        assert_eq!(result.outcome, Outcome::Failure);
+        assert_eq!(result.bead_action, BeadAction::Released);
+
+        // Should emit a timeout event.
+        assert!(result
+            .telemetry_events
+            .iter()
+            .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { operation, .. } if operation == "flush")));
+    }
+
+    #[tokio::test]
+    async fn handle_failure_with_release_timeout_continues_gracefully() {
+        // Test that release timeout doesn't block the worker in HANDLING state.
+        struct SlowReleaseStore {
+            inner: MockBeadStore,
+        }
+
+        #[async_trait]
+        impl BeadStore for SlowReleaseStore {
+            async fn list_all(&self) -> Result<Vec<Bead>> {
+                self.inner.list_all().await
+            }
+            async fn ready(&self, filters: &crate::bead_store::Filters) -> Result<Vec<Bead>> {
+                self.inner.ready(filters).await
+            }
+            async fn show(&self, id: &BeadId) -> Result<Bead> {
+                self.inner.show(id).await
+            }
+            async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
+                self.inner.claim(id, actor).await
+            }
+            async fn release(&self, _id: &BeadId) -> Result<()> {
+                // Simulate a slow release that times out.
+                tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+                Ok(())
+            }
+            async fn flush(&self) -> Result<()> {
+                self.inner.flush().await
+            }
+            async fn reopen(&self, id: &BeadId) -> Result<()> {
+                self.inner.reopen(id).await
+            }
+            async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+                self.inner.labels(id).await
+            }
+            async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+                self.inner.add_label(id, label).await
+            }
+            async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+                self.inner.remove_label(id, label).await
+            }
+            async fn create_bead(
+                &self,
+                title: &str,
+                body: &str,
+                labels: &[&str],
+            ) -> Result<BeadId> {
+                self.inner.create_bead(title, body, labels).await
+            }
+            async fn doctor_repair(&self) -> Result<crate::bead_store::RepairReport> {
+                self.inner.doctor_repair().await
+            }
+            async fn doctor_check(&self) -> Result<crate::bead_store::RepairReport> {
+                self.inner.doctor_check().await
+            }
+            async fn full_rebuild(&self) -> Result<()> {
+                self.inner.full_rebuild().await
+            }
+            async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+                self.inner.add_dependency(blocker_id, blocked_id).await
+            }
+            async fn remove_dependency(
+                &self,
+                blocked_id: &BeadId,
+                blocker_id: &BeadId,
+            ) -> Result<()> {
+                self.inner.remove_dependency(blocked_id, blocker_id).await
+            }
+        }
+
+        let handler = test_handler();
+        let store = SlowReleaseStore {
+            inner: MockBeadStore::new(BeadStatus::InProgress),
+        };
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+
+        // Should still complete despite release timeout.
+        assert_eq!(result.outcome, Outcome::Failure);
+        // The bead action should still be Released (best-effort).
+        assert_eq!(result.bead_action, BeadAction::Released);
+
+        // Should emit a release failure event.
+        assert!(result
+            .telemetry_events
+            .iter()
+            .any(|e| matches!(e, EventKind::BeadReleaseFailed { .. })));
+    }
+
+    #[tokio::test]
+    async fn handle_with_cancellation_respects_cancelled_flag() {
+        // Test that handle_with_cancellation returns early when cancelled.
+        let handler = test_handler();
+        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let result = handler
+            .handle_with_cancellation(&store, &bead, &test_output(1), false, cancelled)
+            .await
+            .unwrap();
+
+        // Should return a default result without calling the store.
+        assert_eq!(result.outcome, Outcome::Failure);
+        assert_eq!(result.bead_action, BeadAction::None);
+        assert!(result.telemetry_events.is_empty());
+    }
 }

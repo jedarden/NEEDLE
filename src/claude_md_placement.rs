@@ -187,9 +187,7 @@ impl ClaudeMdPlacer {
 
             // Find the end of the NEEDLE Learnings section (next ## or end of file)
             let after_section = &existing_content[section_start..];
-            let next_section_idx = after_section
-                .find("\n## ")
-                .unwrap_or(after_section.len());
+            let next_section_idx = after_section.find("\n## ").unwrap_or(after_section.len());
 
             let section_content = &after_section[..next_section_idx];
             let after = &after_section[next_section_idx..];
@@ -277,9 +275,7 @@ impl ClaudeMdPlacer {
         if let Some(needle_idx) = content.find("## NEEDLE Learnings") {
             let needle_section = &content[needle_idx..];
             // Find the next section header or end
-            let section_end = needle_section
-                .find("\n## ")
-                .unwrap_or(needle_section.len());
+            let section_end = needle_section.find("\n## ").unwrap_or(needle_section.len());
             let section = &needle_section[..section_end];
 
             // Check for HTML comment markers with this learning
@@ -287,7 +283,9 @@ impl ClaudeMdPlacer {
             let observation_lower = observation.to_lowercase();
 
             // Look for decision markers or bead ID markers
-            if section.contains("<!-- needle-learning:") && section.contains("<!-- /needle-learning:") {
+            if section.contains("<!-- needle-learning:")
+                && section.contains("<!-- /needle-learning:")
+            {
                 // Extract learning IDs from markers
                 let mut learning_ids = Vec::new();
                 for part in section.split("<!-- needle-learning:") {
@@ -305,7 +303,8 @@ impl ClaudeMdPlacer {
                         let marker_end = format!("<!-- /needle-learning:{} -->", id);
                         if let Some(start_idx) = section.find(&marker_start) {
                             if let Some(end_idx) = section.find(&marker_end) {
-                                let learning_content = &section[start_idx..end_idx + marker_end.len()];
+                                let learning_content =
+                                    &section[start_idx..end_idx + marker_end.len()];
                                 if learning_content.to_lowercase().contains(&observation_lower) {
                                     return true;
                                 }
@@ -347,7 +346,12 @@ fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", s.chars().take(max_len.saturating_sub(3)).collect::<String>())
+        format!(
+            "{}...",
+            s.chars()
+                .take(max_len.saturating_sub(3))
+                .collect::<String>()
+        )
     }
 }
 
@@ -416,9 +420,9 @@ pub fn detect_cross_workspace_patterns(
             }
 
             // Check if any entry in this workspace is similar
-            let has_similar = entries.iter().any(|e| {
-                observations_similar(&e.observation, &entry.observation)
-            });
+            let has_similar = entries
+                .iter()
+                .any(|e| observations_similar(&e.observation, &entry.observation));
 
             if has_similar {
                 matching_workspaces.push(ws.clone());
@@ -427,10 +431,7 @@ pub fn detect_cross_workspace_patterns(
 
         // Only promote if appears in 2+ workspaces
         if matching_workspaces.len() >= 2 {
-            promoted.push(PromotedLearning::new(
-                entry.clone(),
-                matching_workspaces,
-            ));
+            promoted.push(PromotedLearning::new(entry.clone(), matching_workspaces));
         }
     }
 

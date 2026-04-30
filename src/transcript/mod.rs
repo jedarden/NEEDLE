@@ -28,8 +28,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::types::BeadId;
 use crate::learning::DecisionContext;
+use crate::types::BeadId;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Transcript entry types (parsed from JSONL)
@@ -53,10 +53,16 @@ enum TranscriptEntry {
     System { subtype: String, session_id: String },
     /// Stream event (content blocks, deltas).
     #[serde(rename = "stream_event")]
-    StreamEvent { event: StreamEvent, session_id: String },
+    StreamEvent {
+        event: StreamEvent,
+        session_id: String,
+    },
     /// Queue operation (enqueue/dequeue).
     #[serde(rename = "queue-operation")]
-    QueueOperation { operation: String, timestamp: String },
+    QueueOperation {
+        operation: String,
+        timestamp: String,
+    },
 }
 
 /// User message content.
@@ -81,7 +87,11 @@ enum ContentBlock {
     #[serde(rename = "thinking")]
     Thinking { thinking: String },
     #[serde(rename = "tool_use")]
-    ToolUse { id: String, name: String, input: serde_json::Value },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
 }
 
 /// Attachment metadata.
@@ -96,7 +106,10 @@ struct Attachment {
 #[serde(tag = "type")]
 enum StreamEvent {
     #[serde(rename = "content_block_start")]
-    ContentBlockStart { index: usize, content_block: ContentBlock },
+    ContentBlockStart {
+        index: usize,
+        content_block: ContentBlock,
+    },
     #[serde(rename = "content_block_delta")]
     ContentBlockDelta { index: usize, delta: ContentDelta },
     #[serde(rename = "content_block_stop")]
@@ -213,9 +226,12 @@ impl TranscriptDiscovery {
         let mut transcripts = Vec::new();
 
         // Iterate through JSONL files in the project directory
-        for entry in std::fs::read_dir(&project_dir)
-            .with_context(|| format!("failed to read project directory: {}", project_dir.display()))?
-        {
+        for entry in std::fs::read_dir(&project_dir).with_context(|| {
+            format!(
+                "failed to read project directory: {}",
+                project_dir.display()
+            )
+        })? {
             let entry = match entry {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -289,7 +305,11 @@ impl TranscriptDiscovery {
     }
 
     /// Parse a single transcript file.
-    fn parse_transcript(&self, path: &Path, modified_at: DateTime<Utc>) -> Result<ParsedTranscript> {
+    fn parse_transcript(
+        &self,
+        path: &Path,
+        modified_at: DateTime<Utc>,
+    ) -> Result<ParsedTranscript> {
         let session_id = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -315,7 +335,8 @@ impl TranscriptDiscovery {
                     // Extract task description from first user message
                     if task_description.is_none() {
                         if let TranscriptEntry::User { ref message } = entry {
-                            task_description = Some(self.extract_task_bead_id(&message.content, &mut bead_id));
+                            task_description =
+                                Some(self.extract_task_bead_id(&message.content, &mut bead_id));
                         }
                     }
 
@@ -552,9 +573,7 @@ fn analyze_text_for_decision(text: &str) -> Option<DetectedDecision> {
     let text_lower = text.to_lowercase();
 
     // Check if any decision pattern is present
-    let decision_match = DECISION_PATTERNS
-        .iter()
-        .find(|p| text_lower.contains(*p));
+    let decision_match = DECISION_PATTERNS.iter().find(|p| text_lower.contains(*p));
 
     if decision_match.is_none() {
         return None;
@@ -671,16 +690,11 @@ fn extract_alternatives(text: &str) -> Vec<String> {
     let text_lower = text.to_lowercase();
 
     // Look for "instead of X", "over Y", "not Z"
-    let patterns = [(
-        "instead of",
-        "instead of",
-    ), (
-        "over ",
-        "over",
-    ), (
-        "not ",
-        "not",
-    )];
+    let patterns = [
+        ("instead of", "instead of"),
+        ("over ", "over"),
+        ("not ", "not"),
+    ];
 
     for (marker, _name) in patterns {
         let mut search_start = 0;
@@ -720,11 +734,7 @@ fn extract_alternatives(text: &str) -> Vec<String> {
 }
 
 /// Calculate confidence score for a detected decision.
-fn calculate_decision_confidence(
-    decision: &str,
-    rationale: &str,
-    alternatives: &[String],
-) -> f32 {
+fn calculate_decision_confidence(decision: &str, rationale: &str, alternatives: &[String]) -> f32 {
     let mut confidence: f32 = 0.3; // Base confidence
 
     // Strong decision phrases
@@ -771,11 +781,12 @@ impl From<DetectedDecision> for DecisionContext {
 
 /// Convert SystemTime to DateTime<Utc>.
 fn system_time_to_datetime(t: SystemTime) -> Option<DateTime<Utc>> {
-    t.duration_since(SystemTime::UNIX_EPOCH)
-        .ok()
-        .and_then(|d| {
-            DateTime::from_timestamp(d.as_secs() as i64, (d.subsec_nanos() as u32) / 1_000_000_000)
-        })
+    t.duration_since(SystemTime::UNIX_EPOCH).ok().and_then(|d| {
+        DateTime::from_timestamp(
+            d.as_secs() as i64,
+            (d.subsec_nanos() as u32) / 1_000_000_000,
+        )
+    })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -828,7 +839,11 @@ mod tests {
         let claude_dir = temp_dir.path().join(".claude");
 
         // Create project directory
-        let project_name = workspace.to_string_lossy().replace('/', "-").trim_start_matches('-').to_string();
+        let project_name = workspace
+            .to_string_lossy()
+            .replace('/', "-")
+            .trim_start_matches('-')
+            .to_string();
         let project_dir = claude_dir.join("projects").join(&project_name);
         fs::create_dir_all(&project_dir).unwrap();
 
@@ -861,7 +876,11 @@ mod tests {
         let claude_dir = temp_dir.path().join(".claude");
 
         // Create project directory
-        let project_name = workspace.to_string_lossy().replace('/', "-").trim_start_matches('-').to_string();
+        let project_name = workspace
+            .to_string_lossy()
+            .replace('/', "-")
+            .trim_start_matches('-')
+            .to_string();
         let project_dir = claude_dir.join("projects").join(&project_name);
         fs::create_dir_all(&project_dir).unwrap();
 
@@ -886,7 +905,11 @@ mod tests {
         let claude_dir = temp_dir.path().join(".claude");
 
         // Create project directory
-        let project_name = workspace.to_string_lossy().replace('/', "-").trim_start_matches('-').to_string();
+        let project_name = workspace
+            .to_string_lossy()
+            .replace('/', "-")
+            .trim_start_matches('-')
+            .to_string();
         let project_dir = claude_dir.join("projects").join(&project_name);
         fs::create_dir_all(&project_dir).unwrap();
 

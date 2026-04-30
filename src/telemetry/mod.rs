@@ -29,7 +29,7 @@ use crate::types::{BeadId, WorkerId, WorkerState};
 pub mod otlp;
 
 #[cfg(feature = "otlp")]
-pub use otlp::OtlpSink;
+pub use otlp::{create_tracing_layer, OtlpSink};
 
 // ─── Test Utilities ────────────────────────────────────────────────────────────
 
@@ -206,14 +206,6 @@ pub enum EventKind {
         duration_ms: u64,
         agent: String,
         model: Option<String>,
-    },
-    BuildTimeout {
-        bead_id: BeadId,
-        timeout_secs: u64,
-    },
-    BuildHeartbeat {
-        bead_id: BeadId,
-        elapsed_ms: u64,
     },
     BuildTimeout {
         bead_id: BeadId,
@@ -978,24 +970,6 @@ impl EventKind {
                     "duration_ms": duration_ms,
                     "agent": agent,
                     "model": model,
-                })
-            }
-            EventKind::BuildTimeout {
-                bead_id,
-                timeout_secs,
-            } => {
-                serde_json::json!({
-                    "bead_id": bead_id.as_ref(),
-                    "timeout_secs": timeout_secs,
-                })
-            }
-            EventKind::BuildHeartbeat {
-                bead_id,
-                elapsed_ms,
-            } => {
-                serde_json::json!({
-                    "bead_id": bead_id.as_ref(),
-                    "elapsed_ms": elapsed_ms,
                 })
             }
             EventKind::BuildTimeout {
@@ -2479,13 +2453,6 @@ enum WriterMessage {
     Flush(tokio::sync::oneshot::Sender<()>),
 }
 
-/// Internal message type for the writer task.
-#[allow(clippy::large_enum_variant)]
-enum WriterMessage {
-    Event(TelemetryEvent),
-    Flush(tokio::sync::oneshot::Sender<()>),
-}
-
 /// Holds the receiver and sinks until they can be spawned in an async context.
 struct PendingWriter {
     receiver: mpsc::UnboundedReceiver<WriterMessage>,
@@ -3079,48 +3046,6 @@ impl Telemetry {
         } else {
             // Pending writer already consumed by start().
             Err(anyhow::anyhow!("cannot emit_sync after start()"))
-        }
-    }
-
-    /// Force-flush all buffered events to disk (synchronous).
-    ///
-    /// Sends a flush request through the writer channel and waits (up to
-    /// `timeout`) for the writer task to flush its BufWriter. Used after
-    /// `worker.booting` so the event is visible on disk even if subsequent
-    /// init steps block.
-    ///
-    /// NOTE: This uses `blocking_recv()` and must be called from outside a
-    /// tokio runtime (e.g., in `run_worker` before `rt.block_on`). Use
-    /// `force_flush_async()` from within async contexts.
-    pub fn force_flush(&self, timeout: std::time::Duration) -> Result<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Some(ref s) = *self.sender.lock().unwrap() {
-            s.send(WriterMessage::Flush(tx)).ok();
-        }
-        // Block until the writer task flushes or timeout.
-        // Use a small thread to avoid needing an async context.
-        let _ = rx.blocking_recv();
-        let _ = timeout; // deadline enforced by the writer task
-        Ok(())
-    }
-
-    /// Force-flush all buffered events to disk (async).
-    ///
-    /// Async version of `force_flush()` that can be called from within a
-    /// tokio runtime. Use this in `Worker::run()` and other async contexts.
-    pub async fn force_flush_async(&self, timeout: std::time::Duration) -> Result<()> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if let Some(ref s) = *self.sender.lock().unwrap() {
-            s.send(WriterMessage::Flush(tx)).ok();
-        }
-        // Wait for the writer task to flush, with timeout.
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(_)) => Ok(()), // Channel closed, writer already flushed
-            Err(_) => {
-                tracing::warn!("force_flush_async timed out after {:?}", timeout);
-                Ok(())
-            }
         }
     }
 

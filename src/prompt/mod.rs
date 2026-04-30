@@ -47,7 +47,7 @@ const DEFAULT_PLUCK_TEMPLATE: &str = "\
 {workspace_instructions}
 
 Complete the task described above. When finished:
-- Commit your changes with a descriptive message
+- **Commit all work with `git commit` before closing.** Every completed bead MUST produce at least one commit. If your work produced no file changes, create `notes/{bead_id}.md` summarizing what you did and commit that file. Do not close the bead without committing.
 - Close the bead with a structured retrospective:
 
 `br close {bead_id} --body \"Summary of work completed.
@@ -58,7 +58,7 @@ Complete the task described above. When finished:
 - **Surprise:** [anything unexpected about the codebase/tooling]
 - **Reusable pattern:** [if this task type recurs, do X]\"`
 
-If you cannot complete the task:
+If you cannot complete the task OR cannot produce a commit:
 - Do NOT close the bead
 - The bead will be automatically released for retry
 
@@ -806,6 +806,10 @@ mod tests {
         assert!(
             result.content.contains("br close needle-abc"),
             "prompt must contain br close instruction"
+        );
+        assert!(
+            result.content.contains("notes/needle-abc.md"),
+            "prompt must contain notes file fallback instruction"
         );
     }
 

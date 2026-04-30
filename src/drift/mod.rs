@@ -37,7 +37,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::learning::{BeadType, Confidence, LearningEntry};
-use crate::transcript::{ParsedTranscript, ActionType};
+use crate::transcript::{ActionType, ParsedTranscript};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Session Fingerprint
@@ -94,9 +94,8 @@ impl SessionFingerprint {
         }
 
         // Extract keywords from task description
-        let task_keywords = Self::extract_keywords(
-            transcript.task_description.as_deref().unwrap_or("")
-        );
+        let task_keywords =
+            Self::extract_keywords(transcript.task_description.as_deref().unwrap_or(""));
 
         SessionFingerprint {
             session_id: transcript.session_id.clone(),
@@ -116,16 +115,15 @@ impl SessionFingerprint {
 
         // Common stop words to filter out
         let stop_words = [
-            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for",
-            "of", "with", "by", "from", "as", "is", "was", "are", "were", "been",
-            "be", "have", "has", "had", "do", "does", "did", "will", "would", "could",
-            "should", "may", "might", "must", "shall", "can", "need", "this", "that",
-            "these", "those", "i", "you", "he", "she", "it", "we", "they", "what",
-            "which", "who", "when", "where", "why", "how", "all", "each", "every",
-            "both", "few", "more", "most", "other", "some", "such", "no", "nor",
-            "not", "only", "own", "same", "so", "than", "too", "very", "just",
-            "also", "now", "here", "there", "then", "once", "about", "into",
-            "through", "during", "before", "after", "above", "below", "up", "down",
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
+            "by", "from", "as", "is", "was", "are", "were", "been", "be", "have", "has", "had",
+            "do", "does", "did", "will", "would", "could", "should", "may", "might", "must",
+            "shall", "can", "need", "this", "that", "these", "those", "i", "you", "he", "she",
+            "it", "we", "they", "what", "which", "who", "when", "where", "why", "how", "all",
+            "each", "every", "both", "few", "more", "most", "other", "some", "such", "no", "nor",
+            "not", "only", "own", "same", "so", "than", "too", "very", "just", "also", "now",
+            "here", "there", "then", "once", "about", "into", "through", "during", "before",
+            "after", "above", "below", "up", "down",
         ];
 
         for word in text.split_whitespace() {
@@ -178,25 +176,43 @@ impl SessionFingerprint {
         } else {
             let intersection = self.tools_used.intersection(&other.tools_used).count();
             let union = self.tools_used.union(&other.tools_used).count();
-            if union == 0 { 1.0 } else { intersection as f64 / union as f64 }
+            if union == 0 {
+                1.0
+            } else {
+                intersection as f64 / union as f64
+            }
         };
 
         // Keyword similarity (40% weight)
         let kw_sim = if self.task_keywords.is_empty() && other.task_keywords.is_empty() {
             1.0
         } else {
-            let intersection = self.task_keywords.intersection(&other.task_keywords).count();
+            let intersection = self
+                .task_keywords
+                .intersection(&other.task_keywords)
+                .count();
             let union = self.task_keywords.union(&other.task_keywords).count();
-            if union == 0 { 1.0 } else { intersection as f64 / union as f64 }
+            if union == 0 {
+                1.0
+            } else {
+                intersection as f64 / union as f64
+            }
         };
 
         // File pattern similarity (20% weight)
         let file_sim = if self.file_patterns.is_empty() && other.file_patterns.is_empty() {
             1.0
         } else {
-            let intersection = self.file_patterns.intersection(&other.file_patterns).count();
+            let intersection = self
+                .file_patterns
+                .intersection(&other.file_patterns)
+                .count();
             let union = self.file_patterns.union(&other.file_patterns).count();
-            if union == 0 { 1.0 } else { intersection as f64 / union as f64 }
+            if union == 0 {
+                1.0
+            } else {
+                intersection as f64 / union as f64
+            }
         };
 
         tool_sim * 0.4 + kw_sim * 0.4 + file_sim * 0.2
@@ -276,8 +292,7 @@ pub struct DriftCluster {
 impl DriftCluster {
     /// Create a new drift cluster.
     pub fn new(cluster_id: String, sessions: Vec<SessionFingerprint>) -> Self {
-        let bead_type = sessions.first()
-            .and_then(|s| s.bead_type.clone());
+        let bead_type = sessions.first().and_then(|s| s.bead_type.clone());
 
         DriftCluster {
             cluster_id,
@@ -374,17 +389,18 @@ impl DriftCluster {
 
         // Split sessions into early and late halves
         let mid = sorted.len() / 2;
-        let early_tools: HashSet<_> = sorted[..mid].iter()
+        let early_tools: HashSet<_> = sorted[..mid]
+            .iter()
             .flat_map(|s| s.tools_used.iter().cloned())
             .collect();
-        let _late_tools: HashSet<_> = sorted[mid..].iter()
+        let _late_tools: HashSet<_> = sorted[mid..]
+            .iter()
             .flat_map(|s| s.tools_used.iter().cloned())
             .collect();
 
         // Check if late sessions converged on a consistent approach
-        let late_unique_tools: Vec<HashSet<_>> = sorted[mid..].iter()
-            .map(|s| s.tools_used.clone())
-            .collect();
+        let late_unique_tools: Vec<HashSet<_>> =
+            sorted[mid..].iter().map(|s| s.tools_used.clone()).collect();
 
         // If all late sessions use the same tool set, that's evolution
         if late_unique_tools.len() > 1 {
@@ -397,9 +413,7 @@ impl DriftCluster {
         }
 
         // Check for inconsistent tool usage
-        let tool_sets: Vec<_> = sorted.iter()
-            .map(|s| s.tools_used.clone())
-            .collect();
+        let tool_sets: Vec<_> = sorted.iter().map(|s| s.tools_used.clone()).collect();
 
         // If tool sets vary widely, it's inconsistent
         let unique_tool_count = tool_sets.len();
@@ -421,18 +435,31 @@ impl DriftCluster {
             output.push_str(&format!("**Bead Type:** {}\n", bt.as_str()));
         }
         output.push_str(&format!("**Sessions:** {}\n", self.sessions.len()));
-        output.push_str(&format!("**Detected:** {}\n\n", self.detected_at.format("%Y-%m-%d %H:%M:%S UTC")));
+        output.push_str(&format!(
+            "**Detected:** {}\n\n",
+            self.detected_at.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
 
         output.push_str("### Sessions\n\n");
         for session in &self.sessions {
-            output.push_str(&format!("- **{}** ({})\n", session.session_id,
-                session.modified_at.format("%Y-%m-%d %H:%M")));
+            output.push_str(&format!(
+                "- **{}** ({})\n",
+                session.session_id,
+                session.modified_at.format("%Y-%m-%d %H:%M")
+            ));
             if let Some(ref bead_id) = session.bead_id {
                 output.push_str(&format!("  - Bead: `{}`\n", bead_id));
             }
             if !session.tools_used.is_empty() {
-                output.push_str(&format!("  - Tools: {}\n",
-                    session.tools_used.iter().cloned().collect::<Vec<_>>().join(", ")));
+                output.push_str(&format!(
+                    "  - Tools: {}\n",
+                    session
+                        .tools_used
+                        .iter()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
         }
 
@@ -495,10 +522,8 @@ impl DriftCluster {
         // Add entries for specific tool differences
         for diff in &self.differences {
             if diff.tool_only_a.is_some() || diff.tool_only_b.is_some() {
-                let tool_observation = format!(
-                    "Tool usage drift across sessions: {}",
-                    diff.description
-                );
+                let tool_observation =
+                    format!("Tool usage drift across sessions: {}", diff.description);
                 entries.push(LearningEntry::new(
                     format!("{}-tool", drift_id),
                     worker.clone(),
@@ -531,10 +556,12 @@ impl DriftCluster {
             let mut sorted = self.sessions.clone();
             sorted.sort_by_key(|s| s.modified_at);
 
-            let early_tools: HashSet<_> = sorted[..sorted.len()/2].iter()
+            let early_tools: HashSet<_> = sorted[..sorted.len() / 2]
+                .iter()
                 .flat_map(|s| s.tools_used.iter().cloned())
                 .collect();
-            let late_tools: HashSet<_> = sorted[sorted.len()/2..].iter()
+            let late_tools: HashSet<_> = sorted[sorted.len() / 2..]
+                .iter()
                 .flat_map(|s| s.tools_used.iter().cloned())
                 .collect();
 
@@ -598,9 +625,18 @@ impl DriftReport {
         let mut output = String::new();
 
         output.push_str("# Drift Detection Report\n\n");
-        output.push_str(&format!("**Generated:** {}\n", self.generated_at.format("%Y-%m-%d %H:%M:%S UTC")));
-        output.push_str(&format!("**Sessions Analyzed:** {}\n", self.sessions_analyzed));
-        output.push_str(&format!("**Drift Clusters:** {}\n\n", self.clusters_detected));
+        output.push_str(&format!(
+            "**Generated:** {}\n",
+            self.generated_at.format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+        output.push_str(&format!(
+            "**Sessions Analyzed:** {}\n",
+            self.sessions_analyzed
+        ));
+        output.push_str(&format!(
+            "**Drift Clusters:** {}\n\n",
+            self.clusters_detected
+        ));
 
         if self.clusters.is_empty() {
             output.push_str("No drift detected across analyzed sessions.\n");
@@ -742,18 +778,17 @@ impl Default for DriftDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::{TranscriptAction, ActionType};
+    use crate::transcript::{ActionType, TranscriptAction};
 
-    fn make_test_transcript(
-        session_id: &str,
-        task: &str,
-        tools: &[&str],
-    ) -> ParsedTranscript {
-        let actions = tools.iter().map(|tool| TranscriptAction {
-            action_type: ActionType::ToolUse,
-            tool_name: Some(tool.to_string()),
-            description: format!("{}: /tmp/test.txt", tool),
-        }).collect();
+    fn make_test_transcript(session_id: &str, task: &str, tools: &[&str]) -> ParsedTranscript {
+        let actions = tools
+            .iter()
+            .map(|tool| TranscriptAction {
+                action_type: ActionType::ToolUse,
+                tool_name: Some(tool.to_string()),
+                description: format!("{}: /tmp/test.txt", tool),
+            })
+            .collect();
 
         ParsedTranscript {
             session_id: session_id.to_string(),

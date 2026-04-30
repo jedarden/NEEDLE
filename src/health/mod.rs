@@ -552,10 +552,7 @@ fn emitter_loop(
                 tracing::debug!(worker = %worker_id, "heartbeat emitter shutting down");
                 return;
             }
-            let sleep_dur = std::cmp::min(
-                INTERRUPTIBLE_SLEEP_INTERVAL,
-                current_sleep - elapsed,
-            );
+            let sleep_dur = std::cmp::min(INTERRUPTIBLE_SLEEP_INTERVAL, current_sleep - elapsed);
             std::thread::sleep(sleep_dur);
             elapsed += sleep_dur;
         }

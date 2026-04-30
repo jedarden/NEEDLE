@@ -683,10 +683,16 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
     eprintln!("NEEDLE worker boot: writer thread started");
 
     // Phase 1: bead store discovery.
+    // Use BfCliBeadStore for atomic server-selected bead claiming.
     let store: Arc<dyn crate::bead_store::BeadStore> =
         Arc::new(init_step("bead_store_discover", &telemetry, || {
-            BrCliBeadStore::discover(config.workspace.default.clone())
-                .context("failed to locate br CLI for bead store")
+            crate::bead_store::BfCliBeadStore::discover(
+                config.workspace.default.clone(),
+                Some("claude-opus-4-7".to_string()), // model
+                Some("needle".to_string()),          // harness
+                Some(env!("CARGO_PKG_VERSION").to_string()), // harness_version
+            )
+            .context("failed to locate bf CLI for bead store")
         })?);
 
     // Phase 2: worker construction (heavy — prompt loading, adapter discovery, etc.).

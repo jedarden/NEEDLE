@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::transcript::{ParsedTranscript, TranscriptAction, ActionType};
+use crate::transcript::{ActionType, ParsedTranscript, TranscriptAction};
 use crate::types::BeadId;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -80,7 +80,10 @@ impl DecisionPoint {
         if let Some(ref bead) = self.bead_id {
             md.push_str(&format!("**Bead:** {}\n", bead));
         }
-        md.push_str(&format!("**Date:** {}\n\n", self.timestamp.format("%Y-%m-%d")));
+        md.push_str(&format!(
+            "**Date:** {}\n\n",
+            self.timestamp.format("%Y-%m-%d")
+        ));
 
         md.push_str("## Context\n\n");
         md.push_str(&self.context);
@@ -187,7 +190,10 @@ impl DecisionDetector {
     }
 
     /// Detect decision points within a single transcript.
-    fn detect_decisions_in_transcript(&self, transcript: &ParsedTranscript) -> Result<Vec<DecisionPoint>> {
+    fn detect_decisions_in_transcript(
+        &self,
+        transcript: &ParsedTranscript,
+    ) -> Result<Vec<DecisionPoint>> {
         let mut decisions = Vec::new();
         let actions = &transcript.actions;
 
@@ -263,8 +269,8 @@ impl DecisionDetector {
         }
 
         // Success indicates recovery worked
-        let is_success = success.action_type == ActionType::Text
-            || success.action_type == ActionType::ToolUse;
+        let is_success =
+            success.action_type == ActionType::Text || success.action_type == ActionType::ToolUse;
 
         if !is_success {
             return Ok(None);
@@ -290,10 +296,7 @@ impl DecisionDetector {
                 format!("Switch to {}", recovery_tool),
             ],
             decision: format!("Use {} to handle the task", recovery_tool),
-            rationale: format!(
-                "{} failed, {} succeeded",
-                attempt_tool, recovery_tool
-            ),
+            rationale: format!("{} failed, {} succeeded", attempt_tool, recovery_tool),
             outcome: format!("{} completed the task successfully", recovery_tool),
             succeeded: true,
         }))
@@ -336,7 +339,9 @@ impl DecisionDetector {
         let decision_action = actions.get(idx + 1);
         let decision = if let Some(action) = decision_action {
             match action.action_type {
-                ActionType::ToolUse => action.tool_name.as_deref()
+                ActionType::ToolUse => action
+                    .tool_name
+                    .as_deref()
                     .map(|t| format!("Use {}", t))
                     .unwrap_or_else(|| "Take action".to_string()),
                 ActionType::Text => "Respond to user".to_string(),
@@ -409,9 +414,7 @@ impl DecisionDetector {
             session_id: transcript.session_id.clone(),
             timestamp: transcript.modified_at,
             title: format!("Edit {} over {}", chosen_file, first_file),
-            context: format!(
-                "Explored multiple files before choosing where to make changes"
-            ),
+            context: format!("Explored multiple files before choosing where to make changes"),
             alternatives: vec![
                 format!("Edit {}", first_file),
                 format!("Edit {}", second_file),
@@ -482,8 +485,12 @@ impl AdrStore {
 
     /// Ensure the decisions directory exists.
     fn ensure_dir(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.decisions_dir)
-            .with_context(|| format!("failed to create decisions directory: {}", self.decisions_dir.display()))?;
+        std::fs::create_dir_all(&self.decisions_dir).with_context(|| {
+            format!(
+                "failed to create decisions directory: {}",
+                self.decisions_dir.display()
+            )
+        })?;
         Ok(())
     }
 
@@ -522,9 +529,12 @@ impl AdrStore {
         }
 
         let mut adrs = Vec::new();
-        for entry in std::fs::read_dir(&self.decisions_dir)
-            .with_context(|| format!("failed to read decisions directory: {}", self.decisions_dir.display()))?
-        {
+        for entry in std::fs::read_dir(&self.decisions_dir).with_context(|| {
+            format!(
+                "failed to read decisions directory: {}",
+                self.decisions_dir.display()
+            )
+        })? {
             let entry = entry?;
             let path = entry.path();
             if path.extension().and_then(|s| s.to_str()) == Some("md") {
@@ -547,7 +557,7 @@ impl AdrStore {
     /// Parse ADR markdown back into a DecisionPoint.
     fn parse_adr(&self, content: &str, id: &str) -> Result<DecisionPoint> {
         // Simple parsing - extract sections
-        let mut title = String::new();
+        let title = String::new();
         let mut context = String::new();
         let mut alternatives = Vec::new();
         let mut decision = String::new();
@@ -644,7 +654,11 @@ mod tests {
     use super::*;
     use crate::transcript::{ActionType, TranscriptAction};
 
-    fn make_action(action_type: ActionType, tool_name: Option<&str>, desc: &str) -> TranscriptAction {
+    fn make_action(
+        action_type: ActionType,
+        tool_name: Option<&str>,
+        desc: &str,
+    ) -> TranscriptAction {
         TranscriptAction {
             action_type,
             tool_name: tool_name.map(|s| s.to_string()),
@@ -781,7 +795,10 @@ mod tests {
     #[test]
     fn extract_file_path_from_description() {
         let detector = DecisionDetector::new();
-        assert_eq!(detector.extract_file_path("Read: /home/coding/file.rs"), "file.rs");
+        assert_eq!(
+            detector.extract_file_path("Read: /home/coding/file.rs"),
+            "file.rs"
+        );
         assert_eq!(detector.extract_file_path("Edit: src/main.rs"), "main.rs");
         assert_eq!(detector.extract_file_path("Write: file.txt"), "file.txt");
     }
