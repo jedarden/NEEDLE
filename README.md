@@ -2,11 +2,47 @@
 
 # 🧵 NEEDLE
 
+[![CI](https://github.com/jedarden/NEEDLE/actions/workflows/ci.yml/badge.svg)](https://github.com/jedarden/NEEDLE/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](rust-toolchain.toml)
+[![Version](https://img.shields.io/badge/version-0.2.0-green.svg)](Cargo.toml)
+
 **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
 > Deterministic bead processing with explicit outcome paths.
 
 NEEDLE is a universal wrapper for headless coding CLI agents. It processes a shared bead queue in deterministic order, dispatching work to any headless CLI (Claude Code, OpenCode, Codex, Aider) and handling every outcome through an explicit, predefined path.
+
+---
+
+## 🚀 Quickstart
+
+```bash
+# Install the latest release
+curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
+
+# Or build from source
+cargo install --git https://github.com/jedarden/NEEDLE
+
+# Run a worker against a bead-tracked workspace
+cd /path/to/your/workspace
+needle run --agent claude --identity alpha
+```
+
+A worker starts, claims the next bead, dispatches to your chosen agent CLI, and loops. Multiple workers can run in parallel against the same workspace — coordination is handled by the shared bead queue (no central orchestrator).
+
+See [`docs/examples/`](docs/examples/) for end-to-end configurations.
+
+---
+
+## 🤔 Why NEEDLE
+
+Existing agent orchestration tools are built for one of two shapes:
+
+- **Conversational frameworks** (LangGraph, AutoGen, CrewAI) assume a chat loop with a human-in-the-loop or another LLM. They are bad at headless, long-running, cost-bounded work.
+- **Workflow engines** (Temporal, Argo Workflows, Inngest) assume each step is deterministic code. They are bad at non-deterministic agent steps whose outcomes have to be classified and routed.
+
+NEEDLE is the missing middle: a **deterministic state machine that drives non-deterministic agents.** Every outcome an agent can produce has an explicit handler. The agent's work is fuzzy; the orchestration around it is not.
 
 ---
 
@@ -161,12 +197,36 @@ Adding a new agent requires **only a YAML configuration file** — no code chang
 
 ```
 NEEDLE/
-├── README.md
-├── plan/
-│   └── plan.md                     # Complete implementation plan
-└── docs/
-    ├── research/                   # Beads ecosystem research (14 files)
-    └── notes/                      # NEEDLE v1 post-mortem learnings (9 files)
+├── Cargo.toml             # Rust crate manifest
+├── install.sh             # One-line installer for prebuilt binaries
+├── src/
+│   ├── main.rs            # Worker entry point
+│   ├── lib.rs             # Library root
+│   ├── claim/             # Atomic bead claiming via SQLite transactions
+│   ├── dispatch/          # Agent invocation + YAML adapter loading
+│   ├── outcome/           # Explicit handler per outcome type
+│   ├── strand/            # Pluck / Explore / Mend / Weave / Knot logic
+│   ├── decision/          # Outcome classification from agent exit + output
+│   ├── peer/              # Multi-worker coordination, peer discovery
+│   ├── mitosis/           # Worker spawn / lifecycle / supervised respawn
+│   ├── health/            # Liveness, stale-claim cleanup, watchdog
+│   ├── learning/          # Per-agent performance tracking and weighting
+│   ├── telemetry/         # OTLP exporter, gen_ai semantic conventions
+│   ├── trace/             # Span construction for state transitions
+│   ├── cost/              # Token + USD spend tracking per bead and worker
+│   ├── rate_limit/        # Quota enforcement, backoff, weekly limit gates
+│   ├── prompt/            # Deterministic prompt construction from bead
+│   ├── registry/          # Agent adapter registry (YAML-loaded)
+│   ├── sanitize/          # Output redaction and prompt-injection guards
+│   ├── validation/        # Pre-dispatch and post-execution checks
+│   ├── worker/            # Worker session and identity management
+│   ├── config/            # `.needle.yaml` parsing and defaults
+│   └── bin/               # Auxiliary binaries (transform helpers)
+├── tests/                 # Integration tests
+├── ci/                    # Docker images used by GitHub Actions
+├── .github/workflows/     # CI + release pipelines
+├── config/                # Default agent adapters
+└── docs/                  # Plan, research, examples, post-mortems
 ```
 
 ---
@@ -200,6 +260,25 @@ telemetry:
 **Semantic conventions:** NEEDLE follows OpenTelemetry's `gen_ai.*` semantic conventions for LLM telemetry, enabling out-of-the-box integration with GenAI dashboards (Grafana GenAI app, Langfuse, Honeycomb AI, etc.).
 
 See [`docs/plan/plan.md`](docs/plan/plan.md) for the complete semantic mapping table.
+
+---
+
+## 📊 Production Status
+
+NEEDLE currently powers my own headless multi-agent workflow — workers run continuously against shared bead queues, dispatching to Claude Code and other CLIs, with full OTLP telemetry wired through. APIs are stable enough that I rebuild on top of them daily.
+
+This is alpha software in the sense that **I'm the primary user**, not in the sense that "it doesn't work." Resource governance is delegated to [claude-governor](https://github.com/jedarden/claude-governor); session monitoring is handled by [ccdash](https://github.com/jedarden/ccdash).
+
+If you want to run NEEDLE in your own workflow, open an issue and I'll help.
+
+---
+
+## 🔗 Related Projects
+
+- **[claude-governor](https://github.com/jedarden/claude-governor)** — caps API spend and enforces weekly Anthropic quotas across NEEDLE worker fleets
+- **[ccdash](https://github.com/jedarden/ccdash)** — TUI for monitoring Claude Code sessions, token usage, and worker activity
+- **[CLASP](https://github.com/jedarden/CLASP)** — drop-in proxy letting Claude Code target OpenAI, Gemini, Anthropic, or any LLM backend
+- **[agentists-quickstart](https://github.com/jedarden/agentists-quickstart)** — opinionated DevPod workspaces for running Claude Code + NEEDLE
 
 ---
 
