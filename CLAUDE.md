@@ -47,6 +47,50 @@ Leaf modules (no internal deps): `types`, `config`, `telemetry`, `bead_store`, `
 - Do not use `tokio_test::block_on` — use `#[tokio::test]`.
 - Test the public interface, not internals.
 
+**Do not run `cargo test` locally.** Tests run on iad-ci automatically when you push to `main`. A GitHub webhook triggers the `needle-ci` WorkflowTemplate on iad-ci.
+
+After pushing, poll for the triggered workflow and wait for it to complete:
+
+```bash
+# Record push time, then poll for the triggered workflow
+PUSH_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+git push origin main
+
+# Wait up to 2 min for the workflow to appear, then poll until done
+WF=""
+for i in $(seq 24); do
+  sleep 5
+  WF=$(kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
+    get workflows -n argo-workflows \
+    --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.creationTimestamp}{"\n"}{end}' \
+    2>/dev/null | awk -v t="$PUSH_TIME" '$2 >= t && /^needle-ci-/ {print $1}' | tail -1)
+  [[ -n "$WF" ]] && break
+done
+echo "Workflow: $WF"
+
+# Poll until complete
+for i in $(seq 60); do
+  PHASE=$(kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
+    get workflow "$WF" -n argo-workflows -o jsonpath='{.status.phase}' 2>/dev/null)
+  echo "[$i] $WF phase=$PHASE"
+  if [[ "$PHASE" == "Succeeded" || "$PHASE" == "Failed" || "$PHASE" == "Error" ]]; then break; fi
+  sleep 30
+done
+
+# On failure, stream the pod log (pods are deleted on completion — act fast)
+if [[ "$PHASE" != "Succeeded" ]]; then
+  POD=$(kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
+    get pods -n argo-workflows -l workflows.argoproj.io/workflow="$WF" \
+    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+  kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
+    logs -n argo-workflows "$POD" -c main 2>/dev/null \
+    || echo "Pod already deleted — check Argo UI at https://argo-ci.ardenone.com (logs kept 2h on failure)"
+fi
+```
+
+If CI fails, add the log output as a note to the bead and do **not** close it. Fix the issue and push again.
+
 ## Commit Convention
 
 ```
