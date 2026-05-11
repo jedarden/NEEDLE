@@ -348,6 +348,15 @@ pub struct BrDependency {
 // Bead struct
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Serde helper: treats an empty JSON string as `None`.
+fn empty_string_as_none<'de, D>(d: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = Option::<String>::deserialize(d)?;
+    Ok(s.filter(|s| !s.is_empty()))
+}
+
 /// A bead as returned from the bead store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bead {
@@ -358,6 +367,8 @@ pub struct Bead {
     pub body: Option<String>,
     pub priority: Priority,
     pub status: BeadStatus,
+    /// br emits `""` for unassigned beads; normalize to `None`.
+    #[serde(default, deserialize_with = "empty_string_as_none")]
     pub assignee: Option<String>,
     /// br may omit this field when empty.
     #[serde(default)]
@@ -370,6 +381,8 @@ pub struct Bead {
     #[serde(default)]
     pub dependents: Vec<BrDependency>,
     pub created_at: DateTime<Utc>,
+    // br ready --json omits updated_at; default to now so explore can deserialize it
+    #[serde(default = "chrono::Utc::now")]
     pub updated_at: DateTime<Utc>,
 }
 
