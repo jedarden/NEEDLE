@@ -505,16 +505,15 @@ impl BrCliBeadStore {
         let timeout_duration = std::time::Duration::from_secs(30);
 
         // Try to find bf on PATH or at the default install location
-        let bf_path = which::which("bf")
-            .or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_default();
-                let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
-                if candidate.exists() {
-                    Ok(candidate)
-                } else {
-                    Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
-                }
-            });
+        let bf_path = which::which("bf").or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
+            if candidate.exists() {
+                Ok(candidate)
+            } else {
+                Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
+            }
+        });
 
         let bf_path = match bf_path {
             Ok(p) => p,
@@ -554,7 +553,12 @@ impl BrCliBeadStore {
 
         if !output.status.success() {
             let code = output.status.code().unwrap_or(-1);
-            bail!("bf {:?} exited with code {}\nstderr: {}", args, code, stderr);
+            bail!(
+                "bf {:?} exited with code {}\nstderr: {}",
+                args,
+                code,
+                stderr
+            );
         }
 
         Ok(stdout)
@@ -820,7 +824,9 @@ impl BeadStore for BrCliBeadStore {
 
                 if let Some(bead_id) = response.bead_id {
                     // Fetch the full bead details
-                    self.show(&BeadId::from(bead_id)).await.map(ClaimResult::Claimed)
+                    self.show(&BeadId::from(bead_id))
+                        .await
+                        .map(ClaimResult::Claimed)
                 } else {
                     Ok(ClaimResult::NotClaimable {
                         reason: "no beads available".to_string(),

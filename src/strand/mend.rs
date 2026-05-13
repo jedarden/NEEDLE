@@ -1276,67 +1276,69 @@ impl super::Strand for MendStrand {
             return StrandResult::Error(StrandError::StoreError(e));
         }
 
-        // Step 1.5: Orphaned in-progress bead recovery (registry-based).
-        if let Err(e) = self.cleanup_orphaned_in_progress(store, &mut summary).await {
-            tracing::warn!(error = %e, "mend: orphaned in-progress cleanup failed");
-            // Non-fatal — continue with remaining steps.
-        }
-
-        // Step 1.75: Orphaned heartbeat file removal.
-        if let Err(e) = self.cleanup_orphaned_heartbeats(&mut summary) {
-            tracing::warn!(error = %e, "mend: orphaned heartbeat cleanup failed");
-            // Non-fatal — continue with remaining steps.
-        }
-
-        // Step 2: Orphaned lock file removal.
-        if let Err(e) = self.cleanup_orphaned_locks(&mut summary) {
-            tracing::warn!(error = %e, "mend: orphaned lock cleanup failed");
-            return StrandResult::Error(StrandError::StoreError(e));
-        }
-
-        // Step 3: Dependency link repair.
-        if let Err(e) = self.cleanup_stale_dependencies(store, &mut summary).await {
-            tracing::warn!(error = %e, "mend: dependency cleanup failed");
-            return StrandResult::Error(StrandError::StoreError(e));
-        }
-
-        // Step 3.5: Dead worker registry cleanup.
-        if let Err(e) = self.cleanup_dead_workers(&mut summary) {
-            tracing::warn!(error = %e, "mend: dead worker cleanup failed");
-            // Non-fatal — continue with remaining steps.
-        }
-
-        // Step 4: Agent log file cleanup.
+        // Step 1.5: Agent log file cleanup.
+        // Must run BEFORE orphaned in-progress cleanup so that logs for in-progress
+        // beads are preserved (they're still InProgress when we check).
         if let Err(e) = self.cleanup_old_agent_logs(store, &mut summary).await {
             tracing::warn!(error = %e, "mend: agent log cleanup failed");
             // Non-fatal — continue with remaining steps.
         }
 
-        // Step 4.5: Trace retention cleanup.
+        // Step 2: Orphaned in-progress bead recovery (registry-based).
+        if let Err(e) = self.cleanup_orphaned_in_progress(store, &mut summary).await {
+            tracing::warn!(error = %e, "mend: orphaned in-progress cleanup failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
+        // Step 2.5: Orphaned heartbeat file removal.
+        if let Err(e) = self.cleanup_orphaned_heartbeats(&mut summary) {
+            tracing::warn!(error = %e, "mend: orphaned heartbeat cleanup failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
+        // Step 3: Orphaned lock file removal.
+        if let Err(e) = self.cleanup_orphaned_locks(&mut summary) {
+            tracing::warn!(error = %e, "mend: orphaned lock cleanup failed");
+            return StrandResult::Error(StrandError::StoreError(e));
+        }
+
+        // Step 4: Dependency link repair.
+        if let Err(e) = self.cleanup_stale_dependencies(store, &mut summary).await {
+            tracing::warn!(error = %e, "mend: dependency cleanup failed");
+            return StrandResult::Error(StrandError::StoreError(e));
+        }
+
+        // Step 4.5: Dead worker registry cleanup.
+        if let Err(e) = self.cleanup_dead_workers(&mut summary) {
+            tracing::warn!(error = %e, "mend: dead worker cleanup failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
+        // Step 5: Trace retention cleanup.
         if let Err(e) = self.cleanup_old_traces(&mut summary) {
             tracing::warn!(error = %e, "mend: trace cleanup failed");
             // Non-fatal — continue with remaining steps.
         }
 
-        // Step 4.75: Learning consolidation.
+        // Step 5.5: Learning consolidation.
         if let Err(e) = self.cleanup_learnings(&mut summary) {
             tracing::warn!(error = %e, "mend: learning cleanup failed");
             // Non-fatal — continue with remaining steps.
         }
 
-        // Step 4.8: Idle worker flagging.
+        // Step 5.75: Idle worker flagging.
         if let Err(e) = self.flag_idle_workers(&mut summary) {
             tracing::warn!(error = %e, "mend: idle worker flagging failed");
             // Non-fatal — continue with remaining steps.
         }
 
-        // Step 4.9: Rate limiter state cleanup.
+        // Step 5.875: Rate limiter state cleanup.
         if let Err(e) = self.cleanup_rate_limit_state(&mut summary) {
             tracing::warn!(error = %e, "mend: rate limit state cleanup failed");
             // Non-fatal — continue with remaining steps.
         }
 
-        // Step 5: Database health check.
+        // Step 6: Database health check.
         if let Err(e) = self.check_db_health(store, &mut summary).await {
             tracing::warn!(error = %e, "mend: database health check failed");
             // DB check failure is non-fatal — continue with the summary.
@@ -1428,12 +1430,12 @@ mod tests {
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     // ── Mock bead store ─────────────────────────────────────────────────────
 
     struct MockBeadStore {
-        all_beads: Vec<Bead>,
+        all_beads: Mutex<Vec<Bead>>,
         release_count: Arc<AtomicU32>,
         /// Warnings returned by doctor_check (probe-only).
         check_warnings: Vec<String>,
@@ -1448,7 +1450,7 @@ mod tests {
             let release_count = Arc::new(AtomicU32::new(0));
             (
                 MockBeadStore {
-                    all_beads: beads,
+                    all_beads: Mutex::new(beads),
                     release_count: release_count.clone(),
                     check_warnings: vec![],
                     repair_report: Some(RepairReport::default()),
@@ -1488,7 +1490,7 @@ mod tests {
             Ok(vec![])
         }
         async fn list_all(&self) -> Result<Vec<Bead>> {
-            Ok(self.all_beads.clone())
+            Ok(self.all_beads.lock().unwrap().clone())
         }
         async fn show(&self, _id: &BeadId) -> Result<Bead> {
             anyhow::bail!("not implemented in mock")
@@ -1502,11 +1504,15 @@ mod tests {
         }
 
         async fn release(&self, id: &BeadId) -> Result<()> {
-            // Only return Ok if the bead exists in all_beads.
-            // This matches real bead store behavior where releasing a
-            // non-existent bead returns an error.
-            if self.all_beads.iter().any(|b| &b.id == id) {
-                self.release_count.fetch_add(1, Ordering::Relaxed);
+            // Find and update the bead's status, simulating real bead store behavior.
+            let mut beads = self.all_beads.lock().unwrap();
+            if let Some(bead) = beads.iter_mut().find(|b| &b.id == id) {
+                // Only count releases for InProgress beads (real behavior).
+                if bead.status == BeadStatus::InProgress {
+                    bead.status = BeadStatus::Open;
+                    bead.assignee = None;
+                    self.release_count.fetch_add(1, Ordering::Relaxed);
+                }
                 Ok(())
             } else {
                 anyhow::bail!("bead not found: {}", id)
@@ -1758,7 +1764,9 @@ mod tests {
             &make_stale_heartbeat("dead-worker", 99_999_999, Some("nd-orphan")),
         );
 
-        let (store, release_count) = MockBeadStore::new(vec![]);
+        // Create an in-progress bead assigned to the dead worker.
+        let bead = make_in_progress_bead("nd-orphan", "dead-worker");
+        let (store, release_count) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -2186,12 +2194,10 @@ mod tests {
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
-        // NOTE: Dependency detection alone does NOT return WorkCreated because we don't
-        // actually remove the dependency links. The cleanup_stale_dependencies method
-        // only detects and reports stale dependencies—it has no way to remove them.
+        // Stale dependency links are removed, which creates work.
         assert!(
-            matches!(result, StrandResult::NoWork),
-            "expected NoWork when finding stale dependencies (not actually removed), got: {result:?}"
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated when removing stale dependencies, got: {result:?}"
         );
     }
 
@@ -2319,14 +2325,17 @@ mod tests {
             &make_stale_heartbeat("dead-worker", 99_999_999, Some("nd-orphan")),
         );
 
+        // In-progress bead assigned to dead worker (for peer cleanup).
+        let orphan_bead = make_in_progress_bead("nd-orphan", "dead-worker");
+
         // Stale dependency link.
-        let bead = make_bead_with_deps(
+        let blocked_bead = make_bead_with_deps(
             "blocked-bead",
             BeadStatus::Open,
             vec![make_dep("done-blocker", "closed", "blocks")],
         );
 
-        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let (store, release_count) = MockBeadStore::new(vec![orphan_bead, blocked_bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -3945,6 +3954,9 @@ mod tests {
         // Verify the idle worker was flagged.
         assert_eq!(summary.idle_workers_flagged, 1);
 
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
         // Verify the MendIdleWorkerFlagged telemetry event was emitted.
         let captured_events = events.lock().unwrap();
         let idle_worker_events: Vec<_> = captured_events
@@ -4625,6 +4637,21 @@ mod tests {
         dir_perms.set_readonly(true);
         std::fs::set_permissions(lock_dir.path(), dir_perms).unwrap();
 
+        // Verify the directory is actually unwritable. When running as root
+        // (e.g., in CI containers), set_readonly(true) doesn't block writes and
+        // the removal would succeed, making the assertion below wrong.
+        let probe = lock_dir.path().join(".write-probe");
+        let unwritable = std::fs::write(&probe, b"x").is_err();
+        let _ = std::fs::remove_file(&probe);
+        if !unwritable {
+            // Root bypasses permission checks — skip this test.
+            use std::os::unix::fs::PermissionsExt;
+            let mut dir_perms = std::fs::metadata(lock_dir.path()).unwrap().permissions();
+            dir_perms.set_mode(0o755);
+            std::fs::set_permissions(lock_dir.path(), dir_perms).unwrap();
+            return;
+        }
+
         let mut summary = MendSummary::default();
         mend.cleanup_orphaned_locks(&mut summary).unwrap();
 
@@ -4632,8 +4659,9 @@ mod tests {
         assert_eq!(summary.locks_removed, 0);
 
         // Restore directory permissions before waiting/cleanup.
+        use std::os::unix::fs::PermissionsExt;
         let mut dir_perms = std::fs::metadata(lock_dir.path()).unwrap().permissions();
-        dir_perms.set_readonly(false);
+        dir_perms.set_mode(0o755);
         std::fs::set_permissions(lock_dir.path(), dir_perms).unwrap();
 
         // Wait for background task to process telemetry events.
@@ -4971,7 +4999,7 @@ mod tests {
         registry
             .register(crate::registry::WorkerEntry {
                 id: "stuck-worker".to_string(),
-                pid: 12345,
+                pid: std::process::id(),
                 workspace: PathBuf::from("/tmp/test"),
                 agent: "claude".to_string(),
                 model: None,
@@ -5119,7 +5147,7 @@ mod tests {
         for i in 0..3 {
             let entry = crate::registry::WorkerEntry {
                 id: format!("idle-worker-{}", i),
-                pid: 12340 + i as u32,
+                pid: std::process::id(),
                 workspace: PathBuf::from("/tmp/test"),
                 agent: "claude".to_string(),
                 model: None,
@@ -5846,12 +5874,15 @@ mod tests {
         // Register a worker with 0 beads processed, started 90 seconds ago
         // (exceeds default 60 second idle_timeout).
         let started_at = Utc::now() - chrono::Duration::seconds(90);
-        let worker = make_worker_entry("claude-idle", 12345, started_at, 0);
+        let worker_pid = std::process::id();
+        let worker = make_worker_entry("claude-idle", worker_pid, started_at, 0);
         registry.register(worker).unwrap();
 
         let state_dir = tempfile::tempdir().unwrap();
-        let mut config = MendConfig::default();
-        config.idle_timeout = 60; // 60 seconds
+        let config = MendConfig {
+            idle_timeout: 60,
+            ..Default::default()
+        };
 
         let mend = MendStrand::new(
             config,
@@ -5888,7 +5919,7 @@ mod tests {
             .expect("MendIdleWorkerFlagged event should be emitted");
 
         assert_eq!(idle_event.data["worker_id"], "claude-idle");
-        assert_eq!(idle_event.data["pid"], 12345);
+        assert_eq!(idle_event.data["pid"], worker_pid);
         assert!(idle_event.data["age_secs"].as_u64().unwrap() >= 85); // Allow some timing tolerance
     }
 }
