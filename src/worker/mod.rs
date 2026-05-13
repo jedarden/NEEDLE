@@ -3139,10 +3139,16 @@ mod tests {
     #[tokio::test]
     async fn do_select_with_no_beads_transitions_to_exhausted() {
         let store = Arc::new(MockStore::empty());
-        let mut worker = make_worker(store);
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+        // Disable Explore strand so it doesn't find beads from the filesystem
+        config.strands.explore.enabled = false;
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
         worker.boot().unwrap();
 
         worker.do_select().await.unwrap();
+        // When claim_auto fails and strand waterfall finds no candidates,
+        // we transition to Exhausted.
         assert_eq!(*worker.state(), WorkerState::Exhausted);
     }
 
@@ -3169,7 +3175,9 @@ mod tests {
         worker.boot().unwrap();
 
         worker.do_select().await.unwrap();
-        assert_eq!(*worker.state(), WorkerState::Claiming);
+        // With claim_auto, successful claim transitions directly to Building
+        // (skips Claiming state which was used in the old two-phase select/claim flow)
+        assert_eq!(*worker.state(), WorkerState::Building);
         assert!(worker.current_bead.is_some());
     }
 
@@ -3484,9 +3492,10 @@ mod tests {
         worker.do_retry().await.unwrap();
         let elapsed = before.elapsed();
 
-        // Backoff for consecutive_race_lost=2 is 1 << 1 = 2 seconds.
-        // We just verify it slept (at least 1s) and transitioned to Selecting.
-        assert!(elapsed >= std::time::Duration::from_secs(1));
+        // Backoff formula: 100 * (1 << (consecutive_race_lost - 1)) ms
+        // For consecutive_race_lost=2: 100 * (1 << 1) = 200ms
+        // Verify it slept (at least 100ms) and transitioned to Selecting.
+        assert!(elapsed >= std::time::Duration::from_millis(100));
         assert_eq!(*worker.state(), WorkerState::Selecting);
     }
 
@@ -3969,7 +3978,11 @@ mod tests {
     #[tokio::test]
     async fn do_select_clears_race_lost_this_cycle_and_retry_count() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut worker = make_worker(store);
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+        // Disable Explore strand so it doesn't find beads from the filesystem
+        config.strands.explore.enabled = false;
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
         worker.boot().unwrap();
         worker.race_lost_this_cycle.insert(BeadId::from("old-bead"));
         worker.retry_count = 3;
@@ -3977,7 +3990,9 @@ mod tests {
         worker.do_select().await.unwrap();
 
         assert!(worker.race_lost_this_cycle.is_empty());
-        assert_eq!(worker.retry_count, 0);
+        // retry_count is NOT cleared by do_select() anymore — it must accumulate
+        // across cycles to prevent infinite race-lost loops (see needle-aad8).
+        assert_eq!(worker.retry_count, 3);
         // Note: exclusion_set is NOT cleared by do_select() anymore - it persists
         // for race-lost beads until they expire or the worker transitions to Exhausted
     }

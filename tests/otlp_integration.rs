@@ -970,16 +970,17 @@ async fn otlp_integration_drop_path() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let workspace_home = temp_dir.path();
 
-    // Create a file sink for drop events (OTLP failures are logged here)
+    // Create a file sink for all events (including drop events from OtlpSink)
     let file_sink =
         needle::telemetry::FileSink::with_dir(workspace_home, "test-worker", "drop-test")?;
 
     // Create OTLP config pointing to a non-existent endpoint
+    // Use HTTP/protobuf instead of gRPC for more reliable connection failure detection
     let otlp_config = needle::config::OtlpSinkConfig {
         enabled: true,
         endpoint: "http://localhost:9999".to_string(), // Non-existent endpoint
-        protocol: "grpc".to_string(),
-        timeout_secs: 1, // Short timeout for faster test
+        protocol: "http".to_string(),                  // Use HTTP instead of gRPC
+        timeout_secs: 1,                               // Short timeout for faster test
         compression: "none".to_string(),
         tls: "none".to_string(),
         headers: vec![],
@@ -990,12 +991,15 @@ async fn otlp_integration_drop_path() -> Result<()> {
     };
 
     // Create an OTLP telemetry sink pointing to a non-existent endpoint.
+    // We pass a separate file sink to OtlpSink for drop events only.
+    let drop_file_sink =
+        needle::telemetry::FileSink::with_dir(workspace_home, "test-worker", "otlp-drops")?;
     let otlp_sink = Arc::new(
         needle::telemetry::OtlpSink::new(
             "test-worker".to_string(),
             "drop-test".to_string(),
             &otlp_config,
-            Some(Box::new(file_sink)),
+            Some(Box::new(drop_file_sink)),
             None, // agent
             None, // model
             workspace_home.to_str(),
@@ -1003,14 +1007,22 @@ async fn otlp_integration_drop_path() -> Result<()> {
         .context("failed to create OTLP sink")?,
     );
 
-    let telemetry = Telemetry::with_sink("test-worker".to_string(), otlp_sink.clone());
+    // Use both sinks: file sink for all events, OTLP sink for export attempts
+    let telemetry = Telemetry::with_boxed_sinks(
+        "test-worker".to_string(),
+        vec![
+            Box::new(file_sink) as Box<dyn needle::telemetry::Sink>,
+            Box::new(otlp_sink) as Box<dyn needle::telemetry::Sink>,
+        ],
+    );
 
     // Start the telemetry writer
     telemetry.start();
 
     // Emit many telemetry events to trigger batch export attempts
     // We need to trigger enough exports to cause 3+ consecutive failures
-    for i in 0..100 {
+    // Increased from 100 to 300 to ensure batch processor flushes multiple times
+    for i in 0..300 {
         telemetry
             .emit(needle::telemetry::EventKind::WorkerStarted {
                 worker_name: format!("test-worker-{}", i),
@@ -1020,16 +1032,32 @@ async fn otlp_integration_drop_path() -> Result<()> {
     }
 
     // Give time for export failures to be detected and drop events emitted.
-    // The batch processor flushes periodically, and we need 3+ consecutive failures.
-    // With a short timeout and many events, failures should be detected quickly.
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    // The batch processor flushes periodically (default 5s), and we need 3+ consecutive failures.
+    // Increased from 10s to 30s to ensure multiple batch flushes and consecutive failures.
+    tokio::time::sleep(Duration::from_secs(30)).await;
 
     // Trigger shutdown to force flush
     telemetry.shutdown().await;
     drop(telemetry);
 
-    // Additional wait for async tasks to complete
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Additional wait for async tasks to complete and file sink to flush
+    // The file sink writes synchronously but we need to ensure all async tasks complete
+    // Increased from 2s to 5s to give drop_monitor_task time to process
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Debug: List files in the workspace directory to see what was created
+    let entries: Vec<_> = std::fs::read_dir(workspace_home)?
+        .filter_map(|e| e.ok())
+        .flat_map(|e| {
+            let metadata = e.metadata().ok();
+            Some((e.path(), metadata?.len()))
+        })
+        .collect();
+
+    eprintln!("Files in workspace_home:");
+    for (path, len) in &entries {
+        eprintln!("  {} ({} bytes)", path.display(), len);
+    }
 
     // Assert: The file sink (used for drop events) contains `telemetry.otlp.dropped`.
     let drops_path = workspace_home.join("test-worker-drop-test.jsonl");

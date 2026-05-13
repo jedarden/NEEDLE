@@ -491,19 +491,13 @@ impl DriftCluster {
         // Main drift observation entry
         let main_observation = match self.category {
             DriftCategory::Evolved => {
-                format!(
-                    "Drift detected: Worker approach evolved across sessions. Sessions handling similar tasks progressed from early to later approaches, indicating learning and improvement over time."
-                )
+                "Drift detected: Worker approach evolved across sessions. Sessions handling similar tasks progressed from early to later approaches, indicating learning and improvement over time.".to_string()
             }
             DriftCategory::Inconsistent => {
-                format!(
-                    "Drift detected: Inconsistent approaches across similar sessions. Workers used different tools, file patterns, or action sequences for similar task types without clear temporal progression — may indicate need for standardization."
-                )
+                "Drift detected: Inconsistent approaches across similar sessions. Workers used different tools, file patterns, or action sequences for similar task types without clear temporal progression — may indicate need for standardization.".to_string()
             }
             DriftCategory::Unknown => {
-                format!(
-                    "Drift detected: Divergent approaches across similar sessions. Sessions with similar task keywords and file patterns showed different tool usage or action sequences."
-                )
+                "Drift detected: Divergent approaches across similar sessions. Sessions with similar task keywords and file patterns showed different tool usage or action sequences.".to_string()
             }
         };
 
@@ -603,15 +597,21 @@ pub struct DriftReport {
     pub clusters: Vec<DriftCluster>,
 }
 
-impl DriftReport {
-    /// Create a new drift report.
-    pub fn new() -> Self {
-        DriftReport {
+impl Default for DriftReport {
+    fn default() -> Self {
+        Self {
             generated_at: Utc::now(),
             sessions_analyzed: 0,
             clusters_detected: 0,
             clusters: Vec::new(),
         }
+    }
+}
+
+impl DriftReport {
+    /// Create a new drift report.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Add a cluster to the report.
@@ -795,6 +795,7 @@ mod tests {
             modified_at: Utc::now(),
             task_description: Some(task.to_string()),
             actions,
+            action_outcomes: vec![],
             bead_id: None,
         }
     }

@@ -22,7 +22,6 @@
 //! 4. Parse each JSONL file to extract structured events
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -45,6 +44,13 @@ enum TranscriptEntry {
     /// Assistant response (text, tool calls).
     #[serde(rename = "assistant")]
     Assistant { message: AssistantMessage },
+    /// Tool result (outcome of a tool_use).
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: Option<bool>,
+    },
     /// Attachment (deferred tools, companion intro).
     #[serde(rename = "attachment")]
     Attachment { attachment: Attachment },
@@ -104,6 +110,7 @@ struct Attachment {
 /// Stream event (content block updates).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
+#[allow(clippy::enum_variant_names)]
 enum StreamEvent {
     #[serde(rename = "content_block_start")]
     ContentBlockStart {
@@ -141,6 +148,8 @@ pub struct ParsedTranscript {
     pub task_description: Option<String>,
     /// Assistant actions extracted from the transcript.
     pub actions: Vec<TranscriptAction>,
+    /// Action-outcome pairs (tool_use → tool_result sequences).
+    pub action_outcomes: Vec<ActionOutcome>,
     /// Bead ID if referenced in the task context.
     pub bead_id: Option<BeadId>,
 }
@@ -154,6 +163,113 @@ pub struct TranscriptAction {
     pub tool_name: Option<String>,
     /// Action description (text output or tool input summary).
     pub description: String,
+}
+
+/// An action-outcome pair extracted from a transcript.
+///
+/// Represents a tool_use action and its corresponding tool_result,
+/// capturing the full cause-effect relationship.
+#[derive(Debug, Clone)]
+pub struct ActionOutcome {
+    /// Tool name (e.g., "Read", "Bash", "Grep").
+    pub tool_name: String,
+    /// Tool input (file path, command, pattern, etc.).
+    pub input: String,
+    /// Tool result output (success content, error message, etc.).
+    pub output: String,
+    /// Whether the result indicates an error.
+    pub is_error: bool,
+    /// Action description (human-readable summary).
+    pub action_description: String,
+    /// Outcome description (human-readable summary).
+    pub outcome_description: String,
+}
+
+impl ActionOutcome {
+    /// Create a new action-outcome pair.
+    pub fn new(tool_name: String, input: String, output: String, is_error: bool) -> Self {
+        let action_description = Self::format_action(&tool_name, &input);
+        let outcome_description = Self::format_outcome(&tool_name, &output, is_error);
+
+        ActionOutcome {
+            tool_name,
+            input,
+            output,
+            is_error,
+            action_description,
+            outcome_description,
+        }
+    }
+
+    /// Format the action as a human-readable description.
+    fn format_action(tool_name: &str, input: &str) -> String {
+        match tool_name {
+            "Read" | "Edit" | "Write" => {
+                format!("{}: {}", tool_name, truncate_path(input))
+            }
+            "Bash" => format!("bash: {}", truncate_cmd(input)),
+            "Grep" => format!("grep: {}", truncate_pattern(input)),
+            _ => format!("{}: {}", tool_name, truncate_text(input, 100)),
+        }
+    }
+
+    /// Format the outcome as a human-readable description.
+    fn format_outcome(tool_name: &str, output: &str, is_error: bool) -> String {
+        if is_error {
+            return format!("Error: {}", truncate_text(output, 200));
+        }
+
+        match tool_name {
+            "Read" => format!("File read successfully ({} bytes)", output.len()),
+            "Write" | "Edit" => "File written successfully".to_string(),
+            "Bash" => format!("Exit: {}", truncate_text(output.trim(), 100)),
+            "Grep" => format!("Found {} matches", output.lines().count()),
+            _ => truncate_text(output, 200),
+        }
+    }
+
+    /// Convert to a TranscriptPattern for learning extraction.
+    pub fn to_pattern(
+        &self,
+        session_id: &str,
+        timestamp: DateTime<Utc>,
+    ) -> crate::learning::TranscriptPattern {
+        crate::learning::TranscriptPattern::new(
+            self.tool_name.clone(),
+            self.input.clone(),
+            self.outcome_description.clone(),
+            session_id.to_string(),
+            timestamp,
+        )
+    }
+}
+
+/// Truncate a path to at most N characters, showing end if truncated.
+fn truncate_path(path: &str) -> String {
+    if path.len() <= 80 {
+        path.to_string()
+    } else {
+        format!("...{}", &path[path.len() - 77..])
+    }
+}
+
+/// Truncate a command to at most N characters.
+fn truncate_cmd(cmd: &str) -> String {
+    truncate_text(cmd, 100)
+}
+
+/// Truncate a grep pattern to at most N characters.
+fn truncate_pattern(pattern: &str) -> String {
+    truncate_text(pattern, 60)
+}
+
+/// Truncate text to at most N characters with ellipsis.
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        text.to_string()
+    } else {
+        format!("{}...", &text[..max_chars - 3])
+    }
 }
 
 /// Type of action performed by the assistant.
@@ -254,8 +370,8 @@ impl TranscriptDiscovery {
             let modified_at: DateTime<Utc> = metadata
                 .modified()
                 .ok()
-                .and_then(|t| t.try_into().ok())
-                .unwrap_or_else(|| Utc::now());
+                .map(DateTime::<Utc>::from)
+                .unwrap_or_else(Utc::now);
 
             // Check recency cutoff
             if let Some(cutoff) = self.recency_cutoff {
@@ -278,7 +394,7 @@ impl TranscriptDiscovery {
         }
 
         // Sort by modification time (most recent first)
-        transcripts.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+        transcripts.sort_by_key(|b| std::cmp::Reverse(b.modified_at));
 
         // Limit to max_sessions
         transcripts.truncate(self.max_sessions);
@@ -298,8 +414,7 @@ impl TranscriptDiscovery {
     fn derive_project_name(&self) -> String {
         self.workspace
             .to_string_lossy()
-            .replace('/', "-")
-            .replace('\\', "-")
+            .replace(['/', '\\'], "-")
             .trim_start_matches('-')
             .to_string()
     }
@@ -321,7 +436,12 @@ impl TranscriptDiscovery {
 
         let mut task_description = None;
         let mut actions = Vec::new();
+        let mut action_outcomes = Vec::new();
         let mut bead_id = None;
+
+        // Track pending tool_use actions for pairing with tool_result
+        let mut pending_tool_uses: std::collections::HashMap<String, (String, String)> =
+            std::collections::HashMap::new();
 
         // Parse each JSONL line
         for (line_no, line) in content.lines().enumerate() {
@@ -353,12 +473,17 @@ impl TranscriptDiscovery {
                                         });
                                     }
                                 }
-                                ContentBlock::ToolUse { name, input, .. } => {
+                                ContentBlock::ToolUse { id, name, input } => {
                                     actions.push(TranscriptAction {
                                         action_type: ActionType::ToolUse,
                                         tool_name: Some(name.clone()),
                                         description: self.format_tool_input(name, input),
                                     });
+
+                                    // Track pending tool_use for pairing with tool_result
+                                    let input_str = serde_json::to_string(input)
+                                        .unwrap_or_else(|_| input.to_string());
+                                    pending_tool_uses.insert(id.clone(), (name.clone(), input_str));
                                 }
                                 ContentBlock::Thinking { thinking } => {
                                     if !thinking.trim().is_empty() {
@@ -370,6 +495,29 @@ impl TranscriptDiscovery {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Extract tool_result and pair with pending tool_use
+                    if let TranscriptEntry::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } = entry
+                    {
+                        if let Some((tool_name, input)) = pending_tool_uses.remove(&tool_use_id) {
+                            let outcome = ActionOutcome::new(
+                                tool_name,
+                                input,
+                                content,
+                                is_error.unwrap_or(false),
+                            );
+                            action_outcomes.push(outcome);
+                        } else {
+                            tracing::trace!(
+                                tool_use_id = %tool_use_id,
+                                "tool_result without matching tool_use"
+                            );
                         }
                     }
                 }
@@ -389,6 +537,7 @@ impl TranscriptDiscovery {
             modified_at,
             task_description,
             actions,
+            action_outcomes,
             bead_id,
         })
     }
@@ -536,9 +685,7 @@ fn analyze_thinking_for_decision(thinking: &str) -> Option<DetectedDecision> {
         .iter()
         .find(|p| thinking_lower.contains(*p));
 
-    if decision_match.is_none() {
-        return None;
-    }
+    let _ = decision_match?;
 
     // Extract the decision sentence(s)
     let decision = extract_decision_sentence(thinking)?;
@@ -575,9 +722,7 @@ fn analyze_text_for_decision(text: &str) -> Option<DetectedDecision> {
     // Check if any decision pattern is present
     let decision_match = DECISION_PATTERNS.iter().find(|p| text_lower.contains(*p));
 
-    if decision_match.is_none() {
-        return None;
-    }
+    let _ = decision_match?;
 
     // Extract the decision (first sentence with decision pattern)
     let decision = extract_decision_sentence(text)?;
@@ -705,12 +850,12 @@ fn extract_alternatives(text: &str) -> Vec<String> {
             // Extract next few words as alternative (up to 50 chars)
             let alt_text: String = text
                 .get(after_marker..)
-                .and_then(|s| Some(s.chars().take(50).collect::<String>()))
+                .map(|s| s.chars().take(50).collect::<String>())
                 .unwrap_or_default();
 
             // Extract first phrase (up to comma, period, or 5 words)
             let alt: String = alt_text
-                .split(|c: char| c == ',' || c == '.')
+                .split([',', '.'])
                 .next()
                 .unwrap_or("")
                 .split_whitespace()
@@ -776,20 +921,6 @@ impl From<DetectedDecision> for DecisionContext {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Utilities
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Convert SystemTime to DateTime<Utc>.
-fn system_time_to_datetime(t: SystemTime) -> Option<DateTime<Utc>> {
-    t.duration_since(SystemTime::UNIX_EPOCH).ok().and_then(|d| {
-        DateTime::from_timestamp(
-            d.as_secs() as i64,
-            (d.subsec_nanos() as u32) / 1_000_000_000,
-        )
-    })
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -847,13 +978,14 @@ mod tests {
         let project_dir = claude_dir.join("projects").join(&project_name);
         fs::create_dir_all(&project_dir).unwrap();
 
-        // Create a test transcript
+        // Create a test transcript with tool_use and tool_result
         let transcript_path = project_dir.join("test-session.jsonl");
         let mut file = fs::File::create(&transcript_path).unwrap();
 
         writeln!(file, "{{\"type\":\"user\",\"message\":{{\"content\":\"## Task\\n\\nFix the bug\\n\\nBead ID: needle-test123\"}}}}").unwrap();
         writeln!(file, r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"I'll fix it"}}], "stop_reason":"end_turn"}}}}"#).unwrap();
         writeln!(file, r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"1","name":"Read","input":{{"file_path":"/tmp/test.txt"}}}}]}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"tool_result","tool_use_id":"1","content":"file content here","is_error":false}}"#).unwrap();
 
         let discovery = TranscriptDiscovery::new(&workspace, Some(&claude_dir), 10);
         let results = discovery.discover().unwrap();
@@ -867,6 +999,11 @@ mod tests {
         assert_eq!(transcript.actions[0].action_type, ActionType::Text);
         assert_eq!(transcript.actions[1].action_type, ActionType::ToolUse);
         assert_eq!(transcript.actions[1].tool_name.as_deref(), Some("Read"));
+        // Check action-outcome pairs
+        assert_eq!(transcript.action_outcomes.len(), 1);
+        assert_eq!(transcript.action_outcomes[0].tool_name, "Read");
+        assert!(!transcript.action_outcomes[0].is_error);
+        assert_eq!(transcript.action_outcomes[0].output, "file content here");
     }
 
     #[test]

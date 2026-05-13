@@ -1869,7 +1869,6 @@ impl FileSink {
         let handle = thread::spawn(move || {
             // This runs in a separate thread, so if it blocks, it won't block the main process
             let file = std::fs::OpenOptions::new()
-                .write(true)
                 .create(true)
                 .append(true)
                 .open(&path_clone)?;

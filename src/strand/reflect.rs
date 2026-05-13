@@ -904,23 +904,6 @@ impl ReflectStrand {
         Ok(placed)
     }
 
-    /// Simple similarity check for observation text (shared with claude_md_placement).
-    fn observations_similar(a: &str, b: &str) -> bool {
-        use std::collections::HashSet;
-        let a_lower = a.to_lowercase();
-        let b_lower = b.to_lowercase();
-
-        let a_words: HashSet<&str> = a_lower.split_whitespace().collect();
-        let b_words: HashSet<&str> = b_lower.split_whitespace().collect();
-
-        let shared = a_words.intersection(&b_words).count();
-        let min_len = a_words.len().min(b_words.len());
-
-        shared >= 2 && (shared as f32) >= (min_len as f32 * 0.5)
-            || a_lower.contains(&b_lower)
-            || b_lower.contains(&a_lower)
-    }
-
     /// Write a skill file for a promoted learning entry (YAML frontmatter format).
     fn write_skill_file(&self, skills_dir: &Path, entry: &LearningEntry) -> Result<()> {
         std::fs::create_dir_all(skills_dir)
@@ -1047,6 +1030,47 @@ impl ReflectStrand {
                     confidence = decision.confidence,
                     "reflect: extracted decision from transcript"
                 );
+            }
+
+            // Extract learning entries from action-outcome pairs
+            for action_outcome in &transcript.action_outcomes {
+                // Create a pattern from the action-outcome pair
+                let pattern =
+                    action_outcome.to_pattern(&transcript.session_id, transcript.modified_at);
+
+                // Convert frequent patterns to learning entries
+                if pattern.is_frequent(1) {
+                    // For now, all patterns are included (frequency threshold = 1)
+                    let observation =
+                        format!("Action-outcome: {} → {}", pattern.action, pattern.outcome);
+
+                    let entry = LearningEntry::new(
+                        bead_id_str.clone(),
+                        worker.clone(),
+                        BeadType::Other,
+                        observation,
+                        Confidence::Medium,
+                        format!("transcript action-outcome: {}", transcript.session_id),
+                    );
+                    entries.push(entry);
+                }
+
+                // Error outcomes get higher confidence learning entries
+                if action_outcome.is_error {
+                    let observation = format!(
+                        "Error pattern: {} — {}",
+                        action_outcome.action_description,
+                        truncate(&action_outcome.output, 150)
+                    );
+                    entries.push(LearningEntry::new(
+                        bead_id_str.clone(),
+                        worker.clone(),
+                        BeadType::BugFix,
+                        observation,
+                        Confidence::High,
+                        format!("transcript error: {}", transcript.session_id),
+                    ));
+                }
             }
 
             // Extract learning entries from transcript actions (non-decision patterns)

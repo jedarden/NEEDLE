@@ -93,8 +93,8 @@ impl super::Strand for PluckStrand {
         //    and Open beads with a stale assignee. These are never claimable — the claimer
         //    will reject them every time, causing a hot loop.
         candidates.retain(|b| {
-            !matches!(b.status, crate::types::BeadStatus::InProgress)
-                && !(b.status == crate::types::BeadStatus::Open && b.assignee.is_some())
+            !(matches!(b.status, crate::types::BeadStatus::InProgress)
+                || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some()))
         });
 
         // 4. Sort: deterministic (priority, created_at, id).

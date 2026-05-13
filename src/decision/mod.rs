@@ -94,7 +94,7 @@ impl DecisionPoint {
             for (i, alt) in self.alternatives.iter().enumerate() {
                 md.push_str(&format!("{}. {}\n", i + 1, alt));
             }
-            md.push_str("\n");
+            md.push('\n');
         }
 
         md.push_str("## Decision\n\n");
@@ -112,7 +112,7 @@ impl DecisionPoint {
         } else {
             md.push_str(" (failed)");
         }
-        md.push_str("\n");
+        md.push('\n');
 
         md
     }
@@ -414,7 +414,7 @@ impl DecisionDetector {
             session_id: transcript.session_id.clone(),
             timestamp: transcript.modified_at,
             title: format!("Edit {} over {}", chosen_file, first_file),
-            context: format!("Explored multiple files before choosing where to make changes"),
+            context: "Explored multiple files before choosing where to make changes".to_string(),
             alternatives: vec![
                 format!("Edit {}", first_file),
                 format!("Edit {}", second_file),
@@ -568,7 +568,7 @@ impl AdrStore {
         let mut current_content = String::new();
 
         for line in content.lines() {
-            if line.starts_with("## ") {
+            if let Some(rest) = line.strip_prefix("## ") {
                 // Save previous section
                 match current_section.as_str() {
                     "Context" => context = current_content.trim().to_string(),
@@ -613,7 +613,7 @@ impl AdrStore {
                     "Outcome" => outcome = current_content.trim().to_string(),
                     _ => {}
                 }
-                current_section = line[3..].to_string();
+                current_section = rest.to_string();
                 current_content = String::new();
             } else if !line.starts_with("**") && !line.starts_with("# ") {
                 current_content.push_str(line);
@@ -622,9 +622,8 @@ impl AdrStore {
         }
 
         // Handle last section
-        match current_section.as_str() {
-            "Outcome" => outcome = current_content.trim().to_string(),
-            _ => {}
+        if current_section.as_str() == "Outcome" {
+            outcome = current_content.trim().to_string();
         }
 
         let succeeded = outcome.to_lowercase().contains("success");
@@ -691,6 +690,7 @@ mod tests {
             modified_at: Utc::now(),
             task_description: Some("Test task".to_string()),
             actions,
+            action_outcomes: vec![],
             bead_id: None,
         };
 
@@ -718,6 +718,7 @@ mod tests {
             modified_at: Utc::now(),
             task_description: Some("Test task".to_string()),
             actions,
+            action_outcomes: vec![],
             bead_id: None,
         };
 

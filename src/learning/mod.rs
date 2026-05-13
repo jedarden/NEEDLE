@@ -289,7 +289,7 @@ impl LearningEntry {
             }
         }
 
-        result.push_str("\n");
+        result.push('\n');
         result
     }
 
@@ -762,8 +762,110 @@ impl GlobalLearningsFile {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Retrospective
+// TranscriptPattern
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// A pattern extracted from Claude Code session transcripts.
+///
+/// Unlike `Retrospective` (which is written by agents when closing beads),
+/// `TranscriptPattern` is extracted automatically from session transcripts
+/// by analyzing action-outcome pairs (tool_call → tool_result sequences).
+///
+/// This captures:
+/// - Action: What tool was called and with what inputs
+/// - Outcome: What result was returned (success, error, partial)
+/// - Frequency: How often this pattern appears across sessions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptPattern {
+    /// Action description (e.g., "Read file", "Bash command", "Grep pattern").
+    pub action: String,
+    /// Action inputs (e.g., file path, command, pattern).
+    pub inputs: String,
+    /// Outcome description (success, error, partial result).
+    pub outcome: String,
+    /// Number of times this pattern was observed across sessions.
+    #[serde(default)]
+    pub frequency: u32,
+    /// Session IDs where this pattern was observed.
+    #[serde(default)]
+    pub sessions: Vec<String>,
+    /// First observed timestamp.
+    pub first_observed: String,
+    /// Last observed timestamp.
+    pub last_observed: String,
+}
+
+impl TranscriptPattern {
+    /// Create a new transcript pattern from an action-outcome pair.
+    pub fn new(
+        action: String,
+        inputs: String,
+        outcome: String,
+        session_id: String,
+        timestamp: DateTime<Utc>,
+    ) -> Self {
+        let time_str = timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+        TranscriptPattern {
+            action,
+            inputs,
+            outcome,
+            frequency: 1,
+            sessions: vec![session_id],
+            first_observed: time_str.clone(),
+            last_observed: time_str,
+        }
+    }
+
+    /// Increment frequency and add session if not already present.
+    pub fn observe(&mut self, session_id: String, timestamp: DateTime<Utc>) {
+        self.frequency += 1;
+        if !self.sessions.contains(&session_id) {
+            self.sessions.push(session_id);
+        }
+        self.last_observed = timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+    }
+
+    /// Returns true if this pattern is frequent enough to be considered a learning.
+    pub fn is_frequent(&self, threshold: u32) -> bool {
+        self.frequency >= threshold
+    }
+
+    /// Format as markdown for display.
+    pub fn to_markdown(&self) -> String {
+        format!(
+            "### {} Pattern (observed {} times across {} sessions)\n\
+             - **Action:** {}\n\
+             - **Inputs:** {}\n\
+             - **Outcome:** {}\n\
+             - **First observed:** {}\n\
+             - **Last observed:** {}\n",
+            self.action,
+            self.frequency,
+            self.sessions.len(),
+            self.action,
+            self.inputs,
+            self.outcome,
+            self.first_observed,
+            self.last_observed
+        )
+    }
+
+    /// Convert to a learning entry for consolidation.
+    pub fn to_learning_entry(&self, bead_id: String, worker: String) -> LearningEntry {
+        let observation = format!(
+            "Transcript pattern: {} → {} (observed {} times)",
+            self.action, self.outcome, self.frequency
+        );
+        LearningEntry::new(
+            bead_id,
+            worker,
+            BeadType::Other,
+            observation,
+            Confidence::Medium,
+            format!("transcript pattern, frequency {}", self.frequency),
+        )
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Retrospective
