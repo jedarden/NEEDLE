@@ -469,13 +469,22 @@ impl BrCliBeadStore {
         Ok((code, stdout))
     }
 
-    /// Parse a JSON array of beads from br output.
+    /// Parse a JSON array or JSONL stream of beads from br output.
     fn parse_beads(json: &str, context: &str) -> Result<Vec<Bead>> {
         if json.trim().is_empty() {
             return Ok(vec![]);
         }
-        serde_json::from_str::<Vec<Bead>>(json)
-            .with_context(|| format!("JSON parse error from {context}:\n{json}"))
+        // Try JSON array first, then fall back to JSONL (one object per line)
+        if let Ok(beads) = serde_json::from_str::<Vec<Bead>>(json) {
+            return Ok(beads);
+        }
+        json.lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str::<Bead>(line)
+                    .with_context(|| format!("JSON parse error from {context}:\n{line}"))
+            })
+            .collect()
     }
 
     /// Parse a single bead from a JSON array (first element).
@@ -485,6 +494,70 @@ impl BrCliBeadStore {
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("{context} returned empty array"))
+    }
+
+    /// Run `bf claim` for atomic bead selection and claiming.
+    ///
+    /// This uses bead-forge's atomic claim which performs scoring
+    /// (downstream_impact + critical_float + priority + created_at) and
+    /// the UPDATE in a single BEGIN IMMEDIATE transaction.
+    async fn run_bf_claim(&self, actor: &str) -> Result<String> {
+        let timeout_duration = std::time::Duration::from_secs(30);
+
+        // Try to find bf on PATH or at the default install location
+        let bf_path = which::which("bf")
+            .or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
+                if candidate.exists() {
+                    Ok(candidate)
+                } else {
+                    Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
+                }
+            });
+
+        let bf_path = match bf_path {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(e.context("bf CLI not found; falling back to br-style claim"));
+            }
+        };
+
+        let args = ["claim", "--assignee", actor, "--json"];
+        let mut cmd = tokio::process::Command::new(&bf_path);
+        cmd.args(args)
+            .current_dir(&self.workspace)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        let child = cmd
+            .spawn()
+            .with_context(|| format!("failed to spawn bf subprocess: {:?}", args))?;
+
+        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => {
+                return Err(e).context(format!("bf subprocess failed: {:?}", args));
+            }
+            Err(_) => {
+                tracing::error!(
+                    args = ?args,
+                    "bf subprocess timed out, killing process"
+                );
+                bail!("bf subprocess timed out after 30s: {:?}", args);
+            }
+        };
+
+        let stdout = String::from_utf8(output.stdout).context("bf stdout was not valid UTF-8")?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        if !output.status.success() {
+            let code = output.status.code().unwrap_or(-1);
+            bail!("bf {:?} exited with code {}\nstderr: {}", args, code, stderr);
+        }
+
+        Ok(stdout)
     }
 }
 
@@ -499,7 +572,7 @@ impl BeadStore for BrCliBeadStore {
     }
 
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
-        let mut args = vec!["ready", "--json", "--limit", "0"];
+        let mut args = vec!["ready", "--json"];
 
         // Build filter args — stored so they live long enough for the slice.
         let assignee_arg;
@@ -604,7 +677,7 @@ impl BeadStore for BrCliBeadStore {
 
     async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_br(&["label", "add", id_str, label])
+        self.run_br(&["label", "add", "--label", label, id_str])
             .await
             .with_context(|| format!("br label add {id_str} {label} failed"))?;
         Ok(())
@@ -612,7 +685,7 @@ impl BeadStore for BrCliBeadStore {
 
     async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_br(&["label", "remove", id_str, label])
+        self.run_br(&["label", "remove", "--label", label, id_str])
             .await
             .with_context(|| format!("br label remove {id_str} {label} failed"))?;
         Ok(())
@@ -720,16 +793,53 @@ impl BeadStore for BrCliBeadStore {
     }
 
     async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
-        // BrCliBeadStore doesn't support atomic claim_auto.
-        // Fall back to the old behavior: get ready list, try to claim first.
-        let filters = Filters::default();
-        let candidates = self.ready(&filters).await?;
-        if let Some(bead) = candidates.first() {
-            self.claim(&bead.id, actor).await
-        } else {
-            Ok(ClaimResult::NotClaimable {
-                reason: "no beads available".to_string(),
-            })
+        // Use bf claim's atomic select-score-update to eliminate TOCTOU race.
+        // bf claim performs scoring (downstream_impact + critical_float + priority)
+        // and the UPDATE in a single BEGIN IMMEDIATE transaction, guaranteeing
+        // that concurrent workers receive distinct beads.
+        match self.run_bf_claim(actor).await {
+            Ok(stdout) => {
+                // bf claim returns JSON with bead_id or empty object for no candidates
+                let trimmed = stdout.trim();
+                if trimmed.is_empty() || trimmed == "{}" || trimmed == "null" {
+                    return Ok(ClaimResult::NotClaimable {
+                        reason: "no beads available".to_string(),
+                    });
+                }
+
+                // Parse the JSON response from bf claim
+                #[derive(serde::Deserialize)]
+                struct BfClaimResponse {
+                    bead_id: Option<String>,
+                    #[allow(dead_code)]
+                    assignee: Option<String>,
+                }
+
+                let response: BfClaimResponse = serde_json::from_str(trimmed)
+                    .with_context(|| format!("bf claim returned invalid JSON: {}", trimmed))?;
+
+                if let Some(bead_id) = response.bead_id {
+                    // Fetch the full bead details
+                    self.show(&BeadId::from(bead_id)).await.map(ClaimResult::Claimed)
+                } else {
+                    Ok(ClaimResult::NotClaimable {
+                        reason: "no beads available".to_string(),
+                    })
+                }
+            }
+            Err(e) => {
+                // If bf is not available, fall back to the old br-style pattern
+                tracing::warn!(error = %e, "bf claim failed, falling back to br-style ready+claim");
+                let filters = Filters::default();
+                let candidates = self.ready(&filters).await?;
+                if let Some(bead) = candidates.first() {
+                    self.claim(&bead.id, actor).await
+                } else {
+                    Ok(ClaimResult::NotClaimable {
+                        reason: "no beads available".to_string(),
+                    })
+                }
+            }
         }
     }
 }
@@ -1051,7 +1161,7 @@ impl BeadStore for BfCliBeadStore {
 
     async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_bf(&["label", "add", id_str, label])
+        self.run_bf(&["label", "add", "--label", label, id_str])
             .await
             .with_context(|| format!("bf label add {id_str} {label} failed"))?;
         Ok(())
@@ -1059,7 +1169,7 @@ impl BeadStore for BfCliBeadStore {
 
     async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_bf(&["label", "remove", id_str, label])
+        self.run_bf(&["label", "remove", "--label", label, id_str])
             .await
             .with_context(|| format!("bf label remove {id_str} {label} failed"))?;
         Ok(())
