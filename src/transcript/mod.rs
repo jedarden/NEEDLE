@@ -152,6 +152,8 @@ pub struct ParsedTranscript {
     pub action_outcomes: Vec<ActionOutcome>,
     /// Bead ID if referenced in the task context.
     pub bead_id: Option<BeadId>,
+    /// Workspace path this transcript belongs to (set during multi-workspace discovery).
+    pub workspace: Option<PathBuf>,
 }
 
 /// An action extracted from a transcript (tool call or text output).
@@ -539,6 +541,7 @@ impl TranscriptDiscovery {
             actions,
             action_outcomes,
             bead_id,
+            workspace: Some(self.workspace.clone()),
         })
     }
 
@@ -584,6 +587,47 @@ impl TranscriptDiscovery {
             _ => name.to_string(),
         }
     }
+}
+
+/// Discover recent transcripts across multiple workspaces.
+///
+/// Combines results from all workspaces, sorted by modification time (most recent
+/// first), and truncated to `max_total`. Each returned transcript has its
+/// `workspace` field set to the source workspace path.
+///
+/// Workspaces that have no transcript directory are silently skipped.
+pub fn discover_workspaces(
+    workspaces: &[&Path],
+    claude_dir: Option<&Path>,
+    max_per_workspace: usize,
+    max_total: usize,
+    recency_cutoff: Option<DateTime<Utc>>,
+) -> Result<Vec<ParsedTranscript>> {
+    let mut all = Vec::new();
+
+    for &workspace in workspaces {
+        let mut d = TranscriptDiscovery::new(workspace, claude_dir, max_per_workspace);
+        if let Some(cutoff) = recency_cutoff {
+            d = d.with_recency_cutoff(cutoff);
+        }
+
+        match d.discover() {
+            Ok(transcripts) => all.extend(transcripts),
+            Err(e) => {
+                tracing::warn!(
+                    workspace = %workspace.display(),
+                    error = %e,
+                    "transcript discovery: skipping workspace due to error"
+                );
+            }
+        }
+    }
+
+    // Sort by modification time (most recent first) and cap
+    all.sort_by_key(|t| std::cmp::Reverse(t.modified_at));
+    all.truncate(max_total);
+
+    Ok(all)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1111,5 +1155,149 @@ mod tests {
 
         assert!(desc.contains("Just do something"));
         assert!(bead_id.is_none());
+    }
+
+    #[test]
+    fn parsed_transcript_workspace_field_is_set() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path().join("home").join("coding").join("NEEDLE");
+        let claude_dir = temp_dir.path().join(".claude");
+
+        let project_name = workspace
+            .to_string_lossy()
+            .replace('/', "-")
+            .trim_start_matches('-')
+            .to_string();
+        let project_dir = claude_dir.join("projects").join(&project_name);
+        fs::create_dir_all(&project_dir).unwrap();
+
+        fs::write(
+            project_dir.join("ws-session.jsonl"),
+            r#"{"type":"user","message":{"content":"test"}}"#,
+        )
+        .unwrap();
+
+        let discovery = TranscriptDiscovery::new(&workspace, Some(&claude_dir), 10);
+        let results = discovery.discover().unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].workspace.as_deref(), Some(workspace.as_path()));
+    }
+
+    #[test]
+    fn discover_workspaces_combines_multiple() {
+        let temp_dir = TempDir::new().unwrap();
+        let claude_dir = temp_dir.path().join(".claude");
+
+        // Create two workspaces, each with one transcript
+        let ws_a = temp_dir.path().join("home").join("coding").join("project-a");
+        let ws_b = temp_dir.path().join("home").join("coding").join("project-b");
+
+        for ws in [&ws_a, &ws_b] {
+            let project_name = ws
+                .to_string_lossy()
+                .replace('/', "-")
+                .trim_start_matches('-')
+                .to_string();
+            let project_dir = claude_dir.join("projects").join(&project_name);
+            fs::create_dir_all(&project_dir).unwrap();
+            fs::write(
+                project_dir.join("session.jsonl"),
+                r#"{"type":"user","message":{"content":"task"}}"#,
+            )
+            .unwrap();
+        }
+
+        let results = super::discover_workspaces(
+            &[ws_a.as_path(), ws_b.as_path()],
+            Some(&claude_dir),
+            10,
+            100,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(results.len(), 2);
+        // Both workspaces should be represented
+        let found_a = results.iter().any(|t| t.workspace.as_deref() == Some(ws_a.as_path()));
+        let found_b = results.iter().any(|t| t.workspace.as_deref() == Some(ws_b.as_path()));
+        assert!(found_a, "workspace A not found in results");
+        assert!(found_b, "workspace B not found in results");
+    }
+
+    #[test]
+    fn discover_workspaces_respects_max_total() {
+        let temp_dir = TempDir::new().unwrap();
+        let claude_dir = temp_dir.path().join(".claude");
+
+        // Create two workspaces, each with 3 transcripts
+        for proj in ["proj-x", "proj-y"] {
+            let ws = temp_dir.path().join("home").join(proj);
+            let project_name = ws
+                .to_string_lossy()
+                .replace('/', "-")
+                .trim_start_matches('-')
+                .to_string();
+            let project_dir = claude_dir.join("projects").join(&project_name);
+            fs::create_dir_all(&project_dir).unwrap();
+            for i in 1..=3 {
+                fs::write(
+                    project_dir.join(format!("session-{}.jsonl", i)),
+                    r#"{"type":"user","message":{"content":"t"}}"#,
+                )
+                .unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+
+        let ws_x = temp_dir.path().join("home").join("proj-x");
+        let ws_y = temp_dir.path().join("home").join("proj-y");
+
+        let results = super::discover_workspaces(
+            &[ws_x.as_path(), ws_y.as_path()],
+            Some(&claude_dir),
+            10,
+            4,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(results.len(), 4);
+    }
+
+    #[test]
+    fn discover_workspaces_skips_missing_workspace() {
+        let temp_dir = TempDir::new().unwrap();
+        let claude_dir = temp_dir.path().join(".claude");
+
+        // One valid workspace
+        let ws_good = temp_dir.path().join("home").join("coding").join("good");
+        let project_name = ws_good
+            .to_string_lossy()
+            .replace('/', "-")
+            .trim_start_matches('-')
+            .to_string();
+        let project_dir = claude_dir.join("projects").join(&project_name);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(
+            project_dir.join("session.jsonl"),
+            r#"{"type":"user","message":{"content":"x"}}"#,
+        )
+        .unwrap();
+
+        // One workspace with no transcript directory
+        let ws_missing = temp_dir.path().join("home").join("coding").join("missing");
+
+        let results = super::discover_workspaces(
+            &[ws_good.as_path(), ws_missing.as_path()],
+            Some(&claude_dir),
+            10,
+            100,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].workspace.as_deref(), Some(ws_good.as_path()));
     }
 }

@@ -797,6 +797,7 @@ mod tests {
             actions,
             action_outcomes: vec![],
             bead_id: None,
+            workspace: None,
         }
     }
 

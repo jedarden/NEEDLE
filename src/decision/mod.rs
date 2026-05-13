@@ -692,6 +692,7 @@ mod tests {
             actions,
             action_outcomes: vec![],
             bead_id: None,
+            workspace: None,
         };
 
         let result = detector.detect_failure_recovery(&transcript, &transcript.actions, 0);
@@ -720,6 +721,7 @@ mod tests {
             actions,
             action_outcomes: vec![],
             bead_id: None,
+            workspace: None,
         };
 
         let result = detector.detect_exploration_choice(&transcript, &transcript.actions, 0);

@@ -953,17 +953,30 @@ impl ReflectStrand {
         // Create transcript discovery with recency cutoff
         let recency_cutoff =
             Utc::now() - Duration::days(self.config.transcript_recency_days as i64);
-        let discovery = TranscriptDiscovery::new(
-            &self.workspace,
-            None, // Use default ~/.claude
-            self.config.transcript_max_sessions,
-        )
-        .with_recency_cutoff(recency_cutoff);
 
-        // Discover and parse transcripts
-        let transcripts = discovery
+        // Build the full workspace list: primary + known (for multi-workspace support)
+        let transcripts = if self.known_workspaces.is_empty() {
+            TranscriptDiscovery::new(
+                &self.workspace,
+                None, // Use default ~/.claude
+                self.config.transcript_max_sessions,
+            )
+            .with_recency_cutoff(recency_cutoff)
             .discover()
-            .with_context(|| "failed to discover transcripts")?;
+            .with_context(|| "failed to discover transcripts")?
+        } else {
+            let mut all_workspaces = vec![self.workspace.as_path()];
+            all_workspaces.extend(self.known_workspaces.iter().map(|p| p.as_path()));
+
+            crate::transcript::discover_workspaces(
+                &all_workspaces,
+                None, // Use default ~/.claude
+                self.config.transcript_max_sessions,
+                self.config.transcript_max_sessions,
+                Some(recency_cutoff),
+            )
+            .with_context(|| "failed to discover transcripts across workspaces")?
+        };
 
         if transcripts.is_empty() {
             return Ok((Vec::new(), Vec::new()));
