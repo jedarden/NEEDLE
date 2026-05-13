@@ -1023,12 +1023,29 @@ impl BfCliBeadStore {
     }
 
     /// Parse a JSON array of beads from bf output.
+    /// Handles both JSON array format `[{...},{...}]` and NDJSON (one object per line).
     fn parse_beads(json: &str, context: &str) -> Result<Vec<Bead>> {
-        if json.trim().is_empty() {
+        let trimmed = json.trim();
+        if trimmed.is_empty() {
             return Ok(vec![]);
         }
-        serde_json::from_str::<Vec<Bead>>(json)
-            .with_context(|| format!("JSON parse error from {context}:\n{json}"))
+        // Try JSON array first (bf show returns [...])
+        if trimmed.starts_with('[') {
+            return serde_json::from_str::<Vec<Bead>>(trimmed)
+                .with_context(|| format!("JSON parse error from {context}:\n{json}"));
+        }
+        // Fall back to NDJSON (bf list returns one object per line)
+        let mut beads = Vec::new();
+        for line in trimmed.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let bead: Bead = serde_json::from_str(line)
+                .with_context(|| format!("NDJSON parse error from {context}: {line}"))?;
+            beads.push(bead);
+        }
+        Ok(beads)
     }
 
     /// Parse a single bead from a JSON array (first element).
