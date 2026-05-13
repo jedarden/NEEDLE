@@ -261,18 +261,16 @@ fn builtin_claude_sonnet() -> AgentAdapter {
         version_command: Some("claude --version".to_string()),
         input_method: InputMethod::Stdin,
         invoke_template: concat!(
-            "cd {workspace} && claude --print --model claude-sonnet-4-6",
-            " --max-turns 30 --output-format json --verbose < {prompt_file}",
+            "cd {workspace} && unbuffer -p claude --model claude-sonnet-4-6",
+            " --max-turns 30 --output-format stream-json --dangerously-skip-permissions",
+            " --verbose < {prompt_file}",
         )
         .to_string(),
         environment: HashMap::new(),
         timeout_secs: 3600,
         provider: Some("anthropic".to_string()),
         model: Some("claude-sonnet-4-6".to_string()),
-        token_extraction: TokenExtraction::JsonField {
-            input_path: "result.usage.input_tokens".to_string(),
-            output_path: "result.usage.output_tokens".to_string(),
-        },
+        token_extraction: TokenExtraction::None,
         output_transform: Some("needle-transform-claude".to_string()),
     }
 }
@@ -286,18 +284,16 @@ fn builtin_claude_opus() -> AgentAdapter {
         version_command: Some("claude --version".to_string()),
         input_method: InputMethod::Stdin,
         invoke_template: concat!(
-            "cd {workspace} && claude --print --model claude-opus-4-6",
-            " --max-turns 50 --output-format json --verbose < {prompt_file}",
+            "cd {workspace} && unbuffer -p claude --model claude-opus-4-6",
+            " --max-turns 50 --output-format stream-json --dangerously-skip-permissions",
+            " --verbose < {prompt_file}",
         )
         .to_string(),
         environment: HashMap::new(),
         timeout_secs: 7200,
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-6".to_string()),
-        token_extraction: TokenExtraction::JsonField {
-            input_path: "result.usage.input_tokens".to_string(),
-            output_path: "result.usage.output_tokens".to_string(),
-        },
+        token_extraction: TokenExtraction::None,
         output_transform: Some("needle-transform-claude".to_string()),
     }
 }
@@ -1567,10 +1563,7 @@ output_transform: "needle-transform-custom"
         assert!(adapter.invoke_template.contains("claude-opus-4-6"));
         assert!(adapter.invoke_template.contains("--max-turns 50"));
         assert_eq!(adapter.timeout_secs, 7200);
-        assert!(matches!(
-            adapter.token_extraction,
-            TokenExtraction::JsonField { .. }
-        ));
+        assert!(matches!(adapter.token_extraction, TokenExtraction::None));
     }
 
     #[test]
@@ -1989,10 +1982,7 @@ output_transform: "needle-transform-custom"
         let adapter = builtin_claude_sonnet();
         let yaml = serde_yaml::to_string(&adapter).unwrap();
         let parsed: AgentAdapter = serde_yaml::from_str(&yaml).unwrap();
-        assert!(matches!(
-            parsed.token_extraction,
-            TokenExtraction::JsonField { .. }
-        ));
+        assert!(matches!(parsed.token_extraction, TokenExtraction::None));
     }
 
     #[test]
