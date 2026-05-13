@@ -127,7 +127,7 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
     let br = br_path();
     let do_add = || {
         std::process::Command::new(&br)
-            .args(["label", "add", bead_id.as_ref(), label])
+            .args(["label", "add", "--label", label, bead_id.as_ref()])
             .current_dir(workspace)
             .output()
             .context("failed to run br label add")
