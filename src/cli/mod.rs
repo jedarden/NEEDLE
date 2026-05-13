@@ -827,8 +827,8 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
         Arc::new(init_step("bead_store_discover", &telemetry, || {
             crate::bead_store::BfCliBeadStore::discover(
                 config.workspace.default.clone(),
-                None,                                        // model: do not filter by model — beads are untagged
-                Some("needle".to_string()),                  // harness
+                None,                       // model: do not filter by model — beads are untagged
+                Some("needle".to_string()), // harness
                 Some(env!("CARGO_PKG_VERSION").to_string()), // harness_version
             )
             .context("failed to locate bf CLI for bead store")

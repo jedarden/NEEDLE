@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use libc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
@@ -664,14 +665,21 @@ impl Dispatcher {
             model,
         );
 
-        let mut child = tokio::process::Command::new("bash")
-            .arg("-c")
-            .arg(&rendered)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .envs(&adapter.environment)
-            .spawn()
-            .with_context(|| format!("failed to spawn agent: {}", adapter.name))?;
+        // Safety: setpgid(0,0) is async-signal-safe and idempotent.
+        let mut child = unsafe {
+            tokio::process::Command::new("bash")
+                .arg("-c")
+                .arg(&rendered)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .envs(&adapter.environment)
+                .pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                })
+                .spawn()
+                .with_context(|| format!("failed to spawn agent: {}", adapter.name))?
+        };
 
         let pid = child.id().unwrap_or(0);
         tracing::Span::current().record("needle.agent.pid", pid);
@@ -833,7 +841,14 @@ impl Dispatcher {
                 Ok(Ok(status)) => status.code().unwrap_or(-1),
                 Ok(Err(e)) => return Err(e).context("failed to wait for agent process"),
                 Err(_) => {
-                    // Timeout: kill the process and reap it.
+                    // Timeout: kill the entire process group so subprocesses
+                    // spawned by the agent (subshells, background jobs) are
+                    // also reaped, not just the direct bash child.
+                    if pid > 0 {
+                        unsafe {
+                            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                        }
+                    }
                     let _ = child.start_kill();
                     let _ = child.wait().await;
                     124
