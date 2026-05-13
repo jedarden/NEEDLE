@@ -53,35 +53,30 @@ impl ClaudeMdPlacer {
             return None;
         }
 
-        // Single workspace: use that workspace's CLAUDE.md
         if workspaces.len() == 1 {
             let ws = &workspaces[0];
-            let claude_md = ws.join("CLAUDE.md");
-            if claude_md.exists() {
-                return Some(claude_md);
+            // Prefer workspace-level CLAUDE.md if it exists.
+            let ws_level = ws.join("CLAUDE.md");
+            if ws_level.exists() {
+                return Some(ws_level);
             }
-            // Fall through to create at workspace level
+            // Check one level up (project-root pattern: workspace is a sub-directory).
+            // Stop there — traversing further risks picking up unrelated CLAUDE.md files
+            // (e.g. the user's home directory when TMPDIR sits inside it).
+            if let Some(parent) = ws.parent() {
+                let parent_level = parent.join("CLAUDE.md");
+                if parent_level.exists() {
+                    return Some(parent_level);
+                }
+            }
+            // Neither exists — create at workspace level.
+            return Some(ws_level);
         }
 
-        // Multiple workspaces: find the lowest common ancestor
+        // Multiple workspaces: place at the lowest common ancestor.
+        // Do not traverse above the LCA — that would pick up unrelated CLAUDE.md files.
         let lca = self.find_lowest_common_ancestor(workspaces)?;
-        let claude_md = lca.join("CLAUDE.md");
-
-        // Check if CLAUDE.md exists at this level or any parent
-        let mut current_dir = lca.clone();
-        loop {
-            let candidate = current_dir.join("CLAUDE.md");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-            current_dir = match current_dir.parent() {
-                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-                _ => break,
-            };
-        }
-
-        // No existing CLAUDE.md found - return the LCA location for creation
-        Some(claude_md)
+        Some(lca.join("CLAUDE.md"))
     }
 
     /// Find the lowest common ancestor directory of all given workspaces.
