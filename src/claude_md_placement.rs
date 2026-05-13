@@ -35,6 +35,7 @@ impl PromotedLearning {
 #[derive(Debug, Clone)]
 pub struct ClaudeMdPlacer {
     /// Known workspace roots for finding ancestors.
+    #[allow(dead_code)]
     workspace_roots: Vec<PathBuf>,
 }
 
@@ -67,16 +68,16 @@ impl ClaudeMdPlacer {
         let claude_md = lca.join("CLAUDE.md");
 
         // Check if CLAUDE.md exists at this level or any parent
-        let mut search_path = claude_md.clone();
+        let mut current_dir = lca.clone();
         loop {
-            if search_path.exists() {
-                return Some(search_path);
+            let candidate = current_dir.join("CLAUDE.md");
+            if candidate.exists() {
+                return Some(candidate);
             }
-            search_path = match search_path.parent() {
+            current_dir = match current_dir.parent() {
                 Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
                 _ => break,
             };
-            search_path = search_path.join("CLAUDE.md");
         }
 
         // No existing CLAUDE.md found - return the LCA location for creation
@@ -529,7 +530,7 @@ mod tests {
         std::fs::write(&claude_md, "# Test\n").unwrap();
 
         let placer = ClaudeMdPlacer::new(vec![]);
-        let target = placer.find_target_claude_md(&[ws.clone()]);
+        let target = placer.find_target_claude_md(std::slice::from_ref(&ws));
         assert_eq!(target, Some(claude_md));
     }
 
@@ -676,8 +677,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ws1 = dir.path().join("ws1");
         let ws2 = dir.path().join("ws2");
-        std::fs::create_dir_all(&ws1.join(".beads")).unwrap();
-        std::fs::create_dir_all(&ws2.join(".beads")).unwrap();
+        std::fs::create_dir_all(ws1.join(".beads")).unwrap();
+        std::fs::create_dir_all(ws2.join(".beads")).unwrap();
 
         // Create learnings files with matching observations
         let obs = "use existing pattern from modules";
@@ -693,7 +694,7 @@ mod tests {
             std::fs::write(ws.join(".beads/learnings.md"), content).unwrap();
         }
 
-        let result = detect_cross_workspace_patterns(&ws1, &[ws2.clone()]).unwrap();
+        let result = detect_cross_workspace_patterns(&ws1, std::slice::from_ref(&ws2)).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].source_workspaces.len(), 2);
     }
@@ -703,8 +704,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ws1 = dir.path().join("ws1");
         let ws2 = dir.path().join("ws2");
-        std::fs::create_dir_all(&ws1.join(".beads")).unwrap();
-        std::fs::create_dir_all(&ws2.join(".beads")).unwrap();
+        std::fs::create_dir_all(ws1.join(".beads")).unwrap();
+        std::fs::create_dir_all(ws2.join(".beads")).unwrap();
 
         // Create learnings files with different observations
         for (ws, obs) in [
@@ -722,7 +723,7 @@ mod tests {
             std::fs::write(ws.join(".beads/learnings.md"), content).unwrap();
         }
 
-        let result = detect_cross_workspace_patterns(&ws1, &[ws2.clone()]).unwrap();
+        let result = detect_cross_workspace_patterns(&ws1, std::slice::from_ref(&ws2)).unwrap();
         assert_eq!(result.len(), 0);
     }
 }
