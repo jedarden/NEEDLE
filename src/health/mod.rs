@@ -352,16 +352,22 @@ impl HealthMonitor {
 
     /// Check whether a process with the given PID is alive.
     ///
-    /// Uses `kill -0` semantics: sends signal 0 to check existence without
-    /// actually sending a signal.
+    /// Uses `kill(pid, 0)` semantics: sends signal 0 to check existence
+    /// without actually delivering a signal. Returns true if the process
+    /// exists (including EPERM — process exists but we can't signal it).
     pub fn check_pid_alive(pid: u32) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        if pid == 0 {
+            return false;
+        }
+        // SAFETY: kill(pid, 0) only checks existence; no signal is delivered.
+        let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if rc == 0 {
+            return true;
+        }
+        // ESRCH means no such process. EPERM means the process exists but we
+        // lack permission to send signals to it (process is alive).
+        let errno = unsafe { *libc::__errno_location() };
+        errno == libc::EPERM
     }
 
     /// Detect peers with stale heartbeats.
@@ -978,6 +984,18 @@ mod tests {
 
         // Make the heartbeat directory read-only so every write attempt fails.
         std::fs::set_permissions(&hb_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Verify the directory is actually unwritable. When running as root
+        // (e.g., in CI containers), 0o555 doesn't block writes and the emitter
+        // loop would never hit its failure threshold, hanging the test forever.
+        let probe = hb_dir.join(".write-probe");
+        let unwritable = std::fs::write(&probe, b"x").is_err();
+        let _ = std::fs::remove_file(&probe);
+        if !unwritable {
+            // Root bypasses permission checks — skip this test.
+            let _ = std::fs::set_permissions(&hb_dir, std::fs::Permissions::from_mode(0o755));
+            return;
+        }
 
         let shared_state = Arc::new(Mutex::new(SharedHeartbeatState {
             state: WorkerState::Selecting,
