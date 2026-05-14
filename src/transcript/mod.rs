@@ -74,7 +74,31 @@ enum TranscriptEntry {
 /// User message content.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct UserMessage {
-    content: String,
+    content: UserContent,
+}
+
+/// User message content — either a plain task description string or an array of
+/// content blocks (tool results wrapped in user turns).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+enum UserContent {
+    /// Plain text task description (first user turn).
+    Text(String),
+    /// Array of content blocks (subsequent user turns with tool results).
+    Blocks(Vec<UserContentItem>),
+}
+
+/// A single item in a user message content array.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct UserContentItem {
+    #[serde(rename = "type")]
+    block_type: String,
+    #[serde(default)]
+    tool_use_id: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    is_error: Option<bool>,
 }
 
 /// Assistant message content.
@@ -417,7 +441,6 @@ impl TranscriptDiscovery {
         self.workspace
             .to_string_lossy()
             .replace(['/', '\\'], "-")
-            .trim_start_matches('-')
             .to_string()
     }
 
@@ -454,11 +477,34 @@ impl TranscriptDiscovery {
 
             match serde_json::from_str::<TranscriptEntry>(line) {
                 Ok(entry) => {
-                    // Extract task description from first user message
-                    if task_description.is_none() {
-                        if let TranscriptEntry::User { ref message } = entry {
-                            task_description =
-                                Some(self.extract_task_bead_id(&message.content, &mut bead_id));
+                    // Handle user messages: task description (text) or tool results (blocks)
+                    if let TranscriptEntry::User { ref message } = entry {
+                        match &message.content {
+                            UserContent::Text(text) => {
+                                if task_description.is_none() {
+                                    task_description =
+                                        Some(self.extract_task_bead_id(text, &mut bead_id));
+                                }
+                            }
+                            UserContent::Blocks(blocks) => {
+                                for block in blocks {
+                                    if block.block_type == "tool_result" {
+                                        if let Some(ref tool_use_id) = block.tool_use_id {
+                                            if let Some((tool_name, input)) =
+                                                pending_tool_uses.remove(tool_use_id)
+                                            {
+                                                let outcome = ActionOutcome::new(
+                                                    tool_name,
+                                                    input,
+                                                    block.content.clone().unwrap_or_default(),
+                                                    block.is_error.unwrap_or(false),
+                                                );
+                                                action_outcomes.push(outcome);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -983,16 +1029,16 @@ mod tests {
         // The full path is converted, including the temp directory prefix
         let result = discovery.derive_project_name();
         // Verify it ends with the expected suffix (temp dir prefix varies)
-        assert!(result.ends_with("home-coding-NEEDLE"));
-        // Verify it doesn't start with a dash (trim_start_matches worked)
-        assert!(!result.starts_with('-'));
+        assert!(result.ends_with("-home-coding-NEEDLE"));
+        // Absolute paths always produce a leading dash (slashes → dashes)
+        assert!(result.starts_with('-'));
     }
 
     #[test]
     fn derive_project_name_absolute() {
         let workspace = PathBuf::from("/home/coding/NEEDLE");
         let discovery = TranscriptDiscovery::new(&workspace, None, 10);
-        assert_eq!(discovery.derive_project_name(), "home-coding-NEEDLE");
+        assert_eq!(discovery.derive_project_name(), "-home-coding-NEEDLE");
     }
 
     #[test]
@@ -1013,11 +1059,10 @@ mod tests {
         let workspace = temp_dir.path().join("home").join("coding").join("NEEDLE");
         let claude_dir = temp_dir.path().join(".claude");
 
-        // Create project directory
+        // Create project directory using the same convention as derive_project_name()
         let project_name = workspace
             .to_string_lossy()
-            .replace('/', "-")
-            .trim_start_matches('-')
+            .replace(['/', '\\'], "-")
             .to_string();
         let project_dir = claude_dir.join("projects").join(&project_name);
         fs::create_dir_all(&project_dir).unwrap();
@@ -1051,16 +1096,58 @@ mod tests {
     }
 
     #[test]
+    fn discovery_parses_user_wrapped_tool_results() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path().join("home").join("coding").join("NEEDLE");
+        let claude_dir = temp_dir.path().join(".claude");
+
+        let project_name = workspace
+            .to_string_lossy()
+            .replace(['/', '\\'], "-")
+            .to_string();
+        let project_dir = claude_dir.join("projects").join(&project_name);
+        fs::create_dir_all(&project_dir).unwrap();
+
+        // Write a transcript in the real Claude Code format:
+        // tool_result entries come as user messages with array content
+        let transcript_path = project_dir.join("real-format-session.jsonl");
+        let mut file = fs::File::create(&transcript_path).unwrap();
+
+        // First user message: task description (string content)
+        writeln!(file, "{{\"type\":\"user\",\"message\":{{\"content\":\"Fix the bug\"}}}}").unwrap();
+        // Assistant with tool_use
+        writeln!(file, r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"call_abc","name":"Read","input":{{"file_path":"/tmp/foo.rs"}}}}]}}}}"#).unwrap();
+        // User message with array content wrapping the tool_result (real format)
+        writeln!(file, r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"call_abc","content":"line 1\nline 2","is_error":false}}]}}}}"#).unwrap();
+
+        let discovery = TranscriptDiscovery::new(&workspace, Some(&claude_dir), 10);
+        let results = discovery.discover().unwrap();
+
+        assert_eq!(results.len(), 1);
+        let transcript = &results[0];
+        assert_eq!(transcript.task_description.as_deref(), Some("Fix the bug"));
+        // Tool use should be recorded as an action
+        assert!(transcript
+            .actions
+            .iter()
+            .any(|a| a.tool_name.as_deref() == Some("Read")));
+        // Action-outcome pair should be created from the user-wrapped tool_result
+        assert_eq!(transcript.action_outcomes.len(), 1);
+        assert_eq!(transcript.action_outcomes[0].tool_name, "Read");
+        assert!(!transcript.action_outcomes[0].is_error);
+        assert_eq!(transcript.action_outcomes[0].output, "line 1\nline 2");
+    }
+
+    #[test]
     fn discovery_respects_max_sessions() {
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path().join("home").join("coding").join("NEEDLE");
         let claude_dir = temp_dir.path().join(".claude");
 
-        // Create project directory
+        // Create project directory using the same convention as derive_project_name()
         let project_name = workspace
             .to_string_lossy()
-            .replace('/', "-")
-            .trim_start_matches('-')
+            .replace(['/', '\\'], "-")
             .to_string();
         let project_dir = claude_dir.join("projects").join(&project_name);
         fs::create_dir_all(&project_dir).unwrap();
@@ -1085,11 +1172,10 @@ mod tests {
         let workspace = temp_dir.path().join("home").join("coding").join("NEEDLE");
         let claude_dir = temp_dir.path().join(".claude");
 
-        // Create project directory
+        // Create project directory using the same convention as derive_project_name()
         let project_name = workspace
             .to_string_lossy()
-            .replace('/', "-")
-            .trim_start_matches('-')
+            .replace(['/', '\\'], "-")
             .to_string();
         let project_dir = claude_dir.join("projects").join(&project_name);
         fs::create_dir_all(&project_dir).unwrap();
@@ -1165,8 +1251,7 @@ mod tests {
 
         let project_name = workspace
             .to_string_lossy()
-            .replace('/', "-")
-            .trim_start_matches('-')
+            .replace(['/', '\\'], "-")
             .to_string();
         let project_dir = claude_dir.join("projects").join(&project_name);
         fs::create_dir_all(&project_dir).unwrap();
@@ -1204,8 +1289,7 @@ mod tests {
         for ws in [&ws_a, &ws_b] {
             let project_name = ws
                 .to_string_lossy()
-                .replace('/', "-")
-                .trim_start_matches('-')
+                .replace(['/', '\\'], "-")
                 .to_string();
             let project_dir = claude_dir.join("projects").join(&project_name);
             fs::create_dir_all(&project_dir).unwrap();
@@ -1247,8 +1331,7 @@ mod tests {
             let ws = temp_dir.path().join("home").join(proj);
             let project_name = ws
                 .to_string_lossy()
-                .replace('/', "-")
-                .trim_start_matches('-')
+                .replace(['/', '\\'], "-")
                 .to_string();
             let project_dir = claude_dir.join("projects").join(&project_name);
             fs::create_dir_all(&project_dir).unwrap();
@@ -1286,8 +1369,7 @@ mod tests {
         let ws_good = temp_dir.path().join("home").join("coding").join("good");
         let project_name = ws_good
             .to_string_lossy()
-            .replace('/', "-")
-            .trim_start_matches('-')
+            .replace(['/', '\\'], "-")
             .to_string();
         let project_dir = claude_dir.join("projects").join(&project_name);
         fs::create_dir_all(&project_dir).unwrap();
