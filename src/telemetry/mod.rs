@@ -1846,6 +1846,7 @@ impl FileSink {
         timeout: std::time::Duration,
     ) -> Result<()> {
         use std::io::Write;
+        use std::sync::mpsc;
         use std::thread;
 
         let event = TelemetryEvent {
@@ -1865,30 +1866,45 @@ impl FileSink {
         let path_for_error = path.display().to_string();
         let path_clone = path.to_path_buf();
 
-        // Spawn a thread to do the blocking I/O
-        let handle = thread::spawn(move || {
-            // This runs in a separate thread, so if it blocks, it won't block the main process
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&path_clone)?;
-            let mut writer = std::io::BufWriter::new(file);
-            writeln!(writer, "{line}")?;
-            writer.flush()?;
-            writer.get_ref().sync_all()?;
-            Ok::<(), anyhow::Error>(())
+        // JoinHandle::join() has no timeout in Rust's std — use a channel with recv_timeout.
+        let (tx, rx) = mpsc::channel::<Result<(), String>>();
+
+        // The JoinHandle is intentionally dropped on timeout: dropping detaches the thread,
+        // which continues running until it completes or the process exits.
+        let _handle = thread::spawn(move || {
+            let result: Result<(), String> = (|| {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&path_clone)
+                    .map_err(|e| e.to_string())?;
+                let mut writer = std::io::BufWriter::new(file);
+                writeln!(writer, "{line}").map_err(|e| e.to_string())?;
+                writer.flush().map_err(|e| e.to_string())?;
+                writer.get_ref().sync_all().map_err(|e| e.to_string())?;
+                Ok(())
+            })();
+            // Ignore send error: receiver may have timed out and been dropped.
+            let _ = tx.send(result);
         });
 
-        // Join with timeout
-        handle
-            .join()
-            .map_err(|e| anyhow::anyhow!("boot event writer thread panicked: {:?}", e))?
-            .with_context(|| {
-                format!(
-                    "timed out writing boot event to {} after {:?} (filesystem may be hung)",
-                    path_for_error, timeout
-                )
-            })
+        match rx.recv_timeout(timeout) {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(anyhow::anyhow!(
+                "failed to write boot event to {}: {}",
+                path_for_error,
+                e
+            )),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow::anyhow!(
+                "timed out writing boot event to {} after {:?} (filesystem may be hung)",
+                path_for_error,
+                timeout
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow::anyhow!(
+                "boot event writer thread disconnected for {}",
+                path_for_error
+            )),
+        }
     }
 }
 
