@@ -2336,10 +2336,8 @@ output_transform: "needle-transform-custom"
         // bash child) is killed.  The agent starts a background sleep and writes
         // its PID to a temp file before blocking.  After timeout we assert the
         // grandchild is gone.
-        let pid_file = std::env::temp_dir().join(format!(
-            "needle-pgkill-{}.pid",
-            std::process::id()
-        ));
+        let pid_file =
+            std::env::temp_dir().join(format!("needle-pgkill-{}.pid", std::process::id()));
         let pid_file_str = pid_file.display().to_string();
 
         // Start a background sleep, capture its PID, then sleep (will time out).
