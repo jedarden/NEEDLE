@@ -2331,6 +2331,63 @@ output_transform: "needle-transform-custom"
     }
 
     #[tokio::test]
+    async fn e2e_timeout_kills_entire_process_group() {
+        // Verify that on timeout the entire process group (not just the direct
+        // bash child) is killed.  The agent starts a background sleep and writes
+        // its PID to a temp file before blocking.  After timeout we assert the
+        // grandchild is gone.
+        let pid_file = std::env::temp_dir().join(format!(
+            "needle-pgkill-{}.pid",
+            std::process::id()
+        ));
+        let pid_file_str = pid_file.display().to_string();
+
+        // Start a background sleep, capture its PID, then sleep (will time out).
+        let cmd = format!("sleep 1000 & echo $! > {pid_file_str}; sleep 1000");
+
+        let mut adapter = test_adapter("pgkill", &cmd);
+        adapter.timeout_secs = 2;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("pgkill".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("pgkill").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-pgkill"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 124, "timeout should yield 124");
+
+        // Allow OS to fully reap processes after SIGKILL.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The grandchild PID file must exist — echo runs in milliseconds, well
+        // within the 2-second timeout window.
+        let pid_str = std::fs::read_to_string(&pid_file)
+            .expect("grandchild PID file should have been written before timeout fired");
+        let grandchild_pid: libc::pid_t = pid_str
+            .trim()
+            .parse()
+            .expect("PID file should contain a valid integer PID");
+
+        // kill(pid, 0) returns 0 if the process is alive, ESRCH if dead.
+        let still_alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+        assert!(
+            !still_alive,
+            "grandchild sleep (pid {grandchild_pid}) should be dead after killpg sent to process group"
+        );
+
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    #[tokio::test]
     async fn e2e_json_output_capture_and_token_extraction() {
         // Simulate a claude-like JSON output and verify token extraction works
         // on real process output.
