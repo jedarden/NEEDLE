@@ -1190,8 +1190,16 @@ mod tests {
         let claude_dir = temp_dir.path().join(".claude");
 
         // Create two workspaces, each with one transcript
-        let ws_a = temp_dir.path().join("home").join("coding").join("project-a");
-        let ws_b = temp_dir.path().join("home").join("coding").join("project-b");
+        let ws_a = temp_dir
+            .path()
+            .join("home")
+            .join("coding")
+            .join("project-a");
+        let ws_b = temp_dir
+            .path()
+            .join("home")
+            .join("coding")
+            .join("project-b");
 
         for ws in [&ws_a, &ws_b] {
             let project_name = ws
@@ -1219,8 +1227,12 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         // Both workspaces should be represented
-        let found_a = results.iter().any(|t| t.workspace.as_deref() == Some(ws_a.as_path()));
-        let found_b = results.iter().any(|t| t.workspace.as_deref() == Some(ws_b.as_path()));
+        let found_a = results
+            .iter()
+            .any(|t| t.workspace.as_deref() == Some(ws_a.as_path()));
+        let found_b = results
+            .iter()
+            .any(|t| t.workspace.as_deref() == Some(ws_b.as_path()));
         assert!(found_a, "workspace A not found in results");
         assert!(found_b, "workspace B not found in results");
     }
