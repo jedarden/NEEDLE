@@ -30,3 +30,17 @@ operates on a fresh file handle to avoid lock-ordering issues with the existing 
 
 Verified that the fix is complete and correct. No additional code changes needed.
 The bead was left open after session 1 completed because the session ended before closing.
+
+## Session 3 (2026-05-14)
+
+Re-verified fix completeness:
+- `write_boot_event_direct_impl` (telemetry/mod.rs:1840) opens a fresh file handle in append
+  mode, serializes the `TelemetryEvent`, flushes, and calls `sync_all()` inside a detached thread
+  joined with `recv_timeout(5s)`.
+- `from_config` calls this before wrapping the sink in Arc, so the boot event is on disk before
+  the async writer starts.
+- `emit_sync` (called from cli/mod.rs) also writes via FileSink's BufWriter and flushes.
+- Regression test `boot_event_written_to_file_on_telemetry_creation` covers the invariant.
+- CI `needle-ci-5lqd7` (Succeeded, 2026-05-14T03:49Z) validated the fix.
+
+Closing bead.
