@@ -1114,7 +1114,11 @@ mod tests {
         let mut file = fs::File::create(&transcript_path).unwrap();
 
         // First user message: task description (string content)
-        writeln!(file, "{{\"type\":\"user\",\"message\":{{\"content\":\"Fix the bug\"}}}}").unwrap();
+        writeln!(
+            file,
+            "{{\"type\":\"user\",\"message\":{{\"content\":\"Fix the bug\"}}}}"
+        )
+        .unwrap();
         // Assistant with tool_use
         writeln!(file, r#"{{"type":"assistant","message":{{"content":[{{"type":"tool_use","id":"call_abc","name":"Read","input":{{"file_path":"/tmp/foo.rs"}}}}]}}}}"#).unwrap();
         // User message with array content wrapping the tool_result (real format)
@@ -1287,10 +1291,7 @@ mod tests {
             .join("project-b");
 
         for ws in [&ws_a, &ws_b] {
-            let project_name = ws
-                .to_string_lossy()
-                .replace(['/', '\\'], "-")
-                .to_string();
+            let project_name = ws.to_string_lossy().replace(['/', '\\'], "-").to_string();
             let project_dir = claude_dir.join("projects").join(&project_name);
             fs::create_dir_all(&project_dir).unwrap();
             fs::write(
@@ -1329,10 +1330,7 @@ mod tests {
         // Create two workspaces, each with 3 transcripts
         for proj in ["proj-x", "proj-y"] {
             let ws = temp_dir.path().join("home").join(proj);
-            let project_name = ws
-                .to_string_lossy()
-                .replace(['/', '\\'], "-")
-                .to_string();
+            let project_name = ws.to_string_lossy().replace(['/', '\\'], "-").to_string();
             let project_dir = claude_dir.join("projects").join(&project_name);
             fs::create_dir_all(&project_dir).unwrap();
             for i in 1..=3 {
