@@ -49,15 +49,9 @@ const DEFAULT_PLUCK_TEMPLATE: &str = "\
 Complete the task described above. When finished:
 - **Commit all work with `git commit` before closing.** Every completed bead MUST produce at least one commit. If your work produced no file changes, create `notes/{bead_id}.md` summarizing what you did and commit that file. Do not close the bead without committing.
 - **Push commits with `git push` after committing.** Always push to the remote after a successful commit.
-- Close the bead with a structured retrospective:
+- Close the bead:
 
-`br close {bead_id} --body \"Summary of work completed.
-
-## Retrospective
-- **What worked:** [approach that succeeded]
-- **What didn't:** [approach that failed and why]
-- **Surprise:** [anything unexpected about the codebase/tooling]
-- **Reusable pattern:** [if this task type recurs, do X]\"`
+`br close {bead_id}`
 
 If you cannot complete the task OR cannot produce a commit:
 - Do NOT close the bead
