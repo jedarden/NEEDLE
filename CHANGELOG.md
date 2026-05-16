@@ -2,6 +2,18 @@
 
 All notable changes to NEEDLE are documented in this file.
 
+## [0.2.6] - 2026-05-16
+
+### Added
+
+- **claude-interactive plugin** (`plugins/claude-interactive/`) — PTY wrapper that runs the Claude Code CLI in interactive mode, keeping workers on subscription billing instead of programmatic API credits. Ships as release assets: `claude-interactive`, `claude-interactive.yaml`, `claude-interactive-install.sh`.
+
+### Fixed
+
+- **Pluck template** — `br close` command no longer passes a `--body` flag (not a valid option); uses default close reason instead.
+- **CI deadline** — raised `activeDeadlineSeconds` from 3600 to 7200 to accommodate the full test suite runtime.
+- **Process-group kill test** — replaced a fixed 300ms post-SIGKILL wait with a 3-second polling loop so the test passes reliably in container CI environments.
+
 ## [Unreleased]
 
 ### Phase 2

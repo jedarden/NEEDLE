@@ -5,7 +5,7 @@
 [![CI](https://github.com/jedarden/NEEDLE/actions/workflows/ci.yml/badge.svg)](https://github.com/jedarden/NEEDLE/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](rust-toolchain.toml)
-[![Version](https://img.shields.io/badge/version-0.2.0-green.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.6-green.svg)](Cargo.toml)
 
 **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
@@ -181,15 +181,43 @@ Multiple NEEDLE workers run independently with **no central orchestrator**. Coor
 
 NEEDLE is agent-agnostic. Any CLI that accepts a prompt and exits works.
 
-| Agent | CLI | Input Method |
-|-------|-----|-------------|
-| Claude Code | `claude --print` | stdin |
-| OpenCode | `opencode` | file |
-| Codex CLI | `codex` | args |
-| Aider | `aider --message` | args |
-| *Custom* | *any* | *configurable via YAML adapter* |
+| Agent | CLI | Input Method | Notes |
+|-------|-----|-------------|-------|
+| Claude Code (interactive) | `claude-interactive` | stdin | **Recommended** — uses subscription billing; see [plugin](#-claude-interactive-plugin) |
+| Claude Code (API) | `claude --print` | stdin | Uses programmatic/API billing |
+| OpenCode | `opencode` | file | |
+| Codex CLI | `codex` | args | |
+| Aider | `aider --message` | args | |
+| *Custom* | *any* | *configurable via YAML adapter* | |
 
 Adding a new agent requires **only a YAML configuration file** — no code changes.
+
+---
+
+## 🔌 claude-interactive Plugin
+
+The `claude-interactive` plugin ships as a separate release asset. It wraps the Claude Code CLI in a PTY so workers run under your **Claude subscription** instead of consuming programmatic API credits.
+
+**How it works:** NEEDLE pipes subprocess stdio, which causes `claude` to detect a non-TTY and switch to API billing. `claude-interactive` creates an internal PTY so `claude` sees a real terminal, keeping it in interactive/subscription mode.
+
+**Install:**
+
+```bash
+gh release download v0.2.6 --repo jedarden/NEEDLE --pattern 'claude-interactive*'
+chmod +x claude-interactive-install.sh
+./claude-interactive-install.sh
+```
+
+**Requirements:** Python 3.10+, `pyte` (`pip install pyte`), and the `claude` CLI on PATH.
+
+**Run:**
+
+```bash
+cd /path/to/workspace
+needle run --agent claude-interactive --count 4
+```
+
+Source lives in [`plugins/claude-interactive/`](plugins/claude-interactive/).
 
 ---
 
@@ -199,6 +227,8 @@ Adding a new agent requires **only a YAML configuration file** — no code chang
 NEEDLE/
 ├── Cargo.toml             # Rust crate manifest
 ├── install.sh             # One-line installer for prebuilt binaries
+├── plugins/
+│   └── claude-interactive/ # PTY wrapper — subscription billing adapter for Claude Code
 ├── src/
 │   ├── main.rs            # Worker entry point
 │   ├── lib.rs             # Library root
