@@ -2363,9 +2363,6 @@ output_transform: "needle-transform-custom"
 
         assert_eq!(result.exit_code, 124, "timeout should yield 124");
 
-        // Allow OS to fully reap processes after SIGKILL.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-
         // The grandchild PID file must exist — echo runs in milliseconds, well
         // within the 2-second timeout window.
         let pid_str = std::fs::read_to_string(&pid_file)
@@ -2375,11 +2372,22 @@ output_transform: "needle-transform-custom"
             .parse()
             .expect("PID file should contain a valid integer PID");
 
-        // kill(pid, 0) returns 0 if the process is alive, ESRCH if dead.
-        let still_alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+        // Poll until the grandchild is dead or we time out waiting.  SIGKILL
+        // delivery and OS reaping can be slow in container environments.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let dead = loop {
+            let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+            if !alive {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
         assert!(
-            !still_alive,
-            "grandchild sleep (pid {grandchild_pid}) should be dead after killpg sent to process group"
+            dead,
+            "grandchild sleep (pid {grandchild_pid}) should be dead within 3s after killpg"
         );
 
         let _ = std::fs::remove_file(&pid_file);
