@@ -1,0 +1,14 @@
+name: claude-interactive
+description: Claude Code in interactive mode — uses subscription billing instead of programmatic credits
+agent_cli: claude-interactive
+version_command: "claude --version"
+input_method:
+  method: stdin
+invoke_template: "cd {workspace} && claude-interactive --model {model} --max-turns 30 --dangerously-skip-permissions < {prompt_file}"
+environment: {}
+timeout_secs: 3600
+provider: anthropic
+model: claude-sonnet-4-6
+token_extraction:
+  method: none
+output_transform: needle-transform-claude
