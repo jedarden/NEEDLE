@@ -37,6 +37,7 @@ const ASSERTION_SAMPLE_COUNT: usize = 50;
 
 /// Latency threshold for the assertion-style test (milliseconds).
 /// Configurable via SANITIZER_LATENCY_THRESHOLD_MS environment variable.
+#[allow(dead_code)]
 fn latency_threshold_ms() -> u128 {
     std::env::var("SANITIZER_LATENCY_THRESHOLD_MS")
         .ok()
@@ -157,6 +158,7 @@ fn bench_sanitizer_sizes(c: &mut Criterion) {
 /// This function performs multiple iterations and returns the sorted
 /// latency measurements. Used by both the criterion benchmark and the
 /// assertion-style test.
+#[allow(dead_code)]
 fn measure_median_latency_100kb() -> (Vec<u128>, u128) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_100KB);
@@ -189,6 +191,7 @@ fn measure_median_latency_100kb() -> (Vec<u128>, u128) {
 /// ```bash
 /// cargo test --bench sanitize -- --nocapture assertion_test
 /// ```
+#[allow(dead_code)]
 fn assertion_test() {
     let (latencies, median) = measure_median_latency_100kb();
     let threshold = latency_threshold_ms();
