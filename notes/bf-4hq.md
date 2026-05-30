@@ -33,6 +33,10 @@ All tests consistently pass under `cargo test --features integration`.
 - [x] N=2, N=5, N=20 all assert exactly 1 success
 - [x] Test is documented with 'Property 3 (true concurrent)' comment (line 1199)
 
+## Verification Timestamp
+
+- 2026-05-30: Re-verified all 3 tests pass under `cargo test --features integration`
+
 ## Conclusion
 
 No implementation work was needed. The concurrent claim exclusivity property test was already implemented and passing. This bead is ready to be closed.
