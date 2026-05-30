@@ -1505,6 +1505,8 @@ All events share a common envelope:
 | `peer.stale` | Stale peer detected | `peer_id`, `last_seen`, `claimed_bead` |
 | `peer.crashed` | Dead peer cleaned up | `peer_id`, `released_bead` |
 | `health.check` | Periodic health check | `db_healthy`, `disk_free_mb`, `peer_count` |
+| `fleet.cpu_saturated` | System load exceeds threshold | `load_average` (f64), `threshold` (f64), `core_count` (usize) |
+| `fleet.memory_low` | Free memory below threshold | `free_mb` (u64), `threshold_mb` (u64) |
 
 ### Effort Tracking
 

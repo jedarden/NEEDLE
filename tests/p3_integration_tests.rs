@@ -71,7 +71,7 @@ fn create_bead(workspace: &Path, title: &str) -> Result<BeadId> {
     let br = br_path();
     let do_create = || {
         std::process::Command::new(&br)
-            .args(["create", "--title", title, "--body", title, "--silent"])
+            .args(["create", "--title", title, "--description", title])
             .current_dir(workspace)
             .output()
             .context("failed to run br create")

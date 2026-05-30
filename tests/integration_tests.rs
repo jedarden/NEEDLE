@@ -1713,7 +1713,7 @@ async fn mend_removes_stale_dependency_links() {
 
     // Create blocker bead.
     let blocker_output = std::process::Command::new("/home/coding/.local/bin/br")
-        .args(["create", "Blocker bead", "--body=This is the blocker"])
+        .args(["create", "Blocker bead", "--description=This is the blocker"])
         .current_dir(workspace)
         .output()
         .expect("br create failed");
@@ -1732,7 +1732,7 @@ async fn mend_removes_stale_dependency_links() {
         .args([
             "create",
             "Blocked bead",
-            "--body=This bead depends on the blocker",
+            "--description=This bead depends on the blocker",
         ])
         .current_dir(workspace)
         .output()
@@ -1781,7 +1781,7 @@ async fn mend_removes_stale_dependency_links() {
 
     // Close the blocker bead.
     let close_output = std::process::Command::new("/home/coding/.local/bin/br")
-        .args(["close", &blocker_id, "--body=Blocker completed"])
+        .args(["close", &blocker_id, "--reason=Blocker completed"])
         .current_dir(workspace)
         .output()
         .expect("br close failed");

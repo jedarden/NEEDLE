@@ -1382,7 +1382,7 @@ async fn explore_discovers_work_in_other_workspace() {
             "create",
             "--title",
             "Explore integration test bead",
-            "--body",
+            "--description",
             "Ready to work",
         ])
         .status()

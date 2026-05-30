@@ -1291,8 +1291,10 @@ impl OtlpSink {
             => (Severity::Error, "ERROR"),
 
             // WARN events
-            "peer.stale"   // StuckDetected
+            "peer.stale"     // StuckDetected
             | "peer.crashed" // StuckReleased
+            | "fleet.cpu_saturated" // System CPU load exceeds threshold
+            | "fleet.memory_low" // System memory below threshold
             => (Severity::Warn, "WARN"),
 
             // INFO events (default)
@@ -2624,6 +2626,26 @@ mod tests {
         let (severity, text) = sink.severity_for_event("bead.claim.race_lost");
         assert_eq!(severity, Severity::Info);
         assert_eq!(text, "INFO");
+    }
+
+    #[tokio::test]
+    async fn test_severity_for_fleet_cpu_saturated_is_warn() {
+        let sink = make_test_sink();
+
+        // Test that fleet.cpu_saturated is WARN severity
+        let (severity, text) = sink.severity_for_event("fleet.cpu_saturated");
+        assert_eq!(severity, Severity::Warn);
+        assert_eq!(text, "WARN");
+    }
+
+    #[tokio::test]
+    async fn test_severity_for_fleet_memory_low_is_warn() {
+        let sink = make_test_sink();
+
+        // Test that fleet.memory_low is WARN severity
+        let (severity, text) = sink.severity_for_event("fleet.memory_low");
+        assert_eq!(severity, Severity::Warn);
+        assert_eq!(text, "WARN");
     }
 
     #[tokio::test]

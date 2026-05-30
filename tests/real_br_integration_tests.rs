@@ -82,9 +82,8 @@ fn create_bead(workspace: &Path, title: &str, priority: u8) -> Result<BeadId> {
                 "create",
                 "--title",
                 title,
-                "--body",
+                "--description",
                 &format!("Test bead: {title}"),
-                "--silent",
             ])
             .current_dir(workspace)
             .output()
@@ -1194,6 +1193,117 @@ async fn real_br_database_corruption_auto_recovery() {
         db_header.starts_with(b"SQLite format 3"),
         "rebuilt database should be a valid SQLite file"
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 11: Property 3 (true concurrent) — N workers race on 1 bead, exactly 1 wins
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Test helper for concurrent claim exclusivity.
+///
+/// Given N concurrent workers attempting to claim the same bead, exactly 1
+/// should succeed. The rest should receive AllRaceLost (after exhausting
+/// candidates) or NoCandidates (if the bead is already claimed).
+///
+/// This test uses real flock via fs2 to serialize access to the claim.
+/// Workers are spawned concurrently and race to acquire the flock.
+async fn test_concurrent_claim_exclusivity(num_workers: u32) {
+    let workspace = create_test_workspace("concurrent-claim").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Create a single bead — all workers will race for this one.
+    let bead_id = create_bead(workspace.path(), "concurrent-claim-target", 1).unwrap();
+    let bead = store.show(&bead_id).await.unwrap();
+
+    // All workers share the same lock directory → same flock.
+    let lock_dir = tempfile::tempdir().unwrap();
+
+    // Spawn N workers concurrently, each attempting to claim the same bead.
+    let mut handles = Vec::new();
+    for worker_idx in 0..num_workers {
+        let store = store.clone();
+        let bead = bead.clone();
+        let lock_path = lock_dir.path().to_path_buf();
+        let handle = tokio::spawn(async move {
+            let claimer = Claimer::new(
+                store,
+                lock_path,
+                1, // max_retries=1 — report outcome immediately, don't retry
+                10,
+                Telemetry::new(format!("worker-{worker_idx}")),
+            );
+            claimer
+                .claim_next(
+                    &[bead],
+                    &format!("worker-{worker_idx}"),
+                    &HashSet::new(),
+                    "test-strand",
+                )
+                .await
+        });
+        handles.push(handle);
+    }
+
+    // Collect outcomes.
+    let mut claimed_count = 0u32;
+    let mut race_lost_count = 0u32;
+    let mut no_candidates_count = 0u32;
+    let mut unexpected_outcomes: Vec<String> = Vec::new();
+
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(ClaimOutcome::Claimed(_)) => {
+                claimed_count += 1;
+            }
+            Ok(ClaimOutcome::AllRaceLost) => {
+                race_lost_count += 1;
+            }
+            Ok(ClaimOutcome::NoCandidates) => {
+                no_candidates_count += 1;
+            }
+            Ok(other) => {
+                unexpected_outcomes.push(format!("{:?}", other));
+            }
+            Err(e) => {
+                unexpected_outcomes.push(format!("Error: {e}"));
+            }
+        }
+    }
+
+    // Exactly 1 worker should succeed.
+    assert_eq!(
+        claimed_count, 1,
+        "with {num_workers} workers, exactly 1 should claim the bead; got {claimed_count}"
+    );
+
+    // The remaining workers should all have lost the race.
+    let total_lost = race_lost_count + no_candidates_count;
+    assert_eq!(
+        total_lost,
+        num_workers - 1,
+        "with {num_workers} workers, {} should lose; got race_lost={race_lost_count}, no_candidates={no_candidates_count}",
+        num_workers - 1
+    );
+
+    // No unexpected outcomes.
+    if !unexpected_outcomes.is_empty() {
+        panic!("unexpected outcomes encountered: {:?}", unexpected_outcomes);
+    }
+}
+
+#[tokio::test]
+async fn real_br_property_3_concurrent_claim_exclusivity_n2() {
+    test_concurrent_claim_exclusivity(2).await;
+}
+
+#[tokio::test]
+async fn real_br_property_3_concurrent_claim_exclusivity_n5() {
+    test_concurrent_claim_exclusivity(5).await;
+}
+
+#[tokio::test]
+async fn real_br_property_3_concurrent_claim_exclusivity_n20() {
+    test_concurrent_claim_exclusivity(20).await;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
