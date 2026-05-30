@@ -3204,7 +3204,7 @@ If `.beads/learnings.md` exists in a workspace, NEEDLE automatically appends it 
 
 ### New Strand: Reflect (Strand 7)
 
-Positioned after Pulse and before Knot — the last productive strategy before a worker gives up. Reflect is meta-analysis, not work-finding. It should never preempt actual task execution, remote work discovery, or bead creation strands. A worker only consolidates learnings when there is genuinely nothing else to do.
+Positioned after Pulse and before Splice — the meta-analysis strategy before worker failure documentation. Reflect consolidates learnings from recent work; Splice documents worker failures. Reflect should never preempt actual task execution, remote work discovery, or bead creation strands. A worker only consolidates learnings when there is genuinely nothing else to do.
 
 ```
   Strand 6: PULSE
@@ -3213,10 +3213,13 @@ Positioned after Pulse and before Knot — the last productive strategy before a
   Strand 7: REFLECT ── consolidate learnings from recent beads
        │ consolidation complete or not needed
        ▼
-  Strand 8: KNOT ───── alert human, enter backoff
+  Strand 8: SPLICE ─── worker failure documentation
+       │ no failures
+       ▼
+  Strand 9: KNOT ───── alert human, enter backoff
 ```
 
-(This renumbers Knot from Strand 7 to Strand 8.)
+(This renumbers Splice from Strand 7 to Strand 8, and Knot from Strand 8 to Strand 9.)
 
 **Invokes agent:** Yes — uses a consolidation-specific prompt.
 
@@ -3251,8 +3254,8 @@ Positioned after Pulse and before Knot — the last productive strategy before a
 | Result | Action |
 |--------|--------|
 | Consolidation performed | Return `WorkCreated` → restart from Strand 1 (in case consolidation unblocked something) |
-| Not enough data since last run | Return `NoWork` → fall through to Strand 4 |
-| Disabled or cooldown active | Return `NoWork` → fall through to Strand 4 |
+| Not enough data since last run | Return `NoWork` → fall through to Strand 8 (Splice) |
+| Disabled or cooldown active | Return `NoWork` → fall through to Strand 8 (Splice) |
 
 **Configuration:**
 ```yaml
@@ -3692,7 +3695,7 @@ Following AutoAgent's architecture:
 | **Trace capture** | Adapter-specific structured trace collection, storage in `.beads/traces/` |
 | **Retrospective instructions** | Pluck template extension with learning block |
 | **Workspace learnings** | `.beads/learnings.md` automatic injection, size management |
-| **Reflect strand** | Consolidation daemon as strand 3.5 + `needle reflect` CLI |
+| **Reflect strand** | Consolidation daemon as strand 7 + `needle reflect` CLI |
 | **Skill library** | `.beads/skills/` with promotion lifecycle, skill retrieval in PromptBuilder |
 | **Template versioning** | Version tags in telemetry, A/B variant assignment |
 | **Stats engine** | `needle stats` command with template/task-type/worker aggregation |
