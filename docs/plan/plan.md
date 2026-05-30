@@ -902,10 +902,13 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
   Strand 6: PULSE ──── codebase health scan, auto-generate beads (opt-in)
        │ no issues or disabled
        ▼
-  Strand 7: SPLICE ──── worker failure documentation
+  Strand 7: REFLECT ── consolidate learnings from recent beads
+       │ consolidation complete or not needed
+       ▼
+  Strand 8: SPLICE ──── worker failure documentation
        │ no failures
        ▼
-  Strand 8: KNOT ───── alert human, enter backoff
+  Strand 9: KNOT ───── alert human, enter backoff
        │
        ▼
   → EXHAUSTED (backoff and retry from Strand 1)
@@ -1073,13 +1076,64 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
 | No new issues | Return `NoWork` → fall through to Strand 7 |
 | Disabled | Return `NoWork` → fall through to Strand 7 |
 
-## Strand 7: Splice
+## Strand 7: Reflect (opt-in)
+
+**Purpose:** Consolidate learnings from recent bead work into a shared knowledge base (`.beads/learnings.md`), promoting recurring patterns to reusable skill files. This meta-analysis strand ensures that insights from completed work are captured and made available to future work.
+
+**Invokes agent:** Yes — uses a consolidation-specific prompt.
+
+**Entry condition:** Strands 1-6 returned no work. Reflect is explicitly enabled in workspace config (`strands.reflect.enabled: true`). At least N beads have been closed since last consolidation (configurable, default: 10). At least T hours since last consolidation (configurable, default: 24).
+
+**Algorithm (KAIROS-inspired four-phase cycle):**
+
+1. **Orient:** Read current `.beads/learnings.md` and existing skill files in `.beads/skills/`. Check file sizes to ensure they're within bounds.
+2. **Gather:** Read bead close bodies from `.beads/issues.jsonl` for beads closed since last consolidation. Read available traces for failed beads to capture failure patterns.
+3. **Consolidate:**
+   - Extract retrospective blocks from close bodies
+   - Identify patterns across multiple beads (same failure mode, same codebase quirk, workaround that works)
+   - Merge new learnings into `.beads/learnings.md`, deduplicating against existing entries
+   - Convert relative references to absolute (bead IDs, dates)
+   - If a learning appears 3+ times across different beads, promote to a skill file in `.beads/skills/`
+   - If a learning contradicts an existing entry, resolve in favor of the newer evidence
+4. **Prune:**
+   - Remove entries older than 90 days without reinforcement
+   - Compress similar entries into single entries
+   - Ensure total learnings stay under 80 entries (configurable)
+
+**Guardrails:**
+- **Cooldown:** Minimum 24 hours between consolidation runs (configurable)
+- **Max learnings created per run:** 10 (configurable)
+- **Max skills promoted per run:** 3 (configurable)
+- **Read-only on CLAUDE.md:** The consolidation agent receives the workspace CLAUDE.md as context but MUST NOT modify it. CLAUDE.md changes require explicit human approval.
+- **Workspace exclusion:** Reflect is disabled for NEEDLE's own workspace by default. Workers must not modify their own orchestrator's knowledge base without human approval.
+
+**Exit conditions:**
+| Result | Action |
+|--------|--------|
+| Consolidation performed | Return `WorkCreated` → restart from Strand 1 (learnings may unblock new work) |
+| Not enough data since last run | Return `NoWork` → fall through to Strand 8 |
+| Disabled or cooldown active | Return `NoWork` → fall through to Strand 8 |
+
+**Telemetry:**
+| Event Type | Emitted When | Data Fields |
+|------------|-------------|-------------|
+| `reflect.started` | Consolidation starts | `beads_since_last`, `current_learnings_count` |
+| `reflect.consolidated` | Consolidation completes | `learnings_added`, `learnings_pruned`, `skills_promoted`, `contradictions_resolved` |
+| `reflect.skipped` | Consolidation skipped | `reason` (cooldown, insufficient data, disabled) |
+
+**Learning persistence:** `.beads/learnings.md` is the authoritative source. Workers automatically append it to `context_files` during prompt building (via the Config module's `context_files` discovery). No manual config required — workers always see the latest learnings.
+
+**Session transcript analysis:** Reflect analyzes both bead close bodies (structured outcomes) and Claude Code session transcripts (decision-making process) when available. Transcripts are stored as JSONL in `.claude/projects/<project-hash>/<session-uuid>.jsonl` and contain richer signal: failed attempts, tool call sequences, recovery strategies, and decision points.
+
+**Integration with prompt building:** If `.beads/learnings.md` exists in a workspace, NEEDLE automatically appends it to `context_files` during prompt building. Workers always see the latest learnings without manual configuration.
+
+## Strand 8: Splice
 
 **Purpose:** Document worker failures (crashed workers and live-but-looping workers) by creating failure beads in a configured report workspace.
 
 **Invokes agent:** No.
 
-**Entry condition:** Strand 6 returned no work. Splice is enabled in config (default: true). Heartbeat files exist in the heartbeat directory.
+**Entry condition:** Strand 7 returned no work. Splice is enabled in config (default: true). Heartbeat files exist in the heartbeat directory.
 
 **Algorithm:**
 
@@ -1109,7 +1163,7 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
 | Result | Action |
 |--------|--------|
 | Failure beads created | Return `WorkCreated` → restart from Strand 1 |
-| No new failures detected | Return `NoWork` → fall through to Strand 8 |
+| No new failures detected | Return `NoWork` → fall through to Strand 9 |
 
 **State persistence:** `splice_state.json` tracks which session IDs and loop patterns have already been documented, preventing duplicate failure beads for the same dead/looping worker.
 
@@ -1118,13 +1172,13 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
 - `log_runaway_bytes`: Max JSONL growth in `live_loop_window_secs` without completion (default: 10 MiB)
 - `live_loop_window_secs`: Time window for log runaway check (default: 300s)
 
-## Strand 8: Knot
+## Strand 9: Knot
 
 **Purpose:** All work-finding strategies are exhausted. Alert the human and enter backoff.
 
 **Invokes agent:** No.
 
-**Entry condition:** Strands 1-7 all returned `NoWork`.
+**Entry condition:** Strands 1-8 all returned `NoWork`.
 
 **Algorithm:**
 1. Determine alert state:
@@ -1182,6 +1236,14 @@ strands:
         command: "grep -rn 'TODO\\|FIXME' {workspace}/src"
       - name: test-coverage
         command: "cargo tarpaulin --skip-clean -o json"
+  reflect:
+    enabled: true           # on by default (unlike weave/unravel/pulse)
+    min_beads_since_last: 10   # minimum closed beads before consolidation
+    cooldown_hours: 24
+    max_learnings_per_run: 10
+    max_skills_per_run: 3
+    learning_retention_days: 90
+    max_learnings: 80
   splice:
     enabled: true           # always on, cannot be disabled
     stale_threshold_secs: 300   # seconds before heartbeat considered stale
