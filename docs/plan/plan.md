@@ -444,10 +444,12 @@ needle (binary)
 ├── cli/              CLI parsing, session management
 ├── worker/           Worker loop, state machine
 ├── strand/           Strand waterfall evaluation
+│   └── splice/       Worker failure documentation
 ├── claim/            Atomic claiming, lock management
 ├── prompt/           Prompt construction from bead context
 ├── dispatch/         Agent adapter loading, process execution
 ├── outcome/          Exit code classification, outcome handlers
+├── commit_hook/      Bead-Id trailer injection for git commits
 ├── telemetry/        Structured event emission, sinks
 ├── health/           Heartbeat, stuck detection, peer monitoring
 ├── config/           Hierarchical configuration loading
@@ -460,6 +462,10 @@ needle (binary)
 ```
 cli ──► worker ──► strand ──► bead_store
                 │           │
+                │           └──► splice ──► bead_store
+                │                               ├──► telemetry
+                │                               └──► health
+                │
                 ├──► claim ─┘
                 │
                 ├──► prompt ──► bead_store
@@ -469,6 +475,8 @@ cli ──► worker ──► strand ──► bead_store
                 ├──► outcome ──► bead_store
                 │               ├──► telemetry
                 │               └──► health
+                │
+                ├──► commit_hook ──► types
                 │
                 ├──► telemetry
                 │
@@ -733,6 +741,45 @@ enum PeerStatus {
     Dead { heartbeat_file: PathBuf },
 }
 ```
+
+### commit_hook
+
+Injects `Bead-Id:` trailers into git commits after successful bead closure, for HOOP bead_commit_index integration.
+
+```
+async fn inject_bead_id_trailer(
+    workspace: &Path,
+    bead_id: &BeadId,
+    pre_dispatch_head: &str,
+) -> Result<()>
+
+fn git_head(workspace: &str) -> Result<String>
+```
+
+**Functionality:**
+- When a bead closes with a commit artifact (agent made commits), NEEDLE amends the latest commit to include a `Bead-Id: <id>` trailer
+- Only acts when HEAD moved since `pre_dispatch_head` (i.e. the agent made at least one commit)
+- Idempotent: checks if trailer is already present before injecting
+- Returns `Ok(())` in all no-op cases (not a git repo, no new commits, trailer already present)
+
+**Trailer format:**
+```
+Bead-Id: nd-a3f8
+```
+
+**Integration context:**
+- HOOP's `bead_commit_index` picks up the trailer via `git log --format=%(trailers:key=Bead-Id,valueonly,separator=,)`
+- Enables bidirectional traceability: beads → commits and commits → beads
+- Executed after successful bead close, before returning to SELECTING state
+
+**Timeouts:**
+- `git rev-parse HEAD`: 10s timeout
+- `git commit --amend`: 30s timeout
+
+**Design notes:**
+- Errors are logged as non-fatal warnings; they do not fail the bead processing cycle
+- The trailer is appended via `git commit --amend --no-edit --trailer "Bead-Id: <id>"`
+- Multiple beads can be tracked in a single commit (comma-separated in trailer value)
 
 ## Binary Structure
 
@@ -1135,6 +1182,15 @@ strands:
         command: "grep -rn 'TODO\\|FIXME' {workspace}/src"
       - name: test-coverage
         command: "cargo tarpaulin --skip-clean -o json"
+  splice:
+    enabled: true           # always on, cannot be disabled
+    stale_threshold_secs: 300   # seconds before heartbeat considered stale
+    report_workspace: null      # workspace for failure beads (null = current store)
+    detect_live_loops: true     # scan for stuck workers in JSONL tail
+    live_loop_scan_events: 200  # max events to scan per worker
+    claim_churn_threshold: 20   # race-lost events for same bead before flagging
+    log_runaway_bytes: 10485760 # 10 MiB, max growth without completion
+    live_loop_window_secs: 300   # time window for log runaway check
   knot:
     enabled: true           # always on, cannot be disabled
     alert_cooldown_minutes: 60
