@@ -855,7 +855,10 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
   Strand 6: PULSE ──── codebase health scan, auto-generate beads (opt-in)
        │ no issues or disabled
        ▼
-  Strand 7: KNOT ───── alert human, enter backoff
+  Strand 7: SPLICE ──── worker failure documentation
+       │ no failures
+       ▼
+  Strand 8: KNOT ───── alert human, enter backoff
        │
        ▼
   → EXHAUSTED (backoff and retry from Strand 1)
@@ -1023,13 +1026,58 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
 | No new issues | Return `NoWork` → fall through to Strand 7 |
 | Disabled | Return `NoWork` → fall through to Strand 7 |
 
-## Strand 7: Knot
+## Strand 7: Splice
+
+**Purpose:** Document worker failures (crashed workers and live-but-looping workers) by creating failure beads in a configured report workspace.
+
+**Invokes agent:** No.
+
+**Entry condition:** Strand 6 returned no work. Splice is enabled in config (default: true). Heartbeat files exist in the heartbeat directory.
+
+**Algorithm:**
+
+1. **Scan for dead workers (stale heartbeat + dead tmux session):**
+   - Read all heartbeat files from the heartbeat directory
+   - For each heartbeat older than `stale_threshold_secs` (default: 300s):
+     - Check if the tmux session is still alive
+     - If session is dead, this is a failed worker
+
+2. **Scan for live-but-looping workers (optional, when `detect_live_loops: true`):**
+   - For each worker with a fresh heartbeat:
+     - Read the tail of their JSONL log file
+     - Detect three loop patterns:
+       - **Claim churn:** Repeated `bead.claim.race_lost` events for the same bead
+       - **State ping-pong:** Rapid cycling between a small set of states without forward progress
+       - **Log runaway:** Excessive JSONL growth without `agent.completed` events
+
+3. **Create failure beads:**
+   - For each undocumented failure or loop pattern:
+     - Create a bead in the configured `report_workspace`
+     - Include worker details, session info, and evidence in the bead body
+   - Track documented sessions/loops in `splice_state.json` to prevent duplicates
+
+4. **Return `WorkCreated` if any beads were created, otherwise `NoWork`**
+
+**Exit conditions:**
+| Result | Action |
+|--------|--------|
+| Failure beads created | Return `WorkCreated` → restart from Strand 1 |
+| No new failures detected | Return `NoWork` → fall through to Strand 8 |
+
+**State persistence:** `splice_state.json` tracks which session IDs and loop patterns have already been documented, preventing duplicate failure beads for the same dead/looping worker.
+
+**Loop detection thresholds:**
+- `claim_churn_threshold`: Number of race-lost events for same bead before flagging (default: 20)
+- `log_runaway_bytes`: Max JSONL growth in `live_loop_window_secs` without completion (default: 10 MiB)
+- `live_loop_window_secs`: Time window for log runaway check (default: 300s)
+
+## Strand 8: Knot
 
 **Purpose:** All work-finding strategies are exhausted. Alert the human and enter backoff.
 
 **Invokes agent:** No.
 
-**Entry condition:** Strands 1-6 all returned `NoWork`.
+**Entry condition:** Strands 1-7 all returned `NoWork`.
 
 **Algorithm:**
 1. Determine alert state:
