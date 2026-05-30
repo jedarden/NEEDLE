@@ -135,6 +135,21 @@ fn bench_sanitizer_sizes(c: &mut Criterion) {
     }
 
     group.finish();
+
+    // Report skip rate statistics for each trace size.
+    eprintln!("\nKeyword pre-filter skip rate by trace size:");
+    for size in [SIZE_10KB, SIZE_100KB, SIZE_1MB].iter() {
+        let content = generate_trace_content(*size);
+        let stats = sanitizer.measure_skip_stats(&content);
+        let size_label = if *size >= 1024 * 1024 {
+            format!("{}MB", *size / 1024 / 1024)
+        } else if *size >= 1024 {
+            format!("{}KB", *size / 1024)
+        } else {
+            format!("{}B", *size)
+        };
+        eprintln!("  {}: {}", size_label, stats.format());
+    }
 }
 
 /// Measures and reports median latency for a 100KB trace.

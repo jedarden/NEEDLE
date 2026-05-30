@@ -142,6 +142,29 @@ pub struct CustomPattern {
     pub entropy: Option<f64>,
 }
 
+/// Statistics from the keyword pre-filter skip rate measurement.
+#[derive(Debug, Clone)]
+pub struct SkipStats {
+    /// Total number of rule checks performed (lines × rules).
+    pub total_checks: usize,
+    /// Number of rule checks skipped by the Aho-Corasick keyword pre-filter.
+    pub skipped_by_keywords: usize,
+    /// Fraction of checks skipped (0.0 to 1.0).
+    pub skip_rate: f64,
+}
+
+impl SkipStats {
+    /// Format statistics for display.
+    pub fn format(&self) -> String {
+        format!(
+            "{}/{} skipped ({:.1}%)",
+            self.skipped_by_keywords,
+            self.total_checks,
+            self.skip_rate * 100.0
+        )
+    }
+}
+
 /// Sanitizes text content by redacting secrets.
 ///
 /// Build once and reuse across traces — rule compilation is expensive.
@@ -405,6 +428,43 @@ impl Sanitizer {
     /// Returns the embedded vendored gitleaks TOML text.
     pub fn vendored_toml() -> &'static str {
         GITLEAKS_TOML
+    }
+
+    /// Measure keyword pre-filter skip statistics for given text.
+    ///
+    /// Returns statistics about how many rules were skipped by the
+    /// Aho-Corasick keyword pre-filter (i.e., rules whose keywords
+    /// were not found in the text, allowing them to be skipped
+    /// without running the expensive regex).
+    pub fn measure_skip_stats(&self, text: &str) -> SkipStats {
+        let mut total_checks = 0usize;
+        let mut skipped_by_keywords = 0usize;
+
+        for line in text.lines() {
+            if line.len() < MIN_LINE_LEN {
+                continue;
+            }
+
+            let lower = line.to_ascii_lowercase();
+            for rule in &self.rules {
+                total_checks += 1;
+                if let Some(ref ac) = rule.keywords {
+                    if !ac.is_match(lower.as_bytes()) {
+                        skipped_by_keywords += 1;
+                    }
+                }
+            }
+        }
+
+        SkipStats {
+            total_checks,
+            skipped_by_keywords,
+            skip_rate: if total_checks > 0 {
+                skipped_by_keywords as f64 / total_checks as f64
+            } else {
+                0.0
+            },
+        }
     }
 }
 
