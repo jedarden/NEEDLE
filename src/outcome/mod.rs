@@ -408,6 +408,10 @@ impl OutcomeHandler {
             );
         }
 
+        // Reset failure count on successful gate completion.
+        // This ensures the bead starts fresh on the next cycle if re-claimed.
+        let _ = self.reset_failure_count(store, bead).await;
+
         // Normal success flow: check if agent closed the bead.
         let mut events = Vec::new();
 
@@ -647,11 +651,20 @@ impl OutcomeHandler {
 
         let mut events = self.release_bead(store, bead).await?;
 
-        // If release succeeded, add deferred label.
+        // If release succeeded, increment failure count and add deferred label.
         let release_succeeded = events
             .iter()
             .any(|e| matches!(e, EventKind::BeadReleased { .. }));
         if release_succeeded {
+            // Increment failure count for auto-split tracking.
+            if let Err(e) = self.increment_failure_count(store, bead).await {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to increment failure count after timeout"
+                );
+            }
+
             if let Err(e) = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 store.add_label(&bead.id, "deferred"),
@@ -879,6 +892,80 @@ impl OutcomeHandler {
                     "add_label timed out after 30s"
                 );
             }
+        }
+
+        Ok(())
+    }
+
+    /// Reset the failure count label on a bead by removing all `failure-count:N` labels.
+    ///
+    /// Called on success to clear the failure counter so the bead starts fresh
+    /// on the next cycle.
+    ///
+    /// All `br` calls are wrapped in timeouts to prevent indefinite hang in
+    /// HANDLING state. Failures are non-fatal — we log and continue.
+    async fn reset_failure_count(&self, store: &dyn BeadStore, bead: &Bead) -> Result<()> {
+        // Read labels with timeout.
+        let labels =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), store.labels(&bead.id))
+                .await
+            {
+                Ok(Ok(l)) => l,
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "could not read labels to reset failure count"
+                    );
+                    return Ok(());
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "labels() timed out after 30s, skipping failure count reset"
+                    );
+                    return Ok(());
+                }
+            };
+
+        // Remove all failure-count labels.
+        let mut removed_count = 0;
+        for label in &labels {
+            if label.starts_with("failure-count:") {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    store.remove_label(&bead.id, label),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        removed_count += 1;
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            label,
+                            error = %e,
+                            "failed to remove failure-count label"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            label,
+                            "remove_label timed out after 30s"
+                        );
+                    }
+                }
+            }
+        }
+
+        if removed_count > 0 {
+            tracing::debug!(
+                bead_id = %bead.id,
+                removed_count,
+                "failure count reset"
+            );
         }
 
         Ok(())
@@ -1230,6 +1317,29 @@ mod tests {
                 |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:3")
             ),
             "should add failure-count:3"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_success_resets_failure_count() {
+        // Success should reset failure count by removing all failure-count:N labels.
+        let handler = test_handler();
+        let store =
+            MockBeadStore::new(BeadStatus::Done).with_labels(vec!["failure-count:3".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        let actions = store.actions();
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::RemoveLabel(_, label) if label == "failure-count:3")
+            ),
+            "should remove failure-count:3 on success"
         );
     }
 

@@ -16,6 +16,8 @@ const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked"];
 pub struct PluckStrand {
     /// Labels to exclude from candidate selection.
     exclude_labels: Vec<String>,
+    /// Auto-split beads after this many consecutive failures (0 = disabled).
+    split_after_failures: u32,
 }
 
 impl PluckStrand {
@@ -34,7 +36,40 @@ impl PluckStrand {
         };
         PluckStrand {
             exclude_labels: labels,
+            split_after_failures: 3, // default threshold
         }
+    }
+
+    /// Create a new PluckStrand with the given exclude labels and split threshold.
+    ///
+    /// If `exclude_labels` is empty, the default set (`deferred`, `human`,
+    /// `blocked`) is used.
+    pub fn with_split_threshold(exclude_labels: Vec<String>, split_after_failures: u32) -> Self {
+        let labels = if exclude_labels.is_empty() {
+            DEFAULT_EXCLUDE_LABELS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            exclude_labels
+        };
+        PluckStrand {
+            exclude_labels: labels,
+            split_after_failures,
+        }
+    }
+
+    /// Extract the failure count from a bead's labels.
+    ///
+    /// Labels follow the pattern `failure-count:N`. Returns the count if found,
+    /// or 0 if no failure-count label exists.
+    fn extract_failure_count(bead: &Bead) -> u32 {
+        bead.labels
+            .iter()
+            .filter_map(|l| l.strip_prefix("failure-count:"))
+            .filter_map(|s| s.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Sort candidates in deterministic priority order.
@@ -100,7 +135,19 @@ impl super::Strand for PluckStrand {
         // 4. Sort: deterministic (priority, created_at, id).
         Self::sort_candidates(&mut candidates);
 
-        // 5. Return result.
+        // 5. Check for split trigger: if the first candidate has accumulated
+        //    enough consecutive failures, dispatch a SPLIT instruction instead
+        //    of returning the bead for normal processing.
+        if self.split_after_failures > 0 {
+            if let Some(first_candidate) = candidates.first() {
+                let failure_count = Self::extract_failure_count(first_candidate);
+                if failure_count >= self.split_after_failures {
+                    return StrandResult::Split(Box::new(first_candidate.clone()), failure_count);
+                }
+            }
+        }
+
+        // 6. Return result.
         if candidates.is_empty() {
             StrandResult::NoWork
         } else {
@@ -679,5 +726,77 @@ mod tests {
     fn custom_exclude_labels_used_when_provided() {
         let strand = PluckStrand::new(vec!["custom".to_string()]);
         assert_eq!(strand.exclude_labels, vec!["custom"]);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Split trigger tests
+    // ──────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn split_triggered_when_failure_count_exceeds_threshold() {
+        let bead_with_failures = make_bead_with_labels("failing-bead", 1, vec!["failure-count:3"]);
+        let store = MemoryStore {
+            beads: vec![bead_with_failures],
+        };
+
+        let strand = PluckStrand::with_split_threshold(vec![], 3);
+        let result = strand.evaluate(&store).await;
+
+        match result {
+            StrandResult::Split(bead, failure_count) => {
+                assert_eq!(bead.id.as_ref(), "failing-bead");
+                assert_eq!(failure_count, 3);
+            }
+            other => panic!("expected Split, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn split_not_triggered_when_failure_count_below_threshold() {
+        let bead_with_failures = make_bead_with_labels("failing-bead", 1, vec!["failure-count:2"]);
+        let store = MemoryStore {
+            beads: vec![bead_with_failures],
+        };
+
+        let strand = PluckStrand::with_split_threshold(vec![], 3);
+        let result = strand.evaluate(&store).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                assert_eq!(beads[0].id.as_ref(), "failing-bead");
+            }
+            other => panic!("expected BeadFound, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn split_disabled_when_threshold_is_zero() {
+        let bead_with_failures = make_bead_with_labels("failing-bead", 1, vec!["failure-count:10"]);
+        let store = MemoryStore {
+            beads: vec![bead_with_failures],
+        };
+
+        let strand = PluckStrand::with_split_threshold(vec![], 0);
+        let result = strand.evaluate(&store).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                assert_eq!(beads[0].id.as_ref(), "failing-bead");
+            }
+            other => panic!("expected BeadFound, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_failure_count_returns_max_when_multiple_labels() {
+        let bead =
+            make_bead_with_labels("multi-fail", 1, vec!["failure-count:1", "failure-count:5"]);
+        assert_eq!(PluckStrand::extract_failure_count(&bead), 5);
+    }
+
+    #[test]
+    fn extract_failure_count_returns_zero_when_no_label() {
+        let bead = make_bead("normal", 1, "2026-01-01 00:00:00");
+        assert_eq!(PluckStrand::extract_failure_count(&bead), 0);
     }
 }

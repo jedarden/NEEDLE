@@ -206,6 +206,14 @@ pub enum CliCommand {
         workspace: Option<PathBuf>,
     },
 
+    /// Initialize v2 config with optional v1 migration.
+    ///
+    /// Creates ~/.config/needle/config.yaml. Detects existing v1 artifacts
+    /// in ~/.needle/ and migrates compatible settings (agent name, workspace
+    /// path, worker count) to the v2 YAML schema. Safe to run on already-
+    /// initialized installs (idempotent).
+    Init,
+
     /// Show version information.
     Version,
 
@@ -366,6 +374,7 @@ pub fn run() -> Result<()> {
             show_source,
         } => cmd_config(get, dump, show_source),
         CliCommand::Doctor { repair, workspace } => cmd_doctor(repair, workspace),
+        CliCommand::Init => cmd_init(),
         CliCommand::Version => {
             cmd_version();
             Ok(())
@@ -1111,6 +1120,401 @@ fn cmd_list(format: ListFormat) -> Result<()> {
             println!("{json}");
         }
     }
+
+    Ok(())
+}
+
+/// `needle init` — initialize v2 config with optional v1 migration.
+///
+/// Creates ~/.config/needle/config.yaml. Detects existing v1 artifacts
+/// in ~/.needle/ and migrates compatible settings (agent name, workspace
+/// path, worker count) to the v2 YAML schema. Safe to run on already-
+/// initialized installs (idempotent).
+fn cmd_init() -> Result<()> {
+    /// Resolve a path relative to the user's home directory.
+    fn dirs_or_home(relative: &str) -> PathBuf {
+        if let Some(home) = std::env::var_os("HOME") {
+            PathBuf::from(home).join(relative)
+        } else {
+            PathBuf::from("/tmp").join(relative)
+        }
+    }
+
+    let config_path = dirs_or_home(".config/needle/config.yaml");
+    let v1_dir = dirs_or_home(".needle");
+
+    // Check if v2 config already exists.
+    if config_path.exists() {
+        println!("Config already exists: {}", config_path.display());
+        let config = ConfigLoader::load_from_path(&config_path)?;
+        println!("  Agent default: {}", config.agent.default);
+        println!("  Workspace: {}", config.workspace.default.display());
+        println!("  Max workers: {}", config.worker.max_workers);
+        println!("\nTo reinitialize, delete the existing config file first.");
+        return Ok(());
+    }
+
+    // Detect v1 artifacts and migrate compatible settings.
+    let mut agent_name = None::<String>;
+    let mut workspace_path = None::<PathBuf>;
+
+    // Check for v1 directory.
+    if v1_dir.exists() && v1_dir.is_dir() {
+        println!("Detected v1 artifacts: {}", v1_dir.display());
+
+        // Look for v1 config hints (file-based heuristics).
+        // v1 stored agent name as a subdirectory: ~/.needle/<agent>/
+        if let Ok(entries) = std::fs::read_dir(&v1_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().and_then(|n| n.to_str());
+                    // Skip common non-agent subdirectories.
+                    if let Some(name) = name {
+                        if !matches!(name, "state" | "logs" | "canary" | "config") {
+                            agent_name = Some(name.to_string());
+                            println!("  Migrating agent name from v1: {}", name);
+                        }
+                    }
+                }
+            }
+        }
+
+        // v1 workspace hints: look for recent .beads directories under $HOME.
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let home_path = PathBuf::from(&home);
+        if let Ok(entries) = std::fs::read_dir(&home_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.join(".beads").exists() {
+                    // Prefer the most recently modified workspace.
+                    let modified = entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    let current_best = workspace_path
+                        .as_ref()
+                        .and_then(|p| std::fs::metadata(p).ok()?.modified().ok())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    if modified > current_best {
+                        workspace_path = Some(path.clone());
+                        println!("  Migrating workspace path from v1: {}", path.display());
+                    }
+                }
+            }
+        }
+    }
+
+    // Build the config with migrated values or defaults.
+    let default_config = Config::default();
+    let agent_default = agent_name.unwrap_or_else(|| default_config.agent.default.clone());
+    let workspace_default =
+        workspace_path.unwrap_or_else(|| default_config.workspace.default.clone());
+
+    // Construct a minimal config YAML with comments explaining each field.
+    let config_yaml = format!(
+        r#"# NEEDLE v2 Configuration
+# Migrated from v1: {v1_status}
+#
+# This file controls NEEDLE's global behavior. Workspace-specific overrides
+# can be placed in .needle.yaml within each workspace directory.
+#
+# Resolution order (later overrides earlier):
+#   1. Built-in defaults
+#   2. This global config file
+#   3. Workspace .needle.yaml (if present)
+#   4. Environment variables (NEEDLE_*)
+#   5. CLI arguments
+#
+
+# Agent (AI model CLI) configuration.
+agent:
+  # Default agent adapter to use for bead processing.
+  # Examples: claude, opus, codex
+  default: {agent}
+
+  # Extra arguments to pass before the prompt.
+  args: []
+
+  # Agent process timeout in seconds (0 = unlimited).
+  timeout: 3600
+
+  # Directory containing adapter TOML files.
+  adapters_dir: ~/.config/needle/adapters
+
+# Worker fleet configuration.
+worker:
+  # Maximum number of concurrent workers.
+  max_workers: 4
+
+  # Stagger delay (seconds) between worker launches.
+  launch_stagger_seconds: 2
+
+  # Seconds to wait between queue polls when idle.
+  idle_timeout: 60
+
+  # What to do when the queue is empty.
+  # Options: wait, exit
+  idle_action: wait
+
+  # Maximum claim retries before skipping a bead.
+  max_claim_retries: 3
+
+  # Consecutive race_lost attempts before treating the ready queue as empty.
+  claim_race_lost_skip: 5
+
+  # How workers generate their unique names.
+  # Options: hostname_random, sequential, uuid
+  identifier_scheme: hostname_random
+
+  # Warn when CPU load (0.0–1.0) exceeds this threshold.
+  cpu_load_warn: 0.8
+
+  # Warn when available memory falls below this threshold (MB).
+  memory_free_warn_mb: 512
+
+  # BUILDING state timeout in seconds (0 = unlimited).
+  building_timeout: 600
+
+# Workspace path configuration.
+workspace:
+  # Default workspace directory (used when not specified on CLI).
+  default: {workspace}
+
+  # NEEDLE home directory (heartbeat files, log output).
+  home: ~/.needle
+
+  # Labels describing this workspace's domain (e.g., rust, api, trading).
+  # Used for cross-workspace skill sharing.
+  labels: []
+
+# Strand waterfall configuration.
+strands:
+  # Primary bead selection strand.
+  pluck:
+    exclude_labels: []
+    split_after_failures: 3
+
+  # Stuck/failed bead recovery strand.
+  mend:
+    stuck_threshold_secs: 300
+    lock_ttl_secs: 600
+    db_check_interval: 50
+    idle_timeout: 120
+
+  # Multi-workspace discovery strand.
+  explore:
+    enabled: true
+    workspaces: []
+    workspace_root: ~/
+
+  # Exhaustion alerting strand.
+  knot:
+    alert_destination: null
+    alert_cooldown_minutes: 60
+    exhaustion_threshold: 3
+
+  # Bead splitting on failure.
+  mitosis:
+    enabled: true
+    first_failure_only: true
+    force_failure_threshold: 0
+
+  # Gap analysis and bead creation.
+  weave:
+    enabled: false
+    max_beads_per_run: 5
+    cooldown_hours: 24
+    exclude_workspaces: []
+    doc_patterns:
+      - README*
+      - AGENTS.md
+      - docs/**
+
+  # Alternative proposals for human-blocked beads.
+  unravel:
+    enabled: false
+    max_beads_per_run: 5
+    max_alternatives_per_bead: 3
+    cooldown_hours: 168
+    prompt_template: null
+
+  # Codebase health scans.
+  pulse:
+    enabled: false
+    scanners: []
+    max_beads_per_run: 5
+    cooldown_hours: 48
+    severity_threshold: 3
+    prompt_template: null
+
+  # Meta-analysis and learning consolidation.
+  reflect:
+    enabled: true
+    min_beads_since_last: 10
+    cooldown_hours: 24
+    max_learnings_per_run: 10
+    max_skills_per_run: 3
+    learning_retention_days: 90
+    max_learnings: 80
+    extraction_agent: null
+    extraction_prompt_template: null
+    max_extraction_per_run: 5
+    transcript_recency_days: 7
+    transcript_max_sessions: 50
+    drift_similarity_threshold: 0.6
+    drift_enabled: true
+    adr_enabled: true
+    claude_md_placement: true
+
+  # Worker failure documentation.
+  splice:
+    enabled: true
+    stale_threshold_secs: 300
+    report_workspace: null
+    detect_live_loops: true
+    live_loop_scan_events: 200
+    claim_churn_threshold: 20
+    log_runaway_bytes: 10485760
+    live_loop_window_secs: 300
+
+  # Learning and trace retention.
+  learning:
+    trace_retention_failed_days: 30
+    trace_retention_success_days: 7
+    max_learnings: 80
+    trace_sanitization:
+      enabled: true
+      custom_patterns: []
+    global_learnings_file: ~/.config/needle/global-learnings.md
+    max_global_learnings: 40
+
+# Telemetry configuration.
+telemetry:
+  file_sink:
+    enabled: true
+    log_dir: null
+    retention_days: 30
+  stdout_sink:
+    enabled: false
+    format: normal
+    color: auto
+  hooks: []
+  otlp_sink:
+    enabled: false
+    endpoint: http://localhost:4317
+    protocol: grpc
+    timeout_secs: 10
+    compression: gzip
+    tls: none
+    headers: []
+    resource_attributes: []
+    metrics_interval_secs: 10
+    service_namespace: needle-fleet
+    max_queue_size: 2048
+
+# Health monitoring configuration.
+health:
+  heartbeat_interval_secs: 30
+  heartbeat_ttl_secs: 300
+
+# Provider/model concurrency and rate limiting.
+limits:
+  providers: {{}}
+  models: {{}}
+
+# Prompt construction configuration.
+prompt:
+  context_files: []
+  instructions: null
+  templates: {{}}
+  variants: {{}}
+
+# Per-model token pricing (USD per million tokens).
+# Maps model name directly to input/output pricing.
+pricing:
+  claude-sonnet-4-6:
+    input_per_million: 3.0
+    output_per_million: 15.0
+  claude-opus-4-6:
+    input_per_million: 15.0
+    output_per_million: 75.0
+  claude-haiku-4-20250514:
+    input_per_million: 0.25
+    output_per_million: 1.25
+  gpt-4o:
+    input_per_million: 5.0
+    output_per_million: 15.0
+  gpt-4o-mini:
+    input_per_million: 0.15
+    output_per_million: 0.60
+
+# Daily budget thresholds for cost enforcement.
+budget:
+  daily_usd: null
+
+# Verification commands run after agent success (legacy format).
+verification: []
+
+# Pluggable validation gates.
+gates: []
+
+# Self-modification (hot-reload) configuration.
+self_modification:
+  enabled: false
+  canary_workspace: ~/.needle/canary
+  auto_promote: false
+  canary_timeout: 300
+  hot_reload: true
+
+# FABRIC live dashboard forwarding.
+fabric:
+  enabled: false
+  endpoint: ""
+  timeout: 2
+  batching: false
+"#,
+        v1_status = if v1_dir.exists() {
+            "migrated"
+        } else {
+            "initialized"
+        },
+        agent = agent_default,
+        workspace = workspace_default.display()
+    );
+
+    // Ensure the config directory exists.
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory: {}", parent.display()))?;
+    }
+
+    // Write the config file.
+    std::fs::write(&config_path, config_yaml)
+        .with_context(|| format!("failed to write config file: {}", config_path.display()))?;
+
+    println!("Created config file: {}", config_path.display());
+    println!("\nConfiguration summary:");
+    println!("  Agent default: {}", agent_default);
+    println!("  Workspace: {}", workspace_default.display());
+    println!("  Max workers: 4 (default)");
+
+    // Validate the created config by running it through ConfigLoader.
+    let validated = ConfigLoader::load_from_path(&config_path)?;
+    let errors = ConfigLoader::validate(&validated);
+    if !errors.is_empty() {
+        println!("\nWarning: Config validation produced errors:");
+        for error in &errors {
+            println!("  - {}", error);
+        }
+    } else {
+        println!("\nConfig validated successfully.");
+    }
+
+    println!("\nNext steps:");
+    println!("  1. Review the config file and adjust settings as needed.");
+    println!("  2. Run `needle run` to start processing beads.");
+    println!("  3. Use `needle config --dump` to see the resolved configuration.");
 
     Ok(())
 }

@@ -1340,10 +1340,18 @@ impl Worker {
             }
         });
 
+        // Check if we should use SPLIT mode instead of normal PLUCK.
+        // Auto-split triggers when a bead has >= split_after_failures consecutive failures.
+        let (template_name, failure_count) = self.check_split_mode(&bead).await;
+
         let mut prompt = match tokio::time::timeout(
             timeout_dur,
             tokio::task::spawn_blocking(move || {
-                prompt_builder.build_pluck(&bead, &build_ws, &worker_name)
+                if template_name == "split" {
+                    prompt_builder.build_split(&bead, &build_ws, &worker_name, failure_count)
+                } else {
+                    prompt_builder.build_pluck(&bead, &build_ws, &worker_name)
+                }
             }),
         )
         .await
@@ -1469,6 +1477,7 @@ impl Worker {
         crate::rate_limit::RateLimiter::check_system_resources(
             self.config.worker.cpu_load_warn,
             self.config.worker.memory_free_warn_mb,
+            &self.telemetry,
         );
 
         self.set_state(WorkerState::Executing)?;
@@ -2886,6 +2895,57 @@ impl Worker {
         self.dispatcher
             .adapter(adapter_name)
             .and_then(|a| a.provider.clone())
+    }
+
+    /// Check if a bead should use SPLIT mode based on consecutive failures.
+    ///
+    /// Returns (template_name, failure_count). Uses SPLIT template when
+    /// the bead's consecutive failure count meets or exceeds the configured
+    /// threshold (split_after_failures), otherwise uses normal PLUCK template.
+    async fn check_split_mode(&self, bead: &Bead) -> (&'static str, u32) {
+        // Read labels with timeout protection (5s is generous for a local br call).
+        let labels =
+            match tokio::time::timeout(Duration::from_secs(5), self.store.labels(&bead.id)).await {
+                Ok(Ok(l)) => l,
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "failed to read labels for split mode check, using PLUCK mode"
+                    );
+                    return ("pluck", 0);
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "labels() timed out after 5s, using PLUCK mode"
+                    );
+                    return ("pluck", 0);
+                }
+            };
+
+        // Extract current failure count from labels (format: "failure-count:N").
+        // Multiple labels may exist from previous increments; we take the max.
+        let failure_count = labels
+            .iter()
+            .filter_map(|l| l.strip_prefix("failure-count:"))
+            .filter_map(|n| n.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+
+        // Check if we should use SPLIT mode.
+        let threshold = self.config.strands.pluck.split_after_failures;
+        if failure_count >= threshold {
+            tracing::info!(
+                bead_id = %bead.id,
+                failure_count,
+                threshold,
+                "auto-split triggered: using SPLIT template"
+            );
+            ("split", failure_count)
+        } else {
+            ("pluck", failure_count)
+        }
     }
 
     /// Return the current worker state (for testing/inspection).

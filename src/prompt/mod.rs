@@ -171,6 +171,81 @@ warrant a fix, propose a bead with:
 Do not propose beads that duplicate any existing open beads listed above.
 If no significant issues are found, respond with: NO_ISSUES";
 
+/// Built-in split template for auto-splitting beads with too many consecutive failures.
+///
+/// This template instructs the agent to decompose a problematic bead into
+/// smaller, focused child beads and convert the parent into an umbrella.
+const DEFAULT_SPLIT_TEMPLATE: &str = "\
+## Auto-Split: Decompose This Bead
+
+This bead has failed {failure_count} times in a row and needs to be broken down \
+into smaller, manageable pieces.
+
+### Bead to Split
+
+**Title:** {bead_title}
+**Bead ID:** {bead_id}
+**Description:**
+{bead_body}
+
+### Your Task
+
+You MUST split this bead into 3-5 smaller child beads. The parent is too big \
+or complex and has failed repeatedly. Your job is to decompose it into a \
+chain of focused, independently achievable tasks.
+
+### Requirements
+
+1. **Create 3-5 child beads** using the `br create` command:
+   ```bash
+   br create \"Child Title\" \"Child description and acceptance criteria\"
+   ```
+
+2. **Each child must:**
+   - Be independently completable and closable
+   - Have a clear, focused scope
+   - Start with a verb (e.g., \"Add\", \"Fix\", \"Implement\", \"Write\")
+   - Include acceptance criteria in the body
+   - Be added with label: `split-child`
+
+3. **Chain the children sequentially:**
+   - Child 2 depends on Child 1
+   - Child 3 depends on Child 2
+   - (Continue for all children)
+
+4. **Convert this parent into an umbrella:**
+   - Add a dependency: this parent depends on the LAST child
+   - Add label: `umbrella` to this parent
+
+5. **Verify the setup:**
+   ```bash
+   br show {bead_id}  # Should show umbrella label and dependency on last child
+   br show <last-child-id>  # Should show this parent as a dependent
+   ```
+
+### Example
+
+If splitting \"Build authentication system with OAuth and JWT\":
+1. Create child: \"Design OAuth2 flow\" with label split-child
+2. Create child: \"Implement JWT token service\" with label split-child, depends on child 1
+3. Create child: \"Add OAuth2 login endpoint\" with label split-child, depends on child 2
+4. Parent depends on child 3 and gets umbrella label
+
+### Output Format
+
+After creating all children and wiring dependencies, output:
+```
+SPLIT_COMPLETE: Created N children, parent converted to umbrella
+```
+
+List the created child IDs:
+```
+Children: needle-xxx, needle-yyy, needle-zzz
+```
+
+Do NOT close this bead. Just verify the split is complete and output the \
+SPLIT_COMPLETE message.";
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Known template names and their allowed variables
 // ──────────────────────────────────────────────────────────────────────────────
@@ -191,6 +266,7 @@ const COMMON_VARS: &[&str] = &[
 fn extra_vars_for_template(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "pluck" => Some(&[]),
+        "split" => Some(&["{failure_count}"]),
         "mitosis" => Some(&["{existing_children}"]),
         "weave" => Some(&["{doc_files}", "{existing_beads}"]),
         "unravel" => Some(&["{human_bead_context}"]),
@@ -201,7 +277,7 @@ fn extra_vars_for_template(name: &str) -> Option<&'static [&'static str]> {
 
 /// All known built-in template names (used in tests to verify defaults).
 #[cfg(test)]
-const KNOWN_TEMPLATE_NAMES: &[&str] = &["pluck", "mitosis", "weave", "unravel", "pulse"];
+const KNOWN_TEMPLATE_NAMES: &[&str] = &["pluck", "split", "mitosis", "weave", "unravel", "pulse"];
 
 // ──────────────────────────────────────────────────────────────────────────────
 // BuiltPrompt
@@ -258,6 +334,7 @@ impl PromptBuilder {
     pub fn new(config: &PromptConfig) -> Self {
         let mut templates = BTreeMap::new();
         templates.insert("pluck".to_string(), DEFAULT_PLUCK_TEMPLATE.to_string());
+        templates.insert("split".to_string(), DEFAULT_SPLIT_TEMPLATE.to_string());
         templates.insert("mitosis".to_string(), DEFAULT_MITOSIS_TEMPLATE.to_string());
         templates.insert("weave".to_string(), DEFAULT_WEAVE_TEMPLATE.to_string());
         templates.insert("unravel".to_string(), DEFAULT_UNRAVEL_TEMPLATE.to_string());
@@ -495,6 +572,25 @@ impl PromptBuilder {
         worker_id: &str,
     ) -> Result<BuiltPrompt> {
         self.build(bead, workspace, worker_id, "pluck")
+    }
+
+    /// Build a split (auto-split) prompt.
+    ///
+    /// `failure_count` — the current consecutive failure count for the bead.
+    pub fn build_split(
+        &self,
+        bead: &Bead,
+        workspace: &Path,
+        worker_id: &str,
+        failure_count: u32,
+    ) -> Result<BuiltPrompt> {
+        self.build_with_vars(
+            bead,
+            workspace,
+            worker_id,
+            "split",
+            &[("{failure_count}", &failure_count.to_string())],
+        )
     }
 
     /// Build a weave (gap analysis) prompt.

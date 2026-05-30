@@ -1,0 +1,16 @@
+{
+  "bead_id": "bf-4lxp7",
+  "agent": "echo-test",
+  "provider": null,
+  "model": null,
+  "exit_code": 0,
+  "outcome": "success",
+  "duration_ms": 3,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-05-13T21:01:54.388114993Z",
+  "trace_format": "raw_text",
+  "pruned": true,
+  "template_version": null
+}

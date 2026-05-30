@@ -1,0 +1,16 @@
+{
+  "bead_id": "bf-5nfvr",
+  "agent": "echo-test",
+  "provider": null,
+  "model": null,
+  "exit_code": 0,
+  "outcome": "success",
+  "duration_ms": 1,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-05-13T21:02:01.366392286Z",
+  "trace_format": "raw_text",
+  "pruned": true,
+  "template_version": null
+}

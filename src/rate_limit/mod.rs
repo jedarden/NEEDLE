@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::LimitsConfig;
 use crate::registry::Registry;
+use crate::telemetry::{EventKind, Telemetry};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // RateLimitDecision
@@ -343,17 +344,23 @@ impl RateLimiter {
 
     /// Check system resource health (CPU load and memory).
     ///
-    /// Returns warnings as log messages; does not block dispatch.
-    pub fn check_system_resources(cpu_load_warn: f64, memory_free_warn_mb: u64) {
+    /// Emits structured telemetry events when thresholds are exceeded; does not
+    /// block dispatch. Logs tracing warnings in addition to telemetry for
+    /// operator visibility.
+    pub fn check_system_resources(
+        cpu_load_warn: f64,
+        memory_free_warn_mb: u64,
+        telemetry: &Telemetry,
+    ) {
         // CPU load: read /proc/loadavg on Linux.
         if let Ok(loadavg) = std::fs::read_to_string("/proc/loadavg") {
             if let Some(load_str) = loadavg.split_whitespace().next() {
                 if let Ok(load) = load_str.parse::<f64>() {
                     // Normalize by number of CPUs.
                     let num_cpus = std::thread::available_parallelism()
-                        .map(|n| n.get() as f64)
-                        .unwrap_or(1.0);
-                    let normalized = load / num_cpus;
+                        .map(|n| n.get())
+                        .unwrap_or(1);
+                    let normalized = load / num_cpus as f64;
                     if normalized > cpu_load_warn {
                         tracing::warn!(
                             load_1min = %load_str,
@@ -361,6 +368,12 @@ impl RateLimiter {
                             threshold = %format!("{:.2}", cpu_load_warn),
                             "CPU load exceeds warning threshold"
                         );
+                        // Emit structured telemetry event.
+                        let _ = telemetry.emit(EventKind::FleetCpuSaturated {
+                            load_average: load,
+                            threshold: cpu_load_warn,
+                            core_count: num_cpus,
+                        });
                     }
                 }
             }
@@ -385,6 +398,11 @@ impl RateLimiter {
                         threshold_mb = memory_free_warn_mb,
                         "available memory below warning threshold"
                     );
+                    // Emit structured telemetry event.
+                    let _ = telemetry.emit(EventKind::FleetMemoryLow {
+                        free_mb: avail_mb,
+                        threshold_mb: memory_free_warn_mb,
+                    });
                 }
             }
         }
@@ -676,7 +694,8 @@ mod tests {
     #[test]
     fn system_resource_check_does_not_panic() {
         // Smoke test: should not panic on any platform.
-        RateLimiter::check_system_resources(0.8, 512);
+        let telemetry = Telemetry::new("test-worker".to_string());
+        RateLimiter::check_system_resources(0.8, 512, &telemetry);
     }
 
     #[test]

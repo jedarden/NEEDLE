@@ -212,9 +212,13 @@ proptest! {
 //
 // "Given N concurrent claim attempts on 1 bead, exactly 1 succeeds."
 //
-// We can't easily test concurrent claiming without a real bead store, but we
-// CAN verify the structural property: the claim exclusion set correctly
-// prevents re-claiming, and the ClaimOutcome enum covers all paths.
+// True concurrent claiming with flock serialization is tested in
+// real_br_integration_tests::real_br_property_3_concurrent_claim_exclusivity_*.
+// Those tests spawn N workers racing to claim the same bead and verify exactly
+// one succeeds via real flock (fs2).
+//
+// The tests below verify the structural property: the claim exclusion set
+// correctly prevents re-claiming, and the ClaimOutcome enum covers all paths.
 
 proptest! {
     /// Exclusion set correctly filters out beads. After adding a bead ID to

@@ -57,6 +57,9 @@ pub struct SelectOutcome {
     /// Dropped when the bead lifecycle ends (in do_log).
     #[allow(dead_code)]
     pub strand_span_guard: Option<tracing::span::EnteredSpan>,
+    /// If set, this bead should be dispatched with a split prompt instead of
+    /// the normal work prompt. Contains the consecutive failure count.
+    pub split_failure_count: Option<u32>,
 }
 
 pub use explore::ExploreStrand;
@@ -103,7 +106,10 @@ impl StrandRunner {
         registry: crate::registry::Registry,
         telemetry: crate::telemetry::Telemetry,
     ) -> Self {
-        let pluck = PluckStrand::new(config.strands.pluck.exclude_labels.clone());
+        let pluck = PluckStrand::with_split_threshold(
+            config.strands.pluck.exclude_labels.clone(),
+            config.strands.pluck.split_after_failures,
+        );
 
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
         let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
@@ -272,6 +278,9 @@ impl StrandRunner {
                     StrandResult::WorkCreated => (strand_results::WORK_CREATED.to_string(), true),
                     StrandResult::NoWork => (strand_results::NO_WORK.to_string(), true),
                     StrandResult::Error(_) => (strand_results::ERROR.to_string(), true),
+                    StrandResult::Split(_, _failure_count) => {
+                        (format!("{}({})", strand_results::BEAD_FOUND, 1), true)
+                    }
                 };
                 tracing::Span::current().record(attrs::NEEDLE_STRAND_RESULT, &result_str);
                 tracing::Span::current().record(attrs::NEEDLE_STRAND_DURATION_MS, elapsed_ms);
@@ -349,9 +358,41 @@ impl StrandRunner {
                                 restart_triggers,
                                 strand_evaluations,
                                 strand_span_guard: Some(strand_enter),
+                                split_failure_count: None,
                             });
                         }
                         continue;
+                    }
+                    StrandResult::Split(bead, failure_count) => {
+                        let bead = *bead;
+                        if let Err(e) =
+                            self.telemetry
+                                .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                    strand_name: strand_name.clone(),
+                                    result: "split".to_string(),
+                                    duration_ms: elapsed_ms,
+                                })
+                        {
+                            tracing::warn!(
+                                strand = %strand_name,
+                                error = %e,
+                                "failed to emit strand evaluated telemetry"
+                            );
+                        }
+                        tracing::info!(
+                            strand = %strand_name,
+                            bead_id = %bead.id,
+                            failure_count,
+                            "strand triggered split for bead with excessive failures"
+                        );
+                        return Ok(SelectOutcome {
+                            bead: Some((bead, strand_name.clone())),
+                            waterfall_restarts: restarts,
+                            restart_triggers,
+                            strand_evaluations,
+                            strand_span_guard: Some(strand_enter),
+                            split_failure_count: Some(failure_count),
+                        });
                     }
                     StrandResult::WorkCreated => {
                         if let Err(e) =
@@ -443,6 +484,7 @@ impl StrandRunner {
                 restart_triggers,
                 strand_evaluations,
                 strand_span_guard: None,
+                split_failure_count: None,
             });
         }
     }

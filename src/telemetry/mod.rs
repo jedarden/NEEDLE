@@ -252,6 +252,15 @@ pub enum EventKind {
         disk_free_mb: u64,
         peer_count: u32,
     },
+    FleetCpuSaturated {
+        load_average: f64,
+        threshold: f64,
+        core_count: usize,
+    },
+    FleetMemoryLow {
+        free_mb: u64,
+        threshold_mb: u64,
+    },
 
     // ── Mend strand ──
     MendOrphanedLockRemoved {
@@ -627,6 +636,8 @@ impl EventKind {
             EventKind::StuckDetected { .. } => "peer.stale",
             EventKind::StuckReleased { .. } => "peer.crashed",
             EventKind::HealthCheck { .. } => "health.check",
+            EventKind::FleetCpuSaturated { .. } => "fleet.cpu_saturated",
+            EventKind::FleetMemoryLow { .. } => "fleet.memory_low",
             EventKind::MendOrphanedLockRemoved { .. } => "mend.orphaned_lock_removed",
             EventKind::MendDependencyCleaned { .. } => "mend.dependency_cleaned",
             EventKind::MendDbRepaired { .. } => "mend.db_repaired",
@@ -756,6 +767,8 @@ impl EventKind {
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
             | EventKind::HealthCheck { .. }
+            | EventKind::FleetCpuSaturated { .. }
+            | EventKind::FleetMemoryLow { .. }
             | EventKind::MendOrphanedLockRemoved { .. }
             | EventKind::MendDbRepaired { .. }
             | EventKind::MendDbRebuilt
@@ -1049,6 +1062,26 @@ impl EventKind {
                     "db_healthy": db_healthy,
                     "disk_free_mb": disk_free_mb,
                     "peer_count": peer_count,
+                })
+            }
+            EventKind::FleetCpuSaturated {
+                load_average,
+                threshold,
+                core_count,
+            } => {
+                serde_json::json!({
+                    "load_average": load_average,
+                    "threshold": threshold,
+                    "core_count": core_count,
+                })
+            }
+            EventKind::FleetMemoryLow {
+                free_mb,
+                threshold_mb,
+            } => {
+                serde_json::json!({
+                    "free_mb": free_mb,
+                    "threshold_mb": threshold_mb,
                 })
             }
             EventKind::MendOrphanedLockRemoved {
@@ -1659,6 +1692,8 @@ impl EventKind {
             | EventKind::StuckDetected { .. }
             | EventKind::StuckReleased { .. }
             | EventKind::HealthCheck { .. }
+            | EventKind::FleetCpuSaturated { .. }
+            | EventKind::FleetMemoryLow { .. }
             | EventKind::MendOrphanedLockRemoved { .. }
             | EventKind::MendDependencyCleaned { .. }
             | EventKind::MendDbRepaired { .. }

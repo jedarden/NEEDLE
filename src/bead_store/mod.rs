@@ -681,7 +681,7 @@ impl BeadStore for BrCliBeadStore {
 
     async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_br(&["label", "add", "--label", label, id_str])
+        self.run_br(&["label", "add", id_str, "--label", label])
             .await
             .with_context(|| format!("br label add {id_str} {label} failed"))?;
         Ok(())
@@ -689,7 +689,7 @@ impl BeadStore for BrCliBeadStore {
 
     async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_br(&["label", "remove", "--label", label, id_str])
+        self.run_br(&["label", "remove", id_str, "--label", label])
             .await
             .with_context(|| format!("br label remove {id_str} {label} failed"))?;
         Ok(())
@@ -1184,7 +1184,7 @@ impl BeadStore for BfCliBeadStore {
 
     async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_bf(&["label", "add", "--label", label, id_str])
+        self.run_bf(&["label", "add", id_str, "--label", label])
             .await
             .with_context(|| format!("bf label add {id_str} {label} failed"))?;
         Ok(())
@@ -1192,7 +1192,7 @@ impl BeadStore for BfCliBeadStore {
 
     async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_bf(&["label", "remove", "--label", label, id_str])
+        self.run_bf(&["label", "remove", id_str, "--label", label])
             .await
             .with_context(|| format!("bf label remove {id_str} {label} failed"))?;
         Ok(())

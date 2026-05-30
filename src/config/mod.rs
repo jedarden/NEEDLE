@@ -212,6 +212,21 @@ pub struct PluckConfig {
     /// Labels to exclude from selection.
     #[serde(default)]
     pub exclude_labels: Vec<String>,
+
+    /// Auto-split beads after this many consecutive failures (0 = disabled).
+    ///
+    /// When a bead accumulates this many consecutive failures, pluck dispatches
+    /// a SPLIT instruction to the worker instead of the normal process-the-bead prompt.
+    /// The worker decomposes the bead into smaller child beads and converts the
+    /// parent into an umbrella (parent depends on last child, parent set non-ready).
+    #[serde(default = "PluckConfig::default_split_after_failures")]
+    pub split_after_failures: u32,
+}
+
+impl PluckConfig {
+    fn default_split_after_failures() -> u32 {
+        3
+    }
 }
 
 /// Mend strand configuration (stuck/failed bead recovery).

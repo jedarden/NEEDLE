@@ -291,6 +291,10 @@ pub enum StrandResult {
     NoWork,
     /// The strand encountered an error during evaluation.
     Error(StrandError),
+    /// A bead with too many consecutive failures should be split.
+    ///
+    /// Contains the bead to split and the current failure count.
+    Split(Box<Bead>, u32),
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
