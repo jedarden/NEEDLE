@@ -444,12 +444,12 @@ needle (binary)
 ├── cli/              CLI parsing, session management
 ├── worker/           Worker loop, state machine
 ├── strand/           Strand waterfall evaluation
-│   └── splice/       Worker failure documentation
+│   └── splice.rs     Worker failure documentation
 ├── claim/            Atomic claiming, lock management
 ├── prompt/           Prompt construction from bead context
 ├── dispatch/         Agent adapter loading, process execution
 ├── outcome/          Exit code classification, outcome handlers
-├── commit_hook/      Bead-Id trailer injection for git commits
+├── commit_hook.rs    Bead-Id trailer injection for git commits
 ├── telemetry/        Structured event emission, sinks
 ├── health/           Heartbeat, stuck detection, peer monitoring
 ├── config/           Hierarchical configuration loading
