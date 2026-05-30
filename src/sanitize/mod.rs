@@ -687,4 +687,70 @@ mod tests {
             threshold_ms
         );
     }
+
+    #[test]
+    fn sanitizer_performance_100kb_median() {
+        // Phase 4 success criterion: sanitization of 100KB trace must
+        // complete in <10ms median on release builds (<500ms on debug).
+        // This test measures median latency over multiple samples for
+        // more stable results than a single measurement.
+
+        let s = make_sanitizer();
+
+        // Generate representative 100KB trace content (JSONL format).
+        let events = [
+            r#"{"type":"system","subtype":"init","cwd":"/home/coding/NEEDLE","session_id":"abc123","tools":["Task","Read","Write"],"model":"claude-sonnet-4-6"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Processing bead needle-test.123"}}}"#,
+            r#"{"type":"tool_use","name":"Bash","input":{"command":"echo 'test'}}}"#,
+            r#"{"type":"tool_result","output":"test output","exit_code":0}"#,
+            r#"{"type":"system","subtype":"bead_update","bead_id":"needle-wysd.2.2","status":"completed"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Token=[REDACTED:anthropic-api-key] sanitized"}}}"#,
+        ];
+
+        let avg_event_size = events.iter().map(|s| s.len() + 1).sum::<usize>() / events.len();
+        let events_needed = (100 * 1024) / avg_event_size;
+
+        let mut trace = String::with_capacity(100 * 1024);
+        for i in 0..events_needed {
+            trace.push_str(events[i % events.len()]);
+            trace.push('\n');
+        }
+        trace.truncate(100 * 1024);
+
+        // Measure latency over multiple samples to get stable median.
+        const SAMPLE_COUNT: usize = 20;
+        let mut latencies = Vec::with_capacity(SAMPLE_COUNT);
+
+        // Warm-up.
+        for _ in 0..3 {
+            let _ = s.sanitize(&trace);
+        }
+
+        for _ in 0..SAMPLE_COUNT {
+            let start = std::time::Instant::now();
+            let _ = s.sanitize(&trace);
+            latencies.push(start.elapsed().as_millis());
+        }
+
+        latencies.sort();
+        let median = latencies[SAMPLE_COUNT / 2];
+        let p95 = latencies[(SAMPLE_COUNT * 95) / 100];
+
+        #[cfg(debug_assertions)]
+        let threshold_ms = 500u128;
+        #[cfg(not(debug_assertions))]
+        let threshold_ms = 10u128;
+
+        // Use environment variable to override threshold (for CI tuning).
+        let threshold_ms = std::env::var("SANITIZER_LATENCY_THRESHOLD_MS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(threshold_ms);
+
+        assert!(
+            median < threshold_ms,
+            "Sanitizer median latency ({} ms, p95: {} ms) exceeds threshold ({} ms) over {} samples",
+            median, p95, threshold_ms, SAMPLE_COUNT
+        );
+    }
 }

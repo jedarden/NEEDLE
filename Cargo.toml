@@ -120,6 +120,11 @@ tokio-test = "0.4"
 tempfile = "3"
 proptest = "1"
 filetime = "0.2"
+criterion = "0.5"
+
+[[bench]]
+name = "sanitize"
+harness = false
 
 [profile.release]
 strip = true
