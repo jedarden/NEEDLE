@@ -1679,13 +1679,24 @@ impl ConfigLoader {
         }
 
         if let Some(ref strands) = overrides.strands {
-            if strands.weave.is_some() {
+            if let Some(ref weave_val) = strands.weave {
+                if let Ok(weave_cfg) = serde_yaml::from_value::<WeaveConfig>(weave_val.clone()) {
+                    config.strands.weave = weave_cfg;
+                }
                 sources.insert("strands.weave".to_string(), source.clone());
             }
-            if strands.pulse.is_some() {
+            if let Some(ref pulse_val) = strands.pulse {
+                if let Ok(pulse_cfg) = serde_yaml::from_value::<PulseConfig>(pulse_val.clone()) {
+                    config.strands.pulse = pulse_cfg;
+                }
                 sources.insert("strands.pulse".to_string(), source.clone());
             }
-            if strands.unravel.is_some() {
+            if let Some(ref unravel_val) = strands.unravel {
+                if let Ok(unravel_cfg) =
+                    serde_yaml::from_value::<UnravelConfig>(unravel_val.clone())
+                {
+                    config.strands.unravel = unravel_cfg;
+                }
                 sources.insert("strands.unravel".to_string(), source.clone());
             }
         }
