@@ -474,6 +474,21 @@ impl OutcomeHandler {
             }
         }
 
+        // Flush SQLite state to JSONL so the closed/orphaned bead is captured in
+        // the git-committed backup. Non-fatal: a flush failure is logged but does
+        // not block the worker from picking up the next bead.
+        match self.timeout_op(|| store.flush(), "flush").await {
+            Ok(Some(())) => {
+                tracing::debug!(bead_id = %bead.id, "flushed bead state to JSONL after success");
+            }
+            Ok(None) => {
+                tracing::warn!(bead_id = %bead.id, "flush timed out after success — JSONL may lag SQLite");
+            }
+            Err(e) => {
+                tracing::warn!(bead_id = %bead.id, error = %e, "flush failed after success — JSONL may lag SQLite");
+            }
+        }
+
         Ok((BeadAction::None, events))
     }
 
