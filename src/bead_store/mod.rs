@@ -1203,13 +1203,12 @@ impl BeadStore for BfCliBeadStore {
             "create".into(),
             "--title".into(),
             title.into(),
-            "--body".into(),
+            "--description".into(),
             body.into(),
-            "--json".into(),
         ];
-        if !labels.is_empty() {
-            args.push("--labels".into());
-            args.push(labels.join(","));
+        for label in labels {
+            args.push("--label".into());
+            args.push((*label).into());
         }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let stdout = self.run_bf(&arg_refs).await.context("bf create failed")?;
