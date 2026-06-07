@@ -3163,6 +3163,7 @@ mod tests {
         let mut config = Config::default();
         config.worker.idle_action = IdleAction::Exit;
         config.self_modification.hot_reload = false;
+        config.strands.explore.enabled = false;
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
         let result = worker.run().await.unwrap();
