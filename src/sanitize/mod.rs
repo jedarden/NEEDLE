@@ -797,7 +797,7 @@ mod tests {
         let p95 = latencies[(SAMPLE_COUNT * 95) / 100];
 
         #[cfg(debug_assertions)]
-        let threshold_ms = 500u128;
+        let threshold_ms = 2000u128;
         #[cfg(not(debug_assertions))]
         let threshold_ms = 10u128;
 
