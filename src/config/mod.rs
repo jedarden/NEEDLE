@@ -25,6 +25,45 @@ use crate::validation::GateConfig;
 // Sub-structs
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// A single routing rule mapping model patterns to adapters.
+///
+/// Rules are evaluated in order; the first matching rule determines the adapter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingRule {
+    /// Regex or glob pattern to match against model names.
+    ///
+    /// Patterns are matched against the model name only (not provider prefixes).
+    /// Examples: `"sonnet"`, `"opus"`, `"claude-sonnet-4-6"`, `"(claude-)?(sonnet|opus).*"`.
+    pub match_model: String,
+
+    /// Adapter to use for matching models (e.g., `claude-print`, `claude-code-glm-4.7`).
+    pub adapter: String,
+}
+
+/// Agent routing configuration.
+///
+/// Maps model name patterns to adapters. When a bead specifies a model,
+/// the routing rules are evaluated in order to determine which adapter to use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoutingConfig {
+    /// Ordered list of routing rules (first match wins).
+    #[serde(default)]
+    pub rules: Vec<RoutingRule>,
+
+    /// Fallback adapter when no rules match (defaults to `agent.default`).
+    #[serde(default)]
+    pub default_adapter: Option<String>,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        RoutingConfig {
+            rules: Vec::new(),
+            default_adapter: None,
+        }
+    }
+}
+
 /// Agent (AI model CLI) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -43,6 +82,10 @@ pub struct AgentConfig {
     /// Directory containing adapter TOML files.
     #[serde(default = "AgentConfig::default_adapters_dir")]
     pub adapters_dir: PathBuf,
+
+    /// Model-to-adapter routing rules (optional).
+    #[serde(default)]
+    pub routing: Option<RoutingConfig>,
 }
 
 impl Default for AgentConfig {
@@ -52,6 +95,7 @@ impl Default for AgentConfig {
             args: Vec::new(),
             timeout: Self::default_timeout(),
             adapters_dir: Self::default_adapters_dir(),
+            routing: None,
         }
     }
 }
@@ -1486,6 +1530,7 @@ pub struct WorkspaceOverrides {
 pub struct WorkspaceAgentOverrides {
     pub default: Option<String>,
     pub timeout: Option<u64>,
+    pub routing: Option<RoutingConfig>,
 }
 
 /// Strand fields overridable at the workspace level.
@@ -1676,6 +1721,10 @@ impl ConfigLoader {
                 config.agent.timeout = timeout;
                 sources.insert("agent.timeout".to_string(), source.clone());
             }
+            if let Some(ref routing) = agent.routing {
+                config.agent.routing = Some(routing.clone());
+                sources.insert("agent.routing".to_string(), source.clone());
+            }
         }
 
         if let Some(ref strands) = overrides.strands {
@@ -1750,6 +1799,10 @@ impl ConfigLoader {
                                 "invalid value for agent.timeout — expected integer"
                             );
                         }
+                    }
+                    "agent.routing.default_adapter" => {
+                        config.agent.routing.get_or_insert_with(RoutingConfig::default).default_adapter = Some(value);
+                        sources.insert(config_path, source);
                     }
                     "worker.max_workers" => {
                         if let Ok(v) = value.parse::<u32>() {
@@ -1974,6 +2027,26 @@ impl ConfigLoader {
                     3 * config.health.heartbeat_interval_secs
                 ),
             });
+        }
+
+        // Validate routing regex patterns.
+        if let Some(ref routing) = config.agent.routing {
+            for (idx, rule) in routing.rules.iter().enumerate() {
+                // Validate that match_model is a valid regex.
+                if let Err(e) = regex::Regex::new(&rule.match_model) {
+                    errors.push(ConfigError {
+                        field: format!("agent.routing.rules[{}].match_model", idx),
+                        message: format!("invalid regex pattern '{}': {}", rule.match_model, e),
+                    });
+                }
+                // Validate that adapter is not empty.
+                if rule.adapter.is_empty() {
+                    errors.push(ConfigError {
+                        field: format!("agent.routing.rules[{}].adapter", idx),
+                        message: "must not be empty".to_string(),
+                    });
+                }
+            }
         }
 
         errors
@@ -3118,5 +3191,292 @@ strands:
             message: "must not be empty".to_string(),
         };
         assert_eq!(format!("{}", err), "agent.default: must not be empty");
+    }
+
+    // ── Routing config tests ──
+
+    #[test]
+    fn default_routing_config_is_none() {
+        let config = Config::default();
+        assert!(config.agent.routing.is_none(), "default routing should be None");
+    }
+
+    #[test]
+    fn routing_config_with_rules_parses() {
+        let yaml = r#"
+agent:
+  default: claude
+  routing:
+    rules:
+      - match_model: "(claude-)?(sonnet|opus).*"
+        adapter: claude-print
+      - match_model: "haiku.*"
+        adapter: claude-code-glm-4.7
+    default_adapter: claude-code-glm-4.7
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let config = ConfigLoader::load_from_path(&path).unwrap();
+
+        assert!(config.agent.routing.is_some());
+        let routing = config.agent.routing.as_ref().unwrap();
+        assert_eq!(routing.rules.len(), 2);
+        assert_eq!(routing.rules[0].match_model, "(claude-)?(sonnet|opus).*");
+        assert_eq!(routing.rules[0].adapter, "claude-print");
+        assert_eq!(routing.rules[1].match_model, "haiku.*");
+        assert_eq!(routing.rules[1].adapter, "claude-code-glm-4.7");
+        assert_eq!(routing.default_adapter.as_deref(), Some("claude-code-glm-4.7"));
+    }
+
+    #[test]
+    fn routing_config_empty_rules_list_is_valid() {
+        let yaml = r#"
+agent:
+  routing:
+    rules: []
+    default_adapter: fallback-adapter
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, yaml).unwrap();
+        let config = ConfigLoader::load_from_path(&path).unwrap();
+
+        assert!(config.agent.routing.is_some());
+        let routing = config.agent.routing.as_ref().unwrap();
+        assert!(routing.rules.is_empty());
+        assert_eq!(routing.default_adapter.as_deref(), Some("fallback-adapter"));
+    }
+
+    #[test]
+    fn invalid_regex_in_routing_rule_fails_validation() {
+        let mut config = Config::default();
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![RoutingRule {
+                match_model: "[invalid(regex".to_string(), // Unclosed bracket
+                adapter: "some-adapter".to_string(),
+            }],
+            default_adapter: None,
+        });
+
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.iter().any(|e| e.field == "agent.routing.rules[0].match_model"),
+            "expected regex validation error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn empty_adapter_in_routing_rule_fails_validation() {
+        let mut config = Config::default();
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![RoutingRule {
+                match_model: "sonnet".to_string(),
+                adapter: String::new(), // Empty adapter
+            }],
+            default_adapter: None,
+        });
+
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.iter().any(|e| e.field == "agent.routing.rules[0].adapter"),
+            "expected empty adapter error, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn valid_regex_in_routing_rule_passes_validation() {
+        let mut config = Config::default();
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "(claude-)?sonnet.*".to_string(),
+                    adapter: "claude-print".to_string(),
+                },
+                RoutingRule {
+                    match_model: "opus".to_string(),
+                    adapter: "claude-opus".to_string(),
+                },
+            ],
+            default_adapter: Some("claude-fallback".to_string()),
+        });
+
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            !errors.iter().any(|e| e.field.starts_with("agent.routing")),
+            "routing config should be valid, but got errors: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn workspace_config_routing_override() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            r#"
+agent:
+  routing:
+    rules:
+      - match_model: "fable.*"
+        adapter: fable-adapter
+    default_adapter: workspace-default
+"#,
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert!(config.agent.routing.is_some());
+        let routing = config.agent.routing.as_ref().unwrap();
+        assert_eq!(routing.rules.len(), 1);
+        assert_eq!(routing.rules[0].match_model, "fable.*");
+        assert_eq!(routing.rules[0].adapter, "fable-adapter");
+        assert_eq!(routing.default_adapter.as_deref(), Some("workspace-default"));
+        assert!(sources.contains_key("agent.routing"));
+    }
+
+    #[test]
+    fn env_var_routing_default_adapter_override() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_AGENT__ROUTING__DEFAULT_ADAPTER";
+        std::env::set_var(key, "env-fallback");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert!(config.agent.routing.is_some());
+        assert_eq!(
+            config.agent.routing.as_ref().unwrap().default_adapter.as_deref(),
+            Some("env-fallback")
+        );
+        assert!(sources.contains_key("agent.routing.default_adapter"));
+    }
+
+    #[test]
+    fn env_var_routing_override_beats_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            r#"
+agent:
+  routing:
+    default_adapter: workspace-fallback
+"#,
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        // Apply workspace first.
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+        assert_eq!(
+            config.agent.routing.as_ref().unwrap().default_adapter.as_deref(),
+            Some("workspace-fallback")
+        );
+
+        // Then env var overrides workspace.
+        let key = "NEEDLE_AGENT__ROUTING__DEFAULT_ADAPTER";
+        std::env::set_var(key, "env-fallback");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert_eq!(
+            config.agent.routing.as_ref().unwrap().default_adapter.as_deref(),
+            Some("env-fallback")
+        );
+        assert!(matches!(
+            sources.get("agent.routing.default_adapter"),
+            Some(ConfigSource::EnvVar(_))
+        ));
+    }
+
+    #[test]
+    fn multiple_validation_errors_in_routing() {
+        let mut config = Config::default();
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "[invalid".to_string(),
+                    adapter: "adapter1".to_string(),
+                },
+                RoutingRule {
+                    match_model: "valid".to_string(),
+                    adapter: String::new(), // Empty adapter
+                },
+                RoutingRule {
+                    match_model: "(unclosed".to_string(),
+                    adapter: "adapter3".to_string(),
+                },
+            ],
+            default_adapter: None,
+        });
+
+        let errors = ConfigLoader::validate(&config);
+        let routing_errors: Vec<_> = errors
+            .iter()
+            .filter(|e| e.field.starts_with("agent.routing"))
+            .collect();
+
+        assert!(
+            routing_errors.len() >= 3,
+            "expected at least 3 routing errors, got {}: {:?}",
+            routing_errors.len(),
+            routing_errors
+        );
+    }
+
+    #[test]
+    fn routing_config_yaml_roundtrip() {
+        let routing = RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "sonnet".to_string(),
+                    adapter: "adapter-sonnet".to_string(),
+                },
+                RoutingRule {
+                    match_model: "opus".to_string(),
+                    adapter: "adapter-opus".to_string(),
+                },
+            ],
+            default_adapter: Some("default-adapter".to_string()),
+        };
+
+        let yaml = serde_yaml::to_string(&routing).unwrap();
+        let decoded: RoutingConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(decoded.rules.len(), routing.rules.len());
+        assert_eq!(decoded.rules[0].match_model, routing.rules[0].match_model);
+        assert_eq!(decoded.rules[0].adapter, routing.rules[0].adapter);
+        assert_eq!(decoded.default_adapter, routing.default_adapter);
+    }
+
+    #[test]
+    fn agent_config_with_routing_yaml_roundtrip() {
+        let mut agent = AgentConfig::default();
+        agent.routing = Some(RoutingConfig {
+            rules: vec![RoutingRule {
+                match_model: "haiku".to_string(),
+                adapter: "haiku-adapter".to_string(),
+            }],
+            default_adapter: Some("fallback".to_string()),
+        });
+
+        let yaml = serde_yaml::to_string(&agent).unwrap();
+        let decoded: AgentConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        assert!(decoded.routing.is_some());
+        let routing = decoded.routing.as_ref().unwrap();
+        assert_eq!(routing.rules.len(), 1);
+        assert_eq!(routing.rules[0].match_model, "haiku");
+        assert_eq!(routing.default_adapter.as_deref(), Some("fallback"));
     }
 }
