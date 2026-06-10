@@ -512,6 +512,66 @@ impl Dispatcher {
         self.adapters.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Resolve an adapter name from a model name using routing rules.
+    ///
+    /// If routing is configured in the config, returns the adapter name that
+    /// matches the model pattern (first match wins). Otherwise, returns the
+    /// default adapter name.
+    ///
+    /// # Arguments
+    /// * `model` - Model name (e.g., "sonnet", "claude-opus-4-8", "fable")
+    /// * `config` - Full config containing routing rules
+    ///
+    /// # Returns
+    /// The resolved adapter name (e.g., "claude-code-glm-4.7", "claude-sonnet")
+    pub fn resolve_adapter_name(&self, model: &str, config: &Config) -> String {
+        if let Some(ref routing) = config.agent.routing {
+            // Check each routing rule in order (first match wins)
+            for rule in &routing.rules {
+                match regex::Regex::new(&rule.match_model) {
+                    Ok(re) => {
+                        if re.is_match(model) {
+                            tracing::debug!(
+                                model = %model,
+                                pattern = %rule.match_model,
+                                adapter = %rule.adapter,
+                                "routing rule matched"
+                            );
+                            return rule.adapter.clone();
+                        }
+                    }
+                    Err(_) => {
+                        // Regex was validated during config load, so this should never happen.
+                        // Fall back to default if somehow we get an invalid pattern at runtime.
+                        tracing::warn!(
+                            pattern = %rule.match_model,
+                            "invalid routing regex pattern (should have been caught by config validation)"
+                        );
+                        continue;
+                    }
+                }
+            }
+
+            // No rules matched; use default_adapter if set
+            if let Some(ref default_adapter) = routing.default_adapter {
+                tracing::debug!(
+                    model = %model,
+                    adapter = %default_adapter,
+                    "no routing rules matched, using default_adapter"
+                );
+                return default_adapter.clone();
+            }
+        }
+
+        // No routing configured or no default_adapter; fall back to agent.default
+        tracing::debug!(
+            model = %model,
+            adapter = %config.agent.default,
+            "no routing configured, using agent.default"
+        );
+        config.agent.default.clone()
+    }
+
     /// Execute the agent process for a bead.
     ///
     /// 1. Writes the prompt to a temp file

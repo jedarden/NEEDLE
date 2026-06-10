@@ -1801,7 +1801,11 @@ impl ConfigLoader {
                         }
                     }
                     "agent.routing.default_adapter" => {
-                        config.agent.routing.get_or_insert_with(RoutingConfig::default).default_adapter = Some(value);
+                        config
+                            .agent
+                            .routing
+                            .get_or_insert_with(RoutingConfig::default)
+                            .default_adapter = Some(value);
                         sources.insert(config_path, source);
                     }
                     "worker.max_workers" => {
@@ -3198,7 +3202,10 @@ strands:
     #[test]
     fn default_routing_config_is_none() {
         let config = Config::default();
-        assert!(config.agent.routing.is_none(), "default routing should be None");
+        assert!(
+            config.agent.routing.is_none(),
+            "default routing should be None"
+        );
     }
 
     #[test]
@@ -3226,7 +3233,10 @@ agent:
         assert_eq!(routing.rules[0].adapter, "claude-print");
         assert_eq!(routing.rules[1].match_model, "haiku.*");
         assert_eq!(routing.rules[1].adapter, "claude-code-glm-4.7");
-        assert_eq!(routing.default_adapter.as_deref(), Some("claude-code-glm-4.7"));
+        assert_eq!(
+            routing.default_adapter.as_deref(),
+            Some("claude-code-glm-4.7")
+        );
     }
 
     #[test]
@@ -3261,7 +3271,9 @@ agent:
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "agent.routing.rules[0].match_model"),
+            errors
+                .iter()
+                .any(|e| e.field == "agent.routing.rules[0].match_model"),
             "expected regex validation error, got: {:?}",
             errors
         );
@@ -3280,7 +3292,9 @@ agent:
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "agent.routing.rules[0].adapter"),
+            errors
+                .iter()
+                .any(|e| e.field == "agent.routing.rules[0].adapter"),
             "expected empty adapter error, got: {:?}",
             errors
         );
@@ -3337,7 +3351,10 @@ agent:
         assert_eq!(routing.rules.len(), 1);
         assert_eq!(routing.rules[0].match_model, "fable.*");
         assert_eq!(routing.rules[0].adapter, "fable-adapter");
-        assert_eq!(routing.default_adapter.as_deref(), Some("workspace-default"));
+        assert_eq!(
+            routing.default_adapter.as_deref(),
+            Some("workspace-default")
+        );
         assert!(sources.contains_key("agent.routing"));
     }
 
@@ -3353,7 +3370,13 @@ agent:
 
         assert!(config.agent.routing.is_some());
         assert_eq!(
-            config.agent.routing.as_ref().unwrap().default_adapter.as_deref(),
+            config
+                .agent
+                .routing
+                .as_ref()
+                .unwrap()
+                .default_adapter
+                .as_deref(),
             Some("env-fallback")
         );
         assert!(sources.contains_key("agent.routing.default_adapter"));
@@ -3379,7 +3402,13 @@ agent:
         let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
         ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
         assert_eq!(
-            config.agent.routing.as_ref().unwrap().default_adapter.as_deref(),
+            config
+                .agent
+                .routing
+                .as_ref()
+                .unwrap()
+                .default_adapter
+                .as_deref(),
             Some("workspace-fallback")
         );
 
@@ -3390,7 +3419,13 @@ agent:
         std::env::remove_var(key);
 
         assert_eq!(
-            config.agent.routing.as_ref().unwrap().default_adapter.as_deref(),
+            config
+                .agent
+                .routing
+                .as_ref()
+                .unwrap()
+                .default_adapter
+                .as_deref(),
             Some("env-fallback")
         );
         assert!(matches!(
