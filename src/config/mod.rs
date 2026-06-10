@@ -44,7 +44,7 @@ pub struct RoutingRule {
 ///
 /// Maps model name patterns to adapters. When a bead specifies a model,
 /// the routing rules are evaluated in order to determine which adapter to use.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutingConfig {
     /// Ordered list of routing rules (first match wins).
     #[serde(default)]
@@ -53,15 +53,6 @@ pub struct RoutingConfig {
     /// Fallback adapter when no rules match (defaults to `agent.default`).
     #[serde(default)]
     pub default_adapter: Option<String>,
-}
-
-impl Default for RoutingConfig {
-    fn default() -> Self {
-        RoutingConfig {
-            rules: Vec::new(),
-            default_adapter: None,
-        }
-    }
 }
 
 /// Agent (AI model CLI) configuration.
@@ -3496,14 +3487,16 @@ agent:
 
     #[test]
     fn agent_config_with_routing_yaml_roundtrip() {
-        let mut agent = AgentConfig::default();
-        agent.routing = Some(RoutingConfig {
-            rules: vec![RoutingRule {
-                match_model: "haiku".to_string(),
-                adapter: "haiku-adapter".to_string(),
-            }],
-            default_adapter: Some("fallback".to_string()),
-        });
+        let agent = AgentConfig {
+            routing: Some(RoutingConfig {
+                rules: vec![RoutingRule {
+                    match_model: "haiku".to_string(),
+                    adapter: "haiku-adapter".to_string(),
+                }],
+                default_adapter: Some("fallback".to_string()),
+            }),
+            ..Default::default()
+        };
 
         let yaml = serde_yaml::to_string(&agent).unwrap();
         let decoded: AgentConfig = serde_yaml::from_str(&yaml).unwrap();
@@ -3513,5 +3506,141 @@ agent:
         assert_eq!(routing.rules.len(), 1);
         assert_eq!(routing.rules[0].match_model, "haiku");
         assert_eq!(routing.default_adapter.as_deref(), Some("fallback"));
+    }
+
+    #[test]
+    fn routing_patterns_match_bare_aliases() {
+        // Test patterns that match bare model aliases like 'sonnet', 'opus', 'fable', 'haiku'
+        let mut config = Config::default();
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "sonnet".to_string(),
+                    adapter: "sonnet-adapter".to_string(),
+                },
+                RoutingRule {
+                    match_model: "opus".to_string(),
+                    adapter: "opus-adapter".to_string(),
+                },
+                RoutingRule {
+                    match_model: "fable".to_string(),
+                    adapter: "fable-adapter".to_string(),
+                },
+                RoutingRule {
+                    match_model: "haiku".to_string(),
+                    adapter: "haiku-adapter".to_string(),
+                },
+            ],
+            default_adapter: Some("default-adapter".to_string()),
+        });
+
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            !errors.iter().any(|e| e.field.starts_with("agent.routing")),
+            "bare alias patterns should be valid, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn routing_patterns_match_full_model_ids() {
+        // Test patterns that match full model IDs like 'claude-sonnet-4-6'
+        let mut config = Config::default();
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "claude-sonnet-4-6".to_string(),
+                    adapter: "sonnet-46-adapter".to_string(),
+                },
+                RoutingRule {
+                    match_model: "claude-opus-4-8".to_string(),
+                    adapter: "opus-48-adapter".to_string(),
+                },
+                RoutingRule {
+                    match_model: "claude-fable-5".to_string(),
+                    adapter: "fable-5-adapter".to_string(),
+                },
+            ],
+            default_adapter: Some("default-adapter".to_string()),
+        });
+
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            !errors.iter().any(|e| e.field.starts_with("agent.routing")),
+            "full model ID patterns should be valid, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn routing_patterns_match_with_wildcards() {
+        // Test patterns with wildcards like 'claude-haiku-*'
+        let mut config = Config::default();
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "claude-haiku-.*".to_string(),
+                    adapter: "haiku-adapter".to_string(),
+                },
+                RoutingRule {
+                    match_model: "(claude-)?sonnet.*".to_string(),
+                    adapter: "sonnet-adapter".to_string(),
+                },
+            ],
+            default_adapter: Some("claude-code-glm-4.7".to_string()),
+        });
+
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            !errors.iter().any(|e| e.field.starts_with("agent.routing")),
+            "wildcard patterns should be valid, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn routing_config_from_global_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let yaml = r#"
+agent:
+  default: claude
+  routing:
+    rules:
+      - match_model: "(claude-)?(sonnet|opus).*"
+        adapter: claude-print
+      - match_model: "(claude-)?(fable|haiku).*"
+        adapter: claude-code-glm-4.7
+    default_adapter: claude-code-glm-4.7
+"#;
+        std::fs::write(&path, yaml).unwrap();
+
+        let config = ConfigLoader::load_from_path(&path).unwrap();
+        assert!(config.agent.routing.is_some());
+        let routing = config.agent.routing.as_ref().unwrap();
+        assert_eq!(routing.rules.len(), 2);
+        assert_eq!(routing.rules[0].adapter, "claude-print");
+        assert_eq!(routing.rules[1].adapter, "claude-code-glm-4.7");
+        assert_eq!(
+            routing.default_adapter.as_deref(),
+            Some("claude-code-glm-4.7")
+        );
+    }
+
+    #[test]
+    fn routing_config_backward_compatibility() {
+        // Config without routing section should behave like before (pure agent.default)
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let yaml = r#"
+agent:
+  default: claude
+  timeout: 3600
+"#;
+        std::fs::write(&path, yaml).unwrap();
+
+        let config = ConfigLoader::load_from_path(&path).unwrap();
+        assert!(config.agent.routing.is_none(), "routing should be None when not specified");
+        assert_eq!(config.agent.default, "claude");
     }
 }
