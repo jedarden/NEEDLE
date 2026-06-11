@@ -109,35 +109,56 @@ fn generate_trace_content(target_bytes: usize) -> String {
     result
 }
 
-/// Benchmarks sanitization at different trace sizes.
-fn bench_sanitizer_sizes(c: &mut Criterion) {
+/// Benchmarks sanitization at 10KB trace size.
+fn bench_sanitize_10kb(c: &mut Criterion) {
+    let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
+    let content = generate_trace_content(SIZE_10KB);
+
+    let mut group = c.benchmark_group("sanitize_10kb");
+    group.bench_function("throughput", |b| {
+        b.iter(|| {
+            let result = sanitizer.sanitize(black_box(&content));
+            black_box(result);
+        });
+    });
+    group.finish();
+}
+
+/// Benchmarks sanitization at 100KB trace size.
+fn bench_sanitize_100kb(c: &mut Criterion) {
+    let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
+    let content = generate_trace_content(SIZE_100KB);
+
+    let mut group = c.benchmark_group("sanitize_100kb");
+    group.bench_function("throughput", |b| {
+        b.iter(|| {
+            let result = sanitizer.sanitize(black_box(&content));
+            black_box(result);
+        });
+    });
+    group.finish();
+}
+
+/// Benchmarks sanitization at 1MB trace size.
+fn bench_sanitize_1mb(c: &mut Criterion) {
+    let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
+    let content = generate_trace_content(SIZE_1MB);
+
+    let mut group = c.benchmark_group("sanitize_1mb");
+    group.bench_function("throughput", |b| {
+        b.iter(|| {
+            let result = sanitizer.sanitize(black_box(&content));
+            black_box(result);
+        });
+    });
+    group.finish();
+}
+
+/// Report skip rate statistics for all trace sizes.
+fn report_skip_stats(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     eprintln!("Sanitizer built with {} rules", sanitizer.rule_count());
 
-    let mut group = c.benchmark_group("sanitize");
-
-    for size in [SIZE_10KB, SIZE_100KB, SIZE_1MB].iter() {
-        let content = generate_trace_content(*size);
-        let size_label = if *size >= 1024 * 1024 {
-            format!("{}MB", *size / 1024 / 1024)
-        } else if *size >= 1024 {
-            format!("{}KB", *size / 1024)
-        } else {
-            format!("{}B", *size)
-        };
-
-        group.bench_function(BenchmarkId::new("throughput", size_label), |b| {
-            b.iter(|| {
-                let result = sanitizer.sanitize(black_box(&content));
-                // Prevent compiler from optimizing away the result.
-                black_box(result);
-            });
-        });
-    }
-
-    group.finish();
-
-    // Report skip rate statistics for each trace size.
     eprintln!("\nKeyword pre-filter skip rate by trace size:");
     for size in [SIZE_10KB, SIZE_100KB, SIZE_1MB].iter() {
         let content = generate_trace_content(*size);
@@ -152,6 +173,7 @@ fn bench_sanitizer_sizes(c: &mut Criterion) {
         eprintln!("  {}: {}", size_label, stats.format());
     }
 }
+
 
 /// Measures and reports median latency for a 100KB trace.
 ///
@@ -254,7 +276,7 @@ fn bench_median_latency(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_sanitizer_sizes, bench_median_latency);
+criterion_group!(benches, bench_sanitize_10kb, bench_sanitize_100kb, bench_sanitize_1mb, bench_median_latency, report_skip_stats);
 criterion_main!(benches);
 
 /// Entry point for running the assertion test as a standalone binary.
