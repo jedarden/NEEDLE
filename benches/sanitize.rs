@@ -23,7 +23,7 @@
 //! on a single core, with Aho-Corasick pre-filter demonstrably skipping irrelevant
 //! rules.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use needle::sanitize::Sanitizer;
 
 /// Bytes per trace size benchmark.
@@ -115,6 +115,8 @@ fn bench_sanitize_10kb(c: &mut Criterion) {
     let content = generate_trace_content(SIZE_10KB);
 
     let mut group = c.benchmark_group("sanitize_10kb");
+    group.throughput(Throughput::Bytes(SIZE_10KB as u64));
+    group.sample_size(10); // Faster iteration with fewer samples
     group.bench_function("throughput", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -130,6 +132,8 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
     let content = generate_trace_content(SIZE_100KB);
 
     let mut group = c.benchmark_group("sanitize_100kb");
+    group.throughput(Throughput::Bytes(SIZE_100KB as u64));
+    group.sample_size(10); // Faster iteration with fewer samples
     group.bench_function("throughput", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -145,6 +149,8 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
     let content = generate_trace_content(SIZE_1MB);
 
     let mut group = c.benchmark_group("sanitize_1mb");
+    group.throughput(Throughput::Bytes(SIZE_1MB as u64));
+    group.sample_size(10); // Faster iteration with fewer samples
     group.bench_function("throughput", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -284,21 +290,17 @@ fn bench_median_latency(c: &mut Criterion) {
     );
 
     // Report to criterion for plotting.
-    c.bench_function("median_latency_100kb", |b| {
+    let mut group = c.benchmark_group("median_latency");
+    group.sample_size(10); // Faster iteration with fewer samples
+    group.bench_function("100kb", |b| {
         b.iter(|| {
             let _ = sanitizer.sanitize(black_box(&content));
         });
     });
+    group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_sanitize_10kb,
-    bench_sanitize_100kb,
-    bench_sanitize_1mb,
-    bench_median_latency,
-    report_skip_stats
-);
+criterion_group!(benches, bench_sanitize_10kb, bench_sanitize_100kb, bench_sanitize_1mb, bench_median_latency, report_skip_stats);
 criterion_main!(benches);
 
 /// Entry point for running the assertion test as a standalone binary.
