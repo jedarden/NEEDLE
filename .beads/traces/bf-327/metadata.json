@@ -1,16 +1,16 @@
 {
-  "bead_id": "bf-x1r",
-  "agent": "claude-code-glm-4.7",
+  "bead_id": "bf-327",
+  "agent": "claude-sonnet",
   "provider": "anthropic",
-  "model": "glm-4.7",
+  "model": "claude-sonnet-4-6",
   "exit_code": 0,
   "outcome": "success",
-  "duration_ms": 110907,
+  "duration_ms": 275,
   "input_tokens": null,
   "output_tokens": null,
   "cost_usd": null,
-  "captured_at": "2026-06-11T00:32:28.114390817Z",
+  "captured_at": "2026-05-30T16:09:59.766254067Z",
   "trace_format": "claude_json",
-  "pruned": false,
+  "pruned": true,
   "template_version": null
 }

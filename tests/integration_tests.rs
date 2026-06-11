@@ -1713,7 +1713,11 @@ async fn mend_removes_stale_dependency_links() {
 
     // Create blocker bead.
     let blocker_output = std::process::Command::new("/home/coding/.local/bin/br")
-        .args(["create", "Blocker bead", "--description=This is the blocker"])
+        .args([
+            "create",
+            "Blocker bead",
+            "--description=This is the blocker",
+        ])
         .current_dir(workspace)
         .output()
         .expect("br create failed");

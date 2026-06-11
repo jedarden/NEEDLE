@@ -2808,32 +2808,15 @@ impl Worker {
         Ok(())
     }
 
-    /// Resolve the agent adapter from config, with fallback to built-in.
+    /// Resolve the agent adapter from config.
     fn resolve_adapter(&self) -> Result<crate::dispatch::AgentAdapter> {
         let adapter_name = &self.config.agent.default;
-
-        if let Some(adapter) = self.dispatcher.adapter(adapter_name) {
-            return Ok(adapter.clone());
-        }
-
-        // Fall back to claude-sonnet built-in.
-        if let Some(adapter) = self.dispatcher.adapter("claude-sonnet") {
-            tracing::warn!(
-                requested = %adapter_name,
-                fallback = "claude-sonnet",
-                "configured adapter not found, using fallback"
-            );
-            return Ok(adapter.clone());
-        }
-
-        // Last resort: first built-in adapter.
-        match crate::dispatch::builtin_adapters().into_iter().next() {
-            Some(adapter) => {
-                tracing::warn!("no adapters available, using first built-in");
-                Ok(adapter)
-            }
-            None => bail!("no agent adapters available"),
-        }
+        self.dispatcher.adapter(adapter_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(
+                "configured agent adapter '{}' not found — check ~/.needle/agents/{}.yaml or ~/.local/bin/claude-config/agents/{}/config.json exists",
+                adapter_name, adapter_name, adapter_name
+            ))
     }
 
     /// Check daily budget and emit appropriate telemetry / trigger shutdown.
@@ -3178,10 +3161,20 @@ mod tests {
     async fn resolve_adapter_returns_builtin() {
         let store = Arc::new(MockStore::empty());
         let worker = make_worker(store);
-        let adapter = worker.resolve_adapter().unwrap();
-        // Default config uses "claude" which won't match "claude-sonnet" directly,
-        // but the fallback chain should find a built-in.
-        assert!(!adapter.name.is_empty());
+        let result = worker.resolve_adapter();
+        // Default config uses "claude" which won't be in the dispatcher's adapter map,
+        // so this should fail with a clear error message instead of silently falling back.
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("configured agent adapter"),
+            "error should mention missing adapter"
+        );
+        assert!(
+            msg.contains("'claude'"),
+            "error should mention the requested adapter name"
+        );
     }
 
     #[tokio::test]

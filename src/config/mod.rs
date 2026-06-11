@@ -3640,7 +3640,10 @@ agent:
         std::fs::write(&path, yaml).unwrap();
 
         let config = ConfigLoader::load_from_path(&path).unwrap();
-        assert!(config.agent.routing.is_none(), "routing should be None when not specified");
+        assert!(
+            config.agent.routing.is_none(),
+            "routing should be None when not specified"
+        );
         assert_eq!(config.agent.default, "claude");
     }
 }

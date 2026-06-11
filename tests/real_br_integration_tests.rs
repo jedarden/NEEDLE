@@ -1009,6 +1009,119 @@ async fn real_br_strand_waterfall_ordering() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// Test 8b: Strand waterfall exhaustion — full progression with real br
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn real_br_strand_waterfall_exhaustion() {
+    // Create a workspace with a bead that has an excluded label ("deferred").
+    // This simulates the INVISIBLE diagnosis scenario: open beads exist but
+    // Pluck's filters excluded them, triggering Knot to create an alert bead.
+    let workspace = create_test_workspace("waterfall-exhaustion").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Create a bead with the "deferred" label (excluded by default Pluck filters).
+    let bead_id = create_bead(workspace.path(), "test-deferred-task", 1).unwrap();
+    add_label(workspace.path(), &bead_id, "deferred").unwrap();
+
+    // Verify the bead exists and is open.
+    let beads = store.ready(&Filters::default()).await.unwrap();
+    assert_eq!(beads.len(), 1, "should have 1 bead (unfiltered)");
+    assert_eq!(beads[0].id, bead_id, "bead ID should match");
+
+    // Create a StrandRunner with default config.
+    let config = needle::config::Config::default();
+    let registry = Registry::new(workspace.path());
+    let telemetry = Telemetry::new("test-waterfall-exhaustion".to_string());
+    let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
+
+    // Run the waterfall with an empty exclusion set.
+    let exclusions = HashSet::new();
+    let outcome = runner
+        .select(store.as_ref(), &exclusions)
+        .await
+        .expect("waterfall select should succeed");
+
+    // Verify no bead was selected (all strands returned NoWork).
+    assert!(
+        outcome.bead.is_none(),
+        "waterfall should return None when all strands return NoWork; got {:?}",
+        outcome.bead
+    );
+
+    // Verify strand evaluations contain all strands in correct order.
+    let expected_order = vec![
+        "pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "splice", "knot",
+    ];
+    let actual_order: Vec<&str> = outcome
+        .strand_evaluations
+        .iter()
+        .map(|e| e.strand_name.as_str())
+        .collect();
+
+    assert_eq!(
+        actual_order, expected_order,
+        "strand evaluations should be in waterfall order; expected {expected_order:?}, got {actual_order:?}"
+    );
+
+    // Verify each strand returned "no_work" (except Pluck which may have found
+    // beads before filtering them out).
+    for eval in &outcome.strand_evaluations {
+        if eval.strand_name == "pluck" {
+            // Pluck may report "bead_found(0)" if it found beads before filtering.
+            assert!(
+                eval.result.contains("no_work") || eval.result.contains("bead_found(0)"),
+                "Pluck should return no_work or bead_found(0); got result='{}'",
+                eval.result
+            );
+        } else {
+            assert!(
+                eval.result.contains("no_work"),
+                "{} strand should return no_work; got result='{}'",
+                eval.strand_name,
+                eval.result
+            );
+        }
+    }
+
+    // Verify Knot created a starvation alert bead in the workspace.
+    // The alert bead should have the "starvation-alert" label.
+    let all_beads = store.list_all().await.unwrap();
+    let alert_beads: Vec<_> = all_beads
+        .iter()
+        .filter(|b| b.labels.iter().any(|l| l == "starvation-alert"))
+        .collect();
+
+    assert!(
+        !alert_beads.is_empty(),
+        "Knot should have created a starvation alert bead; found {} alert beads in workspace",
+        alert_beads.len()
+    );
+
+    // Verify the original bead is still present and unmodified.
+    let original_bead = store
+        .show(&bead_id)
+        .await
+        .expect("original bead should still exist");
+    assert!(
+        original_bead.labels.contains(&"deferred".to_string()),
+        "original bead should still have 'deferred' label"
+    );
+
+    // Verify waterfall_restarts is 0 (no strand returned WorkCreated).
+    assert_eq!(
+        outcome.waterfall_restarts, 0,
+        "waterfall restarts should be 0 when no strand creates work"
+    );
+
+    // Verify restart_triggers is empty.
+    assert!(
+        outcome.restart_triggers.is_empty(),
+        "restart triggers should be empty when no strand creates work"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Test 9: Provider/model concurrency limits (registry-based, no br needed)
 // ═════════════════════════════════════════════════════════════════════════════
 

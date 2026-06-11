@@ -174,7 +174,6 @@ fn report_skip_stats(c: &mut Criterion) {
     }
 }
 
-
 /// Measures and reports median latency for a 100KB trace.
 ///
 /// This function performs multiple iterations and returns the sorted
@@ -224,7 +223,10 @@ fn assertion_test() {
     let avg = latencies.iter().sum::<u128>() / latencies.len() as u128;
     let p95 = latencies[(latencies.len() * 95) / 100];
 
-    eprintln!("Sanitizer latency assertion test (100KB trace, {} iterations):", latencies.len());
+    eprintln!(
+        "Sanitizer latency assertion test (100KB trace, {} iterations):",
+        latencies.len()
+    );
     eprintln!("  Min:     {} ms", min);
     eprintln!("  Median:  {} ms", median);
     eprintln!("  Avg:     {} ms", avg);
@@ -235,7 +237,8 @@ fn assertion_test() {
     assert!(
         median < threshold,
         "Sanitizer median latency ({} ms) exceeds threshold ({} ms)",
-        median, threshold
+        median,
+        threshold
     );
 }
 
@@ -263,10 +266,22 @@ fn bench_median_latency(c: &mut Criterion) {
     let median_us = latencies[ASSERTION_SAMPLE_COUNT / 2];
     let median_ms = median_us as f64 / 1000.0;
 
-    eprintln!("Median latency for 100KB trace: {:.2} ms ({} samples)", median_ms, ASSERTION_SAMPLE_COUNT);
-    eprintln!("  Min: {:.2} ms", *latencies.first().unwrap() as f64 / 1000.0);
-    eprintln!("  Max: {:.2} ms", *latencies.last().unwrap() as f64 / 1000.0);
-    eprintln!("  P95: {:.2} ms", latencies[(latencies.len() * 95) / 100] as f64 / 1000.0);
+    eprintln!(
+        "Median latency for 100KB trace: {:.2} ms ({} samples)",
+        median_ms, ASSERTION_SAMPLE_COUNT
+    );
+    eprintln!(
+        "  Min: {:.2} ms",
+        *latencies.first().unwrap() as f64 / 1000.0
+    );
+    eprintln!(
+        "  Max: {:.2} ms",
+        *latencies.last().unwrap() as f64 / 1000.0
+    );
+    eprintln!(
+        "  P95: {:.2} ms",
+        latencies[(latencies.len() * 95) / 100] as f64 / 1000.0
+    );
 
     // Report to criterion for plotting.
     c.bench_function("median_latency_100kb", |b| {
@@ -276,7 +291,14 @@ fn bench_median_latency(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_sanitize_10kb, bench_sanitize_100kb, bench_sanitize_1mb, bench_median_latency, report_skip_stats);
+criterion_group!(
+    benches,
+    bench_sanitize_10kb,
+    bench_sanitize_100kb,
+    bench_sanitize_1mb,
+    bench_median_latency,
+    report_skip_stats
+);
 criterion_main!(benches);
 
 /// Entry point for running the assertion test as a standalone binary.
