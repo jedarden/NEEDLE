@@ -23,7 +23,7 @@
 //! on a single core, with Aho-Corasick pre-filter demonstrably skipping irrelevant
 //! rules.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use needle::sanitize::Sanitizer;
 
 /// Bytes per trace size benchmark.
@@ -155,7 +155,7 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
 }
 
 /// Report skip rate statistics for all trace sizes.
-fn report_skip_stats(c: &mut Criterion) {
+fn report_skip_stats(_c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     eprintln!("Sanitizer built with {} rules", sanitizer.rule_count());
 
