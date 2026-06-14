@@ -4146,6 +4146,7 @@ mod tests {
         config.self_modification.hot_reload = false;
         // Use a simple echo adapter so the test finishes quickly.
         config.agent.default = "echo-test".to_string();
+        config.agent.routing = None; // test dispatcher only has echo-test; disable model-based routing
         config.agent.timeout = 5;
         // Set workspace.default to match the bead's workspace so the remote
         // store switch logic doesn't fire.
