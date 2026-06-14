@@ -2808,15 +2808,95 @@ impl Worker {
         Ok(())
     }
 
-    /// Resolve the agent adapter from config.
+    /// Resolve the agent adapter from config with model-based routing.
     fn resolve_adapter(&self) -> Result<crate::dispatch::AgentAdapter> {
-        let adapter_name = &self.config.agent.default;
-        self.dispatcher.adapter(adapter_name)
+        let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
+
+        // Start with the configured default adapter.
+        let default_adapter_name = &self.config.agent.default;
+
+        // Resolve the default adapter to get its model (if any).
+        let default_adapter = self.dispatcher.adapter(default_adapter_name)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(
                 "configured agent adapter '{}' not found — check ~/.needle/agents/{}.yaml or ~/.local/bin/claude-config/agents/{}/config.json exists",
-                adapter_name, adapter_name, adapter_name
-            ))
+                default_adapter_name, default_adapter_name, default_adapter_name
+            ))?;
+
+        // Apply routing rules if configured.
+        let (chosen_adapter_name, matched_rule) = self.apply_routing_rules(&default_adapter)?;
+
+        // Emit routing decision telemetry (only if routing happened).
+        if chosen_adapter_name != *default_adapter_name || matched_rule != "default" {
+            if let Some(id) = bead_id {
+                let model = default_adapter.model.clone().unwrap_or_else(|| "unknown".to_string());
+                self.telemetry.emit(EventKind::RoutingDecision {
+                    bead_id: id,
+                    model,
+                    matched_rule: matched_rule.clone(),
+                    chosen_adapter: chosen_adapter_name.clone(),
+                })?;
+            }
+        }
+
+        // Resolve the chosen adapter.
+        let adapter = self.dispatcher.adapter(&chosen_adapter_name)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(
+                "routed agent adapter '{}' not found — routing matched model '{}' with rule '{}', but the adapter is missing from ~/.config/needle/adapters/{}.yaml",
+                chosen_adapter_name,
+                default_adapter.model.as_deref().unwrap_or("unknown"),
+                matched_rule,
+                chosen_adapter_name
+            ))?;
+
+        Ok(adapter)
+    }
+
+    /// Apply routing rules to determine the final adapter.
+    ///
+    /// Returns (chosen_adapter_name, matched_rule_pattern).
+    /// If no routing rules match, returns (default_adapter_name, "default").
+    fn apply_routing_rules(&self, default_adapter: &crate::dispatch::AgentAdapter) -> Result<(String, String)> {
+        let routing_config = match &self.config.agent.routing {
+            Some(r) if !r.rules.is_empty() => r,
+            _ => return Ok((default_adapter.name.clone(), "default".to_string())),
+        };
+
+        let model_name = default_adapter.model.as_deref().unwrap_or("");
+
+        // Evaluate rules in order (first match wins).
+        for rule in &routing_config.rules {
+            // Match the pattern against the model name using regex.
+            match regex::Regex::new(&rule.match_model) {
+                Ok(re) => {
+                    if re.is_match(model_name) {
+                        tracing::debug!(
+                            model = %model_name,
+                            pattern = %rule.match_model,
+                            adapter = %rule.adapter,
+                            "routing rule matched"
+                        );
+                        return Ok((rule.adapter.clone(), rule.match_model.clone()));
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        pattern = %rule.match_model,
+                        error = %e,
+                        "invalid regex in routing rule, skipping"
+                    );
+                    // Continue to next rule instead of failing.
+                }
+            }
+        }
+
+        // No rules matched - use routing default or fall back to the configured default.
+        if let Some(ref default_adapter_name) = routing_config.default_adapter {
+            Ok((default_adapter_name.clone(), "routing-default".to_string()))
+        } else {
+            Ok((default_adapter.name.clone(), "default".to_string()))
+        }
     }
 
     /// Check daily budget and emit appropriate telemetry / trigger shutdown.

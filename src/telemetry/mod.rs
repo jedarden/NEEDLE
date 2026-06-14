@@ -207,6 +207,15 @@ pub enum EventKind {
         agent: String,
         model: Option<String>,
     },
+    RoutingDecision {
+        bead_id: BeadId,
+        /// The model name that was matched (e.g., "claude-sonnet-4-6").
+        model: String,
+        /// The routing rule pattern that matched (e.g., "sonnet"), or "default" if no rules matched.
+        matched_rule: String,
+        /// The adapter that was selected (e.g., "claude-print").
+        chosen_adapter: String,
+    },
     BuildTimeout {
         bead_id: BeadId,
         timeout_secs: u64,
@@ -627,6 +636,7 @@ impl EventKind {
             EventKind::BeadOrphaned { .. } => "bead.orphaned",
             EventKind::DispatchStarted { .. } => "agent.dispatched",
             EventKind::DispatchCompleted { .. } => "agent.completed",
+            EventKind::RoutingDecision { .. } => "agent.routing_decision",
             EventKind::BuildTimeout { .. } => "build.timeout",
             EventKind::BuildHeartbeat { .. } => "build.heartbeat",
             EventKind::OutcomeClassified { .. } => "outcome.classified",
@@ -724,6 +734,7 @@ impl EventKind {
             | EventKind::BeadOrphaned { bead_id }
             | EventKind::DispatchStarted { bead_id, .. }
             | EventKind::DispatchCompleted { bead_id, .. }
+            | EventKind::RoutingDecision { bead_id, .. }
             | EventKind::BuildTimeout { bead_id, .. }
             | EventKind::BuildHeartbeat { bead_id, .. }
             | EventKind::OutcomeClassified { bead_id, .. }
@@ -983,6 +994,19 @@ impl EventKind {
                     "duration_ms": duration_ms,
                     "agent": agent,
                     "model": model,
+                })
+            }
+            EventKind::RoutingDecision {
+                bead_id,
+                model,
+                matched_rule,
+                chosen_adapter,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "model": model,
+                    "matched_rule": matched_rule,
+                    "chosen_adapter": chosen_adapter,
                 })
             }
             EventKind::BuildTimeout {
@@ -1763,7 +1787,8 @@ impl EventKind {
             | EventKind::OtlpDropped { .. }
             | EventKind::OtlpShutdownTimeout { .. }
             | EventKind::IdleSleepCompleted { .. }
-            | EventKind::IdleSleepEntered { .. } => None,
+            | EventKind::IdleSleepEntered { .. }
+            | EventKind::RoutingDecision { .. } => None,
             EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
         }
     }

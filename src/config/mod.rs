@@ -86,7 +86,7 @@ impl Default for AgentConfig {
             args: Vec::new(),
             timeout: Self::default_timeout(),
             adapters_dir: Self::default_adapters_dir(),
-            routing: None,
+            routing: Self::default_routing(),
         }
     }
 }
@@ -100,6 +100,25 @@ impl AgentConfig {
     }
     fn default_adapters_dir() -> PathBuf {
         dirs_or_home(".config/needle/adapters")
+    }
+
+    /// Default routing rules for Anthropic subscription models.
+    ///
+    /// Routers Anthropic Claude models (sonnet, opus, fable, haiku) to claude-print
+    /// to use subscription billing before the June 15, 2026 API credit transition.
+    /// All other models fall back to claude-code-glm-4.7.
+    fn default_routing() -> Option<RoutingConfig> {
+        Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    // Match Anthropic Claude models on subscription billing
+                    // Patterns: claude-sonnet-4-6, claude-opus-4-6, claude-fable-5, claude-haiku-4-5-20251001
+                    match_model: "(claude-)?(sonnet|opus|fable|haiku).*".to_string(),
+                    adapter: "claude-print".to_string(),
+                },
+            ],
+            default_adapter: Some("claude-code-glm-4.7".to_string()),
+        })
     }
 }
 
@@ -3191,11 +3210,21 @@ strands:
     // ── Routing config tests ──
 
     #[test]
-    fn default_routing_config_is_none() {
+    fn default_routing_config_matches_anthropic_models() {
         let config = Config::default();
-        assert!(
-            config.agent.routing.is_none(),
-            "default routing should be None"
+        let routing = config.agent.routing.expect("default routing should be Some");
+
+        // Should have one rule matching Anthropic models
+        assert_eq!(routing.rules.len(), 1);
+
+        let rule = &routing.rules[0];
+        assert_eq!(rule.match_model, "(claude-)?(sonnet|opus|fable|haiku).*");
+        assert_eq!(rule.adapter, "claude-print");
+
+        // Default fallback should be claude-code-glm-4.7
+        assert_eq!(
+            routing.default_adapter.as_deref(),
+            Some("claude-code-glm-4.7")
         );
     }
 
