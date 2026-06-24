@@ -5,7 +5,7 @@
 [![CI](https://github.com/jedarden/NEEDLE/actions/workflows/ci.yml/badge.svg)](https://github.com/jedarden/NEEDLE/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](rust-toolchain.toml)
-[![Version](https://img.shields.io/badge/version-0.2.6-green.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.8-green.svg)](Cargo.toml)
 
 **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
@@ -32,6 +32,26 @@ needle run --agent claude --identity alpha
 A worker starts, claims the next bead, dispatches to your chosen agent CLI, and loops. Multiple workers can run in parallel against the same workspace — coordination is handled by the shared bead queue (no central orchestrator).
 
 See [`docs/examples/`](docs/examples/) for end-to-end configurations.
+
+---
+
+## 🧶 What is a bead?
+
+A **bead** is a work item — the unit of work NEEDLE processes. Think of it as a structured task ticket: a title, a body describing the deliverable and acceptance criteria, a status (`open`, `in_progress`, `done`), and optional metadata like priority and dependencies.
+
+Beads live in a **bead store** — a SQLite database (`beads.db`) plus a JSONL checkpoint file (`issues.jsonl`) in a `.beads/` directory inside your project. The `br` CLI manages the bead store: create beads, list them, claim them, close them.
+
+```bash
+# Create a bead
+br create --title "Add pagination to search results" --body "..."
+
+# List open beads
+br list --status open
+
+# NEEDLE does the rest: claims, dispatches, and closes beads automatically
+```
+
+NEEDLE workers read from this store, claim the next available bead atomically, dispatch it to your chosen agent CLI, and close it on success — then loop.
 
 ---
 
