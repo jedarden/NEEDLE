@@ -1122,6 +1122,197 @@ async fn real_br_strand_waterfall_exhaustion() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// Test 8c: Strand waterfall exhaustion with telemetry JSONL verification
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn real_br_strand_waterfall_exhaustion_with_telemetry_jsonl() {
+    use std::io::BufRead;
+    use std::path::PathBuf;
+
+    // Create a workspace with a bead that has an excluded label ("deferred").
+    // This simulates the INVISIBLE diagnosis scenario: open beads exist but
+    // Pluck's filters excluded them, triggering Knot to create an alert bead.
+    let workspace = create_test_workspace("waterfall-exhaustion-jsonl").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Create a bead with the "deferred" label (excluded by default Pluck filters).
+    let bead_id = create_bead(workspace.path(), "test-deferred-task", 1).unwrap();
+    add_label(workspace.path(), &bead_id, "deferred").unwrap();
+
+    // Create a StrandRunner with default config.
+    let config = needle::config::Config::default();
+    let registry = Registry::new(workspace.path());
+    let worker_id = "test-waterfall-jsonl".to_string();
+    let telemetry = Telemetry::new(worker_id.clone());
+    let session_id = telemetry.session_id().to_string();
+
+    // Start telemetry to spawn the background writer thread.
+    telemetry.start();
+
+    let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry.clone());
+
+    // Run the waterfall with an empty exclusion set.
+    let exclusions = HashSet::new();
+    let outcome = runner
+        .select(store.as_ref(), &exclusions)
+        .await
+        .expect("waterfall select should succeed");
+
+    // Shutdown telemetry to flush all events to disk.
+    telemetry.shutdown().await.unwrap();
+
+    // Verify no bead was selected (all strands returned NoWork).
+    assert!(
+        outcome.bead.is_none(),
+        "waterfall should return None when all strands return NoWork; got {:?}",
+        outcome.bead
+    );
+
+    // ── Read and verify telemetry JSONL ─────────────────────────────────────────
+
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let log_dir = PathBuf::from(&home).join(".needle").join("logs");
+    let log_file = log_dir.join(format!("{worker_id}-{session_id}.jsonl"));
+
+    assert!(
+        log_file.exists(),
+        "telemetry JSONL file should exist at {}",
+        log_file.display()
+    );
+
+    // Read all events from the JSONL file.
+    let file = std::fs::File::open(&log_file)
+        .unwrap_or_else(|e| panic!("failed to open telemetry log: {e}"));
+    let reader = std::io::BufReader::new(file);
+
+    let mut events: Vec<serde_json::Value> = Vec::new();
+    for line in reader.lines() {
+        let line = line.unwrap_or_else(|e| panic!("failed to read line: {e}"));
+        if let Ok(event) = serde_json::from_str::<serde_json::Value>(&line) {
+            events.push(event);
+        }
+    }
+
+    // Verify we have events.
+    assert!(
+        !events.is_empty(),
+        "telemetry log should contain events"
+    );
+
+    // Find all strand.evaluated events.
+    let strand_evaluated_events: Vec<_> = events
+        .iter()
+        .filter(|e| e["event_type"] == "strand.evaluated")
+        .collect();
+
+    // Verify we have strand.evaluated events for all expected strands.
+    let expected_strands = vec![
+        "pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "splice", "knot",
+    ];
+
+    assert_eq!(
+        strand_evaluated_events.len(),
+        expected_strands.len(),
+        "should have {} strand.evaluated events, got {}: {:?}",
+        expected_strands.len(),
+        strand_evaluated_events.len(),
+        strand_evaluated_events
+            .iter()
+            .map(|e| e["data"]["strand_name"].as_str().unwrap_or("?"))
+            .collect::<Vec<_>>()
+    );
+
+    // Verify strand.evaluated events appear in the correct waterfall order.
+    for (i, expected_strand) in expected_strands.iter().enumerate() {
+        let event = &strand_evaluated_events[i];
+        let actual_strand = event["data"]["strand_name"]
+            .as_str()
+            .unwrap_or_else(|| panic!("event {i} should have strand_name"));
+
+        assert_eq!(
+            actual_strand, *expected_strand,
+            "strand.evaluated event {} should be for '{}', got '{}'",
+            i, expected_strand, actual_strand
+        );
+
+        // Verify each event has required fields.
+        assert!(
+            event.get("timestamp").is_some(),
+            "strand.evaluated event {} should have timestamp",
+            i
+        );
+        assert!(
+            event.get("sequence").is_some(),
+            "strand.evaluated event {} should have sequence",
+            i
+        );
+        assert!(
+            event.get("data").is_some(),
+            "strand.evaluated event {} should have data",
+            i
+        );
+    }
+
+    // Verify the sequence numbers are monotonically increasing.
+    for (i, event) in strand_evaluated_events.iter().enumerate() {
+        if i > 0 {
+            let prev_seq = strand_evaluated_events[i - 1]["sequence"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("event {i-1} should have numeric sequence"));
+            let curr_seq = event["sequence"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("event {i} should have numeric sequence"));
+            assert!(
+                curr_seq > prev_seq,
+                "sequence numbers should be monotonically increasing: event {i-1}={} vs event {i}={}",
+                prev_seq, curr_seq
+            );
+        }
+    }
+
+    // Verify that most strands returned "no_work" (Pluck may have found beads before filtering).
+    for event in &strand_evaluated_events {
+        let strand_name = event["data"]["strand_name"]
+            .as_str()
+            .unwrap_or_else(|| panic!("strand.evaluated event should have strand_name"));
+        let result = event["data"]["result"]
+            .as_str()
+            .unwrap_or_else(|| panic!("strand.evaluated event should have result"));
+
+        if strand_name == "pluck" {
+            // Pluck may report "bead_found(0)" if it found beads before filtering.
+            assert!(
+                result.contains("no_work") || result.contains("bead_found(0)"),
+                "Pluck strand.evaluated should return no_work or bead_found(0); got result='{}'",
+                result
+            );
+        } else {
+            assert!(
+                result.contains("no_work"),
+                "{} strand.evaluated should return no_work; got result='{}'",
+                strand_name,
+                result
+            );
+        }
+    }
+
+    // Verify Knot created a starvation alert bead in the workspace.
+    // The alert bead should have the "starvation-alert" label.
+    let all_beads = store.list_all().await.unwrap();
+    let alert_beads: Vec<_> = all_beads
+        .iter()
+        .filter(|b| b.labels.iter().any(|l| l == "starvation-alert"))
+        .collect();
+
+    assert!(
+        !alert_beads.is_empty(),
+        "Knot should have created a starvation alert bead; found {} alert beads in workspace",
+        alert_beads.len()
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Test 9: Provider/model concurrency limits (registry-based, no br needed)
 // ═════════════════════════════════════════════════════════════════════════════
 
