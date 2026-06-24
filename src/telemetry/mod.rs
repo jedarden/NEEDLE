@@ -216,6 +216,11 @@ pub enum EventKind {
         /// The adapter that was selected (e.g., "claude-print").
         chosen_adapter: String,
     },
+    RoutingFailed {
+        bead_id: BeadId,
+        model: String,
+        rules_tried: u32,
+    },
     BuildTimeout {
         bead_id: BeadId,
         timeout_secs: u64,
@@ -637,6 +642,7 @@ impl EventKind {
             EventKind::DispatchStarted { .. } => "agent.dispatched",
             EventKind::DispatchCompleted { .. } => "agent.completed",
             EventKind::RoutingDecision { .. } => "agent.routing_decision",
+            EventKind::RoutingFailed { .. } => "agent.routing_failed",
             EventKind::BuildTimeout { .. } => "build.timeout",
             EventKind::BuildHeartbeat { .. } => "build.heartbeat",
             EventKind::OutcomeClassified { .. } => "outcome.classified",
@@ -735,6 +741,7 @@ impl EventKind {
             | EventKind::DispatchStarted { bead_id, .. }
             | EventKind::DispatchCompleted { bead_id, .. }
             | EventKind::RoutingDecision { bead_id, .. }
+            | EventKind::RoutingFailed { bead_id, .. }
             | EventKind::BuildTimeout { bead_id, .. }
             | EventKind::BuildHeartbeat { bead_id, .. }
             | EventKind::OutcomeClassified { bead_id, .. }
@@ -1007,6 +1014,17 @@ impl EventKind {
                     "model": model,
                     "matched_rule": matched_rule,
                     "chosen_adapter": chosen_adapter,
+                })
+            }
+            EventKind::RoutingFailed {
+                bead_id,
+                model,
+                rules_tried,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "model": model,
+                    "rules_tried": rules_tried,
                 })
             }
             EventKind::BuildTimeout {
@@ -1788,7 +1806,8 @@ impl EventKind {
             | EventKind::OtlpShutdownTimeout { .. }
             | EventKind::IdleSleepCompleted { .. }
             | EventKind::IdleSleepEntered { .. }
-            | EventKind::RoutingDecision { .. } => None,
+            | EventKind::RoutingDecision { .. }
+            | EventKind::RoutingFailed { .. } => None,
             EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
         }
     }
