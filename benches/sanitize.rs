@@ -300,7 +300,14 @@ fn bench_median_latency(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_sanitize_10kb, bench_sanitize_100kb, bench_sanitize_1mb, bench_median_latency, report_skip_stats);
+criterion_group!(
+    benches,
+    bench_sanitize_10kb,
+    bench_sanitize_100kb,
+    bench_sanitize_1mb,
+    bench_median_latency,
+    report_skip_stats
+);
 criterion_main!(benches);
 
 /// Entry point for running the assertion test as a standalone binary.

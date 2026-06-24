@@ -293,6 +293,13 @@ pub enum CliCommand {
         #[arg(long, value_enum, default_value = "table")]
         format: ListFormat,
     },
+
+    /// Run the fleet supervisor daemon (auto-scale workers based on queue depth).
+    Supervise {
+        /// Workspace to monitor (defaults to config workspace).
+        #[arg(short = 'w', long)]
+        workspace: Option<PathBuf>,
+    },
 }
 
 /// Output format for the list command.
@@ -391,6 +398,7 @@ pub fn run() -> Result<()> {
             until,
             format,
         } => cmd_stats(by, since, until, format),
+        CliCommand::Supervise { workspace } => cmd_supervise(workspace),
     }
 }
 
@@ -504,7 +512,7 @@ fn cmd_run(
 }
 
 /// Launch `count` workers in separate tmux sessions with staggered startup delays.
-fn launch_workers(
+pub fn launch_workers(
     config: Config,
     workspace: Option<PathBuf>,
     agent: Option<String>,
@@ -2002,6 +2010,17 @@ fn cmd_stats(
     }
 
     Ok(())
+}
+
+/// `needle supervise` — run the fleet supervisor daemon.
+///
+/// The supervisor monitors the bead store and fleet state, auto-scaling
+/// workers when beads appear and the fleet is under capacity.
+fn cmd_supervise(workspace: Option<PathBuf>) -> Result<()> {
+    let rt =
+        tokio::runtime::Runtime::new().context("failed to create tokio runtime for supervisor")?;
+
+    rt.block_on(crate::supervisor::run_supervisor(workspace))
 }
 
 /// `needle config` — view or inspect configuration.

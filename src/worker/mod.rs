@@ -623,26 +623,24 @@ impl Worker {
                 };
 
                 match self.state {
-                    // If we're in the middle of processing a bead, handle it
-                    // as interrupted so the bead gets released.
+                    // If we're in the middle of processing a bead, release it
+                    // before stopping. This ensures the bead is returned to
+                    // the open state and can be claimed by another worker.
                     WorkerState::Building
                     | WorkerState::Dispatching
                     | WorkerState::Executing
                     | WorkerState::Handling => {
-                        // Let the current state handler finish, but mark
-                        // that we should stop after handling.
+                        // Release any claimed bead before stopping.
+                        self.release_current_bead(&reason).await;
+                        return self.stop(&reason).await;
                     }
                     // For states where we don't hold a bead, stop immediately.
                     WorkerState::Selecting
                     | WorkerState::Claiming
                     | WorkerState::Retrying
                     | WorkerState::Logging => {
-                        // Release any claimed bead before stopping.
-                        if let Some(ref bead) = self.current_bead {
-                            let bead_id = bead.id.clone();
-                            tracing::info!(bead_id = %bead_id, "releasing bead on shutdown");
-                            let _ = self.store.release(&bead_id).await;
-                        }
+                        // Release any claimed bead before stopping (should be none in these states).
+                        self.release_current_bead(&reason).await;
                         return self.stop(&reason).await;
                     }
                     WorkerState::Stopped | WorkerState::Exhausted | WorkerState::Errored => {
@@ -2630,8 +2628,28 @@ impl Worker {
             }
             IdleAction::Exit => {
                 tracing::info!("all strands exhausted and idle_action=exit, stopping");
+                // Release any claimed bead before exiting (should be none in exhausted state, but be safe).
+                self.release_current_bead("exhausted").await;
                 self.stop("exhausted").await
             }
+        }
+    }
+
+    /// Release the currently claimed bead (if any).
+    ///
+    /// This helper method is called during graceful shutdown to ensure that
+    /// in-progress beads are returned to the open state and can be claimed by
+    /// another worker.
+    async fn release_current_bead(&mut self, shutdown_reason: &str) {
+        if let Some(ref bead) = self.current_bead {
+            let bead_id = bead.id.clone();
+            tracing::info!(bead_id = %bead_id, reason = %shutdown_reason, "releasing bead on shutdown");
+            let _ = self.store.release(&bead_id).await;
+            // Emit bead.released event for observability
+            let _ = self.telemetry.emit(EventKind::BeadReleased {
+                bead_id: bead_id.clone(),
+                reason: shutdown_reason.to_string(),
+            });
         }
     }
 
@@ -2829,7 +2847,10 @@ impl Worker {
         // Emit routing decision telemetry (only if routing happened).
         if chosen_adapter_name != *default_adapter_name || matched_rule != "default" {
             if let Some(id) = bead_id {
-                let model = default_adapter.model.clone().unwrap_or_else(|| "unknown".to_string());
+                let model = default_adapter
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
                 self.telemetry.emit(EventKind::RoutingDecision {
                     bead_id: id,
                     model,
@@ -2857,7 +2878,10 @@ impl Worker {
     ///
     /// Returns (chosen_adapter_name, matched_rule_pattern).
     /// If no routing rules match, returns (default_adapter_name, "default").
-    fn apply_routing_rules(&self, default_adapter: &crate::dispatch::AgentAdapter) -> Result<(String, String)> {
+    fn apply_routing_rules(
+        &self,
+        default_adapter: &crate::dispatch::AgentAdapter,
+    ) -> Result<(String, String)> {
         let routing_config = match &self.config.agent.routing {
             Some(r) if !r.rules.is_empty() => r,
             _ => return Ok((default_adapter.name.clone(), "default".to_string())),

@@ -596,6 +596,30 @@ pub enum EventKind {
         reason: String,
     },
 
+    // ── Supervisor ──
+    SupervisorStarted {
+        max_workers: u32,
+        workspace: String,
+    },
+    SupervisorSpawnDecision {
+        to_spawn: u32,
+        ready_beads: u32,
+        max_workers: u32,
+    },
+    SupervisorSpawnFailed {
+        error: String,
+    },
+    SupervisorBackoff {
+        backoff_secs: u64,
+        consecutive_failures: u32,
+    },
+    SupervisorSummary {
+        polls: u64,
+        spawned: u64,
+        total_workers: u32,
+        ready_beads: u32,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -721,6 +745,11 @@ impl EventKind {
             EventKind::TransformCompleted { .. } => "transform.completed",
             EventKind::TransformFailed { .. } => "transform.failed",
             EventKind::TransformSkipped { .. } => "transform.skipped",
+            EventKind::SupervisorStarted { .. } => "supervisor.started",
+            EventKind::SupervisorSpawnDecision { .. } => "supervisor.spawn_decision",
+            EventKind::SupervisorSpawnFailed { .. } => "supervisor.spawn_failed",
+            EventKind::SupervisorBackoff { .. } => "supervisor.backoff",
+            EventKind::SupervisorSummary { .. } => "supervisor.summary",
             EventKind::SinkError { .. } => "telemetry.sink_error",
             EventKind::OtlpDropped { .. } => "telemetry.otlp.dropped",
             EventKind::OtlpShutdownTimeout { .. } => "telemetry.otlp.shutdown_timeout",

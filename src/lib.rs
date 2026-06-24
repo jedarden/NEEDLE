@@ -27,6 +27,7 @@ pub mod skill;
 pub mod span;
 pub mod stats;
 pub mod strand;
+pub mod supervisor;
 pub mod telemetry;
 pub mod trace;
 pub mod transcript;

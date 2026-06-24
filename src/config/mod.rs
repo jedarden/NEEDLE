@@ -109,14 +109,12 @@ impl AgentConfig {
     /// All other models fall back to claude-code-glm-4.7.
     fn default_routing() -> Option<RoutingConfig> {
         Some(RoutingConfig {
-            rules: vec![
-                RoutingRule {
-                    // Match Anthropic Claude models on subscription billing
-                    // Patterns: claude-sonnet-4-6, claude-opus-4-6, claude-fable-5, claude-haiku-4-5-20251001
-                    match_model: "(claude-)?(sonnet|opus|fable|haiku).*".to_string(),
-                    adapter: "claude-print".to_string(),
-                },
-            ],
+            rules: vec![RoutingRule {
+                // Match Anthropic Claude models on subscription billing
+                // Patterns: claude-sonnet-4-6, claude-opus-4-6, claude-fable-5, claude-haiku-4-5-20251001
+                match_model: "(claude-)?(sonnet|opus|fable|haiku).*".to_string(),
+                adapter: "claude-print".to_string(),
+            }],
             default_adapter: Some("claude-code-glm-4.7".to_string()),
         })
     }
@@ -3212,7 +3210,10 @@ strands:
     #[test]
     fn default_routing_config_matches_anthropic_models() {
         let config = Config::default();
-        let routing = config.agent.routing.expect("default routing should be Some");
+        let routing = config
+            .agent
+            .routing
+            .expect("default routing should be Some");
 
         // Should have one rule matching Anthropic models
         assert_eq!(routing.rules.len(), 1);
