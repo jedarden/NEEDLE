@@ -619,6 +619,17 @@ pub enum EventKind {
         total_workers: u32,
         ready_beads: u32,
     },
+    SupervisorStopped {
+        reason: String,
+    },
+    SupervisorWorkerSpawned {
+        ready_count: usize,
+        total_spawned: u32,
+    },
+    SupervisorIdleCycle {
+        consecutive_empty: u32,
+        fleet_idle: String,
+    },
 
     // ── Internal ──
     SinkError {
@@ -750,6 +761,9 @@ impl EventKind {
             EventKind::SupervisorSpawnFailed { .. } => "supervisor.spawn_failed",
             EventKind::SupervisorBackoff { .. } => "supervisor.backoff",
             EventKind::SupervisorSummary { .. } => "supervisor.summary",
+            EventKind::SupervisorStopped { .. } => "supervisor.stopped",
+            EventKind::SupervisorWorkerSpawned { .. } => "supervisor.worker_spawned",
+            EventKind::SupervisorIdleCycle { .. } => "supervisor.idle_cycle",
             EventKind::SinkError { .. } => "telemetry.sink_error",
             EventKind::OtlpDropped { .. } => "telemetry.otlp.dropped",
             EventKind::OtlpShutdownTimeout { .. } => "telemetry.otlp.shutdown_timeout",
@@ -871,7 +885,10 @@ impl EventKind {
             | EventKind::SupervisorSpawnDecision { .. }
             | EventKind::SupervisorSpawnFailed { .. }
             | EventKind::SupervisorBackoff { .. }
-            | EventKind::SupervisorSummary { .. } => None,
+            | EventKind::SupervisorSummary { .. }
+            | EventKind::SupervisorStopped { .. }
+            | EventKind::SupervisorWorkerSpawned { .. }
+            | EventKind::SupervisorIdleCycle { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
     }
@@ -1762,6 +1779,23 @@ impl EventKind {
                 "total_workers": total_workers,
                 "ready_beads": ready_beads,
             }),
+            EventKind::SupervisorStopped { reason } => {
+                serde_json::json!({ "reason": reason })
+            }
+            EventKind::SupervisorWorkerSpawned {
+                ready_count,
+                total_spawned,
+            } => serde_json::json!({
+                "ready_count": ready_count,
+                "total_spawned": total_spawned,
+            }),
+            EventKind::SupervisorIdleCycle {
+                consecutive_empty,
+                fleet_idle,
+            } => serde_json::json!({
+                "consecutive_empty": consecutive_empty,
+                "fleet_idle": fleet_idle,
+            }),
         }
     }
 
@@ -1877,6 +1911,9 @@ impl EventKind {
             | EventKind::SupervisorSpawnFailed { .. }
             | EventKind::SupervisorBackoff { .. }
             | EventKind::SupervisorSummary { .. }
+            | EventKind::SupervisorStopped { .. }
+            | EventKind::SupervisorWorkerSpawned { .. }
+            | EventKind::SupervisorIdleCycle { .. }
             | EventKind::SinkError { .. }
             | EventKind::OtlpDropped { .. }
             | EventKind::OtlpShutdownTimeout { .. }
