@@ -4282,4 +4282,170 @@ mod tests {
         // No :testing binary → returns Ok without touching canary workspace.
         assert!(worker.check_auto_canary().is_ok());
     }
+
+    // ── apply_routing_rules tests ──
+
+    #[tokio::test]
+    async fn apply_routing_rules_strict_true_no_match_returns_err() {
+        use crate::config::{RoutingConfig, RoutingRule};
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+        // Enable strict mode with a rule that won't match.
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![RoutingRule {
+                match_model: "sonnet".to_string(),
+                adapter: "claude-print".to_string(),
+            }],
+            default_adapter: None,
+            strict: true,
+        });
+        // Set up a model that won't match the rule.
+        let worker = Worker::new(config, "test-routing-strict".to_string(), store);
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "claude".to_string(),
+            description: None,
+            agent_cli: "claude".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "claude {prompt}".to_string(),
+            environment: std::collections::HashMap::new(),
+            timeout_secs: 3600,
+            provider: Some("anthropic".to_string()),
+            model: Some("gpt-4o".to_string()),
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+        };
+
+        let result = worker.apply_routing_rules(&adapter);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("no routing rule matched model 'gpt-4o'"),
+            "error message should mention the model: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("set routing.strict: false"),
+            "error message should suggest disabling strict mode: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_routing_rules_strict_false_no_match_returns_default() {
+        use crate::config::{RoutingConfig, RoutingRule};
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+        // Disable strict mode with a rule that won't match.
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![RoutingRule {
+                match_model: "sonnet".to_string(),
+                adapter: "claude-print".to_string(),
+            }],
+            default_adapter: None,
+            strict: false,
+        });
+        let worker = Worker::new(config, "test-routing-non-strict".to_string(), store);
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "claude".to_string(),
+            description: None,
+            agent_cli: "claude".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "claude {prompt}".to_string(),
+            environment: std::collections::HashMap::new(),
+            timeout_secs: 3600,
+            provider: Some("anthropic".to_string()),
+            model: Some("gpt-4o".to_string()),
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+        };
+
+        let result = worker.apply_routing_rules(&adapter);
+        assert!(result.is_ok());
+        let (chosen_adapter, matched_rule) = result.unwrap();
+        // Should fall back to default adapter when no rule matches and strict is false.
+        assert_eq!(chosen_adapter, "claude");
+        assert_eq!(matched_rule, "default");
+    }
+
+    #[tokio::test]
+    async fn apply_routing_rules_strict_true_match_returns_ok() {
+        use crate::config::{RoutingConfig, RoutingRule};
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+        // Enable strict mode with a rule that will match.
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![RoutingRule {
+                match_model: "claude-.*".to_string(),
+                adapter: "claude-print".to_string(),
+            }],
+            default_adapter: None,
+            strict: true,
+        });
+        let worker = Worker::new(config, "test-routing-match".to_string(), store);
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "claude".to_string(),
+            description: None,
+            agent_cli: "claude".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "claude {prompt}".to_string(),
+            environment: std::collections::HashMap::new(),
+            timeout_secs: 3600,
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+        };
+
+        let result = worker.apply_routing_rules(&adapter);
+        assert!(result.is_ok());
+        let (chosen_adapter, matched_rule) = result.unwrap();
+        // Should use the matched adapter when rule matches.
+        assert_eq!(chosen_adapter, "claude-print");
+        assert_eq!(matched_rule, "claude-.*");
+    }
+
+    #[tokio::test]
+    async fn apply_routing_rules_strict_false_uses_default_adapter() {
+        use crate::config::{RoutingConfig, RoutingRule};
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+        // Disable strict mode with default_adapter set.
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![RoutingRule {
+                match_model: "sonnet".to_string(),
+                adapter: "claude-print".to_string(),
+            }],
+            default_adapter: Some("claude-code-glm-4.7".to_string()),
+            strict: false,
+        });
+        let worker = Worker::new(config, "test-routing-default-adapter".to_string(), store);
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "claude".to_string(),
+            description: None,
+            agent_cli: "claude".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "claude {prompt}".to_string(),
+            environment: std::collections::HashMap::new(),
+            timeout_secs: 3600,
+            provider: Some("anthropic".to_string()),
+            model: Some("gpt-4o".to_string()),
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+        };
+
+        let result = worker.apply_routing_rules(&adapter);
+        assert!(result.is_ok());
+        let (chosen_adapter, matched_rule) = result.unwrap();
+        // Should use the routing default adapter when no rule matches.
+        assert_eq!(chosen_adapter, "claude-code-glm-4.7");
+        assert_eq!(matched_rule, "routing-default");
+    }
 }
