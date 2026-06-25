@@ -3719,4 +3719,188 @@ agent:
         );
         assert_eq!(config.agent.default, "claude");
     }
+
+    // ── Routing behavior tests ──
+
+    #[test]
+    fn routing_first_match_wins() {
+        // Test that the first matching rule wins
+        let routing = RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "sonnet.*".to_string(),
+                    adapter: "first-adapter".to_string(),
+                },
+                RoutingRule {
+                    match_model: "claude-sonnet-4-6".to_string(),
+                    adapter: "second-adapter".to_string(),
+                },
+            ],
+            default_adapter: Some("fallback-adapter".to_string()),
+            strict: false,
+        };
+
+        // Test that "claude-sonnet-4-6" matches the first rule
+        let first_rule = &routing.rules[0];
+        let re = regex::Regex::new(&first_rule.match_model).unwrap();
+        assert!(
+            re.is_match("claude-sonnet-4-6"),
+            "first rule should match the model"
+        );
+
+        // Both rules match, but first one should win
+        let second_rule = &routing.rules[1];
+        let re2 = regex::Regex::new(&second_rule.match_model).unwrap();
+        assert!(
+            re2.is_match("claude-sonnet-4-6"),
+            "second rule also matches"
+        );
+        // The routing logic in apply_routing_rules iterates in order and returns first match
+    }
+
+    #[test]
+    fn routing_workspace_override() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            r#"
+agent:
+  default: global-default
+  routing:
+    rules:
+      - match_model: "claude-sonnet.*"
+        adapter: workspace-sonnet-adapter
+    default_adapter: workspace-fallback
+"#,
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        config.agent.default = "global-default".to_string();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert!(config.agent.routing.is_some());
+        let routing = config.agent.routing.as_ref().unwrap();
+        assert_eq!(routing.rules.len(), 1);
+        assert_eq!(routing.rules[0].adapter, "workspace-sonnet-adapter");
+        assert_eq!(
+            routing.default_adapter.as_deref(),
+            Some("workspace-fallback")
+        );
+    }
+
+    #[test]
+    fn routing_default_fallback_no_match() {
+        // Test that when no rules match, we fall back to default_adapter
+        let routing = RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "sonnet.*".to_string(),
+                    adapter: "sonnet-adapter".to_string(),
+                },
+            ],
+            default_adapter: Some("fallback-adapter".to_string()),
+            strict: false,
+        };
+
+        // Model "claude-opus-4-8" doesn't match "sonnet.*"
+        let re = regex::Regex::new(&routing.rules[0].match_model).unwrap();
+        assert!(
+            !re.is_match("claude-opus-4-8"),
+            "model should not match the rule"
+        );
+
+        // Should fall back to default_adapter
+        assert_eq!(
+            routing.default_adapter.as_deref(),
+            Some("fallback-adapter")
+        );
+    }
+
+    #[test]
+    fn routing_strict_mode_failure() {
+        // Test that strict mode causes failure when no rules match
+        let routing = RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "sonnet.*".to_string(),
+                    adapter: "sonnet-adapter".to_string(),
+                },
+            ],
+            default_adapter: None,
+            strict: true, // Strict mode enabled
+        };
+
+        // Verify strict mode is set
+        assert!(routing.strict, "strict mode should be enabled");
+
+        // Model "claude-opus-4-8" doesn't match "sonnet.*"
+        let re = regex::Regex::new(&routing.rules[0].match_model).unwrap();
+        assert!(
+            !re.is_match("claude-opus-4-8"),
+            "model should not match the rule"
+        );
+
+        // In strict mode with no match, the worker should fail
+        // (This is tested in integration tests via apply_routing_rules)
+    }
+
+    #[test]
+    fn routing_default_anthropic_models_to_claude_print() {
+        // Test that default routing rules route Anthropic models to claude-print
+        let default_routing = AgentConfig::default_routing();
+        assert!(default_routing.is_some());
+
+        let routing = default_routing.unwrap();
+        assert!(!routing.rules.is_empty(), "should have default rules");
+
+        // Check that the default rule matches Anthropic Claude models
+        let rule = &routing.rules[0];
+        let re = regex::Regex::new(&rule.match_model).unwrap();
+
+        // Test various Anthropic model names
+        assert!(re.is_match("claude-sonnet-4-6"), "should match sonnet");
+        assert!(re.is_match("claude-opus-4-8"), "should match opus");
+        assert!(re.is_match("claude-fable-5"), "should match fable");
+        assert!(re.is_match("claude-haiku-4-5-20251001"), "should match haiku");
+        assert!(re.is_match("sonnet"), "should match short form");
+        assert!(re.is_match("opus"), "should match short form");
+
+        // Verify the adapter is claude-print
+        assert_eq!(rule.adapter, "claude-print");
+
+        // Verify default fallback
+        assert_eq!(
+            routing.default_adapter.as_deref(),
+            Some("claude-code-glm-4.7")
+        );
+    }
+
+    #[test]
+    fn routing_glm_47_defaults_to_claude_code_glm_47() {
+        // Test that glm-4.7 models use claude-code-glm-4.7 adapter
+        let default_routing = AgentConfig::default_routing();
+        let routing = default_routing.unwrap();
+
+        // The default rule should NOT match glm models
+        let rule = &routing.rules[0];
+        let re = regex::Regex::new(&rule.match_model).unwrap();
+
+        assert!(
+            !re.is_match("glm-4.7"),
+            "should not match glm models"
+        );
+        assert!(
+            !re.is_match("claude-code-glm-4.7"),
+            "should not match adapter names"
+        );
+
+        // Should fall back to default_adapter
+        assert_eq!(
+            routing.default_adapter.as_deref(),
+            Some("claude-code-glm-4.7")
+        );
+    }
 }

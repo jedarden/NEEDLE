@@ -659,6 +659,55 @@ struct ExecutionResult {
 - The dispatcher does not interpret agent output. It captures raw exit code, stdout, and stderr, then passes them to the outcome handler.
 - Timeout is enforced by the dispatcher, not the agent. If the agent exceeds the timeout, the dispatcher kills the process and returns exit code 124.
 
+### Model-based adapter routing
+
+NEEDLE supports dynamic adapter selection based on model names. This enables policy-driven routing such as directing Anthropic subscription models to a specific adapter before a billing deadline.
+
+**Motivation:** Anthropic's Agent SDK credit split occurs on June 15, 2026. Before this date, `claude -p` commands use subscription credits; after, they consume API credits. To maximize subscription value, Anthropic Claude models (sonnet, opus, fable, haiku) route to `claude-print`, while other models default to `claude-code-glm-4.7`.
+
+**Configuration schema:**
+
+```yaml
+agent:
+  default: claude  # fallback when no routing rules match
+  routing:
+    rules:
+      - match_model: "(claude-)?(sonnet|opus).*"
+        adapter: claude-print
+      - match_model: "(claude-)?(fable|haiku).*"
+        adapter: claude-print
+      - match_model: "glm-4.*"
+        adapter: claude-code-glm-4.7
+    default_adapter: claude-code-glm-4.7  # fallback when no rule matches
+    strict: false  # if true, fail dispatch when no rule matches
+```
+
+**Routing logic:**
+1. Rules are evaluated in order; first match wins.
+2. Pattern matching uses regex against the model name only (no provider prefix).
+3. If no rule matches and `strict: false`, use `default_adapter` or fall back to `agent.default`.
+4. If no rule matches and `strict: true`, emit `RoutingFailed` telemetry and fail the dispatch.
+
+**Telemetry events:**
+- `RoutingDecision`: emitted when a routing rule matches (bead_id, model, matched_rule, chosen_adapter).
+- `RoutingFailed`: emitted in strict mode when no rule matches (bead_id, model, rules_tried).
+
+**Workspace overrides:**
+Routing rules can be overridden per-workspace via `.needle.yaml`:
+
+```yaml
+# workspace-specific routing
+agent:
+  routing:
+    rules:
+      - match_model: "claude-sonnet.*"
+        adapter: workspace-sonnet-adapter
+    default_adapter: workspace-fallback
+```
+
+**Default behavior:**
+The built-in default routes Anthropic Claude models to `claude-print` and everything else to `claude-code-glm-4.7`. Workspaces can override this by defining their own `agent.routing` section.
+
 ### outcome
 
 Classifies the agent's exit and routes to the appropriate handler.
