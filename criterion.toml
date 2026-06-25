@@ -1,0 +1,14 @@
+# Criterion.rs configuration for NEEDLE benchmarks
+# Configures output format and plotting backend
+# See: https://bheisler.github.io/criterion.rs/book/cargo_criterion/configuring_cargo_criterion.html
+
+# Override the directory where Criterion saves data and generates reports
+criterion_home = "./target/criterion"
+
+# Configure command-line output format
+# Options: criterion (default), quiet, verbose, bencher
+output_format = "verbose"
+
+# Configure plotting backend (used by cargo-criterion for report generation)
+# Options: "gnuplot", "plotters", "auto"
+ploting_backend = "auto"
