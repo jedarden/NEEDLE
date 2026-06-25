@@ -176,7 +176,24 @@ fn bench_sanitize_10kb(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitize_10kb");
     group.throughput(Throughput::Bytes(SIZE_10KB as u64));
     group.sample_size(10); // Faster iteration with fewer samples
-    group.bench_function("throughput", |b| {
+    group.bench_function("throughput_bytes", |b| {
+        b.iter(|| {
+            let result = sanitizer.sanitize(black_box(&content));
+            black_box(result);
+        });
+    });
+    group.finish();
+}
+
+/// Benchmarks sanitization at 10KB trace size (ops/sec).
+fn bench_sanitize_10kb_ops(c: &mut Criterion) {
+    let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
+    let content = generate_trace_content(SIZE_10KB);
+
+    let mut group = c.benchmark_group("sanitize_10kb");
+    group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+    group.bench_function("throughput_ops", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
             black_box(result);
@@ -193,7 +210,24 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitize_100kb");
     group.throughput(Throughput::Bytes(SIZE_100KB as u64));
     group.sample_size(10); // Faster iteration with fewer samples
-    group.bench_function("throughput", |b| {
+    group.bench_function("throughput_bytes", |b| {
+        b.iter(|| {
+            let result = sanitizer.sanitize(black_box(&content));
+            black_box(result);
+        });
+    });
+    group.finish();
+}
+
+/// Benchmarks sanitization at 100KB trace size (ops/sec).
+fn bench_sanitize_100kb_ops(c: &mut Criterion) {
+    let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
+    let content = generate_trace_content(SIZE_100KB);
+
+    let mut group = c.benchmark_group("sanitize_100kb");
+    group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+    group.bench_function("throughput_ops", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
             black_box(result);
@@ -210,7 +244,24 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitize_1mb");
     group.throughput(Throughput::Bytes(SIZE_1MB as u64));
     group.sample_size(10); // Faster iteration with fewer samples
-    group.bench_function("throughput", |b| {
+    group.bench_function("throughput_bytes", |b| {
+        b.iter(|| {
+            let result = sanitizer.sanitize(black_box(&content));
+            black_box(result);
+        });
+    });
+    group.finish();
+}
+
+/// Benchmarks sanitization at 1MB trace size (ops/sec).
+fn bench_sanitize_1mb_ops(c: &mut Criterion) {
+    let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
+    let content = generate_trace_content(SIZE_1MB);
+
+    let mut group = c.benchmark_group("sanitize_1mb");
+    group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+    group.bench_function("throughput_ops", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
             black_box(result);
@@ -362,8 +413,11 @@ fn bench_median_latency(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_sanitize_10kb,
+    bench_sanitize_10kb_ops,
     bench_sanitize_100kb,
+    bench_sanitize_100kb_ops,
     bench_sanitize_1mb,
+    bench_sanitize_1mb_ops,
     bench_median_latency,
     report_skip_stats
 );

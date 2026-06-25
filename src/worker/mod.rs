@@ -4448,4 +4448,128 @@ mod tests {
         assert_eq!(chosen_adapter, "claude-code-glm-4.7");
         assert_eq!(matched_rule, "routing-default");
     }
+
+    #[tokio::test]
+    async fn default_routing_rules_anthropic_subscription_models() {
+        // Verify that default routing rules route Anthropic subscription models to claude-print.
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+
+        // Use the default routing rules from AgentConfig::default_routing().
+        let default_routing = config.agent.routing.as_ref().expect("default routing should be set");
+
+        // Verify the default routing rules are configured correctly.
+        assert!(!default_routing.rules.is_empty(), "should have at least one routing rule");
+        assert_eq!(
+            default_routing.rules[0].match_model,
+            "(claude-)?(sonnet|opus|fable|haiku).*",
+            "first rule should match Anthropic subscription models"
+        );
+        assert_eq!(
+            default_routing.rules[0].adapter,
+            "claude-print",
+            "first rule should route to claude-print"
+        );
+        assert_eq!(
+            default_routing.default_adapter,
+            Some("claude-code-glm-4.7".to_string()),
+            "default adapter should be claude-code-glm-4.7"
+        );
+        assert!(!default_routing.strict, "strict mode should be disabled by default");
+
+        // Test routing with actual Anthropic subscription model names.
+        let anthropic_models = vec![
+            "claude-sonnet-4-6",
+            "claude-opus-4-6",
+            "claude-fable-5",
+            "claude-haiku-4-5-20251001",
+            "sonnet",
+            "opus",
+            "fable",
+            "haiku",
+        ];
+
+        for model_name in anthropic_models {
+            let worker = Worker::new(config.clone(), format!("test-routing-{}", model_name), Arc::clone(&store));
+            let adapter = crate::dispatch::AgentAdapter {
+                name: "claude".to_string(),
+                description: None,
+                agent_cli: "claude".to_string(),
+                version_command: None,
+                input_method: crate::types::InputMethod::Stdin,
+                invoke_template: "claude {prompt}".to_string(),
+                environment: std::collections::HashMap::new(),
+                timeout_secs: 3600,
+                provider: Some("anthropic".to_string()),
+                model: Some(model_name.to_string()),
+                token_extraction: crate::dispatch::TokenExtraction::None,
+                output_transform: None,
+            };
+
+            let result = worker.apply_routing_rules(&adapter);
+            assert!(
+                result.is_ok(),
+                "routing should succeed for model {}: {:?}",
+                model_name,
+                result
+            );
+            let (chosen_adapter, matched_rule) = result.unwrap();
+            assert_eq!(
+                chosen_adapter, "claude-print",
+                "Anthropic subscription model {} should route to claude-print, got {}",
+                model_name, chosen_adapter
+            );
+            assert_ne!(
+                matched_rule, "default",
+                "model {} should match a routing rule, not fall back to default",
+                model_name
+            );
+        }
+
+        // Test that non-Anthropic models route to claude-code-glm-4.7.
+        let non_anthropic_models = vec![
+            "glm-4.7",
+            "gpt-4o",
+            "claude-other", // Doesn't match the subscription pattern
+            "deepseek-r1",
+        ];
+
+        for model_name in non_anthropic_models {
+            let worker = Worker::new(config.clone(), format!("test-routing-{}", model_name), Arc::clone(&store));
+            let adapter = crate::dispatch::AgentAdapter {
+                name: "claude".to_string(),
+                description: None,
+                agent_cli: "claude".to_string(),
+                version_command: None,
+                input_method: crate::types::InputMethod::Stdin,
+                invoke_template: "claude {prompt}".to_string(),
+                environment: std::collections::HashMap::new(),
+                timeout_secs: 3600,
+                provider: Some("anthropic".to_string()),
+                model: Some(model_name.to_string()),
+                token_extraction: crate::dispatch::TokenExtraction::None,
+                output_transform: None,
+            };
+
+            let result = worker.apply_routing_rules(&adapter);
+            assert!(
+                result.is_ok(),
+                "routing should succeed for model {}: {:?}",
+                model_name,
+                result
+            );
+            let (chosen_adapter, matched_rule) = result.unwrap();
+            assert_eq!(
+                chosen_adapter, "claude-code-glm-4.7",
+                "Non-subscription model {} should route to claude-code-glm-4.7, got {}",
+                model_name, chosen_adapter
+            );
+            assert_eq!(
+                matched_rule, "routing-default",
+                "non-matching model {} should use routing-default adapter",
+                model_name
+            );
+        }
+    }
 }
