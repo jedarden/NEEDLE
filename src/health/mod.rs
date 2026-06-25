@@ -1271,4 +1271,117 @@ mod tests {
 
         monitor.stop();
     }
+
+    /// Comprehensive test for heartbeat file creation and periodic refresh.
+    ///
+    /// This test validates the acceptance criteria:
+    /// 1. Workers create heartbeat file on startup
+    /// 2. Heartbeat file is refreshed every heartbeat_interval_secs (30s)
+    /// 3. File contains worker ID and last refresh timestamp
+    ///
+    /// Uses the actual 30-second interval to match production behavior.
+    #[tokio::test]
+    async fn heartbeat_creates_and_refreshes_every_30_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hb_dir = dir.path().join("state").join("heartbeats");
+
+        let mut config = Config::default();
+        config.workspace.home = dir.path().to_path_buf();
+        // Use the actual production interval of 30 seconds
+        config.health.heartbeat_interval_secs = 30;
+        config.health.heartbeat_ttl_secs = 300;
+
+        let mut monitor = HealthMonitor::new(
+            config,
+            "validate-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        let path = monitor.heartbeat_path();
+
+        // ACCEPTANCE CRITERION 1: Worker creates heartbeat file on startup
+        monitor.start_emitter().unwrap();
+        assert!(
+            path.exists(),
+            "heartbeat file must be created immediately on startup"
+        );
+
+        // Verify initial heartbeat contains required fields
+        let content = std::fs::read_to_string(&path).unwrap();
+        let data: HeartbeatData = serde_json::from_str(&content).unwrap();
+
+        // ACCEPTANCE CRITERION 3a: File contains worker ID
+        assert_eq!(data.worker_id, "validate-worker");
+        assert!(!data.qualified_id.is_empty());
+        assert_eq!(data.qualified_id, format!("{}-validate-worker", data.model));
+
+        // ACCEPTANCE CRITERION 3b: File contains last refresh timestamp
+        let initial_timestamp = data.last_heartbeat;
+        let now = Utc::now();
+        let age = (now - initial_timestamp).num_seconds().abs();
+        assert!(
+            age < 2,
+            "initial heartbeat timestamp must be within 2 seconds of now, got {} seconds difference",
+            age
+        );
+
+        // Verify PID is included (useful for detecting crashed workers)
+        assert_eq!(data.pid, std::process::id());
+
+        // Verify started_at timestamp
+        assert!(!data.started_at.timestamp().is_negative());
+
+        // ACCEPTANCE CRITERION 2: File updates every ~30 seconds
+        // We'll observe 3 refresh cycles to ensure periodic updates
+        for cycle in 1..=3 {
+            tracing::info!("waiting for heartbeat refresh cycle {} of 3", cycle);
+
+            // Record the timestamp before waiting
+            let before_content = std::fs::read_to_string(&path).unwrap();
+            let before_data: HeartbeatData = serde_json::from_str(&before_content).unwrap();
+            let before_timestamp = before_data.last_heartbeat;
+
+            // Wait for the next refresh (30 seconds + 2 second buffer)
+            std::thread::sleep(Duration::from_secs(32));
+
+            // Verify the file has been updated
+            let after_content = std::fs::read_to_string(&path).unwrap();
+            let after_data: HeartbeatData = serde_json::from_str(&after_content).unwrap();
+            let after_timestamp = after_data.last_heartbeat;
+
+            let time_diff = (after_timestamp - before_timestamp).num_seconds();
+
+            // The timestamp should have advanced by approximately the interval
+            // Allow some tolerance for system load and scheduling delays
+            assert!(
+                time_diff >= 28 && time_diff <= 35,
+                "heartbeat should refresh every ~30 seconds, got {} seconds difference between updates (cycle {})",
+                time_diff,
+                cycle
+            );
+
+            // Verify the timestamp continues to advance monotonically
+            assert!(
+                after_timestamp > before_timestamp,
+                "last_heartbeat timestamp must monotonically increase"
+            );
+        }
+
+        // Final verification: heartbeat file still contains valid data
+        let final_content = std::fs::read_to_string(&path).unwrap();
+        let final_data: HeartbeatData = serde_json::from_str(&final_content).unwrap();
+
+        assert_eq!(final_data.worker_id, "validate-worker");
+        assert!(!final_data.qualified_id.is_empty());
+        assert_eq!(final_data.pid, std::process::id());
+
+        monitor.stop();
+
+        // Verify file is removed after stop
+        assert!(
+            !path.exists(),
+            "heartbeat file must be removed when worker stops"
+        );
+    }
 }
