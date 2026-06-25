@@ -53,6 +53,17 @@ pub struct RoutingConfig {
     /// Fallback adapter when no rules match (defaults to `agent.default`).
     #[serde(default)]
     pub default_adapter: Option<String>,
+
+    /// When true, fail if no routing rule matches instead of falling back.
+    ///
+    /// If set to true and no rule matches the model:
+    /// - The bead dispatch fails immediately
+    /// - A `RoutingFailed` telemetry event is emitted
+    /// - No fallback to `agent.default` or `default_adapter` occurs
+    ///
+    /// Default: false (fallback behavior for backward compatibility).
+    #[serde(default)]
+    pub strict: bool,
 }
 
 /// Agent (AI model CLI) configuration.
@@ -116,6 +127,7 @@ impl AgentConfig {
                 adapter: "claude-print".to_string(),
             }],
             default_adapter: Some("claude-code-glm-4.7".to_string()),
+            strict: false,
         })
     }
 }
@@ -1249,12 +1261,30 @@ pub struct TelemetryConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthConfig {
     /// How often to emit a heartbeat file (seconds).
+    ///
+    /// Workers write a heartbeat JSON file at this interval to signal liveness.
+    /// The heartbeat file contains worker state, current bead, and other metadata
+    /// used for peer detection and scaling decisions.
     #[serde(default = "HealthConfig::default_heartbeat_interval_secs")]
     pub heartbeat_interval_secs: u64,
 
     /// Time after which a heartbeat is considered stale (seconds).
+    ///
+    /// Heartbeats older than this threshold are considered stale, triggering
+    /// worker failure detection. Should be at least 3x `heartbeat_interval_secs`
+    /// for reliable detection.
     #[serde(default = "HealthConfig::default_heartbeat_ttl_secs")]
     pub heartbeat_ttl_secs: u64,
+
+    /// Directory path for heartbeat files (relative to workspace.home).
+    ///
+    /// Each worker writes its heartbeat file to this directory. The path is
+    /// resolved as `workspace.home/heartbeat_dir`. When not set, defaults to
+    /// `state/heartbeats`.
+    ///
+    /// Example: setting to `heartbeats` resolves to `~/.needle/heartbeats`.
+    #[serde(default)]
+    pub heartbeat_dir: Option<PathBuf>,
 }
 
 impl Default for HealthConfig {
@@ -1262,6 +1292,7 @@ impl Default for HealthConfig {
         HealthConfig {
             heartbeat_interval_secs: Self::default_heartbeat_interval_secs(),
             heartbeat_ttl_secs: Self::default_heartbeat_ttl_secs(),
+            heartbeat_dir: Self::default_heartbeat_dir(),
         }
     }
 }
@@ -1272,6 +1303,9 @@ impl HealthConfig {
     }
     fn default_heartbeat_ttl_secs() -> u64 {
         300
+    }
+    fn default_heartbeat_dir() -> Option<PathBuf> {
+        None
     }
 }
 
@@ -3288,6 +3322,7 @@ agent:
                 adapter: "some-adapter".to_string(),
             }],
             default_adapter: None,
+            strict: false,
         });
 
         let errors = ConfigLoader::validate(&config);
@@ -3309,6 +3344,7 @@ agent:
                 adapter: String::new(), // Empty adapter
             }],
             default_adapter: None,
+            strict: false,
         });
 
         let errors = ConfigLoader::validate(&config);
@@ -3336,6 +3372,7 @@ agent:
                 },
             ],
             default_adapter: Some("claude-fallback".to_string()),
+            strict: false,
         });
 
         let errors = ConfigLoader::validate(&config);
@@ -3474,6 +3511,7 @@ agent:
                 },
             ],
             default_adapter: None,
+            strict: false,
         });
 
         let errors = ConfigLoader::validate(&config);
@@ -3504,6 +3542,7 @@ agent:
                 },
             ],
             default_adapter: Some("default-adapter".to_string()),
+            strict: false,
         };
 
         let yaml = serde_yaml::to_string(&routing).unwrap();
@@ -3524,6 +3563,7 @@ agent:
                     adapter: "haiku-adapter".to_string(),
                 }],
                 default_adapter: Some("fallback".to_string()),
+                strict: false,
             }),
             ..Default::default()
         };

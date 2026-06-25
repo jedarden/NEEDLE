@@ -866,7 +866,12 @@ impl EventKind {
             | EventKind::DriftReportWritten { .. }
             | EventKind::DecisionDetectionStarted { .. }
             | EventKind::DecisionDetectionCompleted { .. }
-            | EventKind::DecisionDetectionSkipped { .. } => None,
+            | EventKind::DecisionDetectionSkipped { .. }
+            | EventKind::SupervisorStarted { .. }
+            | EventKind::SupervisorSpawnDecision { .. }
+            | EventKind::SupervisorSpawnFailed { .. }
+            | EventKind::SupervisorBackoff { .. }
+            | EventKind::SupervisorSummary { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
     }
@@ -1720,6 +1725,43 @@ impl EventKind {
                 "beads_processed": beads_processed,
                 "uptime_secs": uptime_secs,
             }),
+            EventKind::SupervisorStarted {
+                max_workers,
+                workspace,
+            } => serde_json::json!({
+                "max_workers": max_workers,
+                "workspace": workspace,
+            }),
+            EventKind::SupervisorSpawnDecision {
+                to_spawn,
+                ready_beads,
+                max_workers,
+            } => serde_json::json!({
+                "to_spawn": to_spawn,
+                "ready_beads": ready_beads,
+                "max_workers": max_workers,
+            }),
+            EventKind::SupervisorSpawnFailed { error } => {
+                serde_json::json!({ "error": error })
+            }
+            EventKind::SupervisorBackoff {
+                backoff_secs,
+                consecutive_failures,
+            } => serde_json::json!({
+                "backoff_secs": backoff_secs,
+                "consecutive_failures": consecutive_failures,
+            }),
+            EventKind::SupervisorSummary {
+                polls,
+                spawned,
+                total_workers,
+                ready_beads,
+            } => serde_json::json!({
+                "polls": polls,
+                "spawned": spawned,
+                "total_workers": total_workers,
+                "ready_beads": ready_beads,
+            }),
         }
     }
 
@@ -1830,6 +1872,11 @@ impl EventKind {
             | EventKind::DecisionDetectionStarted { .. }
             | EventKind::DecisionDetectionCompleted { .. }
             | EventKind::DecisionDetectionSkipped { .. }
+            | EventKind::SupervisorStarted { .. }
+            | EventKind::SupervisorSpawnDecision { .. }
+            | EventKind::SupervisorSpawnFailed { .. }
+            | EventKind::SupervisorBackoff { .. }
+            | EventKind::SupervisorSummary { .. }
             | EventKind::SinkError { .. }
             | EventKind::OtlpDropped { .. }
             | EventKind::OtlpShutdownTimeout { .. }

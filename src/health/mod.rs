@@ -126,7 +126,11 @@ impl HealthMonitor {
         _telemetry: Telemetry,
         shutdown: Option<Arc<AtomicBool>>,
     ) -> Self {
-        let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
+        let heartbeat_dir = config
+            .health
+            .heartbeat_dir
+            .unwrap_or_else(|| PathBuf::from("state").join("heartbeats"));
+        let heartbeat_dir = config.workspace.home.join(heartbeat_dir);
         let heartbeat_interval = Duration::from_secs(config.health.heartbeat_interval_secs);
         let heartbeat_ttl = Duration::from_secs(config.health.heartbeat_ttl_secs);
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);
@@ -155,17 +159,49 @@ impl HealthMonitor {
     ///
     /// The thread writes a heartbeat JSON file every `heartbeat_interval` until
     /// `stop()` is called.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The heartbeat directory cannot be created
+    /// - The initial heartbeat write fails
+    /// - The emitter thread cannot be spawned
     pub fn start_emitter(&mut self) -> Result<()> {
-        // Ensure heartbeat directory exists.
-        std::fs::create_dir_all(&self.heartbeat_dir).with_context(|| {
+        // Ensure heartbeat directory exists (with retry on transient failures).
+        let mut retry_count = 0u32;
+        const MAX_DIR_CREATE_RETRIES: u32 = 3;
+
+        while retry_count < MAX_DIR_CREATE_RETRIES {
+            match std::fs::create_dir_all(&self.heartbeat_dir) {
+                Ok(_) => break,
+                Err(e) if retry_count < MAX_DIR_CREATE_RETRIES - 1 => {
+                    retry_count += 1;
+                    tracing::warn!(
+                        error = %e,
+                        retry = retry_count,
+                        path = %self.heartbeat_dir.display(),
+                        "failed to create heartbeat directory, retrying"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to create heartbeat directory {} after {} retries: {}",
+                        self.heartbeat_dir.display(),
+                        retry_count,
+                        e
+                    ));
+                }
+            }
+        }
+
+        // Write the initial heartbeat immediately to verify the directory is writable.
+        self.write_heartbeat().with_context(|| {
             format!(
-                "failed to create heartbeat directory: {}",
-                self.heartbeat_dir.display()
+                "failed to write initial heartbeat to {}",
+                self.heartbeat_path().display()
             )
         })?;
-
-        // Write the initial heartbeat immediately.
-        self.write_heartbeat()?;
 
         let shared_state = self.shared_state.clone();
         let shutdown = self.shutdown.clone();
@@ -197,6 +233,7 @@ impl HealthMonitor {
         tracing::info!(
             worker = %self.worker_id,
             interval_secs = self.heartbeat_interval.as_secs(),
+            path = %self.heartbeat_path().display(),
             "heartbeat emitter started"
         );
 
@@ -276,6 +313,45 @@ impl HealthMonitor {
     /// The configured heartbeat TTL.
     pub fn heartbeat_ttl(&self) -> Duration {
         self.heartbeat_ttl
+    }
+
+    /// Verify that this worker's heartbeat file exists and is fresh.
+    ///
+    /// Returns `Ok(true)` if the heartbeat file exists and is within the TTL.
+    /// Returns `Ok(false)` if the heartbeat file doesn't exist or is stale.
+    /// Returns `Err` if the heartbeat file exists but cannot be read/parsed.
+    pub fn verify_heartbeat(&self) -> Result<bool> {
+        let path = self.heartbeat_path();
+        if !path.exists() {
+            tracing::warn!(
+                path = %path.display(),
+                "heartbeat file does not exist"
+            );
+            return Ok(false);
+        }
+
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read heartbeat file: {}", path.display()))?;
+
+        let heartbeat: HeartbeatData = serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse heartbeat file: {}", path.display()))?;
+
+        let age = Utc::now()
+            .signed_duration_since(heartbeat.last_heartbeat)
+            .to_std()
+            .unwrap_or(Duration::ZERO);
+
+        let is_fresh = age <= self.heartbeat_ttl;
+        if !is_fresh {
+            tracing::warn!(
+                path = %path.display(),
+                age_secs = age.as_secs(),
+                ttl_secs = self.heartbeat_ttl.as_secs(),
+                "heartbeat file is stale"
+            );
+        }
+
+        Ok(is_fresh)
     }
 
     // ── Reader utilities (used by peer monitoring / Mend strand) ────────────

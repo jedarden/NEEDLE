@@ -2878,6 +2878,7 @@ impl Worker {
     ///
     /// Returns (chosen_adapter_name, matched_rule_pattern).
     /// If no routing rules match, returns (default_adapter_name, "default").
+    /// When strict mode is enabled and no rule matches, returns an error.
     fn apply_routing_rules(
         &self,
         default_adapter: &crate::dispatch::AgentAdapter,
@@ -2915,7 +2916,25 @@ impl Worker {
             }
         }
 
-        // No rules matched - use routing default or fall back to the configured default.
+        // No rules matched.
+        // If strict mode is enabled, fail with a clear error.
+        if routing_config.strict {
+            let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
+            if let Some(id) = bead_id {
+                // Emit RoutingFailed telemetry event.
+                let _ = self.telemetry.emit(EventKind::RoutingFailed {
+                    bead_id: id,
+                    model: model_name.to_string(),
+                    rules_tried: routing_config.rules.len() as u32,
+                });
+            }
+            bail!(
+                "no routing rule matched model '{}' — add a rule to agent.routing.rules or set routing.strict: false to fall back to the default adapter",
+                model_name
+            );
+        }
+
+        // Strict mode disabled - use routing default or fall back to the configured default.
         if let Some(ref default_adapter_name) = routing_config.default_adapter {
             Ok((default_adapter_name.clone(), "routing-default".to_string()))
         } else {

@@ -5,11 +5,11 @@
   "model": "glm-4.7",
   "exit_code": 0,
   "outcome": "success",
-  "duration_ms": 127564,
+  "duration_ms": 23585,
   "input_tokens": null,
   "output_tokens": null,
   "cost_usd": null,
-  "captured_at": "2026-06-24T13:24:53.745485591Z",
+  "captured_at": "2026-06-24T13:56:01.995040468Z",
   "trace_format": "claude_json",
   "pruned": false,
   "template_version": null

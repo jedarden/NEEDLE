@@ -15,7 +15,7 @@
 //!
 //! Depends on: `config`, `registry`, `health`, `bead_store`, `telemetry`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ use tokio::time::sleep;
 use crate::bead_store::{BeadStore, BrCliBeadStore};
 use crate::config::{Config, ConfigLoader};
 use crate::health::HeartbeatData;
-use crate::registry::{Registry, WorkerEntry};
+use crate::registry::Registry;
 use crate::telemetry::{EventKind, Telemetry};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -267,7 +267,8 @@ impl Supervisor {
             let is_idle = heartbeat
                 .as_ref()
                 .map(|hb| {
-                    hb.state.to_lowercase().contains("exhausted") && hb.current_bead.is_none()
+                    matches!(hb.state, crate::types::WorkerState::Exhausted)
+                        && hb.current_bead.is_none()
                 })
                 .unwrap_or(false);
 
@@ -289,9 +290,10 @@ impl Supervisor {
     /// Count ready beads across all workspaces.
     async fn count_ready_beads(&self) -> Result<usize> {
         // Query the bead store for ready beads.
+        let filters = crate::bead_store::Filters::default();
         let ready_beads = self
             .store
-            .ready(None, None, &[])
+            .ready(&filters)
             .await
             .context("failed to query ready beads from store")?;
 
@@ -338,7 +340,7 @@ impl Supervisor {
         let store_clone = self.store.clone();
         let telemetry_clone = self.telemetry.clone();
 
-        let spawned = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             crate::cli::launch_workers(
                 config_clone,
                 workspace,
@@ -352,7 +354,8 @@ impl Supervisor {
         .await
         .context("worker spawn task failed")??;
 
-        Ok(spawned)
+        // launch_workers doesn't return the actual count, so we assume success
+        Ok(count)
     }
 
     /// Calculate exponential backoff duration.
@@ -434,13 +437,8 @@ pub async fn run_supervisor(workspace: Option<PathBuf>) -> Result<()> {
 
     // Initialize bead store.
     let store = Arc::new(
-        BrCliBeadStore::discover(
-            workspace_root.clone(),
-            None, // No model filter
-            Some("needle".to_string()),
-            Some(env!("CARGO_PKG_VERSION").to_string()),
-        )
-        .context("failed to discover bead store")?,
+        BrCliBeadStore::discover(workspace_root.clone())
+            .context("failed to discover bead store")?,
     );
 
     // Initialize telemetry.

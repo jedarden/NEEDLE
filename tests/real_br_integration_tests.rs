@@ -1195,10 +1195,7 @@ async fn real_br_strand_waterfall_exhaustion_with_telemetry_jsonl() {
     }
 
     // Verify we have events.
-    assert!(
-        !events.is_empty(),
-        "telemetry log should contain events"
-    );
+    assert!(!events.is_empty(), "telemetry log should contain events");
 
     // Find all strand.evaluated events.
     let strand_evaluated_events: Vec<_> = events
