@@ -60,8 +60,10 @@ struct FleetState {
     /// Workers currently idle (exhausted state, no bead).
     idle_workers: usize,
     /// Workers currently processing beads.
+    #[allow(dead_code)]
     busy_workers: usize,
     /// Qualified worker IDs (e.g., "claude-alpha").
+    #[allow(dead_code)]
     worker_ids: Vec<String>,
 }
 
@@ -337,8 +339,6 @@ impl Supervisor {
 
         // Create a blocking task for worker spawning (uses tmux which is not async).
         let config_clone = self.config.clone();
-        let store_clone = self.store.clone();
-        let telemetry_clone = self.telemetry.clone();
 
         tokio::task::spawn_blocking(move || {
             crate::cli::launch_workers(
@@ -470,12 +470,9 @@ pub async fn run_supervisor(workspace: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::TempDir;
 
     #[test]
     fn fleet_state_detects_idle_workers() {
-        let dir = tempfile::tempdir().unwrap();
         let state = FleetState {
             total_workers: 5,
             idle_workers: 2,
@@ -516,9 +513,9 @@ mod tests {
     #[test]
     fn supervisor_snapshot_empty_fleet() {
         // Test that supervisor handles empty registry gracefully.
-        let dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
-        let registry = Registry::new(dir.path());
+        let _dir = tempfile::tempdir().unwrap();
+        let _config = Config::default();
+        let registry = Registry::new(_dir.path());
 
         let workers = registry.list().unwrap();
         assert!(workers.is_empty());
