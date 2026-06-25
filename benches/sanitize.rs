@@ -57,8 +57,9 @@ fn latency_threshold_ms() -> u128 {
 ///
 /// The output mimics real agent traces from `.beads/traces/*/stdout.txt`:
 /// - JSONL format (one JSON object per line)
-/// - Mix of system events, stream events, and tool results
-/// - Includes some potential secret patterns (for testing detection)
+/// - Mix of system events, stream events, thinking deltas, and tool results
+/// - Includes realistic code snippets (Rust, shell, JSON)
+/// - Deterministic: same input produces identical output
 ///
 /// # Arguments
 ///
@@ -68,43 +69,101 @@ fn latency_threshold_ms() -> u128 {
 ///
 /// A string of approximately the target size.
 fn generate_trace_content(target_bytes: usize) -> String {
-    // Sample trace events from real trace files.
-    let events = [
-        r#"{"type":"system","subtype":"init","cwd":"/home/coding/NEEDLE","session_id":"9d9228c7-0ad5-4b01-a2b8-50f7801c482e","tools":["Task","AskUserQuestion","Bash","Read","Write"],"mcp_servers":[],"model":"claude-sonnet-4-6","permissionMode":"bypassPermissions"}"#,
-        r#"{"type":"system","subtype":"status","status":"requesting","uuid":"194bd49c-e341-4ec9-8a56-e8755c4476d8","session_id":"9d9228c7-0ad5-4b01-a2b8-50f7801c482e"}"#,
-        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The user wants me to implement a feature."},"session_id":"9d9228c7-0ad5-4b01-a2b8-50f7801c482e"}"#,
-        r#"{"type":"tool_use","id":"toolu_01","name":"read","input":{"file_path":"/home/coding/NEEDLE/src/main.rs"},"session_id":"9d9228c7-0ad5-4b01-a2b8-50f7801c482e"}"#,
-        r#"{"type":"tool_result","id":"toolu_01","output":"// Main entry point for needle binary\nfn main() { ... }","session_id":"9d9228c7-0ad5-4b01-a2b8-50f7801c482e"}"#,
-        // Include some patterns that might trigger secret detection (but shouldn't match
-        // due to low entropy or other filters).
-        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Set API_KEY=sk-placeholder-key-for-testing"}}}"#,
-        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Configure DATABASE_URL=postgresql://localhost:5432/testdb"}}}"#,
-        // Safe passthrough patterns (should never be redacted).
-        r#"{"type":"system","subtype":"bead_update","bead_id":"needle-test-abc123","status":"in_progress"}"#,
-        r#"{"type":"tool_use","name":"Bash","input":{"command":"echo 'Processing bead needle-wysd.2.2'}}}"#,
-        // Already redacted content (should pass through unchanged).
-        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Previous output: token=[REDACTED:anthropic-api-key]"}}}"#,
+    // System events from real traces (init, hooks, status)
+    let system_events = [
+        r#"{"type":"system","subtype":"init","cwd":"/home/coding/NEEDLE","session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","tools":["Task","Bash","Read","Write","Edit"],"mcp_servers":[],"model":"glm-4.7","permissionMode":"bypassPermissions"}"#,
+        r#"{"type":"system","subtype":"status","status":"requesting","uuid":"a26811cd-e0c3-411c-9ef1-ab7630de71d0","session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+        r#"{"type":"system","subtype":"hook_started","hook_id":"df3f5e15-9390-4080-a979-4d2ced90215f","hook_name":"SessionStart:startup","hook_event":"SessionStart","uuid":"e7553e67-80ef-426a-927b-c652a6fcf08e","session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+        r#"{"type":"system","subtype":"hook_response","hook_id":"df3f5e15-9390-4080-a979-4d2ced90215f","hook_name":"SessionStart:startup","hook_event":"SessionStart","output":"","stdout":"","stderr":"","exit_code":0,"outcome":"success","uuid":"3ab2daae-1f5a-4eba-9338-f7a36f4e1cd0","session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+        r#"{"type":"system","subtype":"thinking_tokens","estimated_tokens":15,"estimated_tokens_delta":2,"uuid":"6e7d97ec-d48b-43b1-8f2e-fdb80234b714","session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
     ];
 
-    // Calculate approximate bytes per event (including newline).
-    let avg_event_size = events.iter().map(|s| s.len() + 1).sum::<usize>() / events.len();
+    // Stream events with thinking deltas (word-by-word output from real traces)
+    let thinking_events = [
+        r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":"4b94f30d883f44b4b168c5b7"}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"03d826c2-944b-45dc-be63-d1befa23437a"}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let"}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"6785a332-dc25-48c7-942d-422c7eb3fe16"}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" me"}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"51c1dd21-22da-4a0a-a871-46b394d3cb4e"}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" break"}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"42385a6c-563f-41e5-8cf2-23f998586e43"}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" down"}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"aeb6a89f-a233-4acd-b015-45278d92f14c"}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" this"}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"d44c0e7d-5053-4890-b1e0-f70c7c9aa416"}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" task"}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"8006bffd-da97-4105-9beb-ca4e301b86ed"}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":":"}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"2d0206c7-407a-4311-982a-3c5a6c624e5f"}"#,
+    ];
+
+    // Text delta events (normal output text)
+    let text_events = [
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The user wants me to implement a feature."}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"b75f0256-90d2-4886-85cb-402428ed7a72"}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I need to read the source files first."}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"c71a1034-2189-4674-b9d4-adaa09a61d0d"}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me check the existing implementation."}},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769","parent_tool_use_id":null,"uuid":"3ab2daae-1f5a-4eba-9338-f7a36f4e1cd0"}"#,
+    ];
+
+    // Tool use events (agent invoking tools)
+    let tool_use_events = [
+        r#"{"type":"tool_use","id":"toolu_01","name":"read","input":{"file_path":"/home/coding/NEEDLE/src/lib.rs"},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+        r#"{"type":"tool_use","id":"toolu_02","name":"bash","input":{"command":"cargo test --lib sanitize"},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+        r#"{"type":"tool_use","id":"toolu_03","name":"edit","input":{"file_path":"/home/coding/NEEDLE/src/sanitize/mod.rs","old_string":"fn foo() {}","new_string":"fn bar() {}"},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+    ];
+
+    // Tool result events with realistic code snippets
+    let tool_result_events = [
+        r#"{"type":"tool_result","id":"toolu_01","output":"pub mod sanitize;\npub mod telemetry;\npub mod config;\n\nuse anyhow::Result;\n","session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+        r#"{"type":"tool_result","id":"toolu_02","output":"running 3 tests\ntest sanitize::tests::test_basic ... ok\ntest sanitize::tests::test_entropy ... ok\ntest sanitize::tests::test_patterns ... ok\n\nresult: ok. 3 passed; 0 failed","session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+        r#"{"type":"tool_result","id":"toolu_03","output":"// Sanitizer implementation\npub struct Sanitizer {\n    rules: Vec<Rule>,\n    ac_matcher: AhoCorasick,\n}\n\nimpl Sanitizer {\n    pub fn new(patterns: &[&str]) -> Result<Self> {\n        // Build Aho-Corasick automaton\n        let ac_matcher = AhoCorasick::new(patterns)?;\n        Ok(Self { rules: vec![], ac_matcher })\n    }\n}\n","session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+    ];
+
+    // Shell command patterns (should never be redacted)
+    let safe_commands = [
+        r#"{"type":"tool_use","name":"Bash","input":{"command":"git status"},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+        r#"{"type":"tool_use","name":"Bash","input":{"command":"echo 'Processing bead needle-wysd.2.2'"},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+        r#"{"type":"tool_use","name":"Bash","input":{"command":"cargo fmt && cargo clippy"},"session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+        r#"{"type":"tool_result","output":"On branch main\nChanges not staged for commit:\n  modified:   src/sanitize/mod.rs\n  modified:   benches/sanitize.rs","session_id":"dda3d9a1-e07a-45f0-9c18-09ee9e00d769"}"#,
+    ];
+
+    // Patterns that look like secrets but are safe (low entropy, placeholders)
+    let safe_patterns = [
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Set API_KEY=sk-placeholder-key-for-testing"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Configure DATABASE_URL=postgresql://localhost:5432/testdb"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Use TOKEN=abc123-example-token"}}}"#,
+    ];
+
+    // Already redacted content (should pass through unchanged)
+    let redacted_content = [
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Previous output: token=[REDACTED:anthropic-api-key]"}}}"#,
+        r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Password: [REDACTED:user-password]"}}}"#,
+    ];
+
+    // Combine all event categories for deterministic cycling
+    let all_events: Vec<&str> = [
+        &system_events[..],
+        &thinking_events[..],
+        &text_events[..],
+        &tool_use_events[..],
+        &tool_result_events[..],
+        &safe_commands[..],
+        &safe_patterns[..],
+        &redacted_content[..],
+    ]
+    .concat();
+
+    // Calculate approximate bytes per event (including newline)
+    let avg_event_size = all_events.iter().map(|s| s.len() + 1).sum::<usize>() / all_events.len();
     let events_needed = target_bytes / avg_event_size;
 
     let mut result = String::with_capacity(target_bytes);
     for i in 0..events_needed {
-        let event = events[i % events.len()];
+        let event = all_events[i % all_events.len()];
         result.push_str(event);
         result.push('\n');
     }
 
-    // Pad to reach exact target size if needed.
+    // Pad to reach exact target size if needed
     while result.len() < target_bytes {
         result.push_str("{\"type\":\"padding\",\"line\":\"");
         result.push_str(&"x".repeat(100));
         result.push_str("\"}\n");
     }
 
-    // Truncate to exact target size.
+    // Truncate to exact target size
     result.truncate(target_bytes);
     result
 }
@@ -318,8 +377,66 @@ criterion_main!(benches);
 /// ```
 #[cfg(test)]
 mod assertion_tests {
+    use super::*;
+
     #[test]
     fn sanitizer_latency_below_threshold() {
         super::assertion_test();
+    }
+
+    #[test]
+    fn generator_creates_all_size_variants() {
+        // Test that the generator creates all 3 required size variants
+        let content_10kb = generate_trace_content(SIZE_10KB);
+        let content_100kb = generate_trace_content(SIZE_100KB);
+        let content_1mb = generate_trace_content(SIZE_1MB);
+
+        // Each should be exactly the target size
+        assert_eq!(content_10kb.len(), SIZE_10KB);
+        assert_eq!(content_100kb.len(), SIZE_100KB);
+        assert_eq!(content_1mb.len(), SIZE_1MB);
+    }
+
+    #[test]
+    fn generator_is_deterministic() {
+        // Test that generator produces identical output for same input
+        let content1 = generate_trace_content(SIZE_10KB);
+        let content2 = generate_trace_content(SIZE_10KB);
+
+        assert_eq!(content1, content2, "Generator must be deterministic");
+    }
+
+    #[test]
+    fn generator_includes_realistic_patterns() {
+        // Test that generated content includes expected patterns
+        let content = generate_trace_content(SIZE_10KB);
+
+        // Should include system events
+        assert!(content.contains("\"type\":\"system\""), "Should include system events");
+
+        // Should include stream events
+        assert!(content.contains("\"type\":\"stream_event\""), "Should include stream events");
+
+        // Should include thinking events
+        assert!(content.contains("\"type\":\"thinking_delta\""), "Should include thinking deltas");
+
+        // Should include tool use events
+        assert!(content.contains("\"type\":\"tool_use\""), "Should include tool use events");
+
+        // Should include tool results with code
+        assert!(content.contains("\"type\":\"tool_result\""), "Should include tool results");
+
+        // Should include code snippets
+        assert!(content.contains("pub fn"), "Should include Rust code patterns");
+        assert!(content.contains("cargo test"), "Should include shell commands");
+
+        // Should be JSONL format (one JSON per line)
+        let lines: Vec<&str> = content.lines().collect();
+        assert!(!lines.is_empty(), "Should produce multiple lines");
+
+        // First non-empty line should be valid JSON
+        let first_json = lines.iter().find(|l| !l.is_empty()).unwrap();
+        assert!(first_json.starts_with('{'), "Lines should start with JSON object");
+        assert!(first_json.ends_with('}'), "Lines should end with JSON object");
     }
 }
