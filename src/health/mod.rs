@@ -1384,4 +1384,87 @@ mod tests {
             "heartbeat file must be removed when worker stops"
         );
     }
+
+    /// Test that validates heartbeat cleanup on graceful shutdown (SIGTERM).
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Workers remove heartbeat file on graceful shutdown
+    /// - Stopped worker's heartbeat file is deleted
+    /// - Normal exit leaves no stale file
+    ///
+    /// Validation: launch worker, kill with SIGTERM, verify file removed.
+    #[tokio::test]
+    async fn heartbeat_cleanup_on_graceful_shutdown() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hb_dir = dir.path().join("state").join("heartbeats");
+
+        let mut config = Config::default();
+        config.workspace.home = dir.path().to_path_buf();
+        config.health.heartbeat_interval_secs = 1;
+        config.health.heartbeat_ttl_secs = 5;
+
+        let mut monitor = HealthMonitor::new(
+            config,
+            "graceful-shutdown-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        let path = monitor.heartbeat_path();
+
+        // Step 1: Launch worker (start emitter)
+        monitor.start_emitter().unwrap();
+        assert!(
+            path.exists(),
+            "heartbeat file must exist after worker starts"
+        );
+
+        // Step 2: Simulate graceful shutdown by calling stop()
+        // (In production, this is triggered by SIGTERM signal handler)
+        monitor.stop();
+
+        // Step 3: Verify file removed (no stale heartbeat)
+        assert!(
+            !path.exists(),
+            "heartbeat file must be removed on graceful shutdown"
+        );
+    }
+
+    /// Test that heartbeat cleanup happens even if Worker is dropped without calling stop().
+    ///
+    /// This validates the Drop trait implementation as a fallback cleanup mechanism.
+    #[tokio::test]
+    async fn heartbeat_cleanup_on_worker_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let _hb_dir = dir.path().join("state").join("heartbeats");
+
+        let mut config = Config::default();
+        config.workspace.home = dir.path().to_path_buf();
+        config.health.heartbeat_interval_secs = 1;
+        config.health.heartbeat_ttl_secs = 5;
+
+        let monitor = HealthMonitor::new(
+            config,
+            "drop-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        let path = monitor.heartbeat_path();
+
+        // Start emitter
+        let mut monitor = monitor;
+        monitor.start_emitter().unwrap();
+        assert!(path.exists(), "heartbeat file must exist after start");
+
+        // Drop monitor without calling stop() (simulates abrupt exit)
+        // The Drop trait should still clean up the heartbeat file
+        drop(monitor);
+
+        // Verify cleanup happened via Drop
+        assert!(
+            !path.exists(),
+            "heartbeat file must be removed even when worker is dropped without calling stop()"
+        );
+    }
 }

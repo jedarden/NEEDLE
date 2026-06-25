@@ -12,3 +12,17 @@ output_format = "verbose"
 # Configure plotting backend (used by cargo-criterion for report generation)
 # Options: "gnuplot", "plotters", "auto"
 ploting_backend = "auto"
+
+# Configure measurement settings
+# Default sample size for benchmarks (higher = more accurate but slower)
+default_sample_size = 10
+
+# Warm-up time in seconds (allows CPU to reach steady state)
+warm_up_time = 3
+
+# Measurement time in seconds (how long to collect samples)
+measurement_time = 5
+
+# Configure which percentiles to report in output
+# Criterion.rs automatically calculates percentiles; verbose output includes them
+# Percentiles are available in the generated reports at target/criterion/

@@ -176,6 +176,8 @@ fn bench_sanitize_10kb(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitize_10kb");
     group.throughput(Throughput::Bytes(SIZE_10KB as u64));
     group.sample_size(10); // Faster iteration with fewer samples
+    group.warm_up_time(std::time::Duration::from_secs(3));
+    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_bytes", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -193,6 +195,8 @@ fn bench_sanitize_10kb_ops(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitize_10kb");
     group.throughput(Throughput::Elements(1));
     group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_secs(3));
+    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_ops", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -210,6 +214,8 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitize_100kb");
     group.throughput(Throughput::Bytes(SIZE_100KB as u64));
     group.sample_size(10); // Faster iteration with fewer samples
+    group.warm_up_time(std::time::Duration::from_secs(3));
+    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_bytes", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -227,6 +233,8 @@ fn bench_sanitize_100kb_ops(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitize_100kb");
     group.throughput(Throughput::Elements(1));
     group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_secs(3));
+    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_ops", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -244,6 +252,8 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitize_1mb");
     group.throughput(Throughput::Bytes(SIZE_1MB as u64));
     group.sample_size(10); // Faster iteration with fewer samples
+    group.warm_up_time(std::time::Duration::from_secs(3));
+    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_bytes", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -261,6 +271,8 @@ fn bench_sanitize_1mb_ops(c: &mut Criterion) {
     let mut group = c.benchmark_group("sanitize_1mb");
     group.throughput(Throughput::Elements(1));
     group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_secs(3));
+    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_ops", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -358,10 +370,10 @@ fn assertion_test() {
     );
 }
 
-/// Specialized benchmark that reports median latency directly.
+/// Specialized benchmark that reports median and p95 latency directly.
 ///
-/// This complements the criterion benchmark by providing a simple
-/// median measurement that can be easily compared against the threshold.
+/// This complements the criterion benchmark by providing explicit
+/// percentile measurements that can be compared against performance thresholds.
 fn bench_median_latency(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_100KB);
@@ -381,6 +393,8 @@ fn bench_median_latency(c: &mut Criterion) {
     latencies.sort();
     let median_us = latencies[ASSERTION_SAMPLE_COUNT / 2];
     let median_ms = median_us as f64 / 1000.0;
+    let p95_us = latencies[(latencies.len() * 95) / 100];
+    let p95_ms = p95_us as f64 / 1000.0;
 
     eprintln!(
         "Median latency for 100KB trace: {:.2} ms ({} samples)",
@@ -396,13 +410,19 @@ fn bench_median_latency(c: &mut Criterion) {
     );
     eprintln!(
         "  P95: {:.2} ms",
-        latencies[(latencies.len() * 95) / 100] as f64 / 1000.0
+        p95_ms
+    );
+    eprintln!(
+        "  P99: {:.2} ms",
+        latencies[(latencies.len() * 99) / 100] as f64 / 1000.0
     );
 
-    // Report to criterion for plotting.
-    let mut group = c.benchmark_group("median_latency");
-    group.sample_size(10); // Faster iteration with fewer samples
-    group.bench_function("100kb", |b| {
+    // Report to criterion for plotting with proper p95 measurement configuration.
+    let mut group = c.benchmark_group("latency_percentiles");
+    group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_secs(3));
+    group.measurement_time(std::time::Duration::from_secs(5));
+    group.bench_function("p95_100kb", |b| {
         b.iter(|| {
             let _ = sanitizer.sanitize(black_box(&content));
         });
