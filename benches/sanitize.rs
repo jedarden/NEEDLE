@@ -377,7 +377,6 @@ criterion_main!(benches);
 /// ```
 #[cfg(test)]
 mod assertion_tests {
-    use super::*;
 
     #[test]
     fn sanitizer_latency_below_threshold() {
@@ -387,9 +386,9 @@ mod assertion_tests {
     #[test]
     fn generator_creates_all_size_variants() {
         // Test that the generator creates all 3 required size variants
-        let content_10kb = generate_trace_content(SIZE_10KB);
-        let content_100kb = generate_trace_content(SIZE_100KB);
-        let content_1mb = generate_trace_content(SIZE_1MB);
+        let content_10kb = super::generate_trace_content(super::SIZE_10KB);
+        let content_100kb = super::generate_trace_content(super::SIZE_100KB);
+        let content_1mb = super::generate_trace_content(super::SIZE_1MB);
 
         // Each should be exactly the target size
         assert_eq!(content_10kb.len(), SIZE_10KB);
@@ -400,8 +399,8 @@ mod assertion_tests {
     #[test]
     fn generator_is_deterministic() {
         // Test that generator produces identical output for same input
-        let content1 = generate_trace_content(SIZE_10KB);
-        let content2 = generate_trace_content(SIZE_10KB);
+        let content1 = super::generate_trace_content(super::SIZE_10KB);
+        let content2 = super::generate_trace_content(super::SIZE_10KB);
 
         assert_eq!(content1, content2, "Generator must be deterministic");
     }
@@ -409,7 +408,7 @@ mod assertion_tests {
     #[test]
     fn generator_includes_realistic_patterns() {
         // Test that generated content includes expected patterns
-        let content = generate_trace_content(SIZE_10KB);
+        let content = super::generate_trace_content(super::SIZE_10KB);
 
         // Should include system events
         assert!(content.contains("\"type\":\"system\""), "Should include system events");
