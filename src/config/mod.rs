@@ -3602,6 +3602,7 @@ agent:
                 },
             ],
             default_adapter: Some("default-adapter".to_string()),
+            strict: false,
         });
 
         let errors = ConfigLoader::validate(&config);
@@ -3632,6 +3633,7 @@ agent:
                 },
             ],
             default_adapter: Some("default-adapter".to_string()),
+            strict: false,
         });
 
         let errors = ConfigLoader::validate(&config);
@@ -3658,6 +3660,7 @@ agent:
                 },
             ],
             default_adapter: Some("claude-code-glm-4.7".to_string()),
+            strict: false,
         });
 
         let errors = ConfigLoader::validate(&config);

@@ -506,8 +506,8 @@ mod tests {
         let base = BASE_BACKOFF_SECS;
         let max = MAX_BACKOFF_SECS;
 
-        for failures in 0..20 {
-            let exponent = failures.saturating_sub(1) as u32;
+        for failures in 0u32..20 {
+            let exponent = failures.saturating_sub(1);
             let backoff = (base * 2u64.pow(exponent)).min(max);
             assert!(backoff <= max, "backoff {backoff} exceeds max {max}");
         }
