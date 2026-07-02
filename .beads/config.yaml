@@ -19,4 +19,5 @@ rotate:
 secret_protection:
   enabled: true
   custom_patterns: []
-  allowlist: []
+  allowlist:
+    - "repeat_interval_zero_preserves_first_failure"

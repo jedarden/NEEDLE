@@ -26,6 +26,32 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use needle::sanitize::Sanitizer;
 
+/// Configure Criterion for p95 latency reporting.
+///
+/// Creates a Criterion instance configured to capture accurate p95 percentiles:
+/// - Confidence level: 0.95 (95% confidence interval for reported statistics)
+/// - Sample size: 100 measurements (more accurate percentiles via bootstrap)
+/// - Warm-up time: 3 seconds (allows CPU cache/JIT warm-up)
+/// - Measurement time: 5 seconds (sufficient samples for stable percentiles)
+/// - Noise threshold: 0.02 (2% noise filtering for stable measurements)
+///
+/// Criterion.rs automatically calculates and reports p95 (and other percentiles)
+/// when given sufficient samples. The key for accurate p95 is sample_size:
+/// - More samples → more accurate bootstrap percentile estimation
+/// - 100 samples provides reasonable accuracy for p95
+/// - For production-grade p95 accuracy, consider 500+ samples
+///
+/// The confidence_level affects the confidence interval around the mean,
+/// not the percentile calculation itself. Percentiles use bootstrap analysis.
+fn configure_criterion() -> Criterion {
+    Criterion::default()
+        .confidence_level(0.95)
+        .sample_size(100)
+        .warm_up_time(std::time::Duration::from_secs(3))
+        .measurement_time(std::time::Duration::from_secs(5))
+        .noise_threshold(0.02)
+}
+
 /// Bytes per trace size benchmark.
 const SIZE_10KB: usize = 10 * 1024;
 const SIZE_100KB: usize = 100 * 1024;
@@ -175,9 +201,6 @@ fn bench_sanitize_10kb(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("sanitize_10kb");
     group.throughput(Throughput::Bytes(SIZE_10KB as u64));
-    group.sample_size(10); // Faster iteration with fewer samples
-    group.warm_up_time(std::time::Duration::from_secs(3));
-    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_bytes", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -194,9 +217,6 @@ fn bench_sanitize_10kb_ops(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("sanitize_10kb");
     group.throughput(Throughput::Elements(1));
-    group.sample_size(10);
-    group.warm_up_time(std::time::Duration::from_secs(3));
-    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_ops", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -213,9 +233,6 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("sanitize_100kb");
     group.throughput(Throughput::Bytes(SIZE_100KB as u64));
-    group.sample_size(10); // Faster iteration with fewer samples
-    group.warm_up_time(std::time::Duration::from_secs(3));
-    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_bytes", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -232,9 +249,6 @@ fn bench_sanitize_100kb_ops(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("sanitize_100kb");
     group.throughput(Throughput::Elements(1));
-    group.sample_size(10);
-    group.warm_up_time(std::time::Duration::from_secs(3));
-    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_ops", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -251,9 +265,6 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("sanitize_1mb");
     group.throughput(Throughput::Bytes(SIZE_1MB as u64));
-    group.sample_size(10); // Faster iteration with fewer samples
-    group.warm_up_time(std::time::Duration::from_secs(3));
-    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_bytes", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -270,9 +281,6 @@ fn bench_sanitize_1mb_ops(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("sanitize_1mb");
     group.throughput(Throughput::Elements(1));
-    group.sample_size(10);
-    group.warm_up_time(std::time::Duration::from_secs(3));
-    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("throughput_ops", |b| {
         b.iter(|| {
             let result = sanitizer.sanitize(black_box(&content));
@@ -419,9 +427,6 @@ fn bench_median_latency(c: &mut Criterion) {
 
     // Report to criterion for plotting with proper p95 measurement configuration.
     let mut group = c.benchmark_group("latency_percentiles");
-    group.sample_size(10);
-    group.warm_up_time(std::time::Duration::from_secs(3));
-    group.measurement_time(std::time::Duration::from_secs(5));
     group.bench_function("p95_100kb", |b| {
         b.iter(|| {
             let _ = sanitizer.sanitize(black_box(&content));
@@ -430,17 +435,11 @@ fn bench_median_latency(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_sanitize_10kb,
-    bench_sanitize_10kb_ops,
-    bench_sanitize_100kb,
-    bench_sanitize_100kb_ops,
-    bench_sanitize_1mb,
-    bench_sanitize_1mb_ops,
-    bench_median_latency,
-    report_skip_stats
-);
+criterion_group! {
+    name = benches;
+    config = configure_criterion();
+    targets = bench_sanitize_10kb, bench_sanitize_10kb_ops, bench_sanitize_100kb, bench_sanitize_100kb_ops, bench_sanitize_1mb, bench_sanitize_1mb_ops, bench_median_latency, report_skip_stats
+}
 criterion_main!(benches);
 
 /// Entry point for running the assertion test as a standalone binary.

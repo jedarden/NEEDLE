@@ -10,7 +10,7 @@
 //!
 //! Depends on: `bead_store`, `config`, `registry`, `telemetry`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ use anyhow::{Context, Result};
 
 use crate::bead_store::{BeadStore, BrCliBeadStore, Filters};
 use crate::config::{Config, ConfigLoader, CliOverrides};
-use crate::registry::{Registry, WorkerEntry};
+use crate::registry::{Registry, is_pid_alive};
 use crate::telemetry::{EventKind, Telemetry};
 
 /// Default interval for polling the ready queue (seconds).
@@ -92,7 +92,7 @@ impl Supervisor {
 
         // Initialize telemetry
         let qualified_id = "supervisor".to_string();
-        let telemetry = Telemetry::from_config(qualified_id, &needle_config.telemetry)
+        let telemetry = Telemetry::from_config(qualified_id.clone(), &needle_config.telemetry)
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "failed to create telemetry for supervisor, falling back");
                 Telemetry::new(qualified_id)
@@ -110,8 +110,42 @@ impl Supervisor {
 
     /// Run the supervisor loop until shutdown is signaled.
     pub async fn run(mut self) -> Result<()> {
+        // Install signal handlers for graceful shutdown
+        let shutdown = self.shutdown.clone();
+        #[cfg(unix)]
+        {
+            // Handle SIGINT and SIGTERM
+            let _ = tokio::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sigint = signal(SignalKind::interrupt()).expect("failed to setup SIGINT handler");
+                let mut sigterm = signal(SignalKind::terminate()).expect("failed to setup SIGTERM handler");
+
+                tokio::select! {
+                    _ = sigint.recv() => {
+                        tracing::info!("received SIGINT, shutting down supervisor");
+                        shutdown.store(true, Ordering::SeqCst);
+                    }
+                    _ = sigterm.recv() => {
+                        tracing::info!("received SIGTERM, shutting down supervisor");
+                        shutdown.store(true, Ordering::SeqCst);
+                    }
+                }
+            });
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Handle Ctrl+C on non-Unix platforms
+            let _ = tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    tracing::info!("received Ctrl+C, shutting down supervisor");
+                    shutdown.store(true, Ordering::SeqCst);
+                }
+            });
+        }
+
         // Start telemetry
-        self.telemetry.start().await;
+        self.telemetry.start();
 
         // Emit supervisor started event
         self.telemetry.emit(EventKind::SupervisorStarted {
@@ -128,6 +162,8 @@ impl Supervisor {
 
         let mut consecutive_errors = 0u32;
         let mut last_spawn_time = Instant::now();
+        let mut total_spawned = 0u64;
+        let mut total_polls = 0u64;
 
         // Main supervisor loop
         loop {
@@ -150,10 +186,25 @@ impl Supervisor {
             }
 
             // Poll the ready queue and check fleet state
+            total_polls += 1;
+
+            // Emit summary every 60 ticks (approximately 10 minutes at default interval)
+            if total_polls % 60 == 0 {
+                let active_workers = self.registry.list().unwrap_or_default();
+                let ready_beads = self.store.ready(&Filters::default()).await.unwrap_or_default();
+                let _ = self.telemetry.emit(EventKind::SupervisorSummary {
+                    polls: total_polls,
+                    spawned: total_spawned,
+                    total_workers: active_workers.len() as u32,
+                    ready_beads: ready_beads.len() as u32,
+                });
+            }
+
             match self.tick().await {
                 Ok(spawned) => {
                     consecutive_errors = 0;
                     if spawned {
+                        total_spawned += 1;
                         last_spawn_time = Instant::now();
                     }
                 }
@@ -165,10 +216,9 @@ impl Supervisor {
                         "supervisor tick failed"
                     );
 
-                    // Emit error event
-                    let _ = self.telemetry.emit(EventKind::SupervisorError {
-                        error_message: e.to_string(),
-                        consecutive_errors,
+                    // Emit spawn failed event
+                    let _ = self.telemetry.emit(EventKind::SupervisorSpawnFailed {
+                        error: e.to_string(),
                     });
 
                     // Enter long backoff if error threshold exceeded
@@ -178,6 +228,13 @@ impl Supervisor {
                             backoff_secs = ERROR_BACKOFF_SECS,
                             "error threshold exceeded, entering long backoff"
                         );
+
+                        // Emit backoff event
+                        let _ = self.telemetry.emit(EventKind::SupervisorBackoff {
+                            backoff_secs: ERROR_BACKOFF_SECS,
+                            consecutive_failures: consecutive_errors,
+                        });
+
                         tokio::time::sleep(Duration::from_secs(ERROR_BACKOFF_SECS)).await;
                     }
                 }
@@ -258,19 +315,20 @@ impl Supervisor {
         );
 
         // Emit spawn decision event
-        self.telemetry.emit(EventKind::SupervisorSpawn {
-            ready_count: ready_count as u32,
-            active_workers: alive_count,
+        self.telemetry.emit(EventKind::SupervisorSpawnDecision {
+            to_spawn: 1,
+            ready_beads: ready_count as u32,
+            max_workers: self.config.max_workers,
         })?;
 
         // Spawn the worker
-        self.spawn_worker().await?;
+        self.spawn_worker(ready_count).await?;
 
         Ok(true)
     }
 
     /// Spawn a new worker process.
-    async fn spawn_worker(&self) -> Result<()> {
+    async fn spawn_worker(&self, ready_count: usize) -> Result<()> {
         let worker_id = self.generate_worker_id()?;
         let agent_name = self.config.agent
             .as_ref()
@@ -300,15 +358,7 @@ impl Supervisor {
         {
             use std::os::unix::process::CommandExt;
             cmd.process_group(0);
-        }
 
-        #[cfg(not(unix))]
-        {
-            cmd.spawn();
-        }
-
-        #[cfg(unix)]
-        {
             // On Unix, use setsid to create a new session
             unsafe {
                 cmd.pre_exec(|| {
@@ -316,8 +366,16 @@ impl Supervisor {
                     Ok(())
                 });
             }
-            cmd.spawn()?;
         }
+
+        // Spawn the worker process (platform-agnostic)
+        cmd.spawn()?;
+
+        // Emit worker spawned event
+        self.telemetry.emit(EventKind::SupervisorWorkerSpawned {
+            ready_count,
+            total_spawned: 1,
+        })?;
 
         tracing::info!(worker_id = %worker_id, "worker spawned successfully");
         Ok(())
@@ -353,27 +411,6 @@ impl Supervisor {
         }
 
         anyhow::bail!("unable to generate unique worker identifier")
-    }
-}
-
-/// Check if a PID corresponds to a live process.
-fn is_pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        use std::process::Command;
-        // Use kill(0) to check if process exists
-        Command::new("kill")
-            .arg("-0")
-            .arg(pid.to_string())
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }
-
-    #[cfg(not(unix))]
-    {
-        // On non-Unix, assume alive (no portable check)
-        true
     }
 }
 

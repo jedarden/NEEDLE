@@ -1160,7 +1160,7 @@ async fn real_br_strand_waterfall_exhaustion_with_telemetry_jsonl() {
         .expect("waterfall select should succeed");
 
     // Shutdown telemetry to flush all events to disk.
-    telemetry.shutdown().await.unwrap();
+    telemetry.shutdown().await;
 
     // Verify no bead was selected (all strands returned NoWork).
     assert!(
@@ -1256,14 +1256,14 @@ async fn real_br_strand_waterfall_exhaustion_with_telemetry_jsonl() {
         if i > 0 {
             let prev_seq = strand_evaluated_events[i - 1]["sequence"]
                 .as_u64()
-                .unwrap_or_else(|| panic!("event {i-1} should have numeric sequence"));
+                .unwrap_or_else(|| panic!("event {} should have numeric sequence", i - 1));
             let curr_seq = event["sequence"]
                 .as_u64()
-                .unwrap_or_else(|| panic!("event {i} should have numeric sequence"));
+                .unwrap_or_else(|| panic!("event {} should have numeric sequence", i));
             assert!(
                 curr_seq > prev_seq,
-                "sequence numbers should be monotonically increasing: event {i-1}={} vs event {i}={}",
-                prev_seq, curr_seq
+                "sequence numbers should be monotonically increasing: event {}={} vs event {}={}",
+                i - 1, prev_seq, i, curr_seq
             );
         }
     }

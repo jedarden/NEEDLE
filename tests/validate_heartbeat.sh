@@ -1,7 +1,8 @@
 #!/bin/bash
 # Validation script for heartbeat functionality.
-# This script demonstrates that workers create heartbeat files on startup
-# and refresh them every heartbeat_interval_secs (default 30s).
+# This script demonstrates that workers create heartbeat files on startup,
+# refresh them every heartbeat_interval_secs (default 30s), and remove them
+# on graceful shutdown (SIGTERM).
 #
 # Usage: ./tests/validate_heartbeat.sh
 #
@@ -9,6 +10,8 @@
 # - Running worker has fresh heartbeat file
 # - File updates every ~30s (heartbeat_interval_secs)
 # - File contains worker ID and last refresh timestamp
+# - Heartbeat file removed on graceful shutdown (SIGTERM)
+# - No stale heartbeat files remain after worker exit
 
 set -euo pipefail
 
@@ -146,10 +149,49 @@ else
     log "✓ Heartbeat refreshed $UPDATE_COUNT times in 15 seconds"
 fi
 
-# Final validation
-log "Final heartbeat state:"
-jq '.' "$HEARTBEAT_FILE" 2>/dev/null | head -20
+# Test graceful shutdown cleanup
+log "Testing graceful shutdown with SIGTERM..."
+log "Sending SIGTERM to worker process (PID: $WORKER_PID)"
+kill -TERM $WORKER_PID
 
+# Wait up to 5 seconds for the worker to exit and clean up
+for i in {1..10}; do
+    if ! kill -0 $WORKER_PID 2>/dev/null; then
+        log "✓ Worker process has exited"
+        break
+    fi
+    if [[ $i -eq 10 ]]; then
+        error "Worker did not exit within 5 seconds after SIGTERM"
+        kill -9 $WORKER_PID 2>/dev/null || true
+        exit 1
+    fi
+    sleep 0.5
+done
+
+# Give a moment for file cleanup to complete
+sleep 0.5
+
+# Verify heartbeat file was removed
+if [[ -f "$HEARTBEAT_FILE" ]]; then
+    error "Heartbeat file still exists after graceful shutdown!"
+    error "File path: $HEARTBEAT_FILE"
+    error "This indicates cleanup on SIGTERM is not working properly"
+    exit 1
+fi
+
+log "✓ Heartbeat file removed on graceful shutdown"
+
+# Verify no other heartbeat files remain
+REMAINING_FILES=$(ls "$HEARTBEAT_DIR/"*.json 2>/dev/null | wc -l)
+if [[ $REMAINING_FILES -gt 0 ]]; then
+    error "Unexpected heartbeat files remain in $HEARTBEAT_DIR"
+    ls -la "$HEARTBEAT_DIR/"
+    exit 1
+fi
+
+log "✓ No stale heartbeat files remain after exit"
+
+# Final validation
 log ""
 log "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log "✅ HEARTBEAT VALIDATION SUCCESSFUL"
@@ -158,5 +200,7 @@ log "✓ Heartbeat file created on startup"
 log "✓ File contains worker_id and last_heartbeat timestamp"
 log "✓ File refreshed periodically ($UPDATE_COUNT updates in 15 seconds)"
 log "✓ Timestamps are fresh and current"
+log "✓ Heartbeat file removed on graceful shutdown (SIGTERM)"
+log "✓ No stale heartbeat files remain after exit"
 log ""
 log "The heartbeat functionality is working as specified!"
