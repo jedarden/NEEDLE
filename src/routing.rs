@@ -61,7 +61,10 @@ fn needs_glob_conversion(pattern: &str) -> bool {
     // First, check if it looks like a regex by looking for regex metacharacters.
     // The key indicator is .* which is "any character" in regex but not in glob.
     let has_regex_features = pattern.contains(|c| {
-        matches!(c, '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '+' | '?' | '|' | '\\')
+        matches!(
+            c,
+            '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '+' | '?' | '|' | '\\'
+        )
     }) || pattern.contains(".*");
 
     if has_regex_features {
@@ -194,11 +197,7 @@ fn convert_glob_to_regex(glob: &str) -> String {
 ///     Some("default-adapter".to_string())
 /// );
 /// ```
-pub fn match_adapter(
-    model: &str,
-    rules: &[RoutingRule],
-    default: &str,
-) -> Option<String> {
+pub fn match_adapter(model: &str, rules: &[RoutingRule], default: &str) -> Option<String> {
     // Compile rules and test in order (first match wins).
     for rule in rules {
         match CompiledRule::from_rule(rule) {
@@ -404,19 +403,13 @@ mod tests {
     #[test]
     fn no_match_empty_default_returns_none() {
         let rules = vec![make_rule("sonnet.*", "claude-print")];
-        assert_eq!(
-            match_adapter("other-model", &rules, ""),
-            None
-        );
+        assert_eq!(match_adapter("other-model", &rules, ""), None);
     }
 
     #[test]
     fn empty_rules_empty_default_returns_none() {
         let rules: Vec<RoutingRule> = vec![];
-        assert_eq!(
-            match_adapter("any-model", &rules, ""),
-            None
-        );
+        assert_eq!(match_adapter("any-model", &rules, ""), None);
     }
 
     #[test]
@@ -555,6 +548,11 @@ mod tests {
 
     #[test]
     fn needs_glob_conversion_detection() {
+        // Plain strings (no wildcards, no regex characters) don't need conversion.
+        assert!(!needs_glob_conversion("hello"));
+        assert!(!needs_glob_conversion("model-name"));
+        assert!(!needs_glob_conversion("claude_sonnet"));
+
         // Patterns with unescaped * need conversion.
         assert!(needs_glob_conversion("pattern*"));
         assert!(needs_glob_conversion("**"));
