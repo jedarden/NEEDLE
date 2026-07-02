@@ -688,4 +688,118 @@ mod tests {
             Some("fallback".to_string())
         );
     }
+
+    #[test]
+    fn gpt_regex_patterns() {
+        // Test GPT patterns as mentioned in acceptance criteria.
+        // Using proper regex pattern with .* for wildcard matching.
+        let rules = vec![make_rule("gpt-.*", "openai-adapter")];
+
+        // Matches GPT models.
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("openai-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("gpt-3.5", &rules, "fallback"),
+            Some("openai-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("gpt-4-turbo", &rules, "fallback"),
+            Some("openai-adapter".to_string())
+        );
+
+        // Does not match non-GPT models.
+        assert_eq!(
+            match_adapter("claude-sonnet", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+        assert_eq!(
+            match_adapter("gemini-pro", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn gpt_glob_style_patterns() {
+        // Test glob-style GPT patterns (single asterisk).
+        // Glob * converts to [^/]+ (non-slash characters).
+        let rules = vec![make_rule("gpt-*", "openai-adapter")];
+
+        // Matches GPT models.
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("openai-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("gpt-3.5", &rules, "fallback"),
+            Some("openai-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("gpt-4-turbo", &rules, "fallback"),
+            Some("openai-adapter".to_string())
+        );
+
+        // Does not match non-GPT models.
+        assert_eq!(
+            match_adapter("claude-sonnet", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_family_regex() {
+        // Test Claude family patterns.
+        let rules = vec![make_rule("claude-.*", "claude-adapter")];
+
+        // Matches Claude models.
+        assert_eq!(
+            match_adapter("claude-sonnet-4-6", &rules, "fallback"),
+            Some("claude-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("claude-opus-4-6", &rules, "fallback"),
+            Some("claude-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("claude-haiku-4-5", &rules, "fallback"),
+            Some("claude-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("claude-fable-5", &rules, "fallback"),
+            Some("claude-adapter".to_string())
+        );
+
+        // Does not match non-Claude models.
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn non_matching_regex_patterns() {
+        // Test that non-matching patterns correctly return default.
+        let rules = vec![make_rule("^gpt-4$", "exact-adapter")];
+
+        // Exact match works.
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("exact-adapter".to_string())
+        );
+
+        // Non-matching models fall back to default.
+        assert_eq!(
+            match_adapter("gpt-3.5", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+        assert_eq!(
+            match_adapter("gpt-4-turbo", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+        assert_eq!(
+            match_adapter("claude-sonnet", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+    }
 }
