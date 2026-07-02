@@ -94,11 +94,46 @@ Important conceptual difference:
 
 Criterion.rs focuses on **confidence intervals** for statistical analysis, but bootstrap analysis also produces percentile estimates.
 
+## Accessing Percentile Values from Output
+
+Criterion.rs provides multiple output formats for accessing computed percentiles:
+
+### JSON Output Format (Recommended for Machine Readability)
+
+Use `--message-format=json` with cargo-criterion to get structured JSON output:
+
+```bash
+cargo bench --bench sanitize -- --message-format=json
+```
+
+- **Output destination:** stdout (one JSON object per line)
+- **Content:** Basic statistics including computed percentiles (p95, p99, etc.)
+- **Documentation:** [Criterion.rs Book - External Tools](https://bheisler.github.io/criterion.rs/book/cargo_criterion/external_tools.html)
+
+### CSV Output Format
+
+CSV output is also available but the JSON format is preferred for machine-readable data:
+
+- **Documentation:** [Criterion.rs Book - CSV Output](https://bheisler.github.io/criterion.rs/book/user_guide/csv_output.html)
+- **Note:** Documentation explicitly recommends JSON format over CSV for machine-readable output
+
+### Parsing JSON Output
+
+Tools like [criterion-table](https://docs.rs/criterion-table) demonstrate parsing Criterion JSON output:
+
+```bash
+criterion --message-format=json | criterion-table > BENCHMARKS.md
+```
+
+The JSON format includes all computed statistics, making it straightforward to extract p95/p99 values programmatically.
+
 ## Official Documentation Sources
 
-- [Criterion.rs Book - Analysis Process](https://bheisler.github.io/criterion.rs/book/analysis.html)
-- [Criterion Struct API Docs](https://docs.rs/criterion/latest/criterion/struct.Criterion.html)
-- [Main Documentation](https://bheisler.github.io/criterion.rs/book/)
+- [Criterion.rs Book - Analysis Process](https://bheisler.github.io/criterion.rs/book/analysis.html) - Bootstrap resampling methodology
+- [Criterion.rs Book - External Tools](https://bheisler.github.io/criterion.rs/book/cargo_criterion/external_tools.html) - JSON output format
+- [Criterion.rs Book - CSV Output](https://bheisler.github.io/criterion.rs/book/user_guide/csv_output.html) - CSV output format
+- [Criterion Struct API Docs](https://docs.rs/criterion/latest/criterion/struct.Criterion.html) - Configuration options
+- [GitHub Issue #147](https://github.com/japaric/criterion.rs/issues/147) - Output format discussions
 
 ## Recommendations
 
