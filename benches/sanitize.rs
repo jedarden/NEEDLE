@@ -416,10 +416,7 @@ fn bench_median_latency(c: &mut Criterion) {
         "  Max: {:.2} ms",
         *latencies.last().unwrap() as f64 / 1000.0
     );
-    eprintln!(
-        "  P95: {:.2} ms",
-        p95_ms
-    );
+    eprintln!("  P95: {:.2} ms", p95_ms);
     eprintln!(
         "  P99: {:.2} ms",
         latencies[(latencies.len() * 99) / 100] as f64 / 1000.0
@@ -484,23 +481,44 @@ mod assertion_tests {
         let content = super::generate_trace_content(super::SIZE_10KB);
 
         // Should include system events
-        assert!(content.contains("\"type\":\"system\""), "Should include system events");
+        assert!(
+            content.contains("\"type\":\"system\""),
+            "Should include system events"
+        );
 
         // Should include stream events
-        assert!(content.contains("\"type\":\"stream_event\""), "Should include stream events");
+        assert!(
+            content.contains("\"type\":\"stream_event\""),
+            "Should include stream events"
+        );
 
         // Should include thinking events
-        assert!(content.contains("\"type\":\"thinking_delta\""), "Should include thinking deltas");
+        assert!(
+            content.contains("\"type\":\"thinking_delta\""),
+            "Should include thinking deltas"
+        );
 
         // Should include tool use events
-        assert!(content.contains("\"type\":\"tool_use\""), "Should include tool use events");
+        assert!(
+            content.contains("\"type\":\"tool_use\""),
+            "Should include tool use events"
+        );
 
         // Should include tool results with code
-        assert!(content.contains("\"type\":\"tool_result\""), "Should include tool results");
+        assert!(
+            content.contains("\"type\":\"tool_result\""),
+            "Should include tool results"
+        );
 
         // Should include code snippets
-        assert!(content.contains("pub fn"), "Should include Rust code patterns");
-        assert!(content.contains("cargo test"), "Should include shell commands");
+        assert!(
+            content.contains("pub fn"),
+            "Should include Rust code patterns"
+        );
+        assert!(
+            content.contains("cargo test"),
+            "Should include shell commands"
+        );
 
         // Should be JSONL format (one JSON per line)
         let lines: Vec<&str> = content.lines().collect();
@@ -508,7 +526,13 @@ mod assertion_tests {
 
         // First non-empty line should be valid JSON
         let first_json = lines.iter().find(|l| !l.is_empty()).unwrap();
-        assert!(first_json.starts_with('{'), "Lines should start with JSON object");
-        assert!(first_json.ends_with('}'), "Lines should end with JSON object");
+        assert!(
+            first_json.starts_with('{'),
+            "Lines should start with JSON object"
+        );
+        assert!(
+            first_json.ends_with('}'),
+            "Lines should end with JSON object"
+        );
     }
 }
