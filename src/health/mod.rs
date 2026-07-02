@@ -479,6 +479,58 @@ impl HealthMonitor {
         Ok(stale)
     }
 
+    /// Detect whether a supervisor is actively managing the worker fleet.
+    ///
+    /// A supervisor is considered present when:
+    /// - Multiple active workers exist (indicating fleet management)
+    /// - OR recent worker spawn activity is detected (workers started within the last 5 minutes)
+    ///
+    /// This detection is used to warn about orphaned bead risk when `idle_action=exit`
+    /// is configured without supervisor supervision.
+    ///
+    /// Returns `Ok(true)` if supervisor presence is detected, `Ok(false)` otherwise.
+    /// Returns `Err` if heartbeat directory cannot be read.
+    pub fn detect_supervisor(&self) -> Result<bool> {
+        let heartbeats = Self::read_all_heartbeats(&self.heartbeat_dir)?;
+
+        // Filter to fresh heartbeats only (within TTL)
+        let fresh_workers: Vec<_> = heartbeats
+            .into_iter()
+            .filter(|hb| !Self::is_stale(hb, self.heartbeat_ttl))
+            .collect();
+
+        // A supervisor is present if we have multiple active workers
+        // (a single worker is likely standalone, not supervised)
+        if fresh_workers.len() >= 2 {
+            tracing::debug!(
+                active_workers = fresh_workers.len(),
+                "supervisor detected: multiple active workers in fleet"
+            );
+            return Ok(true);
+        }
+
+        // Check for recent spawn activity: any worker started within the last 5 minutes
+        // (excluding ourselves, as we just started)
+        let five_minutes_ago = Utc::now() - chrono::Duration::seconds(300);
+        let recent_spawns: Vec<_> = fresh_workers
+            .iter()
+            .filter(|hb| hb.qualified_id != self.qualified_id)
+            .filter(|hb| hb.started_at > five_minutes_ago)
+            .collect();
+
+        if !recent_spawns.is_empty() {
+            tracing::debug!(
+                recent_spawn_count = recent_spawns.len(),
+                "supervisor detected: recent worker spawn activity"
+            );
+            return Ok(true);
+        }
+
+        // No supervisor presence detected
+        tracing::debug!("no supervisor detected: single worker, no recent spawn activity");
+        Ok(false)
+    }
+
     // ── Internal ────────────────────────────────────────────────────────────
 
     /// Write a heartbeat file atomically (write temp, then rename).
@@ -1465,6 +1517,186 @@ mod tests {
         assert!(
             !path.exists(),
             "heartbeat file must be removed even when worker is dropped without calling stop()"
+        );
+    }
+
+    /// Test supervisor detection with no other workers (standalone mode).
+    #[tokio::test]
+    async fn detect_supervisor_no_other_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "standalone-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // No supervisor detected when we're the only worker
+        let detected = monitor.detect_supervisor().unwrap();
+        assert!(
+            !detected,
+            "should not detect supervisor when no other workers present"
+        );
+    }
+
+    /// Test supervisor detection with multiple active workers.
+    #[tokio::test]
+    async fn detect_supervisor_multiple_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "worker-1".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create heartbeat files for 2 other active workers
+        let now = Utc::now();
+        for i in 2..=3 {
+            let hb = HeartbeatData {
+                worker_id: format!("worker-{}", i),
+                qualified_id: format!("claude-worker-{}", i),
+                pid: 1000 + i as u32,
+                state: WorkerState::Selecting,
+                current_bead: None,
+                workspace: PathBuf::from("/tmp"),
+                last_heartbeat: now,
+                started_at: now - chrono::Duration::seconds(60),
+                beads_processed: 0,
+                session: format!("worker-{}", i),
+                is_idle: false,
+                current_task: None,
+                model: "claude-sonnet-4".to_string(),
+                heartbeat_file: None,
+            };
+            let path = hb_dir.join(format!("claude-worker-{}.json", i));
+            std::fs::write(path, serde_json::to_string(&hb).unwrap()).unwrap();
+        }
+
+        // Supervisor detected when multiple active workers present
+        let detected = monitor.detect_supervisor().unwrap();
+        assert!(
+            detected,
+            "should detect supervisor when multiple active workers present"
+        );
+    }
+
+    /// Test supervisor detection ignores stale heartbeats.
+    #[tokio::test]
+    async fn detect_supervisor_ignores_stale_heartbeats() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "worker-1".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create a stale heartbeat (older than TTL)
+        let old_time = Utc::now() - chrono::Duration::seconds(600);
+        let hb = HeartbeatData {
+            worker_id: "worker-2".to_string(),
+            qualified_id: "claude-worker-2".to_string(),
+            pid: 2000,
+            state: WorkerState::Selecting,
+            current_bead: None,
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: old_time,
+            started_at: old_time,
+            beads_processed: 0,
+            session: "worker-2".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
+            heartbeat_file: None,
+        };
+        let path = hb_dir.join("claude-worker-2.json");
+        std::fs::write(path, serde_json::to_string(&hb).unwrap()).unwrap();
+
+        // Stale heartbeats should not trigger supervisor detection
+        let detected = monitor.detect_supervisor().unwrap();
+        assert!(
+            !detected,
+            "should not detect supervisor from stale heartbeats only"
+        );
+    }
+
+    /// Test supervisor detection with recent spawn activity.
+    #[tokio::test]
+    async fn detect_supervisor_recent_spawn_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "worker-1".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create a heartbeat for a worker started very recently (2 minutes ago)
+        let now = Utc::now();
+        let recent_time = now - chrono::Duration::seconds(120);
+        let hb = HeartbeatData {
+            worker_id: "worker-2".to_string(),
+            qualified_id: "claude-worker-2".to_string(),
+            pid: 2000,
+            state: WorkerState::Selecting,
+            current_bead: None,
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: now,
+            started_at: recent_time,
+            beads_processed: 0,
+            session: "worker-2".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
+            heartbeat_file: None,
+        };
+        let path = hb_dir.join("claude-worker-2.json");
+        std::fs::write(path, serde_json::to_string(&hb).unwrap()).unwrap();
+
+        // Recent spawn activity should trigger supervisor detection
+        let detected = monitor.detect_supervisor().unwrap();
+        assert!(
+            detected,
+            "should detect supervisor from recent spawn activity"
+        );
+    }
+
+    /// Test supervisor detection when no heartbeat directory exists.
+    #[test]
+    fn detect_supervisor_nonexistent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "worker-1".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Should return Ok(false) when directory doesn't exist (no supervisor)
+        let detected = monitor.detect_supervisor().unwrap();
+        assert!(
+            !detected,
+            "should return false when heartbeat directory doesn't exist"
         );
     }
 }

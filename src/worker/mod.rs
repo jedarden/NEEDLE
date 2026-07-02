@@ -805,6 +805,48 @@ impl Worker {
         // Check boot timeout before each step
         self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
 
+        // Step: Idle action validation
+        self.telemetry.emit(EventKind::InitStepStarted {
+            step: "idle_action_validation".to_string(),
+        })?;
+        let step_start = Instant::now();
+
+        // Warn if idle_action=exit without supervisor supervision
+        if self.config.worker.idle_action == crate::types::IdleAction::Exit {
+            match self.health.detect_supervisor() {
+                Ok(supervisor_present) => {
+                    if !supervisor_present {
+                        tracing::warn!(
+                            idle_action = "exit",
+                            "no supervisor detected: worker configured to exit when queue is dry will leave orphaned in_progress beads with no reclaim mechanism"
+                        );
+                        tracing::warn!(
+                            "to fix: either run workers under a supervisor (needle supervise) or set idle_action=wait in config"
+                        );
+                    } else {
+                        tracing::info!(
+                            idle_action = "exit",
+                            "supervisor detected: exit policy is safe"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        "failed to detect supervisor presence, skipping idle_action validation"
+                    );
+                }
+            }
+        }
+
+        self.telemetry.emit(EventKind::InitStepCompleted {
+            step: "idle_action_validation".to_string(),
+            duration_ms: step_start.elapsed().as_millis() as u64,
+        })?;
+
+        // Check boot timeout before each step
+        self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
+
         // Step: Heartbeat emitter start
         self.telemetry.emit(EventKind::InitStepStarted {
             step: "heartbeat_emitter".to_string(),
