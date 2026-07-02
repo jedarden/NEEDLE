@@ -37,8 +37,7 @@ async fn heartbeat_file_created_on_startup() {
 
     // Check worker_id field
     assert_eq!(
-        data["worker_id"],
-        "validation-worker",
+        data["worker_id"], "validation-worker",
         "heartbeat file should contain worker_id"
     );
 
@@ -138,7 +137,10 @@ async fn heartbeat_contains_required_fields() {
 
     // Verify all required fields are present
     assert!(!data.worker_id.is_empty(), "worker_id should not be empty");
-    assert!(!data.qualified_id.is_empty(), "qualified_id should not be empty");
+    assert!(
+        !data.qualified_id.is_empty(),
+        "qualified_id should not be empty"
+    );
     assert!(data.pid > 0, "pid should be set");
 
     // Verify timestamp is valid

@@ -4457,18 +4457,23 @@ mod tests {
         config.self_modification.hot_reload = false;
 
         // Use the default routing rules from AgentConfig::default_routing().
-        let default_routing = config.agent.routing.as_ref().expect("default routing should be set");
+        let default_routing = config
+            .agent
+            .routing
+            .as_ref()
+            .expect("default routing should be set");
 
         // Verify the default routing rules are configured correctly.
-        assert!(!default_routing.rules.is_empty(), "should have at least one routing rule");
+        assert!(
+            !default_routing.rules.is_empty(),
+            "should have at least one routing rule"
+        );
         assert_eq!(
-            default_routing.rules[0].match_model,
-            "(claude-)?(sonnet|opus|fable|haiku).*",
+            default_routing.rules[0].match_model, "(claude-)?(sonnet|opus|fable|haiku).*",
             "first rule should match Anthropic subscription models"
         );
         assert_eq!(
-            default_routing.rules[0].adapter,
-            "claude-print",
+            default_routing.rules[0].adapter, "claude-print",
             "first rule should route to claude-print"
         );
         assert_eq!(
@@ -4476,7 +4481,10 @@ mod tests {
             Some("claude-code-glm-4.7".to_string()),
             "default adapter should be claude-code-glm-4.7"
         );
-        assert!(!default_routing.strict, "strict mode should be disabled by default");
+        assert!(
+            !default_routing.strict,
+            "strict mode should be disabled by default"
+        );
 
         // Test routing with actual Anthropic subscription model names.
         let anthropic_models = vec![
@@ -4491,7 +4499,11 @@ mod tests {
         ];
 
         for model_name in anthropic_models {
-            let worker = Worker::new(config.clone(), format!("test-routing-{}", model_name), Arc::clone(&store));
+            let worker = Worker::new(
+                config.clone(),
+                format!("test-routing-{}", model_name),
+                Arc::clone(&store),
+            );
             let adapter = crate::dispatch::AgentAdapter {
                 name: "claude".to_string(),
                 description: None,
@@ -4536,7 +4548,11 @@ mod tests {
         ];
 
         for model_name in non_anthropic_models {
-            let worker = Worker::new(config.clone(), format!("test-routing-{}", model_name), Arc::clone(&store));
+            let worker = Worker::new(
+                config.clone(),
+                format!("test-routing-{}", model_name),
+                Arc::clone(&store),
+            );
             let adapter = crate::dispatch::AgentAdapter {
                 name: "claude".to_string(),
                 description: None,
