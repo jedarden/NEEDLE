@@ -5,6 +5,14 @@
 This bead requested adding p95 percentile measurement to the benchmark harness.
 **This functionality is already fully implemented** in `benches/sanitize.rs`.
 
+**Verification Date: 2026-07-02**
+
+Verified that:
+- Code compiles without errors (`cargo check --benches` passes)
+- P95 calculation exists in lines 360, 404-405
+- Criterion.rs configured with `sample_size(100)` for accurate bootstrap p95
+- Test run shows p95 output: `cargo test --bench sanitize -- --nocapture sanitizer_latency_below_threshold`
+
 ## Implementation Details
 
 ### 1. P95 Calculation in Measurement Code
