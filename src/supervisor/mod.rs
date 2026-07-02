@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::bead_store::{BeadStore, BrCliBeadStore, Filters};
-use crate::config::{Config, ConfigLoader, CliOverrides};
-use crate::registry::{Registry, is_pid_alive};
+use crate::config::{CliOverrides, Config, ConfigLoader};
+use crate::registry::{is_pid_alive, Registry};
 use crate::telemetry::{EventKind, Telemetry};
 
 /// Default interval for polling the ready queue (seconds).
@@ -84,7 +84,7 @@ impl Supervisor {
         // Initialize bead store
         let store: Arc<dyn BeadStore> = Arc::new(
             BrCliBeadStore::discover(config.workspace.clone())
-                .context("failed to initialize bead store for supervisor")?
+                .context("failed to initialize bead store for supervisor")?,
         );
 
         // Initialize registry
@@ -117,8 +117,10 @@ impl Supervisor {
             // Handle SIGINT and SIGTERM
             let _ = tokio::spawn(async move {
                 use tokio::signal::unix::{signal, SignalKind};
-                let mut sigint = signal(SignalKind::interrupt()).expect("failed to setup SIGINT handler");
-                let mut sigterm = signal(SignalKind::terminate()).expect("failed to setup SIGTERM handler");
+                let mut sigint =
+                    signal(SignalKind::interrupt()).expect("failed to setup SIGINT handler");
+                let mut sigterm =
+                    signal(SignalKind::terminate()).expect("failed to setup SIGTERM handler");
 
                 tokio::select! {
                     _ = sigint.recv() => {
@@ -177,10 +179,7 @@ impl Supervisor {
             let backoff_remaining = last_spawn_time.elapsed().as_secs();
             if backoff_remaining < SPAWN_BACKOFF_SECS {
                 let wait_secs = SPAWN_BACKOFF_SECS - backoff_remaining;
-                tracing::debug!(
-                    wait_secs,
-                    "in spawn backoff, waiting before next poll"
-                );
+                tracing::debug!(wait_secs, "in spawn backoff, waiting before next poll");
                 tokio::time::sleep(Duration::from_secs(wait_secs)).await;
                 continue;
             }
@@ -191,7 +190,11 @@ impl Supervisor {
             // Emit summary every 60 ticks (approximately 10 minutes at default interval)
             if total_polls % 60 == 0 {
                 let active_workers = self.registry.list().unwrap_or_default();
-                let ready_beads = self.store.ready(&Filters::default()).await.unwrap_or_default();
+                let ready_beads = self
+                    .store
+                    .ready(&Filters::default())
+                    .await
+                    .unwrap_or_default();
                 let _ = self.telemetry.emit(EventKind::SupervisorSummary {
                     polls: total_polls,
                     spawned: total_spawned,
@@ -330,7 +333,9 @@ impl Supervisor {
     /// Spawn a new worker process.
     async fn spawn_worker(&self, ready_count: usize) -> Result<()> {
         let worker_id = self.generate_worker_id()?;
-        let agent_name = self.config.agent
+        let agent_name = self
+            .config
+            .agent
             .as_ref()
             .unwrap_or(&self.needle_config.agent.default)
             .clone();
@@ -340,10 +345,14 @@ impl Supervisor {
         // Build the needle run command
         let mut cmd = std::process::Command::new("needle");
         cmd.arg("run")
-            .arg("--workspace").arg(&self.config.workspace)
-            .arg("--agent").arg(&agent_name)
-            .arg("--identifier").arg(&worker_id)
-            .arg("--count").arg("1");
+            .arg("--workspace")
+            .arg(&self.config.workspace)
+            .arg("--agent")
+            .arg(&agent_name)
+            .arg("--identifier")
+            .arg(&worker_id)
+            .arg("--count")
+            .arg("1");
 
         if let Some(timeout) = self.config.agent_timeout {
             cmd.arg("--timeout").arg(timeout.to_string());
@@ -384,10 +393,9 @@ impl Supervisor {
     /// Generate a unique worker identifier not currently in use.
     fn generate_worker_id(&self) -> Result<String> {
         const NATO_ALPHABET: &[&str] = &[
-            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
-            "hotel", "india", "juliet", "kilo", "lima", "mike", "november",
-            "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform",
-            "victor", "whiskey", "xray", "yankee", "zulu",
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
+            "sierra", "tango", "uniform", "victor", "whiskey", "xray", "yankee", "zulu",
         ];
 
         let active = self.registry.list().unwrap_or_default();
@@ -464,10 +472,9 @@ mod tests {
     #[test]
     fn nato_alphabet_is_complete() {
         const NATO_ALPHABET: &[&str] = &[
-            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
-            "hotel", "india", "juliet", "kilo", "lima", "mike", "november",
-            "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform",
-            "victor", "whiskey", "xray", "yankee", "zulu",
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india",
+            "juliet", "kilo", "lima", "mike", "november", "oscar", "papa", "quebec", "romeo",
+            "sierra", "tango", "uniform", "victor", "whiskey", "xray", "yankee", "zulu",
         ];
         assert_eq!(NATO_ALPHABET.len(), 26);
         assert_eq!(NATO_ALPHABET[0], "alpha");

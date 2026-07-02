@@ -1263,7 +1263,10 @@ async fn real_br_strand_waterfall_exhaustion_with_telemetry_jsonl() {
             assert!(
                 curr_seq > prev_seq,
                 "sequence numbers should be monotonically increasing: event {}={} vs event {}={}",
-                i - 1, prev_seq, i, curr_seq
+                i - 1,
+                prev_seq,
+                i,
+                curr_seq
             );
         }
     }

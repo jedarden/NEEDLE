@@ -9,8 +9,6 @@ use std::sync::Arc;
 /// Compiled routing rule with cached regex for efficient matching.
 #[derive(Debug, Clone)]
 struct CompiledRule {
-    /// The original pattern (for error messages).
-    pattern: String,
     /// Compiled regex matcher.
     matcher: Arc<regex::Regex>,
     /// Adapter to use on match.
@@ -40,7 +38,6 @@ impl CompiledRule {
         let matcher = regex::Regex::new(&regex_pattern)?;
 
         Ok(CompiledRule {
-            pattern: pattern.clone(),
             matcher: Arc::new(matcher),
             adapter,
         })
@@ -54,10 +51,27 @@ impl CompiledRule {
 
 /// Check if a pattern contains glob-style wildcards that need conversion.
 ///
-/// Returns true if the pattern contains unescaped `*` or `**` sequences.
+/// Returns true if the pattern appears to be a glob pattern rather than
+/// a well-formed regex. The heuristic checks for:
+/// 1. Regex features: anchors (^$), character classes [], parentheses (),
+///    quantifiers +?{}, alternation |, or the regex wildcard sequence .*
+/// 2. If present, it's a regex pattern - no conversion needed
+/// 3. If absent, but * is present, it's a glob pattern - convert it
 fn needs_glob_conversion(pattern: &str) -> bool {
-    // Check for unescaped * or **.
-    // Escaped asterisks are preceded by backslash.
+    // First, check if it looks like a regex by looking for regex metacharacters.
+    // The key indicator is .* which is "any character" in regex but not in glob.
+    let has_regex_features = pattern.contains(|c| {
+        matches!(c, '^' | '$' | '(' | ')' | '[' | ']' | '{' | '}' | '+' | '?' | '|' | '\\')
+    }) || pattern.contains(".*");
+
+    if has_regex_features {
+        // Has clear regex features - treat as regex
+        return false;
+    }
+
+    // At this point, we have a simple pattern that might be glob or regex.
+    // If it contains unescaped * (and we already ruled out other regex chars),
+    // treat it as a glob pattern.
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
 
@@ -79,10 +93,17 @@ fn needs_glob_conversion(pattern: &str) -> bool {
 /// Convert glob-style pattern to regex.
 ///
 /// Rules:
-/// - `*` → `[^/]+` (match any single segment, no slashes)
-/// - `**` → `.+` (match any characters including slashes, greedy)
+/// - `*` alone → `.*` (match anything, catch-all)
+/// - `*` in other contexts → `[^/]+` (match any single segment, no slashes)
+/// - `**` → `.*` (match any characters including slashes, greedy)
 /// - Escaped `\*` and `\*\*` treated literally
+/// - No implicit start anchor for glob patterns (unlike regex patterns)
 fn convert_glob_to_regex(glob: &str) -> String {
+    // Special case: * and ** should match anything (including empty).
+    if glob == "*" || glob == "**" {
+        return "^.*$".to_string();
+    }
+
     let mut result = String::new();
     let chars: Vec<char> = glob.chars().collect();
     let mut i = 0;
@@ -90,8 +111,10 @@ fn convert_glob_to_regex(glob: &str) -> String {
     while i < chars.len() {
         match chars[i] {
             '\\' => {
-                // Escaped character - pass through literally.
+                // Escaped character - pass through the backslash and the character.
+                // This ensures that \* in the glob becomes \* in the regex (literal asterisk).
                 if i + 1 < chars.len() {
+                    result.push('\\');
                     result.push(chars[i + 1]);
                     i += 2;
                 } else {
@@ -122,8 +145,8 @@ fn convert_glob_to_regex(glob: &str) -> String {
         }
     }
 
-    // Anchor to full string match.
-    format!("^{}$", result)
+    // Only add end anchor, not start anchor (glob patterns match substrings).
+    format!("{}$", result)
 }
 
 /// Match a model name against routing rules, returning the adapter to use.
@@ -550,27 +573,27 @@ mod tests {
     #[test]
     fn convert_glob_to_regex_single_asterisk() {
         assert_eq!(convert_glob_to_regex("*"), "^.*$");
-        assert_eq!(convert_glob_to_regex("claude-*"), "^claude-[^/]+$");
-        assert_eq!(convert_glob_to_regex("provider/*"), "^provider/[^/]+$");
+        assert_eq!(convert_glob_to_regex("claude-*"), "claude-[^/]+$");
+        assert_eq!(convert_glob_to_regex("provider/*"), "provider/[^/]+$");
     }
 
     #[test]
     fn convert_glob_to_regex_double_asterisk() {
         assert_eq!(convert_glob_to_regex("**"), "^.*$");
-        assert_eq!(convert_glob_to_regex("provider/**"), "^provider/.*$");
+        assert_eq!(convert_glob_to_regex("provider/**"), "provider/.*$");
     }
 
     #[test]
     fn convert_glob_to_regex_escaped() {
-        assert_eq!(convert_glob_to_regex(r"model\*"), r"^model\*$");
-        assert_eq!(convert_glob_to_regex(r"model\*\*"), r"^model\*\*$");
+        assert_eq!(convert_glob_to_regex(r"model\*"), r"model\*$");
+        assert_eq!(convert_glob_to_regex(r"model\*\*"), r"model\*\*$");
     }
 
     #[test]
     fn convert_glob_to_regex_mixed() {
         // Mix of glob wildcards and literal characters.
-        assert_eq!(convert_glob_to_regex("a*b"), "^a[^/]+b$");
-        assert_eq!(convert_glob_to_regex("a**b"), "^a.*b$");
+        assert_eq!(convert_glob_to_regex("a*b"), "a[^/]+b$");
+        assert_eq!(convert_glob_to_regex("a**b"), "a.*b$");
     }
 
     #[test]

@@ -3795,12 +3795,10 @@ agent:
     fn routing_default_fallback_no_match() {
         // Test that when no rules match, we fall back to default_adapter
         let routing = RoutingConfig {
-            rules: vec![
-                RoutingRule {
-                    match_model: "sonnet.*".to_string(),
-                    adapter: "sonnet-adapter".to_string(),
-                },
-            ],
+            rules: vec![RoutingRule {
+                match_model: "sonnet.*".to_string(),
+                adapter: "sonnet-adapter".to_string(),
+            }],
             default_adapter: Some("fallback-adapter".to_string()),
             strict: false,
         };
@@ -3813,22 +3811,17 @@ agent:
         );
 
         // Should fall back to default_adapter
-        assert_eq!(
-            routing.default_adapter.as_deref(),
-            Some("fallback-adapter")
-        );
+        assert_eq!(routing.default_adapter.as_deref(), Some("fallback-adapter"));
     }
 
     #[test]
     fn routing_strict_mode_failure() {
         // Test that strict mode causes failure when no rules match
         let routing = RoutingConfig {
-            rules: vec![
-                RoutingRule {
-                    match_model: "sonnet.*".to_string(),
-                    adapter: "sonnet-adapter".to_string(),
-                },
-            ],
+            rules: vec![RoutingRule {
+                match_model: "sonnet.*".to_string(),
+                adapter: "sonnet-adapter".to_string(),
+            }],
             default_adapter: None,
             strict: true, // Strict mode enabled
         };
@@ -3864,7 +3857,10 @@ agent:
         assert!(re.is_match("claude-sonnet-4-6"), "should match sonnet");
         assert!(re.is_match("claude-opus-4-8"), "should match opus");
         assert!(re.is_match("claude-fable-5"), "should match fable");
-        assert!(re.is_match("claude-haiku-4-5-20251001"), "should match haiku");
+        assert!(
+            re.is_match("claude-haiku-4-5-20251001"),
+            "should match haiku"
+        );
         assert!(re.is_match("sonnet"), "should match short form");
         assert!(re.is_match("opus"), "should match short form");
 
@@ -3888,10 +3884,7 @@ agent:
         let rule = &routing.rules[0];
         let re = regex::Regex::new(&rule.match_model).unwrap();
 
-        assert!(
-            !re.is_match("glm-4.7"),
-            "should not match glm models"
-        );
+        assert!(!re.is_match("glm-4.7"), "should not match glm models");
         assert!(
             !re.is_match("claude-code-glm-4.7"),
             "should not match adapter names"
