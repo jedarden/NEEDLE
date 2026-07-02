@@ -22,6 +22,7 @@ pub mod peer;
 pub mod prompt;
 pub mod rate_limit;
 pub mod registry;
+pub mod routing;
 pub mod sanitize;
 pub mod skill;
 pub mod span;
