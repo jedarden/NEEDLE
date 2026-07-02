@@ -194,10 +194,32 @@ fn generate_trace_content(target_bytes: usize) -> String {
     result
 }
 
-/// Benchmarks sanitization at 10KB trace size.
+/// Benchmarks sanitization at 10KB trace size with explicit p95 output.
 fn bench_sanitize_10kb(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_10KB);
+
+    // Warm-up
+    for _ in 0..5 {
+        let _ = sanitizer.sanitize(&content);
+    }
+
+    // Collect samples for explicit p95 calculation
+    let mut latencies = Vec::with_capacity(ASSERTION_SAMPLE_COUNT);
+    for _ in 0..ASSERTION_SAMPLE_COUNT {
+        let start = std::time::Instant::now();
+        let _ = sanitizer.sanitize(&content);
+        latencies.push(start.elapsed().as_micros());
+    }
+
+    latencies.sort();
+    let p95_us = latencies[(latencies.len() * 95) / 100];
+    let p95_ms = p95_us as f64 / 1000.0;
+
+    eprintln!(
+        "10KB trace p95 latency: {:.2} ms ({} samples)",
+        p95_ms, ASSERTION_SAMPLE_COUNT
+    );
 
     let mut group = c.benchmark_group("sanitize_10kb");
     group.throughput(Throughput::Bytes(SIZE_10KB as u64));
@@ -226,10 +248,32 @@ fn bench_sanitize_10kb_ops(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmarks sanitization at 100KB trace size.
+/// Benchmarks sanitization at 100KB trace size with explicit p95 output.
 fn bench_sanitize_100kb(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_100KB);
+
+    // Warm-up
+    for _ in 0..5 {
+        let _ = sanitizer.sanitize(&content);
+    }
+
+    // Collect samples for explicit p95 calculation
+    let mut latencies = Vec::with_capacity(ASSERTION_SAMPLE_COUNT);
+    for _ in 0..ASSERTION_SAMPLE_COUNT {
+        let start = std::time::Instant::now();
+        let _ = sanitizer.sanitize(&content);
+        latencies.push(start.elapsed().as_micros());
+    }
+
+    latencies.sort();
+    let p95_us = latencies[(latencies.len() * 95) / 100];
+    let p95_ms = p95_us as f64 / 1000.0;
+
+    eprintln!(
+        "100KB trace p95 latency: {:.2} ms ({} samples)",
+        p95_ms, ASSERTION_SAMPLE_COUNT
+    );
 
     let mut group = c.benchmark_group("sanitize_100kb");
     group.throughput(Throughput::Bytes(SIZE_100KB as u64));
@@ -258,10 +302,32 @@ fn bench_sanitize_100kb_ops(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmarks sanitization at 1MB trace size.
+/// Benchmarks sanitization at 1MB trace size with explicit p95 output.
 fn bench_sanitize_1mb(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_1MB);
+
+    // Warm-up
+    for _ in 0..5 {
+        let _ = sanitizer.sanitize(&content);
+    }
+
+    // Collect samples for explicit p95 calculation
+    let mut latencies = Vec::with_capacity(ASSERTION_SAMPLE_COUNT);
+    for _ in 0..ASSERTION_SAMPLE_COUNT {
+        let start = std::time::Instant::now();
+        let _ = sanitizer.sanitize(&content);
+        latencies.push(start.elapsed().as_micros());
+    }
+
+    latencies.sort();
+    let p95_us = latencies[(latencies.len() * 95) / 100];
+    let p95_ms = p95_us as f64 / 1000.0;
+
+    eprintln!(
+        "1MB trace p95 latency: {:.2} ms ({} samples)",
+        p95_ms, ASSERTION_SAMPLE_COUNT
+    );
 
     let mut group = c.benchmark_group("sanitize_1mb");
     group.throughput(Throughput::Bytes(SIZE_1MB as u64));
