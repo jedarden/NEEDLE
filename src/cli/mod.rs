@@ -1248,7 +1248,7 @@ agent:
   timeout: 3600
 
   # Directory containing adapter TOML files.
-  adapters_dir: ~/.config/needle/adapters
+  adapters_dir: {adapters_dir}
 
 # Worker fleet configuration.
 worker:
@@ -1290,7 +1290,7 @@ workspace:
   default: {workspace}
 
   # NEEDLE home directory (heartbeat files, log output).
-  home: ~/.needle
+  home: {needle_home}
 
   # Labels describing this workspace's domain (e.g., rust, api, trading).
   # Used for cross-workspace skill sharing.
@@ -1488,7 +1488,9 @@ fabric:
             "initialized"
         },
         agent = agent_default,
-        workspace = workspace_default.display()
+        workspace = workspace_default.display(),
+        needle_home = v1_dir.display(),
+        adapters_dir = dirs_or_home(".config/needle/adapters").display()
     );
 
     // Ensure the config directory exists.
