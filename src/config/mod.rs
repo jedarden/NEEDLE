@@ -445,6 +445,14 @@ pub struct MitosisConfig {
     /// fails repeatedly without ever splitting.
     #[serde(default)]
     pub force_failure_threshold: u32,
+
+    /// Re-run mitosis every N consecutive failures after the first (0 = disabled).
+    ///
+    /// Fires at failure_count == 1, 1+N, 1+2N, ...
+    /// Only when force_failure_threshold == 0.
+    /// Beads already carrying a mitosis-depth label are skipped.
+    #[serde(default)]
+    pub repeat_interval: u32,
 }
 
 impl Default for MitosisConfig {
@@ -453,6 +461,7 @@ impl Default for MitosisConfig {
             enabled: Self::default_enabled(),
             first_failure_only: Self::default_first_failure_only(),
             force_failure_threshold: 0,
+            repeat_interval: 0,
         }
     }
 }
