@@ -1,36 +1,36 @@
 # Bead bf-43ff: Add basic supervisor config struct
 
-## Status: Already Implemented
+## Task Status: ✅ ALREADY COMPLETE
 
-The `SupervisorConfig` struct already exists in `src/config/mod.rs` at line 1317. It was implemented in commit `277f1c6 feat(needle-bf-hkhz): implement supervisor config structure`.
+The supervisor config struct was already implemented in commit `277f1c6 feat(needle-bf-hkhz): implement supervisor config structure`.
 
-## Verification
+## Acceptance Criteria Verification
 
-All acceptance criteria met:
+All acceptance criteria are met:
 
-1. **Config struct exists** - `SupervisorConfig` defined in `src/config/mod.rs`
-2. **heartbeat_path field** - `pub heartbeat_path: Option<PathBuf>`
-3. **socket_path field** - `pub socket_path: Option<PathBuf>`
-4. **Derives Debug and Clone** - `#[derive(Debug, Clone, Serialize, Deserialize)]`
-5. **Rustdoc comments present** - Comprehensive module and field documentation
+1. ✅ Config struct exists in `src/config/mod.rs` (lines 1326-1378)
+2. ✅ Has `heartbeat_path` field as `Option<PathBuf>`
+3. ✅ Has `socket_path` field as `Option<PathBuf>`
+4. ✅ Struct derives `Debug` and `Clone` (also `Serialize, Deserialize`)
+5. ✅ Full rustdoc comments present
 
-## Code Reference
+## Implementation Details
 
-```rust
-/// Supervisor detection configuration.
-///
-/// Controls how NEEDLE detects whether it's running under a supervisor process.
-/// Supervisor detection is used for graceful shutdown and resource cleanup.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SupervisorConfig {
-    /// Path to the supervisor's heartbeat file.
-    #[serde(default)]
-    pub heartbeat_path: Option<PathBuf>,
+The `SupervisorConfig` struct in `src/config/mod.rs` includes:
 
-    /// Path to the supervisor's control socket (Unix domain socket).
-    #[serde(default)]
-    pub socket_path: Option<PathBuf>,
-}
-```
+- `heartbeat_path: Option<PathBuf>` - Path to supervisor's heartbeat file for liveness detection
+- `socket_path: Option<PathBuf>` - Optional Unix domain socket path for IPC
+- Default implementation with both fields defaulting to `None`
+- Helper method `resolved_heartbeat_path()` for default path resolution
+- Integrated into main `Config` struct (line 1710)
+- Environment variable overrides supported via `NEEDLE_SUPERVISOR__HEARTBEAT_PATH` and `NEEDLE_SUPERVISOR__SOCKET_PATH`
 
-Compilation verified with `cargo check` - no errors.
+## Documentation
+
+The struct is well-documented with rustdoc comments explaining:
+- Purpose: supervisor detection for graceful shutdown and resource cleanup
+- Heartbeat file usage and default location
+- Socket communication for IPC
+- Example paths and configuration
+
+No additional work was required for this bead.
