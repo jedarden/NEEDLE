@@ -649,8 +649,7 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
     }
 
     // Attempt to remove the file.
-    std::fs::remove_file(path)
-        .with_context(|| format!("failed to remove heartbeat file: {}", path.display()))?;
+    std::fs::remove_file(path)?;
 
     tracing::debug!(
         path = %path.display(),
@@ -1459,7 +1458,7 @@ mod tests {
             // The timestamp should have advanced by approximately the interval
             // Allow some tolerance for system load and scheduling delays
             assert!(
-                time_diff >= 28 && time_diff <= 35,
+                (28..=35).contains(&time_diff),
                 "heartbeat should refresh every ~30 seconds, got {} seconds difference between updates (cycle {})",
                 time_diff,
                 cycle
