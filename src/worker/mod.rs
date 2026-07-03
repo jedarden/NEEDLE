@@ -141,6 +141,8 @@ struct AtexitWorkerState {
     start_time: Instant,
     last_state: String,
     log_file_path: Option<String>,
+    /// Path to this worker's heartbeat file for cleanup on unexpected termination.
+    heartbeat_path: Option<String>,
 }
 
 /// Register the atexit handler with worker state.
@@ -153,6 +155,7 @@ fn register_atexit_handler(
     start_time: Instant,
     last_state: String,
     log_file_path: Option<String>,
+    heartbeat_path: Option<String>,
 ) {
     let state = AtexitWorkerState {
         worker_name,
@@ -160,6 +163,7 @@ fn register_atexit_handler(
         start_time,
         last_state,
         log_file_path,
+        heartbeat_path,
     };
     *ATEXIT_WORKER_STATE.lock().unwrap() = Some(state);
 
@@ -174,6 +178,19 @@ fn register_atexit_handler(
                 state.worker_name, state.last_state, state.beads_processed, uptime
             );
             eprintln!("This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)");
+
+            // Try to clean up the heartbeat file to prevent stale detection.
+            if let Some(ref hb_path) = state.heartbeat_path {
+                use std::fs;
+                if let Err(e) = fs::remove_file(hb_path) {
+                    // Don't spam stderr if the file was already cleaned up
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        eprintln!("Failed to remove heartbeat file {}: {}", hb_path, e);
+                    }
+                } else {
+                    eprintln!("Cleaned up heartbeat file: {}", hb_path);
+                }
+            }
 
             // Try to write a worker.stopped event to the JSONL log file.
             // This provides diagnostic information even when the worker is killed abruptly.
@@ -236,6 +253,7 @@ fn register_atexit_handler(
     _start_time: Instant,
     _last_state: String,
     _log_file_path: Option<String>,
+    _heartbeat_path: Option<String>,
 ) {
     // No-op on non-Unix platforms
 }
@@ -927,12 +945,14 @@ impl Worker {
         // This provides diagnostic information when the worker is killed by an external
         // process (e.g., capacity governor, OOM killer, SIGKILL).
         let start_time = self.boot_time.unwrap_or_else(Instant::now);
+        let heartbeat_path = self.health.heartbeat_path().to_str().map(String::from);
         register_atexit_handler(
             self.worker_name.clone(),
             self.beads_processed,
             start_time,
             format!("{:?}", self.state),
             None, // log_file_path - not available during boot
+            heartbeat_path,
         );
 
         #[cfg(unix)]
