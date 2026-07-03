@@ -1199,4 +1199,47 @@ End of response."#;
             "failure_count=2 should NOT trigger mitosis (first_failure_only mode)"
         );
     }
+
+    #[tokio::test]
+    async fn repeat_interval_skips_max_depth_beads() {
+        // Test that beads with mitosis-depth:1 label are skipped during repeat tick.
+        // Verify depth-limited beads don't trigger repeat mitosis.
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: false,
+            force_failure_threshold: 0,
+            repeat_interval: 50,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // Bead with mitosis-depth:1 label at failure_count = 51 (repeat tick)
+        // This should be skipped because it's a mitosis child bead (depth-limited).
+        let store = MockStore::new().with_labels(vec![
+            "failure-count:51".to_string(),
+            "mitosis-depth:1".to_string(),
+        ]);
+        let mut bead = test_bead();
+        bead.labels = vec![
+            "failure-count:51".to_string(),
+            "mitosis-depth:1".to_string(),
+        ];
+
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result, MitosisResult::Skipped { .. }),
+            "bead with mitosis-depth:1 should be skipped even at repeat tick (failure_count=51)"
+        );
+    }
 }
