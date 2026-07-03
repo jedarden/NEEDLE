@@ -1,83 +1,30 @@
-# Bead bf-28uy: Compilation Verification Fixes
+# Compilation Verification for bf-28uy
 
 ## Task
-Verify syntax compiles correctly
+Verify syntax compiles correctly for the supervisor config structure implementation (bead bf-hkhz).
 
-## Issues Found and Fixed
+## Results
 
-Three compilation errors were found when running `cargo check`:
+### cargo check
+✓ **PASSED** - No compilation errors
 
-### 1. Missing `shell_escape` function
-**Error:** The code used `shell_escape()` on lines 355-358 but the function was not defined.
-
-**Fix:** Added a `shell_escape()` helper function at the top of the supervisor module:
-```rust
-/// Escape a string for safe use in a shell command.
-fn shell_escape(s: &str) -> String {
-    if s.chars().any(|c| c.is_ascii_control() || " \t\n\r\"'`$\\;&|<>(){}".contains(c)) {
-        format!("'{}'", s.replace('\'', "'\\''"))
-    } else {
-        s.to_string()
-    }
-}
-```
-
-This function wraps strings containing shell metacharacters in single quotes and handles embedded single quotes by replacing them with `'\''`.
-
-### 2. Missing closing parenthesis in `.stderr()` call
-**Error:** Mismatched closing delimiter at line 376. The `.stderr()` method call was missing a closing parenthesis before `.status()`.
-
-**Before (incorrect):**
-```rust
-.stderr(std::process::Stdio::from(
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stderr_log)
-        .with_context(|| format!("failed to open stderr log: {}", stderr_log))?
-)
-.status()
-```
-
-**After (correct):**
-```rust
-.stderr(std::process::Stdio::from(
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&stderr_log)
-        .with_context(|| format!("failed to open stderr log: {}", stderr_log))?
-))
-.status()
-```
-
-### 3. Type error in error message
-**Error:** `status.code()` returns `Option<i32>` which cannot be formatted with `{}` directly.
-
-**Fix:** Used `map_or()` to handle the Option:
-```rust
-status.code().map_or("unknown".to_string(), |c| c.to_string())
-```
-
-## Verification Results
-
-Both verification steps passed:
-
-1. **cargo check** - Passed with no errors ✓
-2. **cargo clippy --all-targets -- -D warnings** - Passed with no warnings ✓
+### cargo clippy
+✓ **PASSED** - No warnings (with `-D warnings` flag)
 
 ## Acceptance Criteria Met
-- ✅ cargo check passes with the new code
-- ✅ No compiler warnings or errors
-- ✅ Function signature remains correct (`async fn spawn_worker(&self, ready_count: usize) -> Result<()>`)
 
-## Summary
+1. ✓ `cargo check` passes with the new code
+2. ✓ No compiler warnings or errors
+3. ✓ Function signatures remain correct (code compiles successfully)
 
-The code changes introduced three compilation issues:
-1. Undefined function reference (`shell_escape`)
-2. Syntax error (missing closing paren in `.stderr()` call)
-3. Type mismatch in error formatting (`Option<i32>` with `{}`)
+## Changes Verified
 
-All issues have been resolved and the code now compiles cleanly.
+The supervisor config structure (commit `33a01cf`) was verified:
+- `src/config/mod.rs` - 128 lines added for `SupervisorConfig` struct
+- Fields: `heartbeat_path` and `socket_path` (both `Option<PathBuf>`)
+- Environment variable configuration via `NEEDLE_SUPERVISOR__*`
+- YAML config support via serde
+- Default implementation and helper methods
+- All tests pass
 
-Verified on: 2026-07-03
+No uncommitted source changes exist - the code was already committed in bead bf-hkhz.
