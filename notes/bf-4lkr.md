@@ -1,26 +1,28 @@
-# Bead bf-4lkr: repeat_interval_triggers_at_correct_counts unit test
+# Bead bf-4lkr: repeat_interval_triggers_at_correct_counts Unit Test
 
-## Finding
+## Summary
 
-The unit test `repeat_interval_triggers_at_correct_counts` was already implemented in commit 4225ff9 by bead bf-3pq7.
+Verified that the unit test `repeat_interval_triggers_at_correct_counts` is already complete in `src/mitosis/mod.rs` (lines 1022-1109).
+
+## Test Details
+
+The test verifies that `repeat_interval` mode triggers mitosis at the correct failure counts:
+
+- **repeat_interval = 50** fires at: 1, 51, 101, 151, ... (1, 1+N, 1+2N, ...)
+- Skips all other failure counts (e.g., 25)
+- Also verifies that beads with `mitosis-depth:1` label are skipped even at repeat ticks
 
 ## Verification
 
-Test exists at `src/mitosis/mod.rs:1022-1109` and validates:
-
-1. **Triggers at correct counts**: fires at failure_count = 1, 1+N, 1+2N (where N=50)
-2. **Skips intermediate counts**: does not fire at failure_count = 25
-3. **Repeat interval logic**: uses `(failure_count - 1) % repeat_interval == 0`
-
-Test execution result:
-```
-test mitosis::tests::repeat_interval_triggers_at_correct_counts ... ok
+Ran the test locally:
+```bash
+cargo test --lib mitosis::tests::repeat_interval_triggers_at_correct_counts
 ```
 
-## Acceptance Criteria
+Result: **1 passed** (test compiles and passes)
 
-- [x] Test `repeat_interval_triggers_at_correct_counts` added
-- [x] Test compiles
-- [x] Test passes individually
+## Status
 
-All criteria met by existing work.
+✅ Test already implemented and passing
+✅ Test compiles  
+✅ Test passes individually
