@@ -965,6 +965,19 @@ fn emitter_loop(
         let tmp_path = path.with_extension("json.tmp");
 
         let write_result: anyhow::Result<()> = (|| {
+            // Re-assert the heartbeat directory on every attempt, not just once
+            // before the loop starts. If the directory (or an ancestor) is
+            // transiently removed or unavailable while the worker is running —
+            // e.g. an external cleanup process, a race with another tool, or a
+            // filesystem hiccup under load — the write below would otherwise
+            // fail with ENOENT on every subsequent attempt until the circuit
+            // breaker trips, since nothing else recreates it. `create_dir_all`
+            // is a cheap no-op when the directory already exists, so doing this
+            // unconditionally lets a single transient disruption self-heal
+            // within one heartbeat interval instead of killing the worker after
+            // `max_consecutive_failures` attempts (which, with the default
+            // backoff schedule, can take 25-30 minutes to trigger).
+            std::fs::create_dir_all(&heartbeat_dir)?;
             let json = serde_json::to_string_pretty(&data)?;
             std::fs::write(&tmp_path, json.as_bytes())?;
             std::fs::rename(&tmp_path, &path)?;
