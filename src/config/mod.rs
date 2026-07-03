@@ -2100,6 +2100,14 @@ impl ConfigLoader {
                         config.supervisor.socket_path = Some(expand_tilde(&PathBuf::from(value)));
                         sources.insert(config_path, source);
                     }
+                    "workspace.home" => {
+                        config.workspace.home = expand_tilde(&PathBuf::from(value));
+                        sources.insert(config_path, source);
+                    }
+                    "workspace.default" => {
+                        config.workspace.default = expand_tilde(&PathBuf::from(value));
+                        sources.insert(config_path, source);
+                    }
                     _ => {
                         tracing::debug!(
                             env_var = %key,
@@ -2178,6 +2186,9 @@ impl ConfigLoader {
 
         // Layer 5: CLI arguments.
         Self::apply_cli_overrides(&mut config, cli, &mut sources);
+
+        // Expand all tildes after all overrides are applied.
+        config.expand_tildes();
 
         Ok((config, sources))
     }
