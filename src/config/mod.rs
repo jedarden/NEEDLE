@@ -1309,6 +1309,60 @@ impl HealthConfig {
     }
 }
 
+/// Supervisor detection configuration.
+///
+/// Controls how NEEDLE detects whether it's running under a supervisor process.
+/// Supervisor detection is used for graceful shutdown and resource cleanup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SupervisorConfig {
+    /// Path to the supervisor's heartbeat file.
+    ///
+    /// The supervisor writes this file at a regular interval to signal liveness.
+    /// Workers check this file to determine if the supervisor is still running.
+    /// If the file is missing or stale, workers may initiate graceful shutdown.
+    ///
+    /// When not set, defaults to `state/supervisor-heartbeat.json` under `workspace.home`.
+    ///
+    /// Example: `~/.needle/state/supervisor-heartbeat.json`
+    #[serde(default)]
+    pub heartbeat_path: Option<PathBuf>,
+
+    /// Path to the supervisor's control socket (Unix domain socket).
+    ///
+    /// Some supervisors use a control socket for IPC. If set, workers can use
+    /// this socket to send status updates or receive commands from the supervisor.
+    ///
+    /// When `None`, no socket-based communication is available.
+    #[serde(default)]
+    pub socket_path: Option<PathBuf>,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        SupervisorConfig {
+            heartbeat_path: Self::default_heartbeat_path(),
+            socket_path: Self::default_socket_path(),
+        }
+    }
+}
+
+impl SupervisorConfig {
+    fn default_heartbeat_path() -> Option<PathBuf> {
+        None
+    }
+
+    fn default_socket_path() -> Option<PathBuf> {
+        None
+    }
+
+    /// Returns the resolved heartbeat path, defaulting to `workspace.home/state/supervisor-heartbeat.json`.
+    pub fn resolved_heartbeat_path(&self, workspace_home: &Path) -> PathBuf {
+        self.heartbeat_path
+            .clone()
+            .unwrap_or_else(|| workspace_home.join("state/supervisor-heartbeat.json"))
+    }
+}
+
 /// Per-provider concurrency and rate limits.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderLimits {
@@ -1637,6 +1691,9 @@ pub struct Config {
     /// FABRIC live dashboard forwarding.
     #[serde(default)]
     pub fabric: FabricConfig,
+    /// Supervisor detection configuration.
+    #[serde(default)]
+    pub supervisor: SupervisorConfig,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1945,6 +2002,14 @@ impl ConfigLoader {
                                 "invalid value for self_modification.canary_timeout — expected integer"
                             );
                         }
+                    }
+                    "supervisor.heartbeat_path" => {
+                        config.supervisor.heartbeat_path = Some(PathBuf::from(value));
+                        sources.insert(config_path, source);
+                    }
+                    "supervisor.socket_path" => {
+                        config.supervisor.socket_path = Some(PathBuf::from(value));
+                        sources.insert(config_path, source);
                     }
                     _ => {
                         tracing::debug!(
@@ -2907,6 +2972,40 @@ strands:
         assert!(!sources.contains_key("self_modification.enabled"));
     }
 
+    #[test]
+    fn env_override_supervisor_heartbeat_path() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_SUPERVISOR__HEARTBEAT_PATH";
+        std::env::set_var(key, "/custom/supervisor-heartbeat.json");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert_eq!(
+            config.supervisor.heartbeat_path,
+            Some(PathBuf::from("/custom/supervisor-heartbeat.json"))
+        );
+        assert!(sources.contains_key("supervisor.heartbeat_path"));
+    }
+
+    #[test]
+    fn env_override_supervisor_socket_path() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_SUPERVISOR__SOCKET_PATH";
+        std::env::set_var(key, "/tmp/supervisor.sock");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert_eq!(
+            config.supervisor.socket_path,
+            Some(PathBuf::from("/tmp/supervisor.sock"))
+        );
+        assert!(sources.contains_key("supervisor.socket_path"));
+    }
+
     // ── Workspace override tests (additional paths) ──
 
     #[test]
@@ -3127,6 +3226,35 @@ strands:
         assert_eq!(config.claim_churn_threshold, 20);
         assert_eq!(config.log_runaway_bytes, 10 * 1024 * 1024);
         assert_eq!(config.live_loop_window_secs, 300);
+    }
+
+    #[test]
+    fn default_supervisor_config_values() {
+        let config = SupervisorConfig::default();
+        assert!(config.heartbeat_path.is_none());
+        assert!(config.socket_path.is_none());
+    }
+
+    #[test]
+    fn supervisor_config_resolved_heartbeat_path_default() {
+        let config = SupervisorConfig::default();
+        let workspace_home = PathBuf::from("/home/user/.needle");
+        let resolved = config.resolved_heartbeat_path(&workspace_home);
+        assert_eq!(
+            resolved,
+            PathBuf::from("/home/user/.needle/state/supervisor-heartbeat.json")
+        );
+    }
+
+    #[test]
+    fn supervisor_config_resolved_heartbeat_path_custom() {
+        let config = SupervisorConfig {
+            heartbeat_path: Some(PathBuf::from("/custom/path/heartbeat.json")),
+            ..Default::default()
+        };
+        let workspace_home = PathBuf::from("/home/user/.needle");
+        let resolved = config.resolved_heartbeat_path(&workspace_home);
+        assert_eq!(resolved, PathBuf::from("/custom/path/heartbeat.json"));
     }
 
     #[test]
