@@ -557,25 +557,24 @@ impl HealthMonitor {
         }
 
         // Read and parse the supervisor heartbeat file
-        let content = std::fs::read_to_string(&supervisor_hb_path)
-            .with_context(|| {
-                format!(
-                    "failed to read supervisor heartbeat file: {}",
-                    supervisor_hb_path.display()
-                )
-            })?;
+        let content = std::fs::read_to_string(&supervisor_hb_path).with_context(|| {
+            format!(
+                "failed to read supervisor heartbeat file: {}",
+                supervisor_hb_path.display()
+            )
+        })?;
 
         // Parse as JSON to verify it's valid (we don't need specific fields)
-        let parsed: serde_json::Value = serde_json::from_str(&content)
-            .with_context(|| {
-                format!(
-                    "failed to parse supervisor heartbeat file: {}",
-                    supervisor_hb_path.display()
-                )
-            })?;
+        let parsed: serde_json::Value = serde_json::from_str(&content).with_context(|| {
+            format!(
+                "failed to parse supervisor heartbeat file: {}",
+                supervisor_hb_path.display()
+            )
+        })?;
 
         // Check if heartbeat has a timestamp field
-        let last_heartbeat = if let Some(ts) = parsed.get("last_heartbeat").and_then(|v| v.as_str()) {
+        let last_heartbeat = if let Some(ts) = parsed.get("last_heartbeat").and_then(|v| v.as_str())
+        {
             DateTime::parse_from_rfc3339(ts)
                 .with_context(|| {
                     format!(
@@ -676,13 +675,11 @@ impl HealthMonitor {
                 );
                 Ok(false)
             }
-            Err(e) => {
-                Err(anyhow::anyhow!(
-                    "failed to access supervisor socket {}: {}",
-                    path.display(),
-                    e
-                ))
-            }
+            Err(e) => Err(anyhow::anyhow!(
+                "failed to access supervisor socket {}: {}",
+                path.display(),
+                e
+            )),
         }
     }
 
@@ -828,7 +825,7 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
     }
 
     // Attempt to remove the file.
-    std::fs::remove_file(&path)?;
+    std::fs::remove_file(path)?;
 
     tracing::debug!(
         path = %path.display(),
@@ -2080,7 +2077,10 @@ mod tests {
 
         // Should not detect stale supervisor heartbeat
         let detected = monitor.check_supervisor_heartbeat_file().unwrap();
-        assert!(!detected, "should not detect stale supervisor heartbeat file");
+        assert!(
+            !detected,
+            "should not detect stale supervisor heartbeat file"
+        );
     }
 
     /// Test that check_supervisor_heartbeat_file returns false when file doesn't exist.
@@ -2100,7 +2100,10 @@ mod tests {
 
         // No supervisor heartbeat file exists
         let detected = monitor.check_supervisor_heartbeat_file().unwrap();
-        assert!(!detected, "should return false when supervisor heartbeat file doesn't exist");
+        assert!(
+            !detected,
+            "should return false when supervisor heartbeat file doesn't exist"
+        );
     }
 
     /// Test that check_supervisor_heartbeat_file returns false when file is invalid.
@@ -2129,7 +2132,10 @@ mod tests {
 
         // Should not detect supervisor heartbeat without valid timestamp
         let detected = monitor.check_supervisor_heartbeat_file().unwrap();
-        assert!(!detected, "should return false when supervisor heartbeat file is invalid");
+        assert!(
+            !detected,
+            "should return false when supervisor heartbeat file is invalid"
+        );
     }
 
     /// Test that check_supervisor_heartbeat_file handles malformed JSON.
@@ -2210,8 +2216,8 @@ mod tests {
         // This likely won't exist in test environment, so we expect false
         let detected = HealthMonitor::check_supervisor_socket().unwrap();
         // We don't assert the result since we can't control the test environment's /tmp
-        // Just verify it doesn't error
-        assert!(detected == true || detected == false, "should return a boolean");
+        // Just verify it doesn't error and returns a boolean (type system guarantees this)
+        let _: bool = detected;
     }
 
     /// Test that detect_supervisor_direct returns true when heartbeat file is present.
@@ -2302,7 +2308,10 @@ mod tests {
 
         // No supervisor heartbeat file or socket
         let detected = monitor.detect_supervisor_direct().unwrap();
-        assert!(!detected, "should return false when no supervisor is detected");
+        assert!(
+            !detected,
+            "should return false when no supervisor is detected"
+        );
 
         // Cleanup
         std::env::remove_var("NEEDLE_SUPERVISOR_SOCKET");
@@ -2334,6 +2343,9 @@ mod tests {
 
         // Should detect supervisor via heartbeat file first (even if socket also exists)
         let detected = monitor.detect_supervisor_direct().unwrap();
-        assert!(detected, "should detect supervisor via heartbeat (checked first)");
+        assert!(
+            detected,
+            "should detect supervisor via heartbeat (checked first)"
+        );
     }
 }

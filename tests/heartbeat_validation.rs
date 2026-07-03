@@ -5,7 +5,7 @@
 //! 2. File contains worker ID and last refresh timestamp
 //! 3. File updates every ~heartbeat_interval_secs (30s by default)
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 #[tokio::test]
@@ -146,12 +146,12 @@ async fn heartbeat_contains_required_fields() {
     let age = chrono::Utc::now()
         .signed_duration_since(data.last_heartbeat)
         .num_seconds();
-    assert!(age >= 0 && age < 5, "last_heartbeat should be recent");
+    assert!((0..5).contains(&age), "last_heartbeat should be recent");
 
     monitor.stop();
 }
 
-fn test_config(heartbeat_dir: &PathBuf) -> needle::config::Config {
+fn test_config(heartbeat_dir: &Path) -> needle::config::Config {
     let mut config = needle::config::Config::default();
     config.workspace.home = heartbeat_dir
         .parent()

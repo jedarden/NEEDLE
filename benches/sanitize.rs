@@ -68,7 +68,7 @@ fn latency_threshold_ms() -> u128 {
     std::env::var("SANITIZER_LATENCY_THRESHOLD_MS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(|| {
+        .unwrap_or({
             // Default threshold: 10ms for release builds, 500ms for debug builds.
             // This matches the existing sanitizer_performance test in src/sanitize/mod.rs.
             if cfg!(debug_assertions) {
