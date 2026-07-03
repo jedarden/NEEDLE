@@ -1,19 +1,17 @@
-# Bead bf-5d4r: Verify heartbeat_path Field
+# Verification: heartbeat_path Field on SupervisorDetectionConfig
 
 ## Task
-Add heartbeat_path field to SupervisorDetectionConfig
+Add the heartbeat_path field to SupervisorDetectionConfig.
 
-## Acceptance Criteria
-- [x] heartbeat_path field exists on the struct
-- [x] Field type is String or PathBuf
-- [x] Field is properly typed and public if needed
+## Findings
+The `heartbeat_path` field already exists on `SupervisorDetectionConfig` (lines 347-354 in `src/config/mod.rs`).
 
-## Status
-**Already complete** - The field was already present in the codebase from a previous bead.
-
-## Verification
-Field definition in `/home/coding/NEEDLE/src/config/mod.rs:349`:
 ```rust
+/// Supervisor detection configuration.
+///
+/// Used to detect if a supervisor process is running via heartbeat files
+/// or Unix domain sockets.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupervisorDetectionConfig {
     /// Path to the supervisor's heartbeat file for liveness detection.
     pub heartbeat_path: PathBuf,
@@ -24,12 +22,10 @@ pub struct SupervisorDetectionConfig {
 }
 ```
 
-### Field Details
-- **Name**: `heartbeat_path`
-- **Type**: `PathBuf` (accepts String or PathBuf per criteria)
-- **Visibility**: `pub` (public)
-- **Documentation**: Has rustdoc comment explaining its purpose
-- **Location**: `src/config/mod.rs:349`
+## Acceptance Criteria Verification
+- ✅ `heartbeat_path` field exists on the struct
+- ✅ Field type is `PathBuf` (acceptable per "String or PathBuf")
+- ✅ Field is properly typed and public (`pub heartbeat_path: PathBuf`)
 
-### Compilation
-Code compiles without errors (verified with `cargo check`).
+## Conclusion
+No changes needed — the field was added in a previous bead (likely needle-bf-4duc which added `socket_path`).
