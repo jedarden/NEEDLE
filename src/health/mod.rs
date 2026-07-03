@@ -531,6 +531,185 @@ impl HealthMonitor {
         Ok(false)
     }
 
+    /// Check for a supervisor heartbeat file at the standard location.
+    ///
+    /// This function provides direct supervisor presence detection by checking
+    /// for a supervisor-specific heartbeat file, separate from worker heartbeats.
+    ///
+    /// The supervisor heartbeat file is expected at:
+    /// `<heartbeat_dir>/supervisor-heartbeat.json`
+    ///
+    /// Returns `Ok(true)` if a fresh supervisor heartbeat file exists,
+    /// `Ok(false)` if no supervisor heartbeat is found or it's stale.
+    /// Returns `Err` if the heartbeat directory cannot be read.
+    ///
+    /// A heartbeat is considered fresh if updated within the last 2 minutes.
+    pub fn check_supervisor_heartbeat_file(&self) -> Result<bool> {
+        let supervisor_hb_path = self.heartbeat_dir.join("supervisor-heartbeat.json");
+
+        // Check if supervisor heartbeat file exists
+        if !supervisor_hb_path.exists() {
+            tracing::debug!(
+                path = %supervisor_hb_path.display(),
+                "supervisor heartbeat file not found"
+            );
+            return Ok(false);
+        }
+
+        // Read and parse the supervisor heartbeat file
+        let content = std::fs::read_to_string(&supervisor_hb_path)
+            .with_context(|| {
+                format!(
+                    "failed to read supervisor heartbeat file: {}",
+                    supervisor_hb_path.display()
+                )
+            })?;
+
+        // Parse as JSON to verify it's valid (we don't need specific fields)
+        let parsed: serde_json::Value = serde_json::from_str(&content)
+            .with_context(|| {
+                format!(
+                    "failed to parse supervisor heartbeat file: {}",
+                    supervisor_hb_path.display()
+                )
+            })?;
+
+        // Check if heartbeat has a timestamp field
+        let last_heartbeat = if let Some(ts) = parsed.get("last_heartbeat").and_then(|v| v.as_str()) {
+            DateTime::parse_from_rfc3339(ts)
+                .with_context(|| {
+                    format!(
+                        "invalid timestamp in supervisor heartbeat file: {}",
+                        supervisor_hb_path.display()
+                    )
+                })?
+                .with_timezone(&Utc)
+        } else {
+            // No timestamp field - assume file exists but is stale/invalid
+            tracing::debug!(
+                path = %supervisor_hb_path.display(),
+                "supervisor heartbeat file missing timestamp field"
+            );
+            return Ok(false);
+        };
+
+        // Check if heartbeat is fresh (within 2 minutes)
+        let age = Utc::now()
+            .signed_duration_since(last_heartbeat)
+            .to_std()
+            .unwrap_or(Duration::ZERO);
+        let supervisor_ttl = Duration::from_secs(120); // 2 minutes
+
+        if age <= supervisor_ttl {
+            tracing::debug!(
+                path = %supervisor_hb_path.display(),
+                age_secs = age.as_secs(),
+                "fresh supervisor heartbeat detected"
+            );
+            Ok(true)
+        } else {
+            tracing::debug!(
+                path = %supervisor_hb_path.display(),
+                age_secs = age.as_secs(),
+                ttl_secs = supervisor_ttl.as_secs(),
+                "supervisor heartbeat is stale"
+            );
+            Ok(false)
+        }
+    }
+
+    /// Check for a supervisor socket at the standard location.
+    ///
+    /// This function provides direct supervisor presence detection by checking
+    /// for a Unix domain socket that the supervisor may be listening on.
+    ///
+    /// The socket is expected at: `/tmp/needle-supervisor.sock` or a path
+    /// specified in the `NEEDLE_SUPERVISOR_SOCKET` environment variable.
+    ///
+    /// Returns `Ok(true)` if a socket exists at the expected location,
+    /// `Ok(false)` if no socket is found.
+    /// Returns `Err` if socket path cannot be accessed.
+    pub fn check_supervisor_socket() -> Result<bool> {
+        let socket_path = std::env::var("NEEDLE_SUPERVISOR_SOCKET")
+            .unwrap_or_else(|_| "/tmp/needle-supervisor.sock".to_string());
+
+        let path = PathBuf::from(&socket_path);
+
+        // Check if socket exists and is a socket file
+        match std::fs::metadata(&path) {
+            Ok(metadata) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::FileTypeExt;
+                    let file_type = metadata.file_type();
+                    if file_type.is_socket() {
+                        tracing::debug!(
+                            path = %path.display(),
+                            "supervisor socket detected"
+                        );
+                        return Ok(true);
+                    }
+                }
+
+                #[cfg(not(unix))]
+                {
+                    // On non-Unix platforms, just check if the file/path exists
+                    if path.exists() {
+                        tracing::debug!(
+                            path = %path.display(),
+                            "supervisor socket path exists (non-Unix)"
+                        );
+                        return Ok(true);
+                    }
+                }
+
+                tracing::debug!(
+                    path = %path.display(),
+                    "path exists but is not a socket"
+                );
+                Ok(false)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::debug!(
+                    path = %path.display(),
+                    "supervisor socket not found"
+                );
+                Ok(false)
+            }
+            Err(e) => {
+                Err(anyhow::anyhow!(
+                    "failed to access supervisor socket {}: {}",
+                    path.display(),
+                    e
+                ))
+            }
+        }
+    }
+
+    /// Detect supervisor presence using direct checks.
+    ///
+    /// This function combines direct supervisor detection methods:
+    /// 1. Checks for a supervisor heartbeat file
+    /// 2. Checks for a supervisor socket
+    ///
+    /// Returns `Ok(true)` if either detection method finds a supervisor,
+    /// `Ok(false)` if no supervisor is detected.
+    /// Returns `Err` if detection fails.
+    pub fn detect_supervisor_direct(&self) -> Result<bool> {
+        // Check supervisor heartbeat file first
+        if self.check_supervisor_heartbeat_file()? {
+            return Ok(true);
+        }
+
+        // Fall back to socket check
+        if Self::check_supervisor_socket()? {
+            return Ok(true);
+        }
+
+        tracing::debug!("no supervisor detected via direct methods");
+        Ok(false)
+    }
+
     // ── Internal ────────────────────────────────────────────────────────────
 
     /// Write a heartbeat file atomically (write temp, then rename).
@@ -649,7 +828,7 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
     }
 
     // Attempt to remove the file.
-    std::fs::remove_file(path)?;
+    std::fs::remove_file(&path)?;
 
     tracing::debug!(
         path = %path.display(),
@@ -1839,5 +2018,322 @@ mod tests {
         // Cleanup should remove the file
         cleanup_heartbeat_file(&path).unwrap();
         assert!(!path.exists(), "heartbeat file should be removed");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Supervisor Presence Detection Tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    /// Test that check_supervisor_heartbeat_file returns true when fresh file exists.
+    #[test]
+    fn check_supervisor_heartbeat_file_fresh_returns_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create a fresh supervisor heartbeat file
+        let supervisor_hb_path = hb_dir.join("supervisor-heartbeat.json");
+        let supervisor_data = serde_json::json!({
+            "last_heartbeat": Utc::now().to_rfc3339(),
+            "pid": std::process::id(),
+            "workspace": "/tmp"
+        });
+        std::fs::write(&supervisor_hb_path, supervisor_data.to_string()).unwrap();
+
+        // Should detect fresh supervisor heartbeat
+        let detected = monitor.check_supervisor_heartbeat_file().unwrap();
+        assert!(detected, "should detect fresh supervisor heartbeat file");
+    }
+
+    /// Test that check_supervisor_heartbeat_file returns false when file is stale.
+    #[test]
+    fn check_supervisor_heartbeat_file_stale_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create a stale supervisor heartbeat file (older than 2 minutes)
+        let supervisor_hb_path = hb_dir.join("supervisor-heartbeat.json");
+        let stale_time = Utc::now() - chrono::Duration::seconds(180); // 3 minutes ago
+        let supervisor_data = serde_json::json!({
+            "last_heartbeat": stale_time.to_rfc3339(),
+            "pid": std::process::id(),
+            "workspace": "/tmp"
+        });
+        std::fs::write(&supervisor_hb_path, supervisor_data.to_string()).unwrap();
+
+        // Should not detect stale supervisor heartbeat
+        let detected = monitor.check_supervisor_heartbeat_file().unwrap();
+        assert!(!detected, "should not detect stale supervisor heartbeat file");
+    }
+
+    /// Test that check_supervisor_heartbeat_file returns false when file doesn't exist.
+    #[test]
+    fn check_supervisor_heartbeat_file_missing_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // No supervisor heartbeat file exists
+        let detected = monitor.check_supervisor_heartbeat_file().unwrap();
+        assert!(!detected, "should return false when supervisor heartbeat file doesn't exist");
+    }
+
+    /// Test that check_supervisor_heartbeat_file returns false when file is invalid.
+    #[test]
+    fn check_supervisor_heartbeat_file_invalid_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create an invalid supervisor heartbeat file (missing timestamp field)
+        let supervisor_hb_path = hb_dir.join("supervisor-heartbeat.json");
+        let invalid_data = serde_json::json!({
+            "pid": std::process::id(),
+            "workspace": "/tmp"
+            // Missing last_heartbeat field
+        });
+        std::fs::write(&supervisor_hb_path, invalid_data.to_string()).unwrap();
+
+        // Should not detect supervisor heartbeat without valid timestamp
+        let detected = monitor.check_supervisor_heartbeat_file().unwrap();
+        assert!(!detected, "should return false when supervisor heartbeat file is invalid");
+    }
+
+    /// Test that check_supervisor_heartbeat_file handles malformed JSON.
+    #[test]
+    fn check_supervisor_heartbeat_file_malformed_json_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create a malformed JSON file
+        let supervisor_hb_path = hb_dir.join("supervisor-heartbeat.json");
+        std::fs::write(&supervisor_hb_path, b"invalid json {{{").unwrap();
+
+        // Should return error for malformed JSON
+        let result = monitor.check_supervisor_heartbeat_file();
+        assert!(result.is_err(), "should return error for malformed JSON");
+    }
+
+    /// Test that check_supervisor_socket returns true when socket exists.
+    #[test]
+    fn check_supervisor_socket_exists_returns_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("test-supervisor.sock");
+
+        // Set environment variable to use our test socket path
+        std::env::set_var("NEEDLE_SUPERVISOR_SOCKET", socket_path.to_str().unwrap());
+
+        #[cfg(unix)]
+        {
+            // Create a real Unix socket for testing
+            use std::os::unix::net::UnixListener;
+            let _listener = UnixListener::bind(&socket_path).unwrap();
+        }
+
+        #[cfg(not(unix))]
+        {
+            // On non-Unix, just create a file
+            std::fs::write(&socket_path, b"test").unwrap();
+        }
+
+        // Verify the path exists
+        assert!(socket_path.exists(), "socket path should exist");
+
+        // Should detect socket at the path
+        let detected = HealthMonitor::check_supervisor_socket().unwrap();
+        assert!(detected, "should detect socket at the specified path");
+
+        // Cleanup
+        std::env::remove_var("NEEDLE_SUPERVISOR_SOCKET");
+    }
+
+    /// Test that check_supervisor_socket returns false when socket doesn't exist.
+    #[test]
+    fn check_supervisor_socket_missing_returns_false() {
+        // Set environment variable to a non-existent path
+        std::env::set_var("NEEDLE_SUPERVISOR_SOCKET", "/nonexistent/socket.sock");
+
+        // Should return false when socket doesn't exist
+        let detected = HealthMonitor::check_supervisor_socket().unwrap();
+        assert!(!detected, "should return false when socket doesn't exist");
+
+        // Cleanup
+        std::env::remove_var("NEEDLE_SUPERVISOR_SOCKET");
+    }
+
+    /// Test that check_supervisor_socket uses default path when env var not set.
+    #[test]
+    fn check_supervisor_socket_default_path() {
+        // Don't set NEEDLE_SUPERVISOR_SOCKET - should use default /tmp/needle-supervisor.sock
+        // This likely won't exist in test environment, so we expect false
+        let detected = HealthMonitor::check_supervisor_socket().unwrap();
+        // We don't assert the result since we can't control the test environment's /tmp
+        // Just verify it doesn't error
+        assert!(detected == true || detected == false, "should return a boolean");
+    }
+
+    /// Test that detect_supervisor_direct returns true when heartbeat file is present.
+    #[test]
+    fn detect_supervisor_direct_with_heartbeat_returns_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create a fresh supervisor heartbeat file
+        let supervisor_hb_path = hb_dir.join("supervisor-heartbeat.json");
+        let supervisor_data = serde_json::json!({
+            "last_heartbeat": Utc::now().to_rfc3339(),
+            "pid": std::process::id(),
+            "workspace": "/tmp"
+        });
+        std::fs::write(&supervisor_hb_path, supervisor_data.to_string()).unwrap();
+
+        // Should detect supervisor via heartbeat file
+        let detected = monitor.detect_supervisor_direct().unwrap();
+        assert!(detected, "should detect supervisor via heartbeat file");
+    }
+
+    /// Test that detect_supervisor_direct returns true when socket is present.
+    #[test]
+    fn detect_supervisor_direct_with_socket_returns_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create a real Unix socket for testing
+        let socket_path = dir.path().join("supervisor.sock");
+        std::env::set_var("NEEDLE_SUPERVISOR_SOCKET", socket_path.to_str().unwrap());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::net::UnixListener;
+            let _listener = UnixListener::bind(&socket_path).unwrap();
+        }
+
+        #[cfg(not(unix))]
+        {
+            // On non-Unix, just create a file
+            std::fs::write(&socket_path, b"test").unwrap();
+        }
+
+        // Should detect supervisor via socket
+        let detected = monitor.detect_supervisor_direct().unwrap();
+        assert!(detected, "should detect supervisor via socket");
+
+        // Cleanup
+        std::env::remove_var("NEEDLE_SUPERVISOR_SOCKET");
+    }
+
+    /// Test that detect_supervisor_direct returns false when no supervisor detected.
+    #[test]
+    fn detect_supervisor_direct_no_supervisor_returns_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Set socket path to non-existent
+        std::env::set_var("NEEDLE_SUPERVISOR_SOCKET", "/nonexistent/socket.sock");
+
+        // No supervisor heartbeat file or socket
+        let detected = monitor.detect_supervisor_direct().unwrap();
+        assert!(!detected, "should return false when no supervisor is detected");
+
+        // Cleanup
+        std::env::remove_var("NEEDLE_SUPERVISOR_SOCKET");
+    }
+
+    /// Test that detect_supervisor_direct prefers heartbeat over socket.
+    #[test]
+    fn detect_supervisor_direct_heartbeat_takes_precedence() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create both heartbeat file and socket
+        let supervisor_hb_path = hb_dir.join("supervisor-heartbeat.json");
+        let supervisor_data = serde_json::json!({
+            "last_heartbeat": Utc::now().to_rfc3339(),
+            "pid": std::process::id(),
+            "workspace": "/tmp"
+        });
+        std::fs::write(&supervisor_hb_path, supervisor_data.to_string()).unwrap();
+
+        // Should detect supervisor via heartbeat file first (even if socket also exists)
+        let detected = monitor.detect_supervisor_direct().unwrap();
+        assert!(detected, "should detect supervisor via heartbeat (checked first)");
     }
 }

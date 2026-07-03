@@ -115,7 +115,7 @@ impl Supervisor {
         #[cfg(unix)]
         {
             // Handle SIGINT and SIGTERM
-            let _ = tokio::spawn(async move {
+            std::mem::drop(tokio::spawn(async move {
                 use tokio::signal::unix::{signal, SignalKind};
                 let mut sigint =
                     signal(SignalKind::interrupt()).expect("failed to setup SIGINT handler");
@@ -132,7 +132,7 @@ impl Supervisor {
                         shutdown.store(true, Ordering::SeqCst);
                     }
                 }
-            });
+            }));
         }
 
         #[cfg(not(unix))]
@@ -401,7 +401,7 @@ impl Supervisor {
         let active = self.registry.list().unwrap_or_default();
         let occupied: std::collections::HashSet<String> = active
             .iter()
-            .map(|w| w.id.split('-').last().unwrap_or(&w.id).to_string())
+            .map(|w| w.id.split('-').next_back().unwrap_or(&w.id).to_string())
             .collect();
 
         for name in NATO_ALPHABET {
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn supervisor_config_default_is_valid() {
         let config = SupervisorConfig::default();
-        assert!(config.workspace.exists() || config.workspace == PathBuf::from("."));
+        assert!(config.workspace.exists() || config.workspace == std::path::Path::new("."));
         assert!(config.max_workers > 0);
         assert!(config.poll_interval_secs > 0);
     }

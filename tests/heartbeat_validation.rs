@@ -68,7 +68,6 @@ async fn heartbeat_file_created_on_startup() {
 #[tokio::test]
 async fn heartbeat_refreshes_every_30_seconds() {
     let dir = tempfile::tempdir().unwrap();
-    let hb_dir = dir.path().join("state").join("heartbeats");
 
     let mut config = needle::config::Config::default();
     config.workspace.home = dir.path().to_path_buf();
@@ -109,7 +108,7 @@ async fn heartbeat_refreshes_every_30_seconds() {
     // Verify update happened within expected time window (1-3 seconds)
     let update_interval = (time2 - time1).num_seconds();
     assert!(
-        update_interval >= 1 && update_interval <= 3,
+        (1..=3).contains(&update_interval),
         "heartbeat should update every ~2 seconds (interval), got: {} seconds",
         update_interval
     );
