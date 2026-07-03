@@ -1719,6 +1719,68 @@ pub struct Config {
     pub supervisor: SupervisorConfig,
 }
 
+impl Config {
+    /// Expand all tilde (~) paths to absolute paths using $HOME.
+    ///
+    /// This must be called after deserialization to ensure all paths
+    /// like `~/.needle` are expanded to `/home/user/.needle`.
+    /// Paths without tildes are left unchanged.
+    pub fn expand_tildes(&mut self) {
+        // workspace section
+        self.workspace.default = expand_tilde(&self.workspace.default);
+        self.workspace.home = expand_tilde(&self.workspace.home);
+
+        // agent section
+        self.agent.adapters_dir = expand_tilde(&self.agent.adapters_dir);
+
+        // strands.explore section
+        self.strands.explore.workspace_root = expand_tilde(&self.strands.explore.workspace_root);
+        self.strands.explore.workspaces = expand_tilde_vec(&self.strands.explore.workspaces);
+
+        // strands.weave section
+        self.strands.weave.exclude_workspaces =
+            expand_tilde_vec(&self.strands.weave.exclude_workspaces);
+
+        // strands.splice section
+        self.strands.splice.report_workspace =
+            expand_tilde_option(&self.strands.splice.report_workspace);
+
+        // strands.pulse.scanners[].command paths are strings, not PathBuf, so skip
+
+        // strands.reflect section - no PathBuf fields
+
+        // strands.learning section
+        self.strands.learning.global_learnings_file =
+            expand_tilde(&self.strands.learning.global_learnings_file);
+
+        // telemetry section
+        if let Some(ref mut log_dir) = self.telemetry.file_sink.log_dir {
+            *log_dir = expand_tilde(log_dir);
+        }
+
+        // health section
+        self.health.heartbeat_dir = expand_tilde_option(&self.health.heartbeat_dir);
+
+        // supervisor section
+        self.supervisor.heartbeat_path = expand_tilde_option(&self.supervisor.heartbeat_path);
+        self.supervisor.socket_path = expand_tilde_option(&self.supervisor.socket_path);
+
+        // prompt section
+        self.prompt.context_files = expand_tilde_vec(&self.prompt.context_files);
+
+        // self_modification section
+        self.self_modification.canary_workspace =
+            expand_tilde(&self.self_modification.canary_workspace);
+
+        // prompt.variants[].content_file
+        for variants in self.prompt.variants.values_mut() {
+            for variant in variants {
+                variant.content_file = expand_tilde(&variant.content_file);
+            }
+        }
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Config validation
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1772,12 +1834,15 @@ impl ConfigLoader {
     /// If the file does not exist, returns the default config.
     pub fn load_from_path(path: &Path) -> Result<Config> {
         if !path.exists() {
-            return Ok(Config::default());
+            let mut config = Config::default();
+            config.expand_tildes();
+            return Ok(config);
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
-        let config: Config = serde_yaml::from_str(&text)
+        let mut config: Config = serde_yaml::from_str(&text)
             .with_context(|| format!("invalid YAML in config file: {}", path.display()))?;
+        config.expand_tildes();
         Ok(config)
     }
 
@@ -2027,11 +2092,12 @@ impl ConfigLoader {
                         }
                     }
                     "supervisor.heartbeat_path" => {
-                        config.supervisor.heartbeat_path = Some(PathBuf::from(value));
+                        config.supervisor.heartbeat_path =
+                            Some(expand_tilde(&PathBuf::from(value)));
                         sources.insert(config_path, source);
                     }
                     "supervisor.socket_path" => {
-                        config.supervisor.socket_path = Some(PathBuf::from(value));
+                        config.supervisor.socket_path = Some(expand_tilde(&PathBuf::from(value)));
                         sources.insert(config_path, source);
                     }
                     _ => {
@@ -2244,6 +2310,42 @@ fn dirs_or_home(relative: &str) -> PathBuf {
     } else {
         PathBuf::from("/tmp").join(relative)
     }
+}
+
+/// Expand a leading tilde (~) to the user's home directory.
+///
+/// - `~/path` → `$HOME/path`
+/// - `~` → `$HOME`
+/// - `/absolute/path` → unchanged
+/// - `relative/path` → unchanged
+///
+/// Returns the path unchanged if HOME is not set.
+fn expand_tilde(path: &Path) -> PathBuf {
+    let path_str = path.as_os_str().to_str().unwrap_or("");
+
+    // Check if path starts with ~/ or is exactly ~
+    if path_str == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+    } else if let Some(rest) = path_str.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+
+    // No tilde or HOME not set, return as-is
+    path.to_path_buf()
+}
+
+/// Expand tildes in a vector of PathBufs.
+fn expand_tilde_vec(paths: &[PathBuf]) -> Vec<PathBuf> {
+    paths.iter().map(|p| expand_tilde(p)).collect()
+}
+
+/// Expand tildes in an optional PathBuf.
+fn expand_tilde_option(path: &Option<PathBuf>) -> Option<PathBuf> {
+    path.as_ref().map(|p| expand_tilde(p))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

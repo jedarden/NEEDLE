@@ -119,16 +119,38 @@ impl MitosisEvaluator {
                     ),
                 });
             }
-        } else if self.config.first_failure_only && failure_count != 1 {
-            // Check if this is first failure (failure-count:1).
-            tracing::debug!(
-                bead_id = %bead.id,
-                failure_count,
-                "mitosis skipped: not first failure"
-            );
-            return Ok(MitosisResult::Skipped {
-                reason: format!("not first failure (count={})", failure_count),
-            });
+        } else {
+            // Check if we should fire based on first_failure_only or repeat_interval.
+            let should_fire = if self.config.repeat_interval > 0 {
+                // repeat_interval mode: fire at 1, 1+N, 1+2N, ...
+                // But skip beads that are already mitosis children (have mitosis-depth label).
+                let has_mitosis_depth_label =
+                    bead.labels.iter().any(|l| l.starts_with("mitosis-depth:"));
+                let is_repeat_tick =
+                    failure_count > 1 && (failure_count - 1) % self.config.repeat_interval == 0;
+
+                // Fire at first failure OR at repeat interval ticks (if not a mitosis child)
+                failure_count == 1 || (is_repeat_tick && !has_mitosis_depth_label)
+            } else {
+                // first_failure_only mode: only fire at failure_count == 1
+                !self.config.first_failure_only || failure_count == 1
+            };
+
+            if !should_fire {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    failure_count,
+                    first_failure_only = self.config.first_failure_only,
+                    repeat_interval = self.config.repeat_interval,
+                    "mitosis skipped: not at trigger point"
+                );
+                return Ok(MitosisResult::Skipped {
+                    reason: format!(
+                        "not at trigger point (count={}, first_failure_only={}, repeat_interval={})",
+                        failure_count, self.config.first_failure_only, self.config.repeat_interval
+                    ),
+                });
+            }
         }
 
         // Resolve the agent adapter.
@@ -785,6 +807,7 @@ End of response."#;
             enabled: false,
             first_failure_only: true,
             force_failure_threshold: 0,
+            repeat_interval: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -817,6 +840,7 @@ End of response."#;
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
+            repeat_interval: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -866,6 +890,7 @@ End of response."#;
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
+            repeat_interval: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -911,6 +936,7 @@ End of response."#;
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
+            repeat_interval: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -952,6 +978,7 @@ End of response."#;
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
+            repeat_interval: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -987,5 +1014,189 @@ End of response."#;
         let adapters: HashMap<String, crate::dispatch::AgentAdapter> = HashMap::new();
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         Dispatcher::with_adapters(adapters, telemetry, 60)
+    }
+
+    // ── repeat_interval tests ──
+
+    #[tokio::test]
+    async fn repeat_interval_triggers_at_correct_counts() {
+        // repeat_interval = 50 should fire at 1, 51, 101, 151, ...
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: false,
+            force_failure_threshold: 0,
+            repeat_interval: 50,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // Test failure_count = 1 (should fire)
+        let store = MockStore::new().with_labels(vec!["failure-count:1".to_string()]);
+        let bead = test_bead();
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+        // Should not skip (adapter not found is a different skip, but we check the gate passes)
+        assert!(
+            !matches!(result, MitosisResult::Skipped { reason } if reason.contains("not at trigger point")),
+            "failure_count=1 should trigger mitosis"
+        );
+
+        // Test failure_count = 51 (should fire: (51-1) % 50 == 0)
+        let store = MockStore::new().with_labels(vec!["failure-count:51".to_string()]);
+        let bead = test_bead();
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+        assert!(
+            !matches!(result, MitosisResult::Skipped { reason } if reason.contains("not at trigger point")),
+            "failure_count=51 should trigger mitosis (1+50)"
+        );
+
+        // Test failure_count = 101 (should fire: (101-1) % 50 == 0)
+        let store = MockStore::new().with_labels(vec!["failure-count:101".to_string()]);
+        let bead = test_bead();
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+        assert!(
+            !matches!(result, MitosisResult::Skipped { reason } if reason.contains("not at trigger point")),
+            "failure_count=101 should trigger mitosis (1+2*50)"
+        );
+
+        // Test failure_count = 25 (should NOT fire: not 1, 1+50, 1+100, ...)
+        let store = MockStore::new().with_labels(vec!["failure-count:25".to_string()]);
+        let bead = test_bead();
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, MitosisResult::Skipped { reason } if reason.contains("not at trigger point")),
+            "failure_count=25 should NOT trigger mitosis"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeat_interval_skips_mitosis_depth_beads() {
+        // Beads with mitosis-depth:1 label should be skipped even at repeat ticks
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: false,
+            force_failure_threshold: 0,
+            repeat_interval: 50,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // Bead with mitosis-depth:1 label at failure_count = 51 (repeat tick)
+        let store = MockStore::new().with_labels(vec![
+            "failure-count:51".to_string(),
+            "mitosis-depth:1".to_string(),
+        ]);
+        let mut bead = test_bead();
+        bead.labels = vec![
+            "failure-count:51".to_string(),
+            "mitosis-depth:1".to_string(),
+        ];
+
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result, MitosisResult::Skipped { .. }),
+            "bead with mitosis-depth:1 should be skipped even at repeat tick"
+        );
+    }
+
+    #[tokio::test]
+    async fn repeat_interval_zero_preserves_first_failure_only() {
+        // repeat_interval = 0 should behave like first_failure_only
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // Test failure_count = 1 (should fire)
+        let store = MockStore::new().with_labels(vec!["failure-count:1".to_string()]);
+        let bead = test_bead();
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+        assert!(
+            !matches!(result, MitosisResult::Skipped { reason } if reason.contains("not at trigger point")),
+            "failure_count=1 should trigger mitosis"
+        );
+
+        // Test failure_count = 2 (should NOT fire - first_failure_only mode)
+        let store = MockStore::new().with_labels(vec!["failure-count:2".to_string()]);
+        let bead = test_bead();
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, MitosisResult::Skipped { reason } if reason.contains("not at trigger point")),
+            "failure_count=2 should NOT trigger mitosis (first_failure_only mode)"
+        );
     }
 }
