@@ -609,6 +609,58 @@ impl Drop for HealthMonitor {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Utility functions
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Clean up a heartbeat file by removing it from disk.
+///
+/// This function removes the heartbeat file at the given path. It returns
+/// `Ok(())` if the file is successfully removed or if it doesn't exist.
+/// It returns an error only if removal fails for an unexpected reason.
+///
+/// # Arguments
+///
+/// * `path` - Path to the heartbeat file to remove
+///
+/// # Returns
+///
+/// * `Ok(())` - If the file was removed or doesn't exist
+/// * `Err(e)` - If removal fails for an unexpected reason
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use needle::health::cleanup_heartbeat_file;
+///
+/// let path = Path::new("/tmp/heartbeat.json");
+/// cleanup_heartbeat_file(path)?;
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
+    // Check if the file exists before attempting removal.
+    // This allows us to return Ok(()) for non-existent files rather than an error.
+    if !path.exists() {
+        tracing::debug!(
+            path = %path.display(),
+            "heartbeat file does not exist, skipping cleanup"
+        );
+        return Ok(());
+    }
+
+    // Attempt to remove the file.
+    std::fs::remove_file(path)
+        .with_context(|| format!("failed to remove heartbeat file: {}", path.display()))?;
+
+    tracing::debug!(
+        path = %path.display(),
+        "heartbeat file removed successfully"
+    );
+
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // StalePeer
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1698,5 +1750,95 @@ mod tests {
             !detected,
             "should return false when heartbeat directory doesn't exist"
         );
+    }
+
+    /// Test that cleanup_heartbeat_file removes an existing file.
+    #[test]
+    fn cleanup_heartbeat_file_removes_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-heartbeat.json");
+
+        // Create the file
+        std::fs::write(&path, b"test data").unwrap();
+        assert!(path.exists(), "file should exist before cleanup");
+
+        // Cleanup should succeed and remove the file
+        cleanup_heartbeat_file(&path).unwrap();
+        assert!(!path.exists(), "file should not exist after cleanup");
+    }
+
+    /// Test that cleanup_heartbeat_file returns Ok when file doesn't exist.
+    #[test]
+    fn cleanup_heartbeat_file_ok_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent-heartbeat.json");
+
+        assert!(!path.exists(), "file should not exist");
+
+        // Cleanup should succeed even when file doesn't exist
+        let result = cleanup_heartbeat_file(&path);
+        assert!(
+            result.is_ok(),
+            "cleanup should succeed when file doesn't exist"
+        );
+    }
+
+    /// Test that cleanup_heartbeat_file propagates errors when removal fails.
+    #[test]
+    fn cleanup_heartbeat_file_propagates_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-heartbeat.json");
+
+        // Create a directory at the path (removing a directory will fail)
+        std::fs::create_dir(&path).unwrap();
+
+        // Attempting to cleanup a directory instead of a file should fail
+        let result = cleanup_heartbeat_file(&path);
+        assert!(
+            result.is_err(),
+            "cleanup should fail when path is a directory"
+        );
+
+        // Verify the error message is descriptive
+        let err_msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            err_msg.contains("failed to remove heartbeat file") || err_msg.contains("directory"),
+            "error message should mention failure: {}",
+            err_msg
+        );
+    }
+
+    /// Test that cleanup_heartbeat_file works with the actual heartbeat path format.
+    #[test]
+    fn cleanup_heartbeat_file_with_heartbeat_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let path = hb_dir.join("claude-code-glm-5-test-worker.json");
+
+        // Create a heartbeat file
+        let hb = HeartbeatData {
+            worker_id: "test-worker".to_string(),
+            qualified_id: "claude-code-glm-5-test-worker".to_string(),
+            pid: std::process::id(),
+            state: WorkerState::Selecting,
+            current_bead: None,
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now(),
+            started_at: Utc::now(),
+            beads_processed: 0,
+            session: "test-worker".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
+            heartbeat_file: None,
+        };
+        std::fs::write(&path, serde_json::to_string(&hb).unwrap()).unwrap();
+        assert!(path.exists(), "heartbeat file should exist");
+
+        // Cleanup should remove the file
+        cleanup_heartbeat_file(&path).unwrap();
+        assert!(!path.exists(), "heartbeat file should be removed");
     }
 }
