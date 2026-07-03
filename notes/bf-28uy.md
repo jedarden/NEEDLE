@@ -5,11 +5,11 @@ Date: 2026-07-03
 ## Task
 Verify syntax compiles correctly for the supervisor config structure implementation (bead bf-hkhz).
 
-## Verification Results
+## Verification Results (2026-07-03)
 
 ### cargo check
 ```bash
-cargo check
+cargo check --all-targets
 ```
 ✓ **PASSED** - No compilation errors (exit code 0)
 
