@@ -1024,6 +1024,16 @@ impl BfCliBeadStore {
 
     /// Parse a JSON array of beads from bf output.
     /// Handles both JSON array format `[{...},{...}]` and NDJSON (one object per line).
+    ///
+    /// A single unparseable NDJSON line (e.g. a bead carrying a status value
+    /// this build of NEEDLE doesn't yet recognize) is logged loudly and
+    /// skipped rather than failing the entire list — one bad record used to
+    /// take down `list_all()` for every workspace it appeared in, which broke
+    /// Weave/Mend/Unravel/Knot (all of which need the full bead list) on
+    /// every single cycle. This is NOT the same "silently treat as empty" v1
+    /// bug the module doc warns about: that bug swallowed failures and
+    /// returned nothing; this still surfaces every bad record via a loud
+    /// warning, it just doesn't discard the records that DID parse.
     fn parse_beads(json: &str, context: &str) -> Result<Vec<Bead>> {
         let trimmed = json.trim();
         if trimmed.is_empty() {
@@ -1041,9 +1051,18 @@ impl BfCliBeadStore {
             if line.is_empty() {
                 continue;
             }
-            let bead: Bead = serde_json::from_str(line)
-                .with_context(|| format!("NDJSON parse error from {context}: {line}"))?;
-            beads.push(bead);
+            match serde_json::from_str::<Bead>(line) {
+                Ok(bead) => beads.push(bead),
+                Err(e) => {
+                    tracing::error!(
+                        context = %context,
+                        error = %e,
+                        line = %line,
+                        "NDJSON parse error on one record — skipping this bead, \
+                         keeping the rest of the list intact"
+                    );
+                }
+            }
         }
         Ok(beads)
     }
@@ -1312,6 +1331,41 @@ mod tests {
     fn parse_beads_empty_string_returns_empty() {
         let beads = BrCliBeadStore::parse_beads("", "test").unwrap();
         assert!(beads.is_empty());
+    }
+
+    fn minimal_bead_json(id: &str, status: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","title":"Test bead","description":"desc","priority":2,"status":"{status}","assignee":null,"source_repo":"/home/coding/NEEDLE","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}}"#
+        )
+    }
+
+    #[test]
+    fn bf_parse_beads_accepts_completed_status() {
+        // bf has been observed emitting "completed" for some done beads. A
+        // single such record must not fail the whole list — see
+        // needle-weave-completed-status.
+        let json = minimal_bead_json("bf-1", "completed");
+        let beads = BfCliBeadStore::parse_beads(&json, "test").unwrap();
+        assert_eq!(beads.len(), 1);
+        assert_eq!(beads[0].status, crate::types::BeadStatus::Done);
+    }
+
+    #[test]
+    fn bf_parse_beads_skips_one_bad_line_keeps_the_rest() {
+        // A genuinely unparseable record (unknown field type, corrupt line,
+        // etc.) must not take down every other bead in the same `bf list
+        // --json` call — that was the root cause of Weave/Mend/Unravel/Knot
+        // silently erroring on every cycle for any workspace with one such
+        // record. The bad line is skipped and loudly logged, not silently
+        // dropped from view entirely (that would repeat the v1 "silent
+        // empty" bug this module's doc comment warns about).
+        let good_one = minimal_bead_json("bf-1", "open");
+        let good_two = minimal_bead_json("bf-2", "closed");
+        let bad = r#"{"id":"bf-bad","status":"open" this is not valid json"#;
+        let json = format!("{good_one}\n{bad}\n{good_two}");
+        let beads = BfCliBeadStore::parse_beads(&json, "test").unwrap();
+        let ids: Vec<_> = beads.iter().map(|b| b.id.to_string()).collect();
+        assert_eq!(ids, vec!["bf-1", "bf-2"]);
     }
 
     #[test]
