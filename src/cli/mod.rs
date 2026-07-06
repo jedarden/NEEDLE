@@ -186,6 +186,10 @@ pub enum CliCommand {
         #[arg(long)]
         get: Option<String>,
 
+        /// Set a config key to a value (e.g., --set KEY VALUE or --set KEY=VALUE).
+        #[arg(long, num_args = 0.., value_name = "KEY=VALUE")]
+        set: Option<Vec<String>>,
+
         /// Dump all resolved config values.
         #[arg(long)]
         dump: bool,
@@ -377,6 +381,7 @@ pub fn run() -> Result<()> {
         } => cmd_logs(follow, filter, since, until, format),
         CliCommand::ConfigCmd {
             get,
+            set: _,
             dump,
             show_source,
         } => cmd_config(get, dump, show_source),
