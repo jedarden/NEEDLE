@@ -105,6 +105,8 @@ pub struct HealthMonitor {
     shared_state: Arc<Mutex<SharedHeartbeatState>>,
     shutdown: Arc<AtomicBool>,
     emitter_handle: Option<std::thread::JoinHandle<()>>,
+    /// Path to this worker's heartbeat file (computed during construction).
+    heartbeat_path: PathBuf,
 }
 
 impl HealthMonitor {
@@ -134,6 +136,7 @@ impl HealthMonitor {
         let heartbeat_interval = Duration::from_secs(config.health.heartbeat_interval_secs);
         let heartbeat_ttl = Duration::from_secs(config.health.heartbeat_ttl_secs);
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);
+        let heartbeat_path = heartbeat_dir.join(format!("{}.json", qualified_id));
 
         HealthMonitor {
             heartbeat_dir,
@@ -152,6 +155,7 @@ impl HealthMonitor {
             })),
             shutdown: shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             emitter_handle: None,
+            heartbeat_path,
         }
     }
 
@@ -295,9 +299,11 @@ impl HealthMonitor {
     ///
     /// Keyed by fully-qualified identity (`{adapter}-{worker_id}`) to prevent
     /// collisions when workers from different adapter pools share a NATO name.
+    ///
+    /// This path is computed during construction and stored for efficient access
+    /// by the shutdown handler.
     pub fn heartbeat_path(&self) -> PathBuf {
-        self.heartbeat_dir
-            .join(format!("{}.json", self.qualified_id))
+        self.heartbeat_path.clone()
     }
 
     /// The fully-qualified identity (`{adapter}-{worker_id}`).
@@ -1757,6 +1763,86 @@ mod tests {
         assert!(
             !path.exists(),
             "heartbeat file must be removed even when worker is dropped without calling stop()"
+        );
+    }
+
+    /// Test that heartbeat path is computed during construction and remains consistent.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Path is computed during HealthMonitor construction
+    /// - Path is accessible via heartbeat_path() method
+    /// - Path is consistent throughout the monitor lifecycle
+    /// - Path is correctly formatted: {heartbeat_dir}/{qualified_id}.json
+    ///
+    /// This is the first step in ensuring the shutdown handler has access to
+    /// the heartbeat file path for cleanup on graceful shutdown.
+    #[tokio::test]
+    async fn heartbeat_path_computed_during_construction() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let mut config = Config::default();
+        config.workspace.home = dir.path().to_path_buf();
+        config.health.heartbeat_interval_secs = 1;
+        config.health.heartbeat_ttl_secs = 5;
+
+        // Create monitor with a specific adapter and worker name
+        config.agent.default = "claude-code-glm-5".to_string();
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // ACCEPTANCE CRITERION 1: Path is computed during construction
+        let path = monitor.heartbeat_path();
+
+        // ACCEPTANCE CRITERION 2: Path is correctly formatted
+        // Expected: {heartbeat_dir}/{qualified_id}.json
+        let expected_path = hb_dir.join("claude-code-glm-5-test-worker.json");
+        assert_eq!(
+            path,
+            expected_path,
+            "heartbeat path must be correctly formatted as {{heartbeat_dir}}/{{qualified_id}}.json"
+        );
+
+        // ACCEPTANCE CRITERION 3: Path is consistent when called multiple times
+        let path2 = monitor.heartbeat_path();
+        assert_eq!(
+            path, path2,
+            "heartbeat path must remain consistent across multiple calls"
+        );
+
+        // ACCEPTANCE CRITERION 4: Path matches qualified_id pattern
+        // The path should use the qualified_id (adapter-worker_name), not just worker_name
+        assert!(
+            path.to_str().unwrap().contains("claude-code-glm-5-test-worker"),
+            "heartbeat path must use qualified_id (adapter-worker_name)"
+        );
+
+        // ACCEPTANCE CRITERION 5: Path is accessible throughout lifecycle
+        // Start emitter to verify path works for actual file creation
+        let mut monitor = monitor;
+        monitor.start_emitter().unwrap();
+        assert!(
+            path.exists(),
+            "heartbeat file must be created at the computed path"
+        );
+
+        // Verify the path can be used for cleanup (as shutdown handler would)
+        monitor.stop();
+        assert!(
+            !path.exists(),
+            "heartbeat file must be removed from the computed path during shutdown"
+        );
+
+        // After stop, the path should still be consistent (even though file is gone)
+        let final_path = monitor.heartbeat_path();
+        assert_eq!(
+            path, final_path,
+            "heartbeat path must remain consistent even after shutdown"
         );
     }
 
