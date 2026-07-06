@@ -294,7 +294,14 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     if text.len() <= max_chars {
         text.to_string()
     } else {
-        format!("{}...", &text[..max_chars - 3])
+        let cut = max_chars.saturating_sub(3);
+        let boundary = text
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= cut)
+            .last()
+            .unwrap_or(0);
+        format!("{}...", &text[..boundary])
     }
 }
 
@@ -1020,6 +1027,16 @@ mod tests {
     use std::fs;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[test]
+    fn truncate_text_does_not_panic_on_multibyte_char_boundary() {
+        // '→' is 3 bytes (U+2192). With max_chars=5, cut=2, and a naive
+        // byte-offset slice at index 2 would land inside the arrow and panic.
+        assert_eq!(truncate_text("a→b→c", 5), "a...");
+        // Ascii-only behavior is unchanged.
+        assert_eq!(truncate_text("hello world", 8), "hello...");
+        assert_eq!(truncate_text("short", 100), "short");
+    }
 
     #[test]
     fn derive_project_name_unix() {

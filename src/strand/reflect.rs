@@ -1394,7 +1394,13 @@ fn truncate(s: &str, max_chars: usize) -> &str {
     if s.len() <= max_chars {
         s
     } else {
-        &s[..max_chars]
+        let boundary = s
+            .char_indices()
+            .map(|(i, _)| i)
+            .take_while(|&i| i <= max_chars)
+            .last()
+            .unwrap_or(0);
+        &s[..boundary]
     }
 }
 
@@ -1427,6 +1433,19 @@ mod tests {
     #[test]
     fn truncate_long() {
         assert_eq!(truncate("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_does_not_panic_on_multibyte_char_boundary() {
+        // '→' is 3 bytes (U+2192); a naive byte-offset slice at max_chars=1
+        // would land inside it and panic. Must fall back to the nearest
+        // char boundary at or before max_chars instead.
+        assert_eq!(truncate("a→b", 1), "a");
+        assert_eq!(truncate("→→→", 3), "→");
+        assert_eq!(truncate("🌐hello", 4), "🌐");
+        // A budget smaller than the first character's byte length truncates
+        // to empty rather than panicking.
+        assert_eq!(truncate("→→→", 2), "");
     }
 
     #[test]
