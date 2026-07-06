@@ -267,6 +267,50 @@ impl HealthMonitor {
         }
     }
 
+    /// Clean up this worker's heartbeat file by removing it from disk.
+    ///
+    /// This method removes the heartbeat file at `self.heartbeat_path()`.
+    /// It returns `Ok(())` if the file is successfully removed or if it
+    /// doesn't exist. Logs a warning but returns `Ok(())` if removal fails
+    /// so cleanup failures don't prevent shutdown.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Always returns Ok (errors are logged, not returned)
+    pub fn cleanup_heartbeat_file(&self) -> Result<()> {
+        let path = self.heartbeat_path();
+
+        // Check if the file exists before attempting removal.
+        // This allows us to return Ok(()) for non-existent files.
+        if !path.exists() {
+            tracing::debug!(
+                path = %path.display(),
+                "heartbeat file does not exist, skipping cleanup"
+            );
+            return Ok(());
+        }
+
+        // Attempt to remove the file using std::fs::remove_file.
+        match std::fs::remove_file(&path) {
+            Ok(_) => {
+                tracing::debug!(
+                    path = %path.display(),
+                    "heartbeat file removed successfully"
+                );
+            }
+            Err(e) => {
+                // Log the error but don't fail - cleanup is best-effort
+                tracing::warn!(
+                    error = %e,
+                    path = %path.display(),
+                    "failed to remove heartbeat file during cleanup"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Stop the heartbeat emitter and remove this worker's heartbeat file.
     ///
     /// Called on graceful shutdown (STOPPED) and best-effort on ERRORED.
@@ -281,17 +325,11 @@ impl HealthMonitor {
         }
 
         // Remove the heartbeat file (best-effort).
-        let path = self.heartbeat_path();
-        if path.exists() {
-            if let Err(e) = std::fs::remove_file(&path) {
-                tracing::warn!(
-                    error = %e,
-                    path = %path.display(),
-                    "failed to remove heartbeat file on shutdown"
-                );
-            } else {
-                tracing::debug!(path = %path.display(), "heartbeat file removed");
-            }
+        if let Err(e) = self.cleanup_heartbeat_file() {
+            tracing::warn!(
+                error = %e,
+                "failed to remove heartbeat file on shutdown"
+            );
         }
     }
 
@@ -831,12 +869,22 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
     }
 
     // Attempt to remove the file.
-    std::fs::remove_file(path)?;
-
-    tracing::debug!(
-        path = %path.display(),
-        "heartbeat file removed successfully"
-    );
+    match std::fs::remove_file(path) {
+        Ok(_) => {
+            tracing::debug!(
+                path = %path.display(),
+                "heartbeat file removed successfully"
+            );
+        }
+        Err(e) => {
+            // Log the error but don't fail - cleanup is best-effort
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "failed to remove heartbeat file during cleanup"
+            );
+        }
+    }
 
     Ok(())
 }
@@ -2057,29 +2105,30 @@ mod tests {
         );
     }
 
-    /// Test that cleanup_heartbeat_file propagates errors when removal fails.
+    /// Test that cleanup_heartbeat_file logs errors but doesn't fail when removal fails.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Log errors when file removal fails
+    /// - Ensure the function doesn't panic on cleanup failure
+    /// - Continue execution even if cleanup fails
     #[test]
-    fn cleanup_heartbeat_file_propagates_errors() {
+    fn cleanup_heartbeat_file_logs_errors_on_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test-heartbeat.json");
 
         // Create a directory at the path (removing a directory will fail)
         std::fs::create_dir(&path).unwrap();
 
-        // Attempting to cleanup a directory instead of a file should fail
+        // Attempting to cleanup a directory instead of a file should succeed
+        // (errors are logged but not returned)
         let result = cleanup_heartbeat_file(&path);
         assert!(
-            result.is_err(),
-            "cleanup should fail when path is a directory"
+            result.is_ok(),
+            "cleanup should succeed even when removal fails (errors are logged, not returned)"
         );
 
-        // Verify the error message is descriptive
-        let err_msg = result.unwrap_err().to_string().to_lowercase();
-        assert!(
-            err_msg.contains("failed to remove heartbeat file") || err_msg.contains("directory"),
-            "error message should mention failure: {}",
-            err_msg
-        );
+        // The directory should still exist (removal failed, but execution continued)
+        assert!(path.exists(), "directory should still exist after failed cleanup");
     }
 
     /// Test that cleanup_heartbeat_file works with the actual heartbeat path format.
@@ -2446,5 +2495,132 @@ mod tests {
             detected,
             "should detect supervisor via heartbeat (checked first)"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // HealthMonitor::cleanup_heartbeat_file() Tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    /// Test that HealthMonitor::cleanup_heartbeat_file removes an existing file.
+    #[tokio::test]
+    async fn healthmonitor_cleanup_heartbeat_file_removes_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let mut monitor = HealthMonitor::new(
+            config,
+            "cleanup-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Start the emitter to create the heartbeat file
+        monitor.start_emitter().unwrap();
+        let path = monitor.heartbeat_path();
+        assert!(path.exists(), "heartbeat file should exist before cleanup");
+
+        // Cleanup should succeed and remove the file
+        monitor.cleanup_heartbeat_file().unwrap();
+        assert!(
+            !path.exists(),
+            "heartbeat file should not exist after cleanup"
+        );
+
+        monitor.stop();
+    }
+
+    /// Test that HealthMonitor::cleanup_heartbeat_file returns Ok when file doesn't exist.
+    #[tokio::test]
+    async fn healthmonitor_cleanup_heartbeat_file_ok_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "cleanup-missing-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        let path = monitor.heartbeat_path();
+        assert!(!path.exists(), "heartbeat file should not exist");
+
+        // Cleanup should succeed even when file doesn't exist
+        let result = monitor.cleanup_heartbeat_file();
+        assert!(
+            result.is_ok(),
+            "cleanup should succeed when file doesn't exist"
+        );
+        assert!(!path.exists(), "file should still not exist after cleanup");
+    }
+
+    /// Test that HealthMonitor::cleanup_heartbeat_file logs errors but doesn't fail when removal fails.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Log errors when file removal fails
+    /// - Ensure the function doesn't panic on cleanup failure
+    /// - Continue execution even if cleanup fails
+    #[tokio::test]
+    async fn healthmonitor_cleanup_heartbeat_file_logs_errors_on_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "cleanup-error-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        let path = monitor.heartbeat_path();
+
+        // Create a directory at the path (removing a directory will fail)
+        std::fs::create_dir(&path).unwrap();
+
+        // Attempting to cleanup a directory instead of a file should succeed
+        // (errors are logged but not returned)
+        let result = monitor.cleanup_heartbeat_file();
+        assert!(
+            result.is_ok(),
+            "cleanup should succeed even when removal fails (errors are logged, not returned)"
+        );
+
+        // The directory should still exist (removal failed, but execution continued)
+        assert!(path.exists(), "directory should still exist after failed cleanup");
+    }
+
+    /// Test that HealthMonitor::cleanup_heartbeat_file works after emitter is running.
+    #[tokio::test]
+    async fn healthmonitor_cleanup_heartbeat_file_with_running_emitter() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let mut monitor = HealthMonitor::new(
+            config,
+            "cleanup-running-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Start the emitter
+        monitor.start_emitter().unwrap();
+        let path = monitor.heartbeat_path();
+        assert!(path.exists(), "heartbeat file should exist");
+
+        // Cleanup should remove the file
+        monitor.cleanup_heartbeat_file().unwrap();
+        assert!(!path.exists(), "heartbeat file should be removed");
+
+        // Stop the emitter (should not recreate the file)
+        monitor.stop();
+        assert!(!path.exists(), "heartbeat file should not exist after stop");
     }
 }
