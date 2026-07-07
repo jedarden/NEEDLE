@@ -3407,7 +3407,10 @@ strands:
             decoded.heartbeat_path,
             Some(PathBuf::from("/custom/heartbeat.json"))
         );
-        assert_eq!(decoded.socket_path, Some(PathBuf::from("/tmp/supervisor.sock")));
+        assert_eq!(
+            decoded.socket_path,
+            Some(PathBuf::from("/tmp/supervisor.sock"))
+        );
     }
 
     #[test]
