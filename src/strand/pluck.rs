@@ -10,7 +10,7 @@ use crate::bead_store::{BeadStore, Filters};
 use crate::types::{Bead, StrandError, StrandResult};
 
 /// Default labels excluded from Pluck selection when not configured.
-const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked", "starvation-alert"];
+const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked"];
 
 /// The Pluck strand — primary work selection.
 pub struct PluckStrand {
@@ -719,10 +719,7 @@ mod tests {
     #[test]
     fn default_exclude_labels_applied_when_empty() {
         let strand = PluckStrand::new(vec![]);
-        assert_eq!(
-            strand.exclude_labels,
-            vec!["deferred", "human", "blocked", "starvation-alert"]
-        );
+        assert_eq!(strand.exclude_labels, vec!["deferred", "human", "blocked"]);
     }
 
     #[test]
