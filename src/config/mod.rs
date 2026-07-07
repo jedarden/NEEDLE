@@ -3394,6 +3394,118 @@ strands:
     }
 
     #[test]
+    fn supervisor_config_yaml_roundtrip() {
+        let config = SupervisorConfig {
+            heartbeat_path: Some(PathBuf::from("/custom/heartbeat.json")),
+            socket_path: Some(PathBuf::from("/tmp/supervisor.sock")),
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let decoded: SupervisorConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(
+            decoded.heartbeat_path,
+            Some(PathBuf::from("/custom/heartbeat.json"))
+        );
+        assert_eq!(decoded.socket_path, Some(PathBuf::from("/tmp/supervisor.sock")));
+    }
+
+    #[test]
+    fn supervisor_config_with_only_heartbeat_path() {
+        let config = SupervisorConfig {
+            heartbeat_path: Some(PathBuf::from("/var/lib/supervisor/heartbeat.json")),
+            socket_path: None,
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let decoded: SupervisorConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        assert_eq!(
+            decoded.heartbeat_path,
+            Some(PathBuf::from("/var/lib/supervisor/heartbeat.json"))
+        );
+        assert!(decoded.socket_path.is_none());
+    }
+
+    #[test]
+    fn supervisor_config_with_only_socket_path() {
+        let config = SupervisorConfig {
+            heartbeat_path: None,
+            socket_path: Some(PathBuf::from("/run/supervisor/control.sock")),
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let decoded: SupervisorConfig = serde_yaml::from_str(&yaml).unwrap();
+
+        assert!(decoded.heartbeat_path.is_none());
+        assert_eq!(
+            decoded.socket_path,
+            Some(PathBuf::from("/run/supervisor/control.sock"))
+        );
+    }
+
+    #[test]
+    fn supervisor_config_from_full_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let yaml = r#"
+agent:
+  default: claude
+supervisor:
+  heartbeat_path: /var/lib/needle/supervisor-heartbeat.json
+  socket_path: /run/needle/supervisor.sock
+worker:
+  max_workers: 8
+"#;
+        std::fs::write(&path, yaml).unwrap();
+
+        let config = ConfigLoader::load_from_path(&path).unwrap();
+        assert_eq!(
+            config.supervisor.heartbeat_path,
+            Some(PathBuf::from("/var/lib/needle/supervisor-heartbeat.json"))
+        );
+        assert_eq!(
+            config.supervisor.socket_path,
+            Some(PathBuf::from("/run/needle/supervisor.sock"))
+        );
+    }
+
+    #[test]
+    fn supervisor_config_empty_section_loads_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let yaml = r#"
+agent:
+  default: claude
+supervisor: {}
+worker:
+  max_workers: 8
+"#;
+        std::fs::write(&path, yaml).unwrap();
+
+        let config = ConfigLoader::load_from_path(&path).unwrap();
+        assert!(config.supervisor.heartbeat_path.is_none());
+        assert!(config.supervisor.socket_path.is_none());
+    }
+
+    #[test]
+    fn supervisor_config_json_roundtrip() {
+        let config = SupervisorConfig {
+            heartbeat_path: Some(PathBuf::from("/heartbeat.json")),
+            socket_path: Some(PathBuf::from("/supervisor.sock")),
+        };
+
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: SupervisorConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            decoded.heartbeat_path,
+            Some(PathBuf::from("/heartbeat.json"))
+        );
+        assert_eq!(decoded.socket_path, Some(PathBuf::from("/supervisor.sock")));
+    }
+
+    #[test]
     fn default_self_modification_config_values() {
         let config = SelfModificationConfig::default();
         assert!(!config.enabled);
