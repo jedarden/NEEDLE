@@ -5,3 +5,10 @@ Cargo.lock
 .needle/
 test_telemetry_write
 test_telemetry_write_debug
+
+# Benchmark artifacts
+benchmark_*.txt
+
+# Criterion output
+criterion/
+target/criterion/
