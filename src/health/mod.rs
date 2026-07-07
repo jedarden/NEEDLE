@@ -858,16 +858,6 @@ impl Drop for HealthMonitor {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
-    // Check if the file exists before attempting removal.
-    // This allows us to return Ok(()) for non-existent files rather than an error.
-    if !path.exists() {
-        tracing::debug!(
-            path = %path.display(),
-            "heartbeat file does not exist, skipping cleanup"
-        );
-        return Ok(());
-    }
-
     // Attempt to remove the file.
     match std::fs::remove_file(path) {
         Ok(_) => {
@@ -875,6 +865,15 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
                 path = %path.display(),
                 "heartbeat file removed successfully"
             );
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File doesn't exist - this is fine, return Ok
+            tracing::debug!(
+                path = %path.display(),
+                "heartbeat file does not exist, skipping cleanup"
+            );
+            Ok(())
         }
         Err(e) => {
             // Log the error but don't fail - cleanup is best-effort
@@ -883,10 +882,9 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
                 path = %path.display(),
                 "failed to remove heartbeat file during cleanup"
             );
+            Ok(())
         }
     }
-
-    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
