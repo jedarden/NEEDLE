@@ -1851,8 +1851,7 @@ mod tests {
         // Expected: {heartbeat_dir}/{qualified_id}.json
         let expected_path = hb_dir.join("claude-code-glm-5-test-worker.json");
         assert_eq!(
-            path,
-            expected_path,
+            path, expected_path,
             "heartbeat path must be correctly formatted as {{heartbeat_dir}}/{{qualified_id}}.json"
         );
 
@@ -1866,7 +1865,9 @@ mod tests {
         // ACCEPTANCE CRITERION 4: Path matches qualified_id pattern
         // The path should use the qualified_id (adapter-worker_name), not just worker_name
         assert!(
-            path.to_str().unwrap().contains("claude-code-glm-5-test-worker"),
+            path.to_str()
+                .unwrap()
+                .contains("claude-code-glm-5-test-worker"),
             "heartbeat path must use qualified_id (adapter-worker_name)"
         );
 
@@ -2128,7 +2129,10 @@ mod tests {
         );
 
         // The directory should still exist (removal failed, but execution continued)
-        assert!(path.exists(), "directory should still exist after failed cleanup");
+        assert!(
+            path.exists(),
+            "directory should still exist after failed cleanup"
+        );
     }
 
     /// Test that cleanup_heartbeat_file works with the actual heartbeat path format.
@@ -2592,7 +2596,10 @@ mod tests {
         );
 
         // The directory should still exist (removal failed, but execution continued)
-        assert!(path.exists(), "directory should still exist after failed cleanup");
+        assert!(
+            path.exists(),
+            "directory should still exist after failed cleanup"
+        );
     }
 
     /// Test that HealthMonitor::cleanup_heartbeat_file works after emitter is running.

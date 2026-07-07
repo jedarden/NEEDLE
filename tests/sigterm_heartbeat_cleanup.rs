@@ -217,7 +217,10 @@ async fn cleanup_integration_on_all_shutdown_signals() {
             signal_name
         );
 
-        tracing::info!("✓ {} signal path validated: cleanup called, file removed", signal_name);
+        tracing::info!(
+            "✓ {} signal path validated: cleanup called, file removed",
+            signal_name
+        );
     }
 }
 
@@ -275,7 +278,6 @@ async fn stop_works_when_emitter_already_exited() {
 #[tokio::test]
 #[cfg(unix)]
 async fn e2e_signal_handler_cleanup_flow() {
-    
     use std::time::Instant;
 
     let heartbeat_dir = test_heartbeat_dir();
@@ -364,10 +366,7 @@ heartbeat_ttl_secs = 5
 #[tokio::test]
 async fn e2e_cleanup_in_all_worker_states() {
     // Test cleanup when worker is in different states
-    for (state_name, simulate_work) in [
-        ("idle", false),
-        ("processing", true),
-    ] {
+    for (state_name, simulate_work) in [("idle", false), ("processing", true)] {
         let heartbeat_dir = test_heartbeat_dir();
         let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
@@ -400,7 +399,7 @@ async fn e2e_cleanup_in_all_worker_states() {
             monitor.update_state(
                 &needle::types::WorkerState::Handling,
                 Some(&needle::types::BeadId::from("test-bead")),
-                Some(&config_dir),
+                Some(config_dir),
             );
             // Give the emitter time to write the updated state
             std::thread::sleep(Duration::from_millis(100));
@@ -448,7 +447,11 @@ async fn e2e_no_stale_heartbeats_after_multiple_cycles() {
         let heartbeat_path = monitor.heartbeat_path();
 
         monitor.start_emitter().unwrap();
-        assert!(heartbeat_path.exists(), "cycle {}: heartbeat must exist", cycle);
+        assert!(
+            heartbeat_path.exists(),
+            "cycle {}: heartbeat must exist",
+            cycle
+        );
 
         // Simulate shutdown
         shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -560,7 +563,7 @@ async fn e2e_all_signals_with_full_worker_lifecycle() {
         monitor.update_state(
             &needle::types::WorkerState::Selecting,
             Some(&needle::types::BeadId::from("test-bead")),
-            Some(&config_dir),
+            Some(config_dir),
         );
         std::thread::sleep(Duration::from_millis(50));
 
