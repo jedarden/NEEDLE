@@ -180,13 +180,14 @@ fn register_atexit_handler(
             eprintln!("This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)");
 
             // Try to clean up the heartbeat file to prevent stale detection.
+            // Use the proper cleanup function with error handling from the health module.
             if let Some(ref hb_path) = state.heartbeat_path {
-                use std::fs;
-                if let Err(e) = fs::remove_file(hb_path) {
-                    // Don't spam stderr if the file was already cleaned up
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        eprintln!("Failed to remove heartbeat file {}: {}", hb_path, e);
-                    }
+                use std::path::Path;
+                // Import the cleanup function from health module
+                // This function has proper error handling: logs, doesn't panic,
+                // and returns Ok(()) even if removal fails (best-effort cleanup).
+                if let Err(e) = crate::health::cleanup_heartbeat_file(Path::new(hb_path)) {
+                    eprintln!("Heartbeat cleanup error: {}", e);
                 } else {
                     eprintln!("Cleaned up heartbeat file: {}", hb_path);
                 }

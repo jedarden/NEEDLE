@@ -1,0 +1,160 @@
+agent:
+  default: claude
+  args: []
+  timeout: 3600
+  adapters_dir: /home/coding/.config/needle/adapters
+  routing:
+    rules:
+    - match_model: (claude-)?(sonnet|opus|fable|haiku).*
+      adapter: claude-print
+    default_adapter: claude-code-glm-4.7
+    strict: false
+worker:
+  max_workers: 10
+  launch_stagger_seconds: 2
+  idle_timeout: 60
+  idle_action: wait
+  max_claim_retries: 3
+  claim_race_lost_skip: 5
+  identifier_scheme: hostname_random
+  cpu_load_warn: 0.8
+  memory_free_warn_mb: 512
+  building_timeout: 600
+workspace:
+  default: /home/coding/NEEDLE
+  home: /home/coding/.needle
+  labels: []
+strands:
+  pluck:
+    exclude_labels: []
+    split_after_failures: 0
+  mend:
+    stuck_threshold_secs: 300
+    lock_ttl_secs: 600
+    db_check_interval: 50
+    idle_timeout: 120
+  explore:
+    enabled: true
+    workspaces: []
+    workspace_root: /home/coding/
+  knot:
+    alert_destination: null
+    alert_cooldown_minutes: 60
+    exhaustion_threshold: 3
+  mitosis:
+    enabled: true
+    first_failure_only: true
+    force_failure_threshold: 0
+    repeat_interval: 0
+  weave:
+    enabled: false
+    max_beads_per_run: 5
+    cooldown_hours: 24
+    exclude_workspaces: []
+    doc_patterns:
+    - README*
+    - AGENTS.md
+    - docs/**/*
+    prompt_template: null
+  unravel:
+    enabled: false
+    max_beads_per_run: 5
+    max_alternatives_per_bead: 3
+    cooldown_hours: 168
+    prompt_template: null
+  pulse:
+    enabled: false
+    scanners: []
+    max_beads_per_run: 5
+    cooldown_hours: 48
+    severity_threshold: 3
+    prompt_template: null
+  reflect:
+    enabled: true
+    min_beads_since_last: 10
+    cooldown_hours: 24
+    max_learnings_per_run: 10
+    max_skills_per_run: 3
+    learning_retention_days: 90
+    max_learnings: 80
+    extraction_agent: null
+    extraction_prompt_template: null
+    max_extraction_per_run: 5
+    transcript_recency_days: 7
+    transcript_max_sessions: 50
+    drift_similarity_threshold: 0.6
+    drift_enabled: true
+    adr_enabled: true
+    claude_md_placement: true
+  splice:
+    enabled: true
+    stale_threshold_secs: 300
+    report_workspace: null
+    detect_live_loops: true
+    live_loop_scan_events: 200
+    claim_churn_threshold: 20
+    log_runaway_bytes: 10485760
+    live_loop_window_secs: 300
+  learning:
+    trace_retention_failed_days: 30
+    trace_retention_success_days: 7
+    max_learnings: 80
+    trace_sanitization:
+      enabled: true
+      custom_patterns: []
+    global_learnings_file: /home/coding/.config/needle/global-learnings.md
+    max_global_learnings: 40
+telemetry:
+  file_sink:
+    enabled: true
+    log_dir: null
+    retention_days: 30
+  stdout_sink:
+    enabled: false
+    format: normal
+    color: auto
+  hooks: []
+  otlp_sink:
+    enabled: false
+    endpoint: http://localhost:4317
+    protocol: grpc
+    timeout_secs: 10
+    compression: gzip
+    tls: none
+    headers: []
+    resource_attributes: []
+    metrics_interval_secs: 10
+    service_namespace: needle-fleet
+    max_queue_size: 2048
+prompt:
+  context_files: []
+  instructions: null
+  templates: {}
+  variants: {}
+health:
+  heartbeat_interval_secs: 30
+  heartbeat_ttl_secs: 300
+  heartbeat_dir: null
+limits:
+  providers: {}
+  models: {}
+pricing: {}
+budget:
+  warn_usd: 0.0
+  stop_usd: 0.0
+verification: []
+gates: []
+self_modification:
+  enabled: false
+  canary_workspace: /home/coding/.needle/canary
+  auto_promote: false
+  canary_timeout: 300
+  hot_reload: true
+fabric:
+  enabled: false
+  endpoint: ''
+  timeout: 2
+  batching: false
+supervisor:
+  heartbeat_path: null
+  socket_path: null
