@@ -169,12 +169,14 @@ When the primary workspace has no claimable beads, NEEDLE follows a **strand seq
 | # | Strand | Agent? | Purpose |
 |---|--------|--------|---------|
 | 1 | 🪡 **Pluck** | Yes | Process beads from the assigned workspace |
-| 2 | 🔭 **Explore** | No | Search other workspaces for claimable beads |
-| 3 | 🔧 **Mend** | No | Cleanup: orphaned claims, stale locks, health checks |
+| 2 | 🔧 **Mend** | No | Cleanup: orphaned claims, stale locks, health checks |
+| 3 | 🔭 **Explore** | No | Search other workspaces for claimable beads |
 | 4 | 🕸️ **Weave** | Yes | Create beads from documentation gaps *(opt-in)* |
 | 5 | 🪢 **Unravel** | Yes | Propose alternatives for HUMAN-blocked beads *(opt-in)* |
 | 6 | 💓 **Pulse** | Yes | Codebase health scans, auto-generate beads *(opt-in)* |
-| 7 | 🪢 **Knot** | No | All strands exhausted — alert human, wait |
+| 7 | 🪞 **Reflect** | Yes | Consolidate learnings from recent beads *(opt-in)* |
+| 8 | 🪡 **Splice** | No | Document worker failures, create alert beads |
+| 9 | 🪢 **Knot** | No | All strands exhausted — alert human, wait |
 
 ---
 
@@ -223,7 +225,8 @@ The `claude-interactive` plugin ships as a separate release asset. It wraps the 
 **Install:**
 
 ```bash
-gh release download v0.2.6 --repo jedarden/NEEDLE --pattern 'claude-interactive*'
+# Download the latest claude-interactive release
+gh release download --repo jedarden/NEEDLE --pattern 'claude-interactive*'
 chmod +x claude-interactive-install.sh
 ./claude-interactive-install.sh
 ```
@@ -252,30 +255,45 @@ NEEDLE/
 ├── src/
 │   ├── main.rs            # Worker entry point
 │   ├── lib.rs             # Library root
+│   ├── agent_event.rs     # Agent event telemetry utilities
+│   ├── claude_md_placement.rs  # CLAUDE.md placement logic
+│   ├── commit_hook.rs     # Bead-Id trailer injection for git commits
+│   ├── routing.rs         # Model-based adapter routing
+│   ├── bead_store/        # Abstract bead backend interface
+│   ├── bin/               # Auxiliary binaries (transform helpers)
+│   ├── canary/            # Release channel promotion, canary tests
 │   ├── claim/             # Atomic bead claiming via SQLite transactions
-│   ├── dispatch/          # Agent invocation + YAML adapter loading
-│   ├── outcome/           # Explicit handler per outcome type
-│   ├── strand/            # Pluck / Explore / Mend / Weave / Knot logic
-│   ├── decision/          # Outcome classification from agent exit + output
-│   ├── peer/              # Multi-worker coordination, peer discovery
-│   ├── mitosis/           # Worker spawn / lifecycle / supervised respawn
-│   ├── health/            # Liveness, stale-claim cleanup, watchdog
-│   ├── learning/          # Per-agent performance tracking and weighting
-│   ├── telemetry/         # OTLP exporter, gen_ai semantic conventions
-│   ├── trace/             # Span construction for state transitions
-│   ├── cost/              # Token + USD spend tracking per bead and worker
-│   ├── rate_limit/        # Quota enforcement, backoff, weekly limit gates
-│   ├── prompt/            # Deterministic prompt construction from bead
-│   ├── registry/          # Agent adapter registry (YAML-loaded)
-│   ├── sanitize/          # Output redaction and prompt-injection guards
-│   ├── validation/        # Pre-dispatch and post-execution checks
-│   ├── worker/            # Worker session and identity management
+│   ├── cli/               # Command-line interface parsing
 │   ├── config/            # `.needle.yaml` parsing and defaults
-│   └── bin/               # Auxiliary binaries (transform helpers)
+│   ├── cost/              # Token + USD spend tracking per bead and worker
+│   ├── decision/          # Decision point detection, ADR management
+│   ├── dispatch/          # Agent invocation + YAML adapter loading
+│   ├── drift/             # Session similarity, clustering, divergence detection
+│   ├── health/            # Liveness, stale-claim cleanup, watchdog
+│   ├── learning/          # Retrospective extraction, learnings management
+│   ├── mitosis/           # Child-aware bead splitting
+│   ├── outcome/           # Explicit handler per outcome type
+│   ├── peer/              # Multi-worker coordination, peer discovery
+│   ├── prompt/            # Deterministic prompt construction from bead
+│   ├── rate_limit/        # Provider/model concurrency and RPM rate limiting
+│   ├── registry/          # Worker state registry
+│   ├── sanitize/          # Output redaction (gitleaks integration)
+│   ├── skill/             # Skill library, retrieval, promotion
+│   ├── span/              # W3C trace context utilities
+│   ├── stats/             # Aggregation engine, A/B comparison
+│   ├── strand/            # Pluck / Mend / Explore / Weave / Unravel / Pulse / Reflect / Splice / Knot
+│   ├── supervisor/        # Fleet supervisor daemon (auto-scale)
+│   ├── telemetry/         # OTLP exporter, gen_ai semantic conventions
+│   ├── trace/             # Trace capture, storage, retention
+│   ├── transcript/        # Session JSONL parsing, action-outcome extraction
+│   ├── types/             # Shared types, error definitions
+│   ├── upgrade/           # Self-update, hot-reload, rollback
+│   ├── validation/        # Pre-dispatch and post-execution checks
+│   └── worker/            # Worker session and identity management
 ├── tests/                 # Integration tests
 ├── ci/                    # Docker images used by GitHub Actions
 ├── .github/workflows/     # CI + release pipelines
-├── config/                # Default agent adapters
+├── config/                # Vendored gitleaks rules
 └── docs/                  # Plan, research, examples, post-mortems
 ```
 
