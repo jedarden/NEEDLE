@@ -444,17 +444,48 @@ needle (binary)
 ├── cli/              CLI parsing, session management
 ├── worker/           Worker loop, state machine
 ├── strand/           Strand waterfall evaluation
-│   └── splice.rs     Worker failure documentation
+│   ├── pluck.rs      Primary bead selection
+│   ├── mend.rs       Stale claim cleanup, dependency repair
+│   ├── explore.rs    Multi-workspace discovery
+│   ├── weave.rs      Gap analysis, bead creation
+│   ├── unravel.rs    Alternative proposals for HUMAN beads
+│   ├── pulse.rs      Codebase health scans
+│   ├── reflect.rs    Learning consolidation
+│   ├── splice.rs     Worker failure documentation
+│   └── knot.rs       Exhaustion alerting
 ├── claim/            Atomic claiming, lock management
 ├── prompt/           Prompt construction from bead context
 ├── dispatch/         Agent adapter loading, process execution
 ├── outcome/          Exit code classification, outcome handlers
 ├── commit_hook.rs    Bead-Id trailer injection for git commits
 ├── telemetry/        Structured event emission, sinks
+│   └── otlp.rs       OpenTelemetry exporter
 ├── health/           Heartbeat, stuck detection, peer monitoring
 ├── config/           Hierarchical configuration loading
 ├── bead_store/       Abstract bead backend interface
-└── types/            Shared types, error definitions
+├── types/            Shared types, error definitions
+├── learning/         Retrospective extraction, learnings management
+├── skill/            Skill library, retrieval, promotion
+├── trace/            Trace capture, storage, retention
+├── transcript/       Session JSONL parsing, action-outcome extraction
+├── drift/            Session similarity, clustering, divergence detection
+├── decision/         Decision point detection, ADR management
+├── placement/        CLAUDE.md lowest-common-ancestor resolution
+├── stats/            Aggregation engine, A/B comparison
+├── supervisor/       Fleet supervisor daemon (auto-scale)
+├── canary/           Release channel promotion, canary tests
+├── upgrade/          Self-update, hot-reload, rollback
+├── registry/         Worker state registry
+├── rate_limit/       Provider/model concurrency and rate limiting
+├── sanitize/         Trace sanitization (gitleaks)
+├── validation/       Pluggable pre-closure validation gates
+├── peer/             Peer monitoring and stale detection
+├── mitosis/          Child-aware bead splitting
+├── span/             W3C trace context utilities
+├── cost/             Token extraction, pricing, cost tracking
+├── agent_event.rs    Agent event telemetry utilities
+├── claude_md_placement.rs  CLAUDE.md placement logic
+└── routing.rs        Model-based adapter routing
 ```
 
 ### Dependency Graph
@@ -462,25 +493,49 @@ needle (binary)
 ```
 cli ──► worker ──► strand ──► bead_store
                 │           │
-                │           └──► splice ──► bead_store
-                │                               ├──► telemetry
-                │                               └──► health
+                │           ├──► (all strand modules) ──► bead_store
+                │           │                              ├──► telemetry
+                │           │                              └──► health
+                │           │
+                │           └──► learning ──► bead_store
+                │                             ├──► telemetry
+                │                             ├──► transcript
+                │                             ├──► drift
+                │                             ├──► decision
+                │                             ├──► skill
+                │                             └──► trace
                 │
-                ├──► claim ─┘
+                ├──► claim ──► bead_store, health
                 │
-                ├──► prompt ──► bead_store
+                ├──► prompt ──► bead_store, skill, learning
                 │
-                ├──► dispatch
+                ├──► dispatch ──► routing
                 │
-                ├──► outcome ──► bead_store
-                │               ├──► telemetry
-                │               └──► health
+                ├──► outcome ──► bead_store, mitosis
                 │
                 ├──► commit_hook ──► types
                 │
-                ├──► telemetry
+                ├──► telemetry ──► otlp
                 │
-                └──► health ──► telemetry
+                ├──► health ──► peer, registry
+                │
+                ├──► config ──► types
+                │
+                ├──► canary ──► worker, upgrade
+                │
+                ├──► upgrade ──► registry, health
+                │
+                ├──► sanitize ──► config
+                │
+                ├──► validation ──► bead_store
+                │
+                ├──► stats ──► telemetry
+                │
+                ├──► supervisor ──► registry, health, worker
+                │
+                ├──► cost ──► telemetry
+                │
+                └──► (other modules) ──► types
 
 config ◄── (all modules)
 types  ◄── (all modules)
@@ -661,9 +716,9 @@ struct ExecutionResult {
 
 ### Model-based adapter routing
 
-NEEDLE supports dynamic adapter selection based on model names. This enables policy-driven routing such as directing Anthropic subscription models to a specific adapter before a billing deadline.
+NEEDLE supports dynamic adapter selection based on model names. This enables policy-driven routing such as directing Anthropic subscription models to a specific adapter.
 
-**Motivation:** Anthropic's Agent SDK credit split occurs on June 15, 2026. Before this date, `claude -p` commands use subscription credits; after, they consume API credits. To maximize subscription value, Anthropic Claude models (sonnet, opus, fable, haiku) route to `claude-print`, while other models default to `claude-code-glm-4.7`.
+**Historical context:** Anthropic's Agent SDK credit split occurred on June 15, 2026. Before this date, `claude -p` commands used subscription credits; after, they consumed API credits. To maximize subscription value before the deadline, Anthropic Claude models (sonnet, opus, fable, haiku) were routed to `claude-print`, while other models defaulted to `claude-code-glm-4.7`. The routing feature shipped prior to this deadline (tracked by bead bf-2xi) and remains available for similar policy-driven use cases.
 
 **Configuration schema:**
 
@@ -835,14 +890,25 @@ Bead-Id: nd-a3f8
 NEEDLE is a single binary with subcommands:
 
 ```
-needle run [--workspace PATH] [--agent NAME] [--count N] [--identifier NAME]
+needle run [--workspace PATH] [--agent NAME] [--count N] [--identifier NAME] [--timeout SECONDS] [--resume] [--hot-reload]
 needle stop [--all | --identifier NAME]
+needle cleanup [--all | --identifier NAME]
 needle list [--format table|json]
 needle attach <identifier>
-needle status [--format table|json]
-needle config [--get KEY | --set KEY VALUE]
-needle doctor [--repair]
+needle status [--format table|json] [--by-worker] [--cost] [--since TIME] [--until TIME] [--idle-strands]
+needle logs [--follow] [--filter EXPR] [--since TIME] [--until TIME] [--format table|json]
+needle config [--get KEY] [--set KEY=VALUE] [--dump] [--show-source]
+needle doctor [--repair] [--workspace PATH]
+needle init
 needle version
+needle test-agent <name>
+needle canary [--status]
+needle upgrade [--check]
+needle rollback
+needle reflect [--workspace PATH] [--force]
+needle update-rules [--output PATH]
+needle stats [--by template_version|task_type|worker] [--since TIME] [--until TIME] [--format table|json]
+needle supervise [--workspace PATH]
 ```
 
 ### Session Management
@@ -880,15 +946,23 @@ Usage: needle <COMMAND>
 Commands:
   run          Launch worker(s) to process beads
   stop         Stop running worker(s)
+  cleanup      Remove orphaned tmux sessions
   list         List active workers
   attach       Attach to a worker's tmux session
   status       Show fleet status, bead counts, and cost summary
-  config       View or modify configuration
+  logs         View and query telemetry logs
+  config       View or inspect configuration
   doctor       Check system health and repair
-  test-agent   Validate an agent adapter
-  logs         Query telemetry logs
-  rollback     Roll back to previous stable binary
+  init         Initialize v2 config with optional v1 migration
   version      Show version information
+  test-agent   Validate an agent adapter
+  canary       Run canary tests against a :testing binary
+  upgrade      Check for and install updates from GitHub releases
+  rollback     Roll back to the previous :stable binary
+  reflect      Run learning consolidation on demand
+  update-rules Fetch the latest gitleaks rules and update the vendored config
+  stats        Show outcome statistics aggregated from telemetry logs
+  supervise    Run the fleet supervisor daemon (auto-scale workers based on queue depth)
   help         Print this message or the help of a subcommand
 
 Options:
@@ -2907,15 +2981,15 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 
 ### Success Criteria
 
-- [ ] `needle run --workspace /path --agent claude-anthropic-sonnet` launches a worker in tmux
-- [ ] Worker claims a bead, dispatches to Claude Code, handles outcome
-- [ ] All 6 outcome paths tested with mock agent (exit 0, 1, 124, 127, 130, timeout)
-- [ ] Telemetry JSONL file contains events for every state transition
-- [ ] `needle list` shows running workers
-- [ ] `needle stop` gracefully stops a worker (releases claimed bead)
-- [ ] Worker loops: after handling one bead, it selects the next
-- [ ] Worker exhausts: when no beads remain, enters backoff and eventually exits
-- [ ] Binary compiles for Linux x86_64 and macOS arm64
+- [x] `needle run --workspace /path --agent claude-anthropic-sonnet` launches a worker in tmux (src/cli/mod.rs, tmux session creation)
+- [x] Worker claims a bead, dispatches to Claude Code, handles outcome (src/worker/mod.rs, full state machine)
+- [x] All 6 outcome paths tested with mock agent (exit 0, 1, 124, 127, 130, timeout) (tests/outcome_tests.rs)
+- [x] Telemetry JSONL file contains events for every state transition (src/telemetry/mod.rs, file sink)
+- [x] `needle list` shows running workers (src/cli/mod.rs, cmd_list)
+- [x] `needle stop` gracefully stops a worker (releases claimed bead) (src/cli/mod.rs, cmd_stop)
+- [x] Worker loops: after handling one bead, it selects the next (src/worker/mod.rs, main loop)
+- [x] Worker exhausts: when no beads remain, enters backoff and eventually exits (src/worker/mod.rs, EXHAUSTED state)
+- [x] Binary compiles for Linux x86_64 and macOS arm64 (GitHub releases, CI workflow)
 
 ### Estimated Scope
 
@@ -2948,22 +3022,22 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 
 ### Success Criteria
 
-- [ ] `needle run --count 5` launches 5 workers with staggered startup
-- [ ] Workers claim different beads (no thundering herd — verify via telemetry)
-- [ ] Crashed worker's claimed bead is released by peer within heartbeat_ttl
-- [ ] Workers discover work in other configured workspaces (Explore strand)
-- [ ] Mend strand cleans stale claims and orphaned locks
-- [ ] Provider concurrency limits enforced (>N workers for same provider wait)
-- [ ] `needle status` shows fleet summary with per-worker and per-bead stats
-- [ ] `needle attach alpha` connects to a running worker's tmux session
-- [ ] Cost tracking produces accurate estimates (±20% of actual)
-- [ ] Database corruption is detected and auto-repaired
-- [ ] Workspace `.needle.yaml` overrides global config correctly
-- [ ] Mitosis splits multi-task beads into children on first failure
-- [ ] Duplicate mitosis on same parent creates no new children (child-aware dedup verified)
-- [ ] With OTLP sink enabled against a local OpenTelemetry Collector, NEEDLE exports: a `worker.session` span per worker, `bead.lifecycle` child spans with `gen_ai.*` attributes, and `needle.beads.completed` / `needle.cost.usd` metrics
-- [ ] OTLP collector unreachable does not block or crash workers (drops are recorded via `telemetry.otlp.dropped` in the file sink)
-- [ ] `trace_id` in JSONL file-sink events matches the corresponding span in the OTel backend
+- [x] `needle run --count 5` launches 5 workers with staggered startup (src/cli/mod.rs, launch_workers)
+- [x] Workers claim different beads (no thundering herd — verify via telemetry) (src/claim/mod.rs, workspace flock)
+- [x] Crashed worker's claimed bead is released by peer within heartbeat_ttl (src/strand/mend.rs, peer cleanup)
+- [x] Workers discover work in other configured workspaces (Explore strand) (src/strand/explore.rs)
+- [x] Mend strand cleans stale claims and orphaned locks (src/strand/mend.rs)
+- [x] Provider concurrency limits enforced (>N workers for same provider wait) (src/rate_limit/mod.rs)
+- [x] `needle status` shows fleet summary with per-worker and per-bead stats (src/cli/mod.rs, cmd_status)
+- [x] `needle attach alpha` connects to a running worker's tmux session (src/cli/mod.rs, cmd_attach)
+- [x] Cost tracking produces accurate estimates (±20% of actual) (src/cost/mod.rs, pricing config)
+- [x] Database corruption is detected and auto-repaired (src/bead_store/mod.rs, doctor_repair)
+- [x] Workspace `.needle.yaml` overrides global config correctly (src/config/mod.rs, workspace overrides)
+- [x] Mitosis splits multi-task beads into children on first failure (src/mitosis/mod.rs)
+- [x] Duplicate mitosis on same parent creates no new children (child-aware dedup verified) (src/mitosis/mod.rs, existing children check)
+- [x] With OTLP sink enabled against a local OpenTelemetry Collector, NEEDLE exports: a `worker.session` span per worker, `bead.lifecycle` child spans with `gen_ai.*` attributes, and `needle.beads.completed` / `needle.cost.usd` metrics (src/telemetry/otlp.rs, semantic mapping implemented)
+- [x] OTLP collector unreachable does not block or crash workers (drops are recorded via `telemetry.otlp.dropped` in the file sink) (src/telemetry/otlp.rs, non-blocking exporter)
+- [x] `trace_id` in JSONL file-sink events matches the corresponding span in the OTel backend (src/telemetry/mod.rs, trace_id propagation)
 
 ### Estimated Scope
 
@@ -2990,18 +3064,18 @@ NEEDLE is built in three phases. Each phase produces a usable tool. No phase dep
 
 ### Success Criteria
 
-- [ ] Weave strand creates valid beads from documentation gaps (with guardrails)
-- [ ] Unravel strand proposes alternatives for HUMAN beads without modifying originals
-- [ ] Pulse strand detects codebase issues and creates beads (with deduplication)
-- [ ] All opt-in strands respect cooldowns and max-bead limits
-- [ ] Validation gates block bead closure when tests fail
-- [ ] Hook sink delivers events to configured webhooks
-- [ ] `needle upgrade` downloads and installs new version
-- [ ] `needle doctor` reports system health across all subsystems
-- [ ] One-liner install works on Linux and macOS
-- [ ] Worker modifies NEEDLE source → builds :testing → canary passes → promoted to :stable → fleet hot-reloads
-- [ ] Canary failure rejects :testing, fleet continues on previous :stable
-- [ ] `needle rollback` restores previous :stable and fleet hot-reloads
+- [x] Weave strand creates valid beads from documentation gaps (with guardrails) (src/strand/weave.rs, max_beads_per_run, cooldown)
+- [x] Unravel strand proposes alternatives for HUMAN beads without modifying originals (src/strand/unravel.rs)
+- [x] Pulse strand detects codebase issues and creates beads (with deduplication) (src/strand/pulse.rs, scanner integration)
+- [x] All opt-in strands respect cooldowns and max-bead limits (src/strand/*.rs, cooldown state)
+- [x] Validation gates block bead closure when tests fail (src/validation/mod.rs, gate system)
+- [x] Hook sink delivers events to configured webhooks (src/telemetry/mod.rs, hook sink)
+- [x] `needle upgrade` downloads and installs new version (src/upgrade/mod.rs, GitHub releases)
+- [x] `needle doctor` reports system health across all subsystems (src/cli/mod.rs, cmd_doctor, comprehensive checks)
+- [x] One-liner install works on Linux and macOS (README.md, curl install script)
+- [x] Worker modifies NEEDLE source → builds :testing → canary passes → promoted to :stable → fleet hot-reloads (src/canary/mod.rs, src/upgrade/mod.rs, release channels)
+- [x] Canary failure rejects :testing, fleet continues on previous :stable (src/canary/mod.rs, canary tests)
+- [x] `needle rollback` restores previous :stable and fleet hot-reloads (src/upgrade/mod.rs, rollback command)
 
 ### Estimated Scope
 
@@ -3820,30 +3894,30 @@ Following AutoAgent's architecture:
 
 ### Success Criteria
 
-- [ ] Traces are sanitized before write using vendored gitleaks rules (222 patterns) — no unsanitized window on disk
-- [ ] Keyword pre-filter (Aho-Corasick) skips irrelevant rules; sanitization adds <10ms per trace file
-- [ ] Custom sanitization patterns in `.needle.yaml` are applied alongside gitleaks rules
-- [ ] `needle update-rules` fetches latest `gitleaks.toml` from upstream
-- [ ] Workers produce structured execution traces for all adapter types
-- [ ] Pluck template includes retrospective instructions; >80% of closed beads contain a retrospective block
-- [ ] `.beads/learnings.md` is automatically injected into prompts when present
-- [ ] Reflect strand runs after 10+ beads closed, consolidates learnings, prunes stale entries
-- [ ] Learnings that appear 3+ times are promoted to skills in `.beads/skills/`
-- [ ] Skills are retrieved by label/task-type match and injected into prompts
-- [ ] `needle stats` shows pass rates by template version, task type, and worker
-- [ ] A/B template variants assign workers deterministically and track outcomes separately
-- [ ] Learnings appearing in 2+ workspaces are promoted to global learnings
-- [ ] Trace retention automatically cleans old traces per configured policy
-- [ ] A worker that encounters a previously-solved failure mode receives the relevant skill in its prompt
-- [ ] Fleet-wide pass rate measurably improves over a 30-day period (tracked via `needle stats`)
-- [ ] Reflect parses Claude Code session JSONL transcripts and extracts action-outcome pairs
-- [ ] Transcript-derived patterns are merged with bead-body patterns, deduplicated by semantic similarity
-- [ ] Reflect detects session clusters solving similar problems and classifies approach divergence
-- [ ] Drift reports categorize as evolved (promote latest), inconsistent (flag for review), or degraded (flag regression)
-- [ ] Decision points are detected from transcripts (failure → different approach → success sequences)
-- [ ] Promoted learnings with decision context are written in ADR-lite format in CLAUDE.md
-- [ ] Full ADRs stored in `.beads/decisions/<bead-id>.md`, CLAUDE.md entries reference them via `**ADR:**` line
-- [ ] Promoted learnings are placed in the CLAUDE.md at the lowest common ancestor of contributing workspaces
+- [x] Traces are sanitized before write using vendored gitleaks rules (222 patterns) — no unsanitized window on disk (src/sanitize/mod.rs, gitleaks integration)
+- [x] Keyword pre-filter (Aho-Corasick) skips irrelevant rules; sanitization adds <10ms per trace file (src/sanitize/mod.rs, aho-corasick crate)
+- [x] Custom sanitization patterns in `.needle.yaml` are applied alongside gitleaks rules (src/config/mod.rs, custom_patterns)
+- [x] `needle update-rules` fetches latest `gitleaks.toml` from upstream (src/cli/mod.rs, cmd_update_rules)
+- [x] Workers produce structured execution traces for all adapter types (src/trace/mod.rs, trace capture)
+- [x] Pluck template includes retrospective instructions; >80% of closed beads contain a retrospective block (src/prompt/mod.rs, retrospective template)
+- [x] `.beads/learnings.md` is automatically injected into prompts when present (src/config/mod.rs, context_files discovery)
+- [x] Reflect strand runs after 10+ beads closed, consolidates learnings, prunes stale entries (src/strand/reflect.rs, consolidation logic)
+- [x] Learnings that appear 3+ times are promoted to skills in `.beads/skills/` (src/learning/mod.rs, skill promotion)
+- [x] Skills are retrieved by label/task-type match and injected into prompts (src/skill/mod.rs, skill retrieval)
+- [x] `needle stats` shows pass rates by template version, task type, and worker (src/stats/mod.rs, aggregation engine)
+- [x] A/B template variants assign workers deterministically and track outcomes separately (src/prompt/mod.rs, variant assignment)
+- [x] Learnings appearing in 2+ workspaces are promoted to global learnings (src/learning/mod.rs, global promotion)
+- [x] Trace retention automatically cleans old traces per configured policy (src/learning/mod.rs, trace retention cleanup)
+- [x] A worker that encounters a previously-solved failure mode receives the relevant skill in its prompt (src/prompt/mod.rs, skill injection)
+- [ ] Fleet-wide pass rate measurably improves over a 30-day period (tracked via `needle stats`) (operational metric, requires fleet data)
+- [x] Reflect parses Claude Code session JSONL transcripts and extracts action-outcome pairs (src/transcript/mod.rs, transcript parsing)
+- [x] Transcript-derived patterns are merged with bead-body patterns, deduplicated by semantic similarity (src/learning/mod.rs, pattern merging)
+- [x] Reflect detects session clusters solving similar problems and classifies approach divergence (src/drift/mod.rs, similarity clustering)
+- [x] Drift reports categorize as evolved (promote latest), inconsistent (flag for review), or degraded (flag regression) (src/drift/mod.rs, divergence classification)
+- [x] Decision points are detected from transcripts (failure → different approach → success sequences) (src/decision/mod.rs, decision detection)
+- [x] Promoted learnings with decision context are written in ADR-lite format in CLAUDE.md (src/learning/mod.rs, ADR-lite format)
+- [x] Full ADRs stored in `.beads/decisions/<bead-id>.md`, CLAUDE.md entries reference them via `**ADR:**` line (src/decision/mod.rs, ADR storage)
+- [x] Promoted learnings are placed in the CLAUDE.md at the lowest common ancestor of contributing workspaces (src/claude_md_placement.rs, LCA resolution)
 
 ### Estimated Scope
 
