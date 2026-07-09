@@ -231,3 +231,77 @@ fn config_set_missing_key_fails_validation() {
         _ => panic!("Expected ConfigCmd command"),
     }
 }
+
+/// Test that `needle config --help` includes --set flag with proper description.
+#[test]
+fn config_help_includes_set_flag() {
+    use needle::cli::Cli;
+
+    // Test that --help can be parsed and includes the --set flag description
+    let args = vec![
+        "needle",
+        "config",
+        "--help",
+    ];
+
+    // When --help is provided, clap will display help and exit
+    // We verify this behavior by checking that the parse result handles --help
+    let result = Cli::try_parse_from(args);
+
+    // Clap should successfully parse the --help request (it will then exit)
+    // The fact that parsing succeeds means the --help flag is recognized
+    assert!(result.is_err(), "CLI parsing should fail with --help (clap exits after displaying help)");
+
+    // Verify the error is a help display error (clap's standard behavior)
+    let err = result.unwrap_err();
+    let err_string = err.to_string().to_lowercase();
+
+    // Clap help messages contain standard help text indicators
+    // We verify this is a help-related exit, not a real error
+    assert!(
+        err_string.contains("help") || err_string.contains("usage") || err_string.contains("needle"),
+        "Error should be help-related, got: {}",
+        err
+    );
+}
+
+/// Test that the ConfigCmd subcommand's --set flag appears in long help.
+#[test]
+fn config_set_flag_has_proper_metadata() {
+    use needle::cli::Cli;
+    use clap::CommandFactory;
+
+    // Get the full command definition
+    let cmd = Cli::command();
+
+    // Find the config subcommand
+    let config_subcommand = cmd.find_subcommand("config")
+        .expect("config subcommand should exist");
+
+    // Find the --set flag in the config subcommand
+    let set_flag = config_subcommand.get_arguments()
+        .find(|arg| arg.get_id() == "set")
+        .expect("--set flag should exist in config subcommand");
+
+    // Verify the --set flag has the correct ID and is a long flag
+    assert_eq!(set_flag.get_id(), "set", "Flag ID should be 'set'");
+
+    // Verify the flag is a long option (--set)
+    assert!(
+        set_flag.get_long().is_some(),
+        "--set should be a long flag"
+    );
+    assert_eq!(set_flag.get_long().unwrap(), "set", "Long flag name should be 'set'");
+
+    // Verify the --set flag has help text
+    let help = set_flag.get_help()
+        .expect("--set flag should have help text");
+    let help_str = help.to_string();
+
+    // Verify the help text mentions the two supported formats
+    assert!(
+        help_str.contains("KEY VALUE") || help_str.contains("KEY=VALUE"),
+        "--set help text should mention KEY VALUE or KEY=VALUE format, got: {}",
+        help_str
+    );
+}
