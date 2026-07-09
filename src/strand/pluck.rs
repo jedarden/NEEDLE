@@ -98,18 +98,41 @@ impl super::Strand for PluckStrand {
         fields(
             strand = "pluck",
             exclude_labels = ?self.exclude_labels,
+            split_threshold = self.split_after_failures,
         )
     )]
     async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+        tracing::debug!(
+            exclude_labels = ?self.exclude_labels,
+            split_threshold = self.split_after_failures,
+            "Pluck strand evaluation starting"
+        );
+
         // 1. Query bead store for ready, unassigned beads.
         let filters = Filters {
             assignee: None,
             exclude_labels: self.exclude_labels.clone(),
         };
 
+        tracing::debug!(
+            filters = ?filters,
+            "Querying bead store for ready candidates"
+        );
+
         let mut candidates = match store.ready(&filters).await {
-            Ok(beads) => beads,
+            Ok(beads) => {
+                tracing::debug!(
+                    count = beads.len(),
+                    "Bead store returned {} candidates",
+                    beads.len()
+                );
+                beads
+            }
             Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Bead store query failed"
+                );
                 // Bead store error is semantically different from NoWork.
                 return StrandResult::Error(StrandError::StoreError(e));
             }
@@ -122,17 +145,82 @@ impl super::Strand for PluckStrand {
         //    candidates regardless of backend behaviour, preventing the
         //    SELECTING→CLAIMING→RETRYING spin loop observed when br ready --json
         //    omits label fields for some beads.
+        let before_label_filter = candidates.len();
         candidates.retain(|b| !b.labels.iter().any(|l| self.exclude_labels.contains(l)));
+        let after_label_filter = candidates.len();
+
+        if before_label_filter != after_label_filter {
+            tracing::debug!(
+                excluded_count = before_label_filter - after_label_filter,
+                remaining = after_label_filter,
+                excluded_labels = ?self.exclude_labels,
+                "Label filtering excluded {} beads",
+                before_label_filter - after_label_filter
+            );
+
+            // Log each excluded bead at DEBUG level
+            let excluded_beads: Vec<_> = candidates.iter()
+                .filter(|b| b.labels.iter().any(|l| self.exclude_labels.contains(l)))
+                .map(|b| (b.id.as_ref(), b.labels.clone()))
+                .collect();
+            for (id, labels) in excluded_beads {
+                let excluded_reasons: Vec<_> = labels.iter()
+                    .filter(|l| self.exclude_labels.contains(l))
+                    .map(|l| l.as_str())
+                    .collect();
+                tracing::debug!(
+                    bead_id = %id,
+                    labels = ?labels,
+                    excluded_reasons = ?excluded_reasons,
+                    "Excluded bead due to labels"
+                );
+            }
+
+            // Re-filter since we logged them
+            candidates.retain(|b| !b.labels.iter().any(|l| self.exclude_labels.contains(l)));
+        } else {
+            tracing::debug!(
+                count = after_label_filter,
+                "No beads excluded by label filter"
+            );
+        }
 
         // 3. Filter: remove beads that are actively in_progress (claimed by another worker)
         //    and Open beads with a stale assignee. These are never claimable — the claimer
         //    will reject them every time, causing a hot loop.
+        let before_status_filter = candidates.len();
         candidates.retain(|b| {
             !(matches!(b.status, crate::types::BeadStatus::InProgress)
                 || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some()))
         });
+        let after_status_filter = candidates.len();
+
+        if before_status_filter != after_status_filter {
+            tracing::debug!(
+                filtered_count = before_status_filter - after_status_filter,
+                remaining = after_status_filter,
+                "Status/assignee filtering removed {} beads",
+                before_status_filter - after_status_filter
+            );
+        } else {
+            tracing::debug!(
+                count = after_status_filter,
+                "No beads excluded by status/assignee filter"
+            );
+        }
 
         // 4. Sort: deterministic (priority, created_at, id).
+        if !candidates.is_empty() {
+            let first = &candidates[0];
+            tracing::debug!(
+                total = candidates.len(),
+                first_bead_id = %first.id,
+                first_priority = first.priority,
+                first_created_at = %first.created_at,
+                "Sorting {} candidates by (priority ASC, created_at ASC, id ASC)",
+                candidates.len()
+            );
+        }
         Self::sort_candidates(&mut candidates);
 
         // 5. Check for split trigger: if the first candidate has accumulated
@@ -141,16 +229,42 @@ impl super::Strand for PluckStrand {
         if self.split_after_failures > 0 {
             if let Some(first_candidate) = candidates.first() {
                 let failure_count = Self::extract_failure_count(first_candidate);
+                tracing::debug!(
+                    bead_id = %first_candidate.id,
+                    failure_count = failure_count,
+                    threshold = self.split_after_failures,
+                    split_triggered = failure_count >= self.split_after_failures,
+                    "Checking split trigger for first candidate"
+                );
+
                 if failure_count >= self.split_after_failures {
+                    tracing::info!(
+                        bead_id = %first_candidate.id,
+                        failure_count = failure_count,
+                        threshold = self.split_after_failures,
+                        "Split threshold reached, returning Split instruction"
+                    );
                     return StrandResult::Split(Box::new(first_candidate.clone()), failure_count);
                 }
             }
+        } else {
+            tracing::debug!("Split trigger disabled (threshold = 0)");
         }
 
         // 6. Return result.
         if candidates.is_empty() {
+            tracing::debug!("No candidates remaining after filtering, returning NoWork");
             StrandResult::NoWork
         } else {
+            let candidate_ids: Vec<&str> = candidates.iter()
+                .map(|b| b.id.as_ref())
+                .collect();
+            tracing::info!(
+                count = candidates.len(),
+                candidates = ?candidate_ids,
+                "Returning {} candidates for processing",
+                candidates.len()
+            );
             StrandResult::BeadFound(candidates)
         }
     }
