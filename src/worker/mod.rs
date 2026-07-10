@@ -180,16 +180,28 @@ fn register_atexit_handler(
             eprintln!("This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)");
 
             // Try to clean up the heartbeat file to prevent stale detection.
-            // Use the proper cleanup function with error handling from the health module.
+            //
+            // NOTE: deliberately NOT calling crate::health::cleanup_heartbeat_file()
+            // here. This is a C `atexit` callback fired from libc's exit() — by the
+            // time it runs, Rust's thread-locals may already be torn down. That
+            // function calls tracing::debug!/warn! internally, and dispatching a
+            // tracing event needs thread-local state; if it's gone, the access
+            // panics ("thread-local ... already destroyed"). A panic inside an
+            // atexit handler can't unwind ("fatal runtime error: failed to initiate
+            // panic, error 5, aborting") and hard-aborts the whole process — this
+            // was the root cause of a recurring SIGABRT crash (lab, 2026-07-09,
+            // 261 coredumps) whenever a worker's graceful shutdown had already
+            // removed the heartbeat file before this safety-net handler ran (the
+            // common case, not the exceptional one). Do the removal directly with
+            // only std::fs + eprintln!, neither of which touch TLS.
             if let Some(ref hb_path) = state.heartbeat_path {
                 use std::path::Path;
-                // Import the cleanup function from health module
-                // This function has proper error handling: logs, doesn't panic,
-                // and returns Ok(()) even if removal fails (best-effort cleanup).
-                if let Err(e) = crate::health::cleanup_heartbeat_file(Path::new(hb_path)) {
-                    eprintln!("Heartbeat cleanup error: {}", e);
-                } else {
-                    eprintln!("Cleaned up heartbeat file: {}", hb_path);
+                match std::fs::remove_file(Path::new(hb_path)) {
+                    Ok(_) => eprintln!("Cleaned up heartbeat file: {}", hb_path),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        eprintln!("Heartbeat file already removed: {}", hb_path);
+                    }
+                    Err(e) => eprintln!("Heartbeat cleanup error: {}", e),
                 }
             }
 
