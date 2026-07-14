@@ -9,6 +9,7 @@
 use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -1054,6 +1055,309 @@ mod tests {
         };
         let _: &dyn std::error::Error = &e;
     }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // OutputCapture tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn output_capture_success_with_zero_exit() {
+        let capture = OutputCapture {
+            stdout: "running 1 test\ntest foo ... ok".to_string(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            duration: Duration::from_secs(1),
+        };
+        assert!(capture.success());
+        assert!(!capture.failed());
+    }
+
+    #[test]
+    fn output_capture_failed_with_nonzero_exit() {
+        let capture = OutputCapture {
+            stdout: String::new(),
+            stderr: "error: test failed".to_string(),
+            exit_code: Some(1),
+            duration: Duration::from_millis(500),
+        };
+        assert!(!capture.success());
+        assert!(capture.failed());
+    }
+
+    #[test]
+    fn output_capture_no_exit_code_is_failure() {
+        let capture = OutputCapture {
+            stdout: String::new(),
+            stderr: "killed by signal".to_string(),
+            exit_code: None,
+            duration: Duration::from_secs(10),
+        };
+        assert!(!capture.success());
+        assert!(capture.failed());
+    }
+
+    #[test]
+    fn output_capture_duration_ms() {
+        let capture = OutputCapture {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            duration: Duration::from_millis(2500),
+        };
+        assert_eq!(capture.duration_ms(), 2500);
+    }
+
+    #[test]
+    fn output_capture_total_output_len() {
+        let capture = OutputCapture {
+            stdout: "test output\n".to_string(),
+            stderr: "error message".to_string(),
+            exit_code: Some(1),
+            duration: Duration::ZERO,
+        };
+        assert_eq!(capture.total_output_len(), 12 + 13); // stdout len + stderr len
+    }
+
+    #[test]
+    fn output_capture_serde_serialization() {
+        let capture = OutputCapture {
+            stdout: "test output".to_string(),
+            stderr: "test warnings".to_string(),
+            exit_code: Some(0),
+            duration: Duration::from_millis(1500),
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&capture).unwrap();
+        assert!(json.contains("\"stdout\":\"test output\""));
+        assert!(json.contains("\"exit_code\":0"));
+        assert!(json.contains("\"duration\":1500"));
+
+        // Deserialize from JSON
+        let deserialized: OutputCapture = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.stdout, "test output");
+        assert_eq!(deserialized.stderr, "test warnings");
+        assert_eq!(deserialized.exit_code, Some(0));
+        assert_eq!(deserialized.duration_ms(), 1500);
+    }
+
+    #[test]
+    fn output_capture_serde_with_none_exit_code() {
+        let capture = OutputCapture {
+            stdout: String::new(),
+            stderr: "killed".to_string(),
+            exit_code: None,
+            duration: Duration::from_secs(5),
+        };
+
+        let json = serde_json::to_string(&capture).unwrap();
+        assert!(json.contains("\"exit_code\":null"));
+
+        let deserialized: OutputCapture = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.exit_code, None);
+        assert_eq!(deserialized.duration.as_secs(), 5);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // CompilationError tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn compilation_error_rust_error_description() {
+        let error = CompilationError::RustError {
+            code: "E0308".to_string(),
+            message: "mismatched types".to_string(),
+            file: Some("src/main.rs".to_string()),
+            line: Some(10),
+            column: Some(5),
+        };
+        assert_eq!(error.description(), "E0308: mismatched types");
+        assert_eq!(error.error_code(), Some("E0308"));
+        assert!(error.has_location());
+    }
+
+    #[test]
+    fn compilation_error_general_description() {
+        let error = CompilationError::General {
+            message: "could not compile `my_crate`".to_string(),
+        };
+        assert_eq!(
+            error.description(),
+            "could not compile `my_crate`"
+        );
+        assert!(error.error_code().is_none());
+        assert!(!error.has_location());
+    }
+
+    #[test]
+    fn compilation_error_abort_description() {
+        let error = CompilationError::Abort { error_count: 3 };
+        assert_eq!(error.description(), "aborting due to 3 previous error(s)");
+        assert!(error.error_code().is_none());
+        assert!(!error.has_location());
+    }
+
+    #[test]
+    fn compilation_error_location_string() {
+        let error = CompilationError::RustError {
+            code: "E0382".to_string(),
+            message: "use of moved value".to_string(),
+            file: Some("src/lib.rs".to_string()),
+            line: Some(42),
+            column: Some(10),
+        };
+        assert_eq!(error.location_string(), Some("src/lib.rs:42:10".to_string()));
+    }
+
+    #[test]
+    fn compilation_error_location_string_no_line() {
+        let error = CompilationError::RustError {
+            code: "E0001".to_string(),
+            message: "some error".to_string(),
+            file: Some("src/main.rs".to_string()),
+            line: None,
+            column: None,
+        };
+        assert_eq!(
+            error.location_string(),
+            Some("src/main.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn compilation_error_location_string_no_file() {
+        let error = CompilationError::RustError {
+            code: "E0001".to_string(),
+            message: "some error".to_string(),
+            file: None,
+            line: None,
+            column: None,
+        };
+        assert!(error.location_string().is_none());
+    }
+
+    #[test]
+    fn compilation_error_display_rust_error() {
+        let error = CompilationError::RustError {
+            code: "E0308".to_string(),
+            message: "mismatched types".to_string(),
+            file: Some("src/main.rs".to_string()),
+            line: Some(10),
+            column: Some(5),
+        };
+        let display = format!("{}", error);
+        assert!(display.contains("E0308"));
+        assert!(display.contains("mismatched types"));
+        assert!(display.contains("src/main.rs:10:5"));
+    }
+
+    #[test]
+    fn compilation_error_display_general() {
+        let error = CompilationError::General {
+            message: "compilation failed".to_string(),
+        };
+        let display = format!("{}", error);
+        assert_eq!(display, "compilation failed");
+    }
+
+    #[test]
+    fn compilation_error_display_abort() {
+        let error = CompilationError::Abort { error_count: 5 };
+        let display = format!("{}", error);
+        assert_eq!(display, "aborting due to 5 previous error(s)");
+    }
+
+    #[test]
+    fn compilation_error_serde_rust_error() {
+        let error = CompilationError::RustError {
+            code: "E0308".to_string(),
+            message: "mismatched types".to_string(),
+            file: Some("src/main.rs".to_string()),
+            line: Some(10),
+            column: Some(5),
+        };
+
+        let json = serde_json::to_string(&error).unwrap();
+        assert!(json.contains("\"rust_error\""));
+        assert!(json.contains("\"E0308\""));
+        assert!(json.contains("mismatched types"));
+
+        let deserialized: CompilationError = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            CompilationError::RustError {
+                code,
+                message,
+                file,
+                line,
+                column,
+            } => {
+                assert_eq!(code, "E0308");
+                assert_eq!(message, "mismatched types");
+                assert_eq!(file, Some("src/main.rs".to_string()));
+                assert_eq!(line, Some(10));
+                assert_eq!(column, Some(5));
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn compilation_error_serde_general() {
+        let error = CompilationError::General {
+            message: "compilation failed".to_string(),
+        };
+
+        let json = serde_json::to_string(&error).unwrap();
+        assert!(json.contains("\"general\""));
+        assert!(json.contains("compilation failed"));
+
+        let deserialized: CompilationError = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            CompilationError::General { message } => {
+                assert_eq!(message, "compilation failed");
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn compilation_error_serde_abort() {
+        let error = CompilationError::Abort { error_count: 3 };
+
+        let json = serde_json::to_string(&error).unwrap();
+        assert!(json.contains("\"abort\""));
+        assert!(json.contains("\"error_count\":3"));
+
+        let deserialized: CompilationError = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            CompilationError::Abort { error_count } => {
+                assert_eq!(error_count, 3);
+            }
+            _ => panic!("Wrong variant"),
+        }
+    }
+
+    #[test]
+    fn compilation_error_all_variants_have_display_impl() {
+        // Verify all variants can be displayed
+        let errors = vec![
+            CompilationError::RustError {
+                code: "E0308".to_string(),
+                message: "msg".to_string(),
+                file: None,
+                line: None,
+                column: None,
+            },
+            CompilationError::General {
+                message: "msg".to_string(),
+            },
+            CompilationError::Abort { error_count: 1 },
+        ];
+
+        for error in errors {
+            let _ = format!("{}", error); // Should not panic
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1160,6 +1464,196 @@ impl fmt::Display for ExhaustionDiagnosis {
             ExhaustionDiagnosis::NoBeadsExist => write!(f, "no_beads_exist"),
             ExhaustionDiagnosis::AllClaimed => write!(f, "all_claimed"),
             ExhaustionDiagnosis::Invisible => write!(f, "invisible"),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Cargo test output capture
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Captured output from a cargo test execution.
+///
+/// This struct contains the complete output from running `cargo test`,
+/// including stdout, stderr, exit code, and duration. It is designed to be
+/// serializable for storage and transmission.
+///
+/// ## Example
+///
+/// ```no_run
+/// use needle::types::OutputCapture;
+/// use std::time::Duration;
+///
+/// let capture = OutputCapture {
+///     stdout: "running 1 test\ntest test_foo ... ok".to_string(),
+///     stderr: String::new(),
+///     exit_code: Some(0),
+///     duration: Duration::from_millis(1500),
+/// };
+///
+/// assert!(capture.success());
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputCapture {
+    /// Captured stdout from the test execution.
+    pub stdout: String,
+    /// Captured stderr from the test execution.
+    pub stderr: String,
+    /// Exit code from the test process. `None` if killed by signal.
+    pub exit_code: Option<i32>,
+    /// Duration of the test execution.
+    #[serde(with = "serde_duration")]
+    pub duration: Duration,
+}
+
+impl OutputCapture {
+    /// Returns true if the test exited with code 0.
+    pub fn success(&self) -> bool {
+        self.exit_code == Some(0)
+    }
+
+    /// Returns true if the test failed (non-zero exit code).
+    pub fn failed(&self) -> bool {
+        !self.success()
+    }
+
+    /// Get the duration as milliseconds.
+    pub fn duration_ms(&self) -> u64 {
+        self.duration.as_millis() as u64
+    }
+
+    /// Get the total length of stdout and stderr in bytes.
+    pub fn total_output_len(&self) -> usize {
+        self.stdout.len() + self.stderr.len()
+    }
+}
+
+/// Serde serialization module for Duration.
+///
+/// Duration is serialized as milliseconds (u64) for JSON compatibility.
+mod serde_duration {
+    use std::time::Duration;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let millis = duration.as_millis() as u64;
+        millis.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = u64::deserialize(deserializer)?;
+        Ok(Duration::from_millis(millis))
+    }
+}
+
+/// A single compilation error detected from cargo test output.
+///
+/// Represents a Rust compiler error with code, message, and optional file location.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompilationError {
+    /// A Rust compiler error with error code (e.g., E0308).
+    RustError {
+        /// The error code (e.g., "E0308").
+        code: String,
+        /// The error message.
+        message: String,
+        /// Optional file path where the error occurred.
+        file: Option<String>,
+        /// Optional line number where the error occurred.
+        line: Option<usize>,
+        /// Optional column number where the error occurred.
+        column: Option<usize>,
+    },
+    /// General compilation failure without specific error code.
+    General {
+        /// Description of the failure.
+        message: String,
+    },
+    /// Abort message indicating the number of errors.
+    Abort {
+        /// Number of errors that caused the abort.
+        error_count: usize,
+    },
+}
+
+impl CompilationError {
+    /// Returns a human-readable description of the error.
+    pub fn description(&self) -> String {
+        match self {
+            CompilationError::RustError { code, message, .. } => {
+                format!("{}: {}", code, message)
+            }
+            CompilationError::General { message } => message.clone(),
+            CompilationError::Abort { error_count } => {
+                format!("aborting due to {} previous error(s)", error_count)
+            }
+        }
+    }
+
+    /// Returns the error code if this is a Rust compiler error.
+    pub fn error_code(&self) -> Option<&str> {
+        match self {
+            CompilationError::RustError { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
+    /// Returns true if this error has a file location.
+    pub fn has_location(&self) -> bool {
+        matches!(self, CompilationError::RustError { file: Some(_), .. })
+    }
+
+    /// Get the file location as "file:line:column" if available.
+    pub fn location_string(&self) -> Option<String> {
+        match self {
+            CompilationError::RustError {
+                file,
+                line,
+                column,
+                ..
+            } => {
+                if let Some(f) = file {
+                    let mut loc = f.clone();
+                    if let Some(l) = line {
+                        loc.push(':');
+                        loc.push_str(&l.to_string());
+                        if let Some(c) = column {
+                            loc.push(':');
+                            loc.push_str(&c.to_string());
+                        }
+                    }
+                    Some(loc)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for CompilationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CompilationError::RustError { code, message, file, line, column } => {
+                if let Some(loc) = self.location_string() {
+                    write!(f, "error[{}][{}]: {}", code, loc, message)
+                } else {
+                    write!(f, "error[{}]: {}", code, message)
+                }
+            }
+            CompilationError::General { message } => write!(f, "{}", message),
+            CompilationError::Abort { error_count } => {
+                write!(f, "aborting due to {} previous error(s)", error_count)
+            }
         }
     }
 }
