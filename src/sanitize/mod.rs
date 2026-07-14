@@ -794,9 +794,8 @@ mod tests {
 
         latencies.sort();
         let median = latencies[SAMPLE_COUNT / 2];
-        // Note: Using nearest-rank method (simple indexing) for quick p95 estimate in test context.
-        // For accurate p95 calculation with linear interpolation, use needle::stats::calculate_p95.
-        let p95 = latencies[(SAMPLE_COUNT * 95) / 100];
+        // Use proper linear interpolation p95 calculation for accuracy.
+        let p95 = crate::stats::calculate_p95(&latencies);
 
         #[cfg(debug_assertions)]
         let threshold_ms = 2000u128;
