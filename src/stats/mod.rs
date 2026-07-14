@@ -294,6 +294,17 @@ impl StatsAggregator {
 /// — for example, in latency metrics, p95 tells you that 95% of requests
 /// completed within this time, while the slowest 5% took longer.
 ///
+/// # Edge Cases
+///
+/// This function handles all edge cases gracefully:
+///
+/// - **Empty slice**: Returns `0` (no data available)
+/// - **Single element**: Returns that element (the only value available)
+/// - **Two elements**: Uses linear interpolation to estimate p95 between the two values
+/// - **Small samples (2-3 elements)**: Linear interpolation provides a reasonable estimate
+///
+/// All edge cases return sensible results without panicking.
+///
 /// # Algorithm
 ///
 /// This function uses **linear interpolation**, which is the same method
@@ -312,6 +323,7 @@ impl StatsAggregator {
 /// - **Standard**: Matches the behavior of common benchmarking libraries
 /// - **Well-documented**: The algorithm is described in statistical literature
 /// - **Deterministic**: Always produces the same result for the same input
+/// - **Handles all sample sizes**: Works correctly from 0 to very large datasets
 ///
 /// Note: This uses linear interpolation, not nearest-rank. For example, with 10 elements
 /// `[10, 20, ..., 100]`, the 95th percentile is approximately `95.5` (rounded to `96`),
@@ -374,6 +386,32 @@ impl StatsAggregator {
 /// let empty: Vec<u128> = vec![];
 /// let p95 = calculate_p95(&empty);
 /// assert_eq!(p95, 0); // No data → returns 0
+/// ```
+///
+/// ## Two elements (small sample)
+///
+/// ```
+/// use needle::stats::calculate_p95;
+///
+/// let two = vec![10u128, 20];
+/// let p95 = calculate_p95(&two);
+/// // rank = 0.95 * 1 = 0.95, floor_index = 0, fraction = 0.95
+/// // floor_value = 10, ceiling_value = 20
+/// // interpolated = 10 + 10 * 0.95 = 19.5 → 20
+/// assert_eq!(p95, 20); // Linear interpolation estimates p95
+/// ```
+///
+/// ## Three elements (small sample)
+///
+/// ```
+/// use needle::stats::calculate_p95;
+///
+/// let three = vec![10u128, 20, 30];
+/// let p95 = calculate_p95(&three);
+/// // rank = 0.95 * 2 = 1.9, floor_index = 1, fraction = 0.9
+/// // floor_value = 20, ceiling_value = 30
+/// // interpolated = 20 + 10 * 0.9 = 29.0 → 29
+/// assert_eq!(p95, 29); // Linear interpolation estimates p95
 /// ```
 ///
 /// ## Real-world latency example

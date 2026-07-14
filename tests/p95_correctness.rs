@@ -84,8 +84,7 @@ fn test_p95_large_dataset() {
 fn test_p95_realistic_latency_data() {
     // Simulated latency data with realistic distribution
     let latencies = vec![
-        12, 15, 18, 20, 22, 25, 28, 30, 35, 40,
-        45, 50, 55, 60, 70, 80, 90, 100, 120, 150,
+        12, 15, 18, 20, 22, 25, 28, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 100, 120, 150,
     ];
     // Linear interpolation: rank = 0.95 * 19 = 18.05, floor=18, frac=0.05
     // 120 + (150-120) * 0.05 = 121.5 → 122
@@ -96,8 +95,7 @@ fn test_p95_realistic_latency_data() {
 fn test_p95_with_outliers() {
     // Data with outliers
     let data = vec![
-        10u128, 12, 15, 18, 20, 22, 25, 28, 30, 35,
-        40, 45, 50, 55, 60, 70, 80, 90, 1000, 2000,
+        10u128, 12, 15, 18, 20, 22, 25, 28, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 1000, 2000,
     ];
     // Linear interpolation: rank = 0.95 * 19 = 18.05, floor=18, frac=0.05
     // 1000 + (2000-1000) * 0.05 = 1050
