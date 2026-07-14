@@ -468,6 +468,115 @@ pub fn calculate_p95(latencies: &[u128]) -> u128 {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// P95 aggregation utilities
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Collector for aggregating samples across multiple benchmark iterations.
+///
+/// This struct provides a statistically sound way to aggregate latency measurements
+/// across multiple iterations and calculate a single p95 percentile.
+///
+/// # Statistical Approach
+///
+/// The correct way to aggregate percentiles across multiple iterations is to:
+/// 1. **Pool all samples** from all iterations into a single dataset
+/// 2. **Calculate one p95** on the pooled data
+///
+/// **Do NOT average p95 values** from individual iterations — this is statistically
+/// invalid because percentiles are non-linear statistics. Averaging them produces
+/// misleading results.
+///
+/// # Example
+///
+/// ```no_run
+/// use needle::stats::P95Collector;
+/// use std::time::Instant;
+///
+/// let mut collector = P95Collector::new();
+///
+/// // Run benchmark for 50 iterations
+/// for _ in 0..50 {
+///     let start = Instant::now();
+///     // ... perform work ...
+///     collector.record(start.elapsed().as_micros());
+/// }
+///
+/// // Calculate p95 across all iterations
+/// let p95_us = collector.p95();
+/// println!("p95 latency: {} μs", p95_us);
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct P95Collector {
+    /// All recorded latency samples in microseconds.
+    samples: Vec<u128>,
+}
+
+impl P95Collector {
+    /// Create a new empty collector.
+    pub fn new() -> Self {
+        Self {
+            samples: Vec::new(),
+        }
+    }
+
+    /// Create a new collector with pre-allocated capacity.
+    ///
+    /// Use this when you know how many samples you'll collect to avoid
+    /// reallocations during benchmarking.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            samples: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Record a single latency sample in microseconds.
+    pub fn record(&mut self, latency_us: u128) {
+        self.samples.push(latency_us);
+    }
+
+    /// Record multiple latency samples at once.
+    pub fn record_all(&mut self, latencies: impl IntoIterator<Item = u128>) {
+        self.samples.extend(latencies);
+    }
+
+    /// Calculate the p95 percentile across all recorded samples.
+    ///
+    /// Returns `0` if no samples have been recorded.
+    pub fn p95(&self) -> u128 {
+        calculate_p95(&self.samples)
+    }
+
+    /// Return the number of samples collected.
+    pub fn count(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// Clear all recorded samples.
+    pub fn clear(&mut self) {
+        self.samples.clear();
+    }
+
+    /// Get a reference to the underlying samples.
+    pub fn samples(&self) -> &[u128] {
+        &self.samples
+    }
+
+    /// Calculate additional statistics on the collected samples.
+    ///
+    /// Returns `(min, max, avg)` in microseconds, or `None` if no samples.
+    pub fn stats(&self) -> Option<(u128, u128, f64)> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        let min = *self.samples.iter().min().unwrap();
+        let max = *self.samples.iter().max().unwrap();
+        let sum: u128 = self.samples.iter().sum();
+        let avg = sum as f64 / self.samples.len() as f64;
+        Some((min, max, avg))
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Stats engine — multi-dimensional outcome aggregation
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1079,5 +1188,97 @@ mod tests {
         // Linear interpolation: rank = 0.95 * 19 = 18.05, floor=18, frac=0.05
         // 190 + (200-190) * 0.05 = 190.5 → 191
         assert_eq!(calculate_p95(&data), 191);
+    }
+
+    // ── P95Collector tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn p95_collector_empty() {
+        let collector = P95Collector::new();
+        assert_eq!(collector.p95(), 0);
+        assert_eq!(collector.count(), 0);
+        assert!(collector.stats().is_none());
+    }
+
+    #[test]
+    fn p95_collector_single_sample() {
+        let mut collector = P95Collector::new();
+        collector.record(42);
+        assert_eq!(collector.p95(), 42);
+        assert_eq!(collector.count(), 1);
+        let stats = collector.stats().unwrap();
+        assert_eq!(stats.0, 42); // min
+        assert_eq!(stats.1, 42); // max
+        assert_eq!(stats.2, 42.0); // avg
+    }
+
+    #[test]
+    fn p95_collector_multiple_samples() {
+        let mut collector = P95Collector::new();
+        for i in 1..=10 {
+            collector.record(i * 10);
+        }
+        assert_eq!(collector.count(), 10);
+        // Should match calculate_p95 on the same data
+        let data: Vec<u128> = (1..=10).map(|i| i * 10).collect();
+        assert_eq!(collector.p95(), calculate_p95(&data));
+    }
+
+    #[test]
+    fn p95_collector_with_capacity() {
+        let mut collector = P95Collector::with_capacity(100);
+        assert_eq!(collector.count(), 0);
+        // Should not reallocate
+        for i in 0..100 {
+            collector.record(i);
+        }
+        assert_eq!(collector.count(), 100);
+    }
+
+    #[test]
+    fn p95_collector_record_all() {
+        let mut collector = P95Collector::new();
+        let samples = vec![10u128, 20, 30, 40, 50];
+        collector.record_all(samples.iter().copied());
+        assert_eq!(collector.count(), 5);
+        assert_eq!(collector.p95(), calculate_p95(&samples));
+    }
+
+    #[test]
+    fn p95_collector_stats() {
+        let mut collector = P95Collector::new();
+        collector.record(10);
+        collector.record(20);
+        collector.record(30);
+
+        let stats = collector.stats().unwrap();
+        assert_eq!(stats.0, 10); // min
+        assert_eq!(stats.1, 30); // max
+        assert_eq!(stats.2, 20.0); // avg = (10+20+30)/3
+    }
+
+    #[test]
+    fn p95_collector_clear() {
+        let mut collector = P95Collector::new();
+        collector.record(100);
+        collector.record(200);
+        assert_eq!(collector.count(), 2);
+
+        collector.clear();
+        assert_eq!(collector.count(), 0);
+        assert_eq!(collector.p95(), 0);
+        assert!(collector.stats().is_none());
+    }
+
+    #[test]
+    fn p95_collector_samples_ref() {
+        let mut collector = P95Collector::new();
+        collector.record(10);
+        collector.record(20);
+        collector.record(30);
+
+        let samples = collector.samples();
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples, &[10, 20, 30]);
     }
 }
