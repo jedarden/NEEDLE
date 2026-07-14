@@ -1012,4 +1012,131 @@ mod tests {
         assert!(match_adapter_with_glob("*", "model-with-dashes").is_some());
         assert!(match_adapter_with_glob("*", "model_with_underscores").is_some());
     }
+
+    #[test]
+    fn glob_match_nested_path_test_pattern() {
+        // Test patterns for nested paths with "test" in them
+        // Using *test* to match anything containing "test"
+        assert!(match_adapter_with_glob("*test*", "test").is_some());
+        assert!(match_adapter_with_glob("*test*", "foo-test").is_some());
+        assert!(match_adapter_with_glob("*test*", "foo-test-bar").is_some());
+        assert!(match_adapter_with_glob("*test*", "testing").is_some());
+
+        // Path-based test patterns
+        assert!(match_adapter_with_glob("**/test", "test").is_some());
+        assert!(match_adapter_with_glob("**/test", "foo/test").is_some());
+        assert!(match_adapter_with_glob("**/test", "foo/bar/test").is_some());
+        assert!(match_adapter_with_glob("**/test", "foo/bar/baz/test").is_some());
+
+        // Non-matching patterns
+        assert!(match_adapter_with_glob("**/test", "testing").is_none());
+        assert!(match_adapter_with_glob("**/test", "foo/testing").is_none());
+        assert!(match_adapter_with_glob("**/test", "foo/atest/bar").is_none());
+        assert!(match_adapter_with_glob("**/test", "test/more").is_none()); // Not a leaf
+    }
+
+    #[test]
+    fn glob_match_double_asterisk_specific_patterns() {
+        // More specific double-asterisk patterns
+        assert!(match_adapter_with_glob("**/model", "model").is_some());
+        assert!(match_adapter_with_glob("**/model", "provider/model").is_some());
+        assert!(match_adapter_with_glob("**/model", "a/b/c/model").is_some());
+
+        assert!(match_adapter_with_glob("provider/**", "provider/model").is_some());
+        assert!(match_adapter_with_glob("provider/**", "provider/nested/model").is_some());
+        assert!(match_adapter_with_glob("provider/**", "provider/").is_some());
+
+        // Non-matching
+        assert!(match_adapter_with_glob("**/model", "other").is_none());
+        assert!(match_adapter_with_glob("provider/**", "other/model").is_none());
+    }
+
+    #[test]
+    fn glob_match_empty_string_variations() {
+        // Comprehensive empty string tests
+        assert!(match_adapter_with_glob("*", "").is_none()); // Empty model with wildcard
+        assert!(match_adapter_with_glob("**", "").is_none()); // Empty model with double wildcard
+        assert!(match_adapter_with_glob("pattern", "").is_none()); // Empty model with pattern
+        assert!(match_adapter_with_glob("", "model").is_none()); // Empty pattern
+        assert!(match_adapter_with_glob("", "").is_none()); // Both empty
+    }
+
+    #[test]
+    fn glob_match_bracket_patterns() {
+        // Test negated character classes
+        assert!(match_adapter_with_glob("gpt-[!0-9]", "gpt-a").is_some());
+        assert!(match_adapter_with_glob("gpt-[!0-9]", "gpt-x").is_some());
+        assert!(match_adapter_with_glob("gpt-[!0-9]", "gpt-4").is_none());
+
+        // Test ranges
+        assert!(match_adapter_with_glob("model-[a-c]", "model-a").is_some());
+        assert!(match_adapter_with_glob("model-[a-c]", "model-b").is_some());
+        assert!(match_adapter_with_glob("model-[a-c]", "model-c").is_some());
+        assert!(match_adapter_with_glob("model-[a-c]", "model-d").is_none());
+    }
+
+    #[test]
+    fn glob_match_multiple_wildcards() {
+        // Test multiple wildcards in same pattern
+        assert!(match_adapter_with_glob("*-*", "claude-sonnet").is_some());
+        assert!(match_adapter_with_glob("*-*", "gpt-4").is_some());
+        assert!(match_adapter_with_glob("*-*", "model").is_none()); // No dash
+
+        assert!(match_adapter_with_glob("*-*-*", "claude-sonnet-4").is_some());
+        assert!(match_adapter_with_glob("*-*-*", "a-b-c").is_some());
+        assert!(match_adapter_with_glob("*-*-*", "a-b").is_none()); // Only two parts
+    }
+
+    #[test]
+    fn glob_match_trailing_wildcard() {
+        // Test trailing wildcards with single asterisk
+        assert!(match_adapter_with_glob("claude-*", "claude-sonnet").is_some());
+        assert!(match_adapter_with_glob("claude-*", "claude-sonnet-4-6").is_some());
+        assert!(match_adapter_with_glob("claude-*", "claude").is_none()); // Need at least one char after dash
+
+        // Test trailing wildcards with double asterisk
+        assert!(match_adapter_with_glob("claude/**", "claude/sonnet").is_some());
+        assert!(match_adapter_with_glob("claude/**", "claude/sonnet/4").is_some());
+        assert!(match_adapter_with_glob("claude/**", "claude").is_none()); // Need slash after claude
+
+        // Test patterns ending with various wildcards
+        assert!(match_adapter_with_glob("*-4", "gpt-4").is_some());
+        assert!(match_adapter_with_glob("*-4", "claude-sonnet-4").is_some());
+        assert!(match_adapter_with_glob("*-4", "gpt-3").is_none());
+    }
+
+    #[test]
+    fn glob_match_non_matching_comprehensive() {
+        // Comprehensive non-matching pattern tests
+        assert!(match_adapter_with_glob("claude-*", "gpt-4").is_none());
+        assert!(match_adapter_with_glob("claude-*", "opus-4").is_none());
+        assert!(match_adapter_with_glob("claude-*", "claude").is_none()); // No suffix
+
+        assert!(match_adapter_with_glob("gpt-?", "gpt-").is_none()); // Need one char
+        assert!(match_adapter_with_glob("gpt-?", "gpt-12").is_none()); // Too many chars
+        assert!(match_adapter_with_glob("gpt-?", "claude-4").is_none()); // Wrong prefix
+
+        assert!(match_adapter_with_glob("^exact$", "exact").is_none()); // ^ not special in glob
+        assert!(match_adapter_with_glob("model.*", "model-xyz").is_none()); // . not special in glob
+    }
+
+    #[test]
+    fn glob_match_real_world_model_names() {
+        // Test with real-world model name patterns
+        assert!(match_adapter_with_glob("claude-sonnet-*", "claude-sonnet-4-6").is_some());
+        assert!(match_adapter_with_glob("claude-sonnet-*", "claude-sonnet-4-5-20251001").is_some());
+
+        assert!(match_adapter_with_glob("gpt-*", "gpt-4").is_some());
+        assert!(match_adapter_with_glob("gpt-*", "gpt-4-turbo").is_some());
+        assert!(match_adapter_with_glob("gpt-*", "gpt-3.5-turbo").is_some());
+
+        assert!(match_adapter_with_glob("*-turbo", "gpt-4-turbo").is_some());
+        assert!(match_adapter_with_glob("*-turbo", "claude-sonnet-turbo").is_some());
+        assert!(match_adapter_with_glob("*-turbo", "gpt-4").is_none());
+
+        // Provider/model patterns
+        assert!(match_adapter_with_glob("anthropic/*", "anthropic/claude-sonnet").is_some());
+        assert!(match_adapter_with_glob("openai/*", "openai/gpt-4").is_some());
+        assert!(match_adapter_with_glob("anthropic/*", "openai/gpt-4").is_none());
+    }
 }
