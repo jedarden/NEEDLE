@@ -4787,4 +4787,314 @@ mod tests {
             "should report the first (broader) matching pattern"
         );
     }
+
+    // ── Routing baseline tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn apply_routing_rules_baseline_multiple_rules_same_adapter() {
+        /// Baseline test documenting CURRENT matcher behavior when multiple rules
+        /// both match the same model AND route to the same adapter.
+        ///
+        /// This test establishes the baseline behavior before first-match-wins
+        /// implementation. The test verifies that when both rules match and route
+        /// to the same adapter, the first matching rule is reported.
+        use crate::config::{RoutingConfig, RoutingRule};
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+
+        // Configure two rules that both match "claude-sonnet-4-6" AND route to
+        // the same adapter "claude-print":
+        // - First rule: "claude-.*" -> claude-print
+        // - Second rule: "claude-sonnet-.*" -> claude-print (same adapter)
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "claude-.*".to_string(),
+                    adapter: "claude-print".to_string(),
+                },
+                RoutingRule {
+                    match_model: "claude-sonnet-.*".to_string(),
+                    adapter: "claude-print".to_string(),
+                },
+            ],
+            default_adapter: None,
+            strict: true,
+        });
+
+        let worker = Worker::new(
+            config,
+            "test-routing-baseline-same".to_string(),
+            Arc::clone(&store),
+        );
+
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "claude".to_string(),
+            description: None,
+            agent_cli: "claude".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "claude {prompt}".to_string(),
+            environment: std::collections::HashMap::new(),
+            timeout_secs: 3600,
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+        };
+
+        let result = worker.apply_routing_rules(&adapter);
+        assert!(result.is_ok(), "routing should succeed when rules match");
+
+        let (chosen_adapter, matched_rule) = result.unwrap();
+
+        // Current behavior: both rules match and route to the same adapter
+        // The first matching rule should be reported
+        assert_eq!(
+            chosen_adapter, "claude-print",
+            "should route to claude-print when both rules match"
+        );
+        assert_eq!(
+            matched_rule, "claude-.*",
+            "should report the FIRST matching pattern even when both route to same adapter"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_routing_rules_baseline_three_rules_all_match() {
+        /// Baseline test documenting CURRENT matcher behavior when THREE rules
+        /// all match the same model.
+        ///
+        /// This test verifies that the matcher evaluates rules in order and
+        /// returns the first match, even when multiple subsequent rules would
+        /// also match.
+        use crate::config::{RoutingConfig, RoutingRule};
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+
+        // Configure three rules that all match "claude-sonnet-4-6":
+        // - First rule: "claude-.*" -> claude-print (most broad, should match first)
+        // - Second rule: "claude-sonnet-.*" -> claude-code (more specific)
+        // - Third rule: "claude-sonnet-4-.*" -> claude-fable (most specific)
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "claude-.*".to_string(),
+                    adapter: "claude-print".to_string(),
+                },
+                RoutingRule {
+                    match_model: "claude-sonnet-.*".to_string(),
+                    adapter: "claude-code-glm-4.7".to_string(),
+                },
+                RoutingRule {
+                    match_model: "claude-sonnet-4-.*".to_string(),
+                    adapter: "claude-fable".to_string(),
+                },
+            ],
+            default_adapter: None,
+            strict: true,
+        });
+
+        let worker = Worker::new(
+            config,
+            "test-routing-baseline-three".to_string(),
+            Arc::clone(&store),
+        );
+
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "claude".to_string(),
+            description: None,
+            agent_cli: "claude".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "claude {prompt}".to_string(),
+            environment: std::collections::HashMap::new(),
+            timeout_secs: 3600,
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+        };
+
+        let result = worker.apply_routing_rules(&adapter);
+        assert!(result.is_ok(), "routing should succeed when rules match");
+
+        let (chosen_adapter, matched_rule) = result.unwrap();
+
+        // Current behavior: FIRST matching rule wins, even though all three match
+        assert_eq!(
+            chosen_adapter, "claude-print",
+            "should route to claude-print (first matching adapter)"
+        );
+        assert_eq!(
+            matched_rule, "claude-.*",
+            "should report the FIRST matching pattern, even though all three match"
+        );
+
+        println!(
+            "BASELINE: All three rules matched, but first rule won. \
+             chosen_adapter={}, matched_rule={}",
+            chosen_adapter, matched_rule
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_routing_rules_baseline_invalid_then_valid() {
+        /// Baseline test documenting CURRENT matcher behavior when an invalid
+        /// pattern precedes valid matching patterns.
+        ///
+        /// This test verifies that invalid patterns are skipped gracefully and
+        /// the first valid matching pattern determines the adapter.
+        use crate::config::{RoutingConfig, RoutingRule};
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+
+        // Configure rules with invalid pattern in the middle:
+        // - First rule: valid pattern, matches
+        // - Second rule: INVALID pattern (should be skipped with warning)
+        // - Third rule: valid pattern, would also match but shouldn't be checked
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "claude-.*".to_string(),
+                    adapter: "first-adapter".to_string(),
+                },
+                RoutingRule {
+                    match_model: "[invalid(regex".to_string(),
+                    adapter: "invalid-adapter".to_string(),
+                },
+                RoutingRule {
+                    match_model: "claude-sonnet-.*".to_string(),
+                    adapter: "third-adapter".to_string(),
+                },
+            ],
+            default_adapter: None,
+            strict: true,
+        });
+
+        let worker = Worker::new(
+            config,
+            "test-routing-baseline-invalid".to_string(),
+            Arc::clone(&store),
+        );
+
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "claude".to_string(),
+            description: None,
+            agent_cli: "claude".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "claude {prompt}".to_string(),
+            environment: std::collections::HashMap::new(),
+            timeout_secs: 3600,
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+        };
+
+        let result = worker.apply_routing_rules(&adapter);
+        assert!(
+            result.is_ok(),
+            "routing should succeed when a valid rule matches"
+        );
+
+        let (chosen_adapter, matched_rule) = result.unwrap();
+
+        // Current behavior: first valid match wins, invalid rules are skipped
+        assert_eq!(
+            chosen_adapter, "first-adapter",
+            "should use the first VALID matching rule"
+        );
+        assert_eq!(
+            matched_rule, "claude-.*",
+            "should report the first valid matching pattern"
+        );
+
+        println!(
+            "BASELINE: Invalid pattern was skipped, first valid match determined routing. \
+             chosen_adapter={}, matched_rule={}",
+            chosen_adapter, matched_rule
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_routing_rules_baseline_first_match_stops_evaluation() {
+        /// Baseline test to verify whether the matcher stops at the first match
+        /// or continues checking all rules.
+        ///
+        /// This test uses a counter pattern in the adapter name to detect
+        /// whether all rules are checked or only the first match.
+        use crate::config::{RoutingConfig, RoutingRule};
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+
+        // Configure rules where first match should stop evaluation:
+        // - First rule: specific pattern -> adapter-1
+        // - Second rule: broader pattern -> adapter-2 (should NOT be checked)
+        // - Third rule: catch-all -> adapter-3 (should NOT be checked)
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "^claude-sonnet-4-6$".to_string(),
+                    adapter: "adapter-1".to_string(),
+                },
+                RoutingRule {
+                    match_model: "claude-.*".to_string(),
+                    adapter: "adapter-2".to_string(),
+                },
+                RoutingRule {
+                    match_model: "*".to_string(),
+                    adapter: "adapter-3".to_string(),
+                },
+            ],
+            default_adapter: None,
+            strict: true,
+        });
+
+        let worker = Worker::new(
+            config,
+            "test-routing-baseline-stops".to_string(),
+            Arc::clone(&store),
+        );
+
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "claude".to_string(),
+            description: None,
+            agent_cli: "claude".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "claude {prompt}".to_string(),
+            environment: std::collections::HashMap::new(),
+            timeout_secs: 3600,
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+        };
+
+        let result = worker.apply_routing_rules(&adapter);
+        assert!(result.is_ok(), "routing should succeed when a rule matches");
+
+        let (chosen_adapter, matched_rule) = result.unwrap();
+
+        // Current behavior: FIRST match stops evaluation
+        assert_eq!(
+            chosen_adapter, "adapter-1",
+            "should use the first matching rule and stop checking"
+        );
+        assert_eq!(
+            matched_rule, "^claude-sonnet-4-6$",
+            "should report the exact pattern that matched first"
+        );
+
+        println!(
+            "BASELINE: First match stopped evaluation. \
+             chosen_adapter={}, matched_rule={}",
+            chosen_adapter, matched_rule
+        );
+    }
 }
