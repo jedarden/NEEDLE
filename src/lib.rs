@@ -5,6 +5,7 @@
 pub mod agent_event;
 pub mod bead_store;
 pub mod canary;
+pub mod cargo_test;
 pub mod claim;
 pub mod claude_md_placement;
 pub mod cli;
