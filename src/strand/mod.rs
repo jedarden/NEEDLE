@@ -214,7 +214,7 @@ impl StrandRunner {
             telemetry,
         );
 
-        let knot = KnotStrand::new(config.strands.knot.clone());
+        let knot = KnotStrand::new(config.strands.knot.clone(), runner_telemetry.clone());
         StrandRunner {
             strands: vec![
                 Box::new(pluck),

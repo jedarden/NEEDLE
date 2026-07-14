@@ -15,12 +15,32 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::bead_store::{BeadStore, BrCliBeadStore, Filters};
 use crate::config::ExploreConfig;
 use crate::registry::Registry;
 use crate::telemetry::Telemetry;
 use crate::types::StrandResult;
+
+/// Factory for creating bead stores for workspaces.
+///
+/// In production, this creates real BrCliBeadStore instances.
+/// In tests, this can be mocked to return controlled test stores.
+#[async_trait::async_trait]
+trait StoreFactory: Send + Sync {
+    async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error>;
+}
+
+/// Default factory that creates real BrCliBeadStore instances.
+struct DefaultStoreFactory;
+
+#[async_trait::async_trait]
+impl StoreFactory for DefaultStoreFactory {
+    async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+        Ok(Arc::new(BrCliBeadStore::discover(workspace.to_path_buf())?))
+    }
+}
 
 /// The Explore strand — discovers beads in other workspaces.
 pub struct ExploreStrand {
@@ -36,6 +56,8 @@ pub struct ExploreStrand {
     telemetry: Telemetry,
     /// Fully-qualified worker identity (`{adapter}-{worker_id}`).
     qualified_id: String,
+    /// Store factory for creating workspace stores.
+    store_factory: Arc<dyn StoreFactory>,
 }
 
 impl ExploreStrand {
@@ -65,6 +87,55 @@ impl ExploreStrand {
             registry,
             telemetry,
             qualified_id,
+            store_factory: Arc::new(DefaultStoreFactory),
+        }
+    }
+
+    /// Create a new ExploreStrand for testing with explicit workspace list.
+    ///
+    /// This constructor skips workspace discovery and uses the provided list directly.
+    /// Useful for tests that need precise control over which workspaces are scanned.
+    #[cfg(test)]
+    fn new_for_test(
+        workspaces: Vec<PathBuf>,
+        home_workspace: PathBuf,
+        registry: Registry,
+        telemetry: Telemetry,
+        qualified_id: String,
+    ) -> Self {
+        ExploreStrand {
+            enabled: true,
+            workspaces,
+            home_workspace,
+            registry,
+            telemetry,
+            qualified_id,
+            store_factory: Arc::new(DefaultStoreFactory),
+        }
+    }
+
+    /// Create a new ExploreStrand for testing with injected store factory.
+    ///
+    /// This constructor allows tests to inject custom BeadStore creation logic,
+    /// enabling tests of complex scenarios like the deadlock case where different
+    /// workspaces return different candidate sets.
+    #[cfg(test)]
+    fn new_with_store_factory(
+        workspaces: Vec<PathBuf>,
+        home_workspace: PathBuf,
+        registry: Registry,
+        telemetry: Telemetry,
+        qualified_id: String,
+        store_factory: Arc<dyn StoreFactory>,
+    ) -> Self {
+        ExploreStrand {
+            enabled: true,
+            workspaces,
+            home_workspace,
+            registry,
+            telemetry,
+            qualified_id,
+            store_factory,
         }
     }
 
@@ -119,8 +190,16 @@ impl ExploreStrand {
     }
 
     /// Create a BrCliBeadStore for a given workspace path.
-    fn store_for_workspace(workspace: &Path) -> Result<BrCliBeadStore, anyhow::Error> {
-        BrCliBeadStore::discover(workspace.to_path_buf())
+    async fn store_for_workspace(workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+        Ok(Arc::new(BrCliBeadStore::discover(workspace.to_path_buf())?))
+    }
+
+    /// Create a BrCliBeadStore for a given workspace path.
+    ///
+    /// This internal version is marked pub(crate) to allow testing with store injection.
+    #[cfg(test)]
+    async fn create_store_for(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+        self.store_factory.create_store(workspace).await
     }
 }
 
@@ -176,7 +255,7 @@ impl super::Strand for ExploreStrand {
             }
 
             // Create a store for this workspace and query for ready beads.
-            let remote_store = match Self::store_for_workspace(workspace) {
+            let remote_store = match self.store_factory.create_store(workspace).await {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::warn!(
@@ -202,7 +281,7 @@ impl super::Strand for ExploreStrand {
                         );
 
                         match super::cleanup_orphaned_in_progress(
-                            &remote_store,
+                            remote_store.as_ref(),
                             &self.registry,
                             &self.telemetry,
                             &self.qualified_id,
@@ -333,7 +412,8 @@ impl super::Strand for ExploreStrand {
 mod tests {
     use super::*;
     use crate::bead_store::RepairReport;
-    use crate::types::{Bead, BeadId, ClaimResult};
+    use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
+    use chrono::Utc;
 
     use anyhow::Result;
 
@@ -615,5 +695,492 @@ mod tests {
 
         // Should use the explicit list, not discovery
         assert_eq!(strand.workspaces, explicit_workspaces);
+    }
+
+    // ── Deadlock Scenario Tests ────────────────────────────────────────────────────
+
+    /// Unit test proving the explore strand deadlock scenario.
+    ///
+    /// DEADLOCK SCENARIO (from bf-1d64q):
+    /// 1. Workspace 1 has candidates but all are assigned or excluded
+    /// 2. Workspace 2 has valid unassigned candidates
+    /// 3. EXPECTED: Strand advances past workspace 1 to workspace 2
+    /// 4. BUG: Strand returns NoWork prematurely, never checking workspace 2
+    ///
+    /// This test demonstrates the bug and proves the fix works. The test uses
+    /// injected store factories to simulate the scenario where:
+    /// - Workspace 1's store returns 2 candidates, but all have assignees (filtered out)
+    /// - Workspace 2's store returns 1 valid unassigned candidate
+    ///
+    /// The test verifies that workspace 2's candidates ARE returned, proving
+    /// that the strand advances past workspace 1 after filtering out unclaimable
+    /// candidates.
+    #[tokio::test]
+    async fn deadlock_scenario_assigned_beads_allow_advancement() {
+        let workspace1 = PathBuf::from("/tmp/test/workspace1");
+        let workspace2 = PathBuf::from("/tmp/test/workspace2");
+        let home = PathBuf::from("/home/test");
+
+        // Create a mock store factory
+        let mock_factory = Arc::new(DeadlockMockStoreFactory::new(workspace1.clone(), workspace2.clone()));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new_with_store_factory(
+            vec![workspace1.clone(), workspace2.clone()],
+            home,
+            registry,
+            telemetry,
+            "test-worker".to_string(),
+            mock_factory.clone(),
+        );
+
+        let store = DummyStore;
+        let result = strand.evaluate(&store).await;
+
+        // Verify that both workspaces were queried
+        let call_count = mock_factory.call_count();
+        assert!(call_count >= 2, "both workspaces should be queried (at minimum), got: {}", call_count);
+
+        // Verify that workspace 2's candidate was returned
+        match result {
+            StrandResult::BeadFound(candidates) => {
+                assert_eq!(candidates.len(), 1, "should find 1 candidate from workspace 2");
+                assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
+                assert_eq!(candidates[0].workspace, workspace2);
+                assert!(candidates[0].assignee.is_none(), "candidate should be unassigned");
+            }
+            StrandResult::NoWork => {
+                panic!("deadlock bug reproduced: strand returned NoWork instead of finding workspace 2's candidate");
+            }
+            StrandResult::WorkCreated => {
+                panic!("unexpected WorkCreated result");
+            }
+        }
+    }
+
+    /// Unit test for when workspace 1 has only excluded beads (blocked label).
+    ///
+    /// This proves that the strand advances when candidates are excluded by
+    /// the Filters (deferred/human/blocked labels), not just when assigned.
+    #[tokio::test]
+    async fn deadlock_scenario_excluded_beads_allow_advancement() {
+        let workspace1 = PathBuf::from("/tmp/test/workspace1");
+        let workspace2 = PathBuf::from("/tmp/test/workspace2");
+        let home = PathBuf::from("/home/test");
+
+        // Create a mock store factory for excluded beads scenario
+        let mock_factory = Arc::new(ExcludedBeadsMockFactory::new(workspace1.clone(), workspace2.clone()));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new_with_store_factory(
+            vec![workspace1.clone(), workspace2.clone()],
+            home,
+            registry,
+            telemetry,
+            "test-worker".to_string(),
+            mock_factory.clone(),
+        );
+
+        let store = DummyStore;
+        let result = strand.evaluate(&store).await;
+
+        // Verify that workspace 2's candidate was returned
+        match result {
+            StrandResult::BeadFound(candidates) => {
+                assert_eq!(candidates.len(), 1, "should find 1 candidate from workspace 2");
+                assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
+                assert_eq!(candidates[0].workspace, workspace2);
+            }
+            StrandResult::NoWork => {
+                panic!("deadlock bug reproduced: strand returned NoWork even though workspace 2 has valid candidates");
+            }
+            StrandResult::WorkCreated => {
+                panic!("unexpected WorkCreated result");
+            }
+        }
+    }
+
+    // ── Mock Store Factories ─────────────────────────────────────────────────────
+
+    /// Mock store factory for the deadlock scenario.
+    ///
+    /// Simulates:
+    /// - Workspace 1: ready() returns 2 beads, but all have assignees (filtered out)
+    /// - Workspace 2: ready() returns 1 valid unassigned bead
+    struct DeadlockMockStoreFactory {
+        workspace1: PathBuf,
+        workspace2: PathBuf,
+        call_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl DeadlockMockStoreFactory {
+        fn new(workspace1: PathBuf, workspace2: PathBuf) -> Self {
+            DeadlockMockStoreFactory {
+                workspace1,
+                workspace2,
+                call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }
+        }
+
+        fn call_count(&self) -> u32 {
+            self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for DeadlockMockStoreFactory {
+        async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            if workspace == self.workspace1 {
+                Ok(Arc::new(AssignedBeadsStore::new(self.workspace1.clone())))
+            } else if workspace == self.workspace2 {
+                Ok(Arc::new(ValidBeadStore::new(self.workspace2.clone())))
+            } else {
+                Err(anyhow::anyhow!("unexpected workspace: {}", workspace.display()))
+            }
+        }
+    }
+
+    /// Mock store factory for excluded beads scenario.
+    ///
+    /// Simulates:
+    /// - Workspace 1: ready() returns beads with "blocked" label (excluded by filters)
+    /// - Workspace 2: ready() returns 1 valid unassigned bead
+    struct ExcludedBeadsMockFactory {
+        workspace1: PathBuf,
+        workspace2: PathBuf,
+        call_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl ExcludedBeadsMockFactory {
+        fn new(workspace1: PathBuf, workspace2: PathBuf) -> Self {
+            ExcludedBeadsMockFactory {
+                workspace1,
+                workspace2,
+                call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }
+        }
+
+        fn call_count(&self) -> u32 {
+            self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for ExcludedBeadsMockFactory {
+        async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            if workspace == self.workspace1 {
+                Ok(Arc::new(BlockedBeadsStore::new(self.workspace1.clone())))
+            } else if workspace == self.workspace2 {
+                Ok(Arc::new(ValidBeadStore::new(self.workspace2.clone())))
+            } else {
+                Err(anyhow::anyhow!("unexpected workspace: {}", workspace.display()))
+            }
+        }
+    }
+
+    // ── Mock BeadStore Implementations ───────────────────────────────────────────
+
+    /// Mock store that returns only assigned beads.
+    struct AssignedBeadsStore {
+        workspace: PathBuf,
+        query_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl AssignedBeadsStore {
+        fn new(workspace: PathBuf) -> Self {
+            AssignedBeadsStore {
+                workspace,
+                query_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for AssignedBeadsStore {
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            let count = self.query_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            if count == 0 {
+                // First query: return assigned beads (filtered out by strand)
+                Ok(vec![
+                    Bead {
+                        id: BeadId::from("ws1-assigned-bead-1".to_string()),
+                        title: "Assigned Bead 1".to_string(),
+                        body: None,
+                        priority: 1,
+                        status: BeadStatus::Open,
+                        assignee: Some("other-worker-1".to_string()),
+                        labels: vec![],
+                        workspace: self.workspace.clone(),
+                        dependencies: vec![],
+                        dependents: vec![],
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    },
+                    Bead {
+                        id: BeadId::from("ws1-assigned-bead-2".to_string()),
+                        title: "Assigned Bead 2".to_string(),
+                        body: None,
+                        priority: 1,
+                        status: BeadStatus::Open,
+                        assignee: Some("other-worker-2".to_string()),
+                        labels: vec![],
+                        workspace: self.workspace.clone(),
+                        dependencies: vec![],
+                        dependents: vec![],
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    },
+                ])
+            } else {
+                // Re-query after cross-workspace mend: still no unassigned beads
+                Ok(vec![])
+            }
+        }
+
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(vec![])
+        }
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Mock store that returns beads with "blocked" label (excluded by filters).
+    struct BlockedBeadsStore {
+        workspace: PathBuf,
+        query_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl BlockedBeadsStore {
+        fn new(workspace: PathBuf) -> Self {
+            BlockedBeadsStore {
+                workspace,
+                query_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for BlockedBeadsStore {
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            let count = self.query_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            if count == 0 {
+                // First query: return beads with "blocked" label (excluded by filters)
+                Ok(vec![
+                    Bead {
+                        id: BeadId::from("ws1-blocked-bead".to_string()),
+                        title: "Blocked Bead".to_string(),
+                        body: None,
+                        priority: 1,
+                        status: BeadStatus::Open,
+                        assignee: None,
+                        labels: vec!["blocked".to_string()],
+                        workspace: self.workspace.clone(),
+                        dependencies: vec![],
+                        dependents: vec![],
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    },
+                ])
+            } else {
+                // Re-query: still no valid beads
+                Ok(vec![])
+            }
+        }
+
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(vec![])
+        }
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Mock store that returns a valid unassigned bead.
+    struct ValidBeadStore {
+        workspace: PathBuf,
+    }
+
+    impl ValidBeadStore {
+        fn new(workspace: PathBuf) -> Self {
+            ValidBeadStore { workspace }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for ValidBeadStore {
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            Ok(vec![Bead {
+                id: BeadId::from("ws2-valid-bead".to_string()),
+                title: "Valid Unassigned Bead".to_string(),
+                body: None,
+                priority: 1,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: vec![],
+                workspace: self.workspace.clone(),
+                dependencies: vec![],
+                dependents: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }])
+        }
+
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(vec![])
+        }
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
     }
 }

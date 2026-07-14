@@ -5,7 +5,7 @@
 //! - ALL_CLAIMED: other workers hold every bead (normal contention)
 //! - INVISIBLE: open beads exist but Pluck's filters excluded them (config error)
 //!
-//! Only the INVISIBLE diagnosis triggers an alert bead. Rate-limited to one
+//! Only the INVISIBLE diagnosis triggers a starvation telemetry event. Rate-limited to one
 //! alert per workspace per `config.knot.alert_cooldown_minutes`.
 //!
 //! The verification query uses `list_all()` — a DIFFERENT code path from
@@ -17,6 +17,7 @@ use chrono::{DateTime, Utc};
 
 use crate::bead_store::BeadStore;
 use crate::config::KnotConfig;
+use crate::telemetry::Telemetry;
 use crate::types::{BeadStatus, StrandError, StrandResult};
 
 /// Diagnosis from the three-state verification check.
@@ -54,17 +55,20 @@ pub struct KnotStrand {
     config: KnotConfig,
     /// How many consecutive exhaustion cycles have occurred.
     exhaustion_count: Mutex<u64>,
-    /// Timestamp of the last alert bead created (for rate limiting).
+    /// Timestamp of the last alert emitted (for rate limiting).
     last_alert_at: Mutex<Option<DateTime<Utc>>>,
+    /// Telemetry emitter for starvation events.
+    telemetry: Telemetry,
 }
 
 impl KnotStrand {
-    /// Create a new KnotStrand with the given configuration.
-    pub fn new(config: KnotConfig) -> Self {
+    /// Create a new KnotStrand with the given configuration and telemetry.
+    pub fn new(config: KnotConfig, telemetry: Telemetry) -> Self {
         KnotStrand {
             config,
             exhaustion_count: Mutex::new(0),
             last_alert_at: Mutex::new(None),
+            telemetry,
         }
     }
 
@@ -137,7 +141,7 @@ impl KnotStrand {
         }
     }
 
-    /// Record that an alert was just created.
+    /// Record that an alert was just emitted.
     fn record_alert(&self) {
         let mut guard = self.last_alert_at.lock().unwrap_or_else(|e| e.into_inner());
         *guard = Some(Utc::now());
@@ -151,38 +155,6 @@ impl KnotStrand {
             .unwrap_or_else(|e| e.into_inner());
         *guard += 1;
         *guard
-    }
-
-    /// Build the alert bead body with full diagnostics.
-    fn build_alert_body(diagnosis: &ExhaustionDiagnosis, workspace: &str) -> String {
-        match diagnosis {
-            ExhaustionDiagnosis::Invisible {
-                total,
-                open_count,
-                in_progress_count,
-                claimed_by,
-            } => {
-                let claimers = if claimed_by.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    claimed_by.join(", ")
-                };
-                format!(
-                    "## Starvation Alert\n\n\
-                     Open beads exist but Pluck found none — possible configuration error.\n\n\
-                     **Workspace:** {workspace}\n\
-                     **Total beads:** {total}\n\
-                     **Open:** {open_count}\n\
-                     **In-progress:** {in_progress_count}\n\
-                     **Claimed by:** {claimers}\n\n\
-                     Check exclude_labels, workspace path, and filter configuration."
-                )
-            }
-            // Alert is only created for Invisible diagnosis.
-            ExhaustionDiagnosis::NoBeadsExist | ExhaustionDiagnosis::AllClaimed { .. } => {
-                String::new()
-            }
-        }
     }
 }
 
@@ -228,29 +200,57 @@ impl super::Strand for KnotStrand {
             "knot strand evaluated"
         );
 
-        // Only create an alert for INVISIBLE diagnosis and only after threshold.
-        if let ExhaustionDiagnosis::Invisible { .. } = &diagnosis {
+        // Only emit telemetry for INVISIBLE diagnosis and only after threshold.
+        if let ExhaustionDiagnosis::Invisible {
+            total,
+            open_count,
+            in_progress_count,
+            claimed_by,
+        } = &diagnosis
+        {
             if cycle >= self.config.exhaustion_threshold && !self.is_within_cooldown() {
-                let workspace = "default";
-                let title = "Starvation alert: beads invisible to worker";
-                let body = Self::build_alert_body(&diagnosis, workspace);
+                // Calculate excluded beads: those that are neither open nor in progress.
+                let excluded_count = total - open_count - in_progress_count;
 
-                match store.create_bead(title, &body, &["starvation-alert"]).await {
-                    Ok(alert_id) => {
-                        self.record_alert();
-                        tracing::warn!(
-                            alert_bead = %alert_id,
-                            diagnosis = diagnosis.as_str(),
-                            "knot created starvation alert bead"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "knot failed to create alert bead"
-                        );
-                    }
+                // Build candidate exclusion reasons from assignees holding in-progress beads.
+                let mut candidate_exclusion_reasons = Vec::new();
+                for worker in claimed_by {
+                    candidate_exclusion_reasons
+                        .push(format!("held_by_{}", worker));
                 }
+                if excluded_count > 0 {
+                    candidate_exclusion_reasons.push(
+                        "excluded_by_status".to_string()
+                    );
+                }
+
+                // Extract workspace path from beads for telemetry.
+                // All beads in a single store should have the same workspace.
+                let workspace_path = if let Ok(beads) = store.list_all().await {
+                    beads.first()
+                        .and_then(|b| b.workspace.to_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "unknown".to_string())
+                } else {
+                    "unknown".to_string()
+                };
+
+                // Emit telemetry instead of creating a bead.
+                let _ = self.telemetry.emit(
+                    crate::telemetry::EventKind::PluckStarvationDetected {
+                        workspace: workspace_path,
+                        open_count: *open_count,
+                        excluded_count,
+                        candidate_exclusion_reasons,
+                    }
+                );
+
+                self.record_alert();
+                tracing::warn!(
+                    diagnosis = diagnosis.as_str(),
+                    open_count,
+                    excluded_count,
+                    "knot emitted starvation telemetry"
+                );
             }
         }
 
@@ -265,11 +265,13 @@ impl super::Strand for KnotStrand {
 mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
+    use crate::telemetry::{test_utils::MemorySink, TelemetryEvent};
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
     /// Configurable in-memory bead store for Knot testing.
@@ -448,6 +450,21 @@ mod tests {
         }
     }
 
+    /// Create a KnotStrand with test defaults for telemetry.
+    /// Returns the knot and the captured events for verification.
+    fn make_test_knot_with_events(config: KnotConfig) -> (KnotStrand, Arc<StdMutex<Vec<TelemetryEvent>>>) {
+        let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
+        let telemetry = crate::telemetry::Telemetry::with_sink("test-worker".to_string(), sink);
+        let knot = KnotStrand::new(config, telemetry);
+        (knot, events)
+    }
+
+    /// Create a KnotStrand with test defaults for telemetry (legacy, no event capture).
+    fn make_test_knot(config: KnotConfig) -> KnotStrand {
+        let telemetry = crate::telemetry::Telemetry::new("test-worker".to_string());
+        KnotStrand::new(config, telemetry)
+    }
+
     use super::super::Strand;
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -457,7 +474,7 @@ mod tests {
     #[tokio::test]
     async fn no_beads_exist_returns_no_work_no_alert() {
         let store = KnotTestStore::new(vec![]);
-        let knot = KnotStrand::new(default_knot_config());
+        let knot = make_test_knot(default_knot_config());
 
         // Run past threshold to ensure no alert for empty queue.
         for _ in 0..5 {
@@ -477,7 +494,7 @@ mod tests {
             make_bead("b1", BeadStatus::InProgress, Some("worker-1")),
             make_bead("b2", BeadStatus::InProgress, Some("worker-2")),
         ]);
-        let knot = KnotStrand::new(default_knot_config());
+        let knot = make_test_knot(default_knot_config());
 
         for _ in 0..5 {
             let result = knot.evaluate(&store).await;
@@ -491,7 +508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invisible_creates_alert_after_threshold() {
+    async fn invisible_emits_telemetry_after_threshold() {
         // Open beads exist but Pluck returned nothing → INVISIBLE.
         let store = KnotTestStore::new(vec![
             make_bead("open-1", BeadStatus::Open, None),
@@ -502,19 +519,28 @@ mod tests {
             alert_cooldown_minutes: 60,
             ..default_knot_config()
         };
-        let knot = KnotStrand::new(config);
+        let (knot, events) = make_test_knot_with_events(config);
 
-        // First two cycles: below threshold, no alert.
+        // First two cycles: below threshold, no telemetry.
         for _ in 0..2 {
             let result = knot.evaluate(&store).await;
             assert!(matches!(result, StrandResult::NoWork));
         }
-        assert_eq!(store.created_count(), 0, "no alert below threshold");
+        assert_eq!(events.lock().unwrap().len(), 0, "no telemetry below threshold");
+        assert_eq!(store.created_count(), 0, "no beads created below threshold");
 
-        // Third cycle: hits threshold, alert created.
+        // Third cycle: hits threshold, telemetry emitted.
         let result = knot.evaluate(&store).await;
         assert!(matches!(result, StrandResult::NoWork));
-        assert_eq!(store.created_count(), 1, "alert created at threshold");
+        assert_eq!(store.created_count(), 0, "no beads created at threshold");
+
+        let events_guard = events.lock().unwrap();
+        assert_eq!(events_guard.len(), 1, "telemetry emitted at threshold");
+        let event = &events_guard[0];
+        assert_eq!(event.event_type, "strand.pluck.starvation_detected");
+        assert_eq!(event.data["workspace"], "/tmp/test");
+        assert_eq!(event.data["open_count"], 1);
+        assert_eq!(event.data["excluded_count"], 1);
     }
 
     #[tokio::test]
@@ -525,23 +551,26 @@ mod tests {
             alert_cooldown_minutes: 60,
             ..default_knot_config()
         };
-        let knot = KnotStrand::new(config);
+        let (knot, events) = make_test_knot_with_events(config);
 
-        // First cycle: creates alert.
+        // First cycle: emits telemetry.
         knot.evaluate(&store).await;
-        assert_eq!(store.created_count(), 1);
+        assert_eq!(store.created_count(), 0, "no beads created on first cycle");
+        assert_eq!(events.lock().unwrap().len(), 1, "telemetry emitted on first cycle");
 
-        // Second cycle: within cooldown, no new alert.
+        // Second cycle: within cooldown, no new telemetry.
         knot.evaluate(&store).await;
-        assert_eq!(store.created_count(), 1, "rate limited — no second alert");
+        assert_eq!(store.created_count(), 0, "no beads created on second cycle");
+        assert_eq!(events.lock().unwrap().len(), 1, "rate limited — no second telemetry event");
 
         // Third cycle: still within cooldown.
         knot.evaluate(&store).await;
-        assert_eq!(store.created_count(), 1, "still rate limited");
+        assert_eq!(store.created_count(), 0, "no beads created on third cycle");
+        assert_eq!(events.lock().unwrap().len(), 1, "still rate limited");
     }
 
     #[tokio::test]
-    async fn alert_body_contains_diagnostics() {
+    async fn telemetry_contains_diagnostic_details() {
         let store = KnotTestStore::new(vec![
             make_bead("open-1", BeadStatus::Open, None),
             make_bead("open-2", BeadStatus::Open, None),
@@ -552,19 +581,26 @@ mod tests {
             alert_cooldown_minutes: 60,
             ..default_knot_config()
         };
-        let knot = KnotStrand::new(config);
+        let (knot, events) = make_test_knot_with_events(config);
 
         knot.evaluate(&store).await;
-        assert_eq!(store.created_count(), 1);
 
-        let created = store.created_beads.lock().unwrap();
-        let (title, body, labels) = &created[0];
-        assert!(title.contains("Starvation alert"));
-        assert!(body.contains("**Total beads:** 3"), "body: {body}");
-        assert!(body.contains("**Open:** 2"), "body: {body}");
-        assert!(body.contains("**In-progress:** 1"), "body: {body}");
-        assert!(body.contains("worker-1"), "body: {body}");
-        assert!(labels.contains(&"starvation-alert".to_string()));
+        // Verify no bead was written to the target workspace
+        assert_eq!(store.created_count(), 0, "no beads should be written to target workspace");
+
+        // Verify telemetry event contains diagnostic details
+        let events_guard = events.lock().unwrap();
+        assert_eq!(events_guard.len(), 1, "telemetry event emitted");
+        let event = &events_guard[0];
+
+        assert_eq!(event.event_type, "strand.pluck.starvation_detected");
+        assert_eq!(event.data["open_count"], 2);
+        assert_eq!(event.data["excluded_count"], 1);
+
+        // Verify candidate exclusion reasons include the worker holding beads
+        let reasons = event.data["candidate_exclusion_reasons"].as_array()
+            .expect("candidate_exclusion_reasons should be an array");
+        assert!(reasons.iter().any(|r| r.as_str().unwrap().contains("held_by_worker-1")));
     }
 
     #[tokio::test]
@@ -574,7 +610,7 @@ mod tests {
             make_bead("d1", BeadStatus::Done, None),
             make_bead("bl1", BeadStatus::Blocked, None),
         ]);
-        let knot = KnotStrand::new(default_knot_config());
+        let knot = make_test_knot(default_knot_config());
 
         for _ in 0..5 {
             let result = knot.evaluate(&store).await;
@@ -590,7 +626,7 @@ mod tests {
     #[tokio::test]
     async fn store_error_returns_strand_error() {
         let store = FailingStore;
-        let knot = KnotStrand::new(default_knot_config());
+        let knot = make_test_knot(default_knot_config());
 
         let result = knot.evaluate(&store).await;
         assert!(
@@ -606,7 +642,7 @@ mod tests {
     #[tokio::test]
     async fn diagnose_empty_queue() {
         let store = KnotTestStore::new(vec![]);
-        let knot = KnotStrand::new(default_knot_config());
+        let knot = make_test_knot(default_knot_config());
         let diagnosis = knot.diagnose(&store).await.unwrap();
         assert_eq!(diagnosis, ExhaustionDiagnosis::NoBeadsExist);
     }
@@ -617,7 +653,7 @@ mod tests {
             make_bead("b1", BeadStatus::InProgress, Some("w1")),
             make_bead("b2", BeadStatus::InProgress, Some("w2")),
         ]);
-        let knot = KnotStrand::new(default_knot_config());
+        let knot = make_test_knot(default_knot_config());
         let diagnosis = knot.diagnose(&store).await.unwrap();
         match diagnosis {
             ExhaustionDiagnosis::AllClaimed {
@@ -638,7 +674,7 @@ mod tests {
             make_bead("open-1", BeadStatus::Open, None),
             make_bead("ip-1", BeadStatus::InProgress, Some("w1")),
         ]);
-        let knot = KnotStrand::new(default_knot_config());
+        let knot = make_test_knot(default_knot_config());
         let diagnosis = knot.diagnose(&store).await.unwrap();
         match diagnosis {
             ExhaustionDiagnosis::Invisible {
@@ -663,7 +699,7 @@ mod tests {
             make_bead("done-1", BeadStatus::Done, None),
             make_bead("ip-1", BeadStatus::InProgress, Some("w1")),
         ]);
-        let knot = KnotStrand::new(default_knot_config());
+        let knot = make_test_knot(default_knot_config());
         let diagnosis = knot.diagnose(&store).await.unwrap();
         assert!(
             matches!(diagnosis, ExhaustionDiagnosis::AllClaimed { .. }),
@@ -677,7 +713,7 @@ mod tests {
 
     #[test]
     fn strand_name_is_knot() {
-        let knot = KnotStrand::new(default_knot_config());
+        let knot = make_test_knot(default_knot_config());
         assert_eq!(knot.name(), "knot");
     }
 
@@ -694,7 +730,7 @@ mod tests {
             alert_cooldown_minutes: 60,
             ..default_knot_config()
         };
-        let knot = KnotStrand::new(config);
+        let knot = make_test_knot(config);
 
         let result = knot.evaluate(&store).await;
         assert!(
@@ -714,7 +750,7 @@ mod tests {
             make_bead("b2", BeadStatus::InProgress, Some("w1")),
             make_bead("b3", BeadStatus::InProgress, Some("w2")),
         ]);
-        let knot = KnotStrand::new(default_knot_config());
+        let knot = make_test_knot(default_knot_config());
         let diagnosis = knot.diagnose(&store).await.unwrap();
         match diagnosis {
             ExhaustionDiagnosis::AllClaimed { claimed_by, .. } => {

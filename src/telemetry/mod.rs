@@ -148,6 +148,12 @@ pub enum EventKind {
         reason: String,
     },
     QueueEmpty,
+    PluckStarvationDetected {
+        workspace: String,
+        open_count: usize,
+        excluded_count: usize,
+        candidate_exclusion_reasons: Vec<String>,
+    },
 
     // ── Bead claim ──
     ClaimAttempt {
@@ -665,6 +671,7 @@ impl EventKind {
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
             EventKind::StrandSkipped { .. } => "strand.skipped",
             EventKind::QueueEmpty => "worker.queue_empty",
+            EventKind::PluckStarvationDetected { .. } => "strand.pluck.starvation_detected",
             EventKind::ClaimAttempt { .. } => "bead.claim.attempted",
             EventKind::ClaimSuccess { .. } => "bead.claim.succeeded",
             EventKind::ClaimRaceLost { .. } => "bead.claim.race_lost",
@@ -827,6 +834,7 @@ impl EventKind {
             | EventKind::StrandEvaluated { .. }
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
+            | EventKind::PluckStarvationDetected { .. }
             | EventKind::HealthCheck { .. }
             | EventKind::FleetCpuSaturated { .. }
             | EventKind::FleetMemoryLow { .. }
@@ -978,6 +986,19 @@ impl EventKind {
                 serde_json::json!({ "strand_name": strand_name, "reason": reason })
             }
             EventKind::QueueEmpty => serde_json::json!({}),
+            EventKind::PluckStarvationDetected {
+                workspace,
+                open_count,
+                excluded_count,
+                candidate_exclusion_reasons,
+            } => {
+                serde_json::json!({
+                    "workspace": workspace,
+                    "open_count": open_count,
+                    "excluded_count": excluded_count,
+                    "candidate_exclusion_reasons": candidate_exclusion_reasons,
+                })
+            }
             EventKind::ClaimAttempt { bead_id, attempt } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref(), "attempt": attempt })
             }
@@ -1821,6 +1842,7 @@ impl EventKind {
             | EventKind::WorkerBootTimeout { .. }
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
+            | EventKind::PluckStarvationDetected { .. }
             | EventKind::ClaimAttempt { .. }
             | EventKind::ClaimSuccess { .. }
             | EventKind::ClaimRaceLost { .. }

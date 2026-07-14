@@ -21,3 +21,4 @@ secret_protection:
   custom_patterns: []
   allowlist:
     - "repeat_interval_zero_preserves_first_failure"
+    - "test_deadlock_multi_workspace_with_excluded_"
