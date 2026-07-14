@@ -198,7 +198,10 @@ impl ExploreStrand {
     ///
     /// This internal version is marked pub(crate) to allow testing with store injection.
     #[cfg(test)]
-    async fn create_store_for(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+    async fn create_store_for(
+        &self,
+        workspace: &Path,
+    ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
         self.store_factory.create_store(workspace).await
     }
 }
@@ -275,7 +278,8 @@ impl super::Strand for ExploreStrand {
                     // This ensures excluded/assigned beads are never returned as candidates.
                     candidates.retain(|b| {
                         let assignee_ok = b.assignee.is_none();
-                        let labels_ok = !b.labels.iter().any(|l| filters.exclude_labels.contains(l));
+                        let labels_ok =
+                            !b.labels.iter().any(|l| filters.exclude_labels.contains(l));
                         assignee_ok && labels_ok
                     });
 
@@ -308,7 +312,10 @@ impl super::Strand for ExploreStrand {
                                         // Apply the same defensive filtering.
                                         retry_candidates.retain(|b| {
                                             let assignee_ok = b.assignee.is_none();
-                                            let labels_ok = !b.labels.iter().any(|l| filters.exclude_labels.contains(l));
+                                            let labels_ok = !b
+                                                .labels
+                                                .iter()
+                                                .any(|l| filters.exclude_labels.contains(l));
                                             assignee_ok && labels_ok
                                         });
 
@@ -759,12 +766,22 @@ mod tests {
         // Verify that workspace 2's candidate was returned
         match result {
             StrandResult::BeadFound(candidates) => {
-                assert_eq!(candidates.len(), 1, "should find 1 candidate from workspace 2");
+                assert_eq!(
+                    candidates.len(),
+                    1,
+                    "should find 1 candidate from workspace 2"
+                );
                 assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
                 assert_eq!(candidates[0].workspace, workspace2);
-                assert!(candidates[0].assignee.is_none(), "candidate should be unassigned");
                 assert!(
-                    !candidates[0].labels.iter().any(|l| l == "blocked" || l == "deferred" || l == "human"),
+                    candidates[0].assignee.is_none(),
+                    "candidate should be unassigned"
+                );
+                assert!(
+                    !candidates[0]
+                        .labels
+                        .iter()
+                        .any(|l| l == "blocked" || l == "deferred" || l == "human"),
                     "candidate should not have excluded labels"
                 );
             }
@@ -816,7 +833,10 @@ mod tests {
         fs::create_dir(workspace2.join(".beads")).unwrap();
 
         // Create a mock store factory
-        let mock_factory = Arc::new(DeadlockMockStoreFactory::new(workspace1.clone(), workspace2.clone()));
+        let mock_factory = Arc::new(DeadlockMockStoreFactory::new(
+            workspace1.clone(),
+            workspace2.clone(),
+        ));
 
         let temp_dir = tempfile::tempdir().unwrap();
         let registry = crate::registry::Registry::new(temp_dir.path());
@@ -836,15 +856,26 @@ mod tests {
 
         // Verify that both workspaces were queried
         let call_count = mock_factory.call_count();
-        assert!(call_count >= 2, "both workspaces should be queried (at minimum), got: {}", call_count);
+        assert!(
+            call_count >= 2,
+            "both workspaces should be queried (at minimum), got: {}",
+            call_count
+        );
 
         // Verify that workspace 2's candidate was returned
         match result {
             StrandResult::BeadFound(candidates) => {
-                assert_eq!(candidates.len(), 1, "should find 1 candidate from workspace 2");
+                assert_eq!(
+                    candidates.len(),
+                    1,
+                    "should find 1 candidate from workspace 2"
+                );
                 assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
                 assert_eq!(candidates[0].workspace, workspace2);
-                assert!(candidates[0].assignee.is_none(), "candidate should be unassigned");
+                assert!(
+                    candidates[0].assignee.is_none(),
+                    "candidate should be unassigned"
+                );
             }
             StrandResult::NoWork => {
                 panic!("deadlock bug reproduced: strand returned NoWork instead of finding workspace 2's candidate");
@@ -879,7 +910,10 @@ mod tests {
         fs::create_dir(workspace2.join(".beads")).unwrap();
 
         // Create a mock store factory for excluded beads scenario
-        let mock_factory = Arc::new(ExcludedBeadsMockFactory::new(workspace1.clone(), workspace2.clone()));
+        let mock_factory = Arc::new(ExcludedBeadsMockFactory::new(
+            workspace1.clone(),
+            workspace2.clone(),
+        ));
 
         let temp_dir = tempfile::tempdir().unwrap();
         let registry = crate::registry::Registry::new(temp_dir.path());
@@ -900,12 +934,115 @@ mod tests {
         // Verify that workspace 2's candidate was returned
         match result {
             StrandResult::BeadFound(candidates) => {
-                assert_eq!(candidates.len(), 1, "should find 1 candidate from workspace 2");
+                assert_eq!(
+                    candidates.len(),
+                    1,
+                    "should find 1 candidate from workspace 2"
+                );
                 assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
                 assert_eq!(candidates[0].workspace, workspace2);
             }
             StrandResult::NoWork => {
                 panic!("deadlock bug reproduced: strand returned NoWork even though workspace 2 has valid candidates");
+            }
+            StrandResult::WorkCreated => {
+                panic!("unexpected WorkCreated result");
+            }
+            StrandResult::Error(e) => {
+                panic!("unexpected Error result: {:?}", e);
+            }
+            StrandResult::Split(_, _) => {
+                panic!("unexpected Split result");
+            }
+        }
+    }
+
+    /// Unit test for the excluded AND assigned edge case.
+    ///
+    /// This tests the specific edge case where beads are BOTH:
+    /// 1. Assigned (assignee != None)
+    /// 2. Excluded (have blocked/deferred/human labels)
+    ///
+    /// DEADLOCK SCENARIO:
+    /// - Workspace 1: ready() returns beads that are BOTH assigned AND excluded
+    /// - Workspace 2: ready() returns valid unassigned candidates
+    /// - EXPECTED: Strand filters out doubly-unclaimable beads and advances to workspace 2
+    /// - BUG: Strand returns NoWork prematurely, never checking workspace 2
+    ///
+    /// This is a critical edge case because:
+    /// - The defensive filtering logic checks BOTH conditions (assignee_ok AND labels_ok)
+    /// - A bead that fails EITHER condition should be filtered out
+    /// - A bead that fails BOTH conditions should DEFINITELY be filtered out
+    #[tokio::test]
+    async fn deadlock_scenario_excluded_and_assigned_beads_allow_advancement() {
+        let temp_root = tempfile::tempdir().unwrap();
+        let workspace1 = temp_root.path().join("workspace1");
+        let workspace2 = temp_root.path().join("workspace2");
+        let home = PathBuf::from("/home/test");
+
+        // Create .beads/ directories so has_beads_dir() returns true
+        fs::create_dir_all(&workspace1).unwrap();
+        fs::create_dir_all(&workspace2).unwrap();
+        fs::create_dir(workspace1.join(".beads")).unwrap();
+        fs::create_dir(workspace2.join(".beads")).unwrap();
+
+        // Create a mock store factory for excluded AND assigned beads scenario
+        let mock_factory = Arc::new(ExcludedAndAssignedMockFactory::new(
+            workspace1.clone(),
+            workspace2.clone(),
+        ));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new_with_store_factory(
+            vec![workspace1.clone(), workspace2.clone()],
+            home,
+            registry,
+            telemetry,
+            "test-worker".to_string(),
+            mock_factory.clone(),
+        );
+
+        let store = DummyStore;
+        let result = strand.evaluate(&store).await;
+
+        // Verify that both workspaces were queried
+        let call_count = mock_factory.call_count();
+        assert!(
+            call_count >= 2,
+            "both workspaces should be queried (at minimum), got: {}",
+            call_count
+        );
+
+        // Verify that workspace 2's candidate was returned (proving advancement past workspace 1)
+        match result {
+            StrandResult::BeadFound(candidates) => {
+                assert_eq!(
+                    candidates.len(),
+                    1,
+                    "should find 1 candidate from workspace 2"
+                );
+                assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
+                assert_eq!(candidates[0].workspace, workspace2);
+                assert!(
+                    candidates[0].assignee.is_none(),
+                    "candidate should be unassigned"
+                );
+                assert!(
+                    !candidates[0]
+                        .labels
+                        .iter()
+                        .any(|l| l == "blocked" || l == "deferred" || l == "human"),
+                    "candidate should not have excluded labels"
+                );
+            }
+            StrandResult::NoWork => {
+                panic!(
+                    "deadlock bug reproduced: strand returned NoWork instead of finding workspace 2's candidate.\n\
+                     This proves the strand is not advancing past workspace 1 even though all its candidates are BOTH excluded AND assigned."
+                );
             }
             StrandResult::WorkCreated => {
                 panic!("unexpected WorkCreated result");
@@ -945,13 +1082,21 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StoreFactory for ExcludedFirstMockFactory {
-        async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+        async fn create_store(
+            &self,
+            workspace: &Path,
+        ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
             if workspace == self.workspace1 {
-                Ok(Arc::new(ExcludedCandidatesStore::new(self.workspace1.clone())))
+                Ok(Arc::new(ExcludedCandidatesStore::new(
+                    self.workspace1.clone(),
+                )))
             } else if workspace == self.workspace2 {
                 Ok(Arc::new(ValidBeadStore::new(self.workspace2.clone())))
             } else {
-                Err(anyhow::anyhow!("unexpected workspace: {}", workspace.display()))
+                Err(anyhow::anyhow!(
+                    "unexpected workspace: {}",
+                    workspace.display()
+                ))
             }
         }
     }
@@ -983,15 +1128,22 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StoreFactory for DeadlockMockStoreFactory {
-        async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
-            self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async fn create_store(
+            &self,
+            workspace: &Path,
+        ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
             if workspace == self.workspace1 {
                 Ok(Arc::new(AssignedBeadsStore::new(self.workspace1.clone())))
             } else if workspace == self.workspace2 {
                 Ok(Arc::new(ValidBeadStore::new(self.workspace2.clone())))
             } else {
-                Err(anyhow::anyhow!("unexpected workspace: {}", workspace.display()))
+                Err(anyhow::anyhow!(
+                    "unexpected workspace: {}",
+                    workspace.display()
+                ))
             }
         }
     }
@@ -1023,15 +1175,74 @@ mod tests {
 
     #[async_trait::async_trait]
     impl StoreFactory for ExcludedBeadsMockFactory {
-        async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
-            self.call_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async fn create_store(
+            &self,
+            workspace: &Path,
+        ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
             if workspace == self.workspace1 {
                 Ok(Arc::new(BlockedBeadsStore::new(self.workspace1.clone())))
             } else if workspace == self.workspace2 {
                 Ok(Arc::new(ValidBeadStore::new(self.workspace2.clone())))
             } else {
-                Err(anyhow::anyhow!("unexpected workspace: {}", workspace.display()))
+                Err(anyhow::anyhow!(
+                    "unexpected workspace: {}",
+                    workspace.display()
+                ))
+            }
+        }
+    }
+
+    /// Mock store factory for excluded AND assigned beads scenario.
+    ///
+    /// Simulates the critical edge case where beads are BOTH:
+    /// 1. Assigned (assignee != None)
+    /// 2. Excluded (have blocked/deferred/human labels)
+    ///
+    /// This tests that the defensive filtering correctly handles beads that fail
+    /// BOTH filtering conditions (doubly-unclaimable).
+    struct ExcludedAndAssignedMockFactory {
+        workspace1: PathBuf,
+        workspace2: PathBuf,
+        call_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl ExcludedAndAssignedMockFactory {
+        fn new(workspace1: PathBuf, workspace2: PathBuf) -> Self {
+            ExcludedAndAssignedMockFactory {
+                workspace1,
+                workspace2,
+                call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }
+        }
+
+        fn call_count(&self) -> u32 {
+            self.call_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for ExcludedAndAssignedMockFactory {
+        async fn create_store(
+            &self,
+            workspace: &Path,
+        ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            self.call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            if workspace == self.workspace1 {
+                Ok(Arc::new(ExcludedAndAssignedStore::new(
+                    self.workspace1.clone(),
+                )))
+            } else if workspace == self.workspace2 {
+                Ok(Arc::new(ValidBeadStore::new(self.workspace2.clone())))
+            } else {
+                Err(anyhow::anyhow!(
+                    "unexpected workspace: {}",
+                    workspace.display()
+                ))
             }
         }
     }
@@ -1175,7 +1386,9 @@ mod tests {
     #[async_trait::async_trait]
     impl BeadStore for AssignedBeadsStore {
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
-            let count = self.query_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = self
+                .query_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
             if count == 0 {
                 // First query: return assigned beads (filtered out by strand)
@@ -1287,19 +1500,155 @@ mod tests {
     #[async_trait::async_trait]
     impl BeadStore for BlockedBeadsStore {
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
-            let count = self.query_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let count = self
+                .query_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
             if count == 0 {
                 // First query: return beads with "blocked" label (excluded by filters)
+                Ok(vec![Bead {
+                    id: BeadId::from("ws1-blocked-bead".to_string()),
+                    title: "Blocked Bead".to_string(),
+                    body: None,
+                    priority: 1,
+                    status: BeadStatus::Open,
+                    assignee: None,
+                    labels: vec!["blocked".to_string()],
+                    workspace: self.workspace.clone(),
+                    dependencies: vec![],
+                    dependents: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }])
+            } else {
+                // Re-query: still no valid beads
+                Ok(vec![])
+            }
+        }
+
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(vec![])
+        }
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Mock store that returns beads that are BOTH excluded AND assigned.
+    ///
+    /// This simulates the critical edge case where beads are doubly-unclaimable:
+    /// 1. They have an assignee (assigned to another worker)
+    /// 2. They have excluded labels (blocked/deferred/human)
+    ///
+    /// The defensive filtering should remove these beads because they fail
+    /// BOTH filtering conditions (assignee_ok AND labels_ok).
+    struct ExcludedAndAssignedStore {
+        workspace: PathBuf,
+        query_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl ExcludedAndAssignedStore {
+        fn new(workspace: PathBuf) -> Self {
+            ExcludedAndAssignedStore {
+                workspace,
+                query_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for ExcludedAndAssignedStore {
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            let count = self
+                .query_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+            if count == 0 {
+                // First query: return beads that are BOTH assigned AND excluded
+                // These should be filtered out by the defensive filtering
                 Ok(vec![
                     Bead {
-                        id: BeadId::from("ws1-blocked-bead".to_string()),
-                        title: "Blocked Bead".to_string(),
+                        id: BeadId::from("ws1-both-1".to_string()),
+                        title: "Assigned and Blocked Bead 1".to_string(),
                         body: None,
                         priority: 1,
                         status: BeadStatus::Open,
-                        assignee: None,
+                        assignee: Some("other-worker-1".to_string()),
                         labels: vec!["blocked".to_string()],
+                        workspace: self.workspace.clone(),
+                        dependencies: vec![],
+                        dependents: vec![],
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    },
+                    Bead {
+                        id: BeadId::from("ws1-both-2".to_string()),
+                        title: "Assigned and Deferred Bead 2".to_string(),
+                        body: None,
+                        priority: 2,
+                        status: BeadStatus::Open,
+                        assignee: Some("other-worker-2".to_string()),
+                        labels: vec!["deferred".to_string()],
+                        workspace: self.workspace.clone(),
+                        dependencies: vec![],
+                        dependents: vec![],
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    },
+                    Bead {
+                        id: BeadId::from("ws1-both-3".to_string()),
+                        title: "Assigned and Human Bead 3".to_string(),
+                        body: None,
+                        priority: 3,
+                        status: BeadStatus::Open,
+                        assignee: Some("other-worker-3".to_string()),
+                        labels: vec!["human".to_string()],
                         workspace: self.workspace.clone(),
                         dependencies: vec![],
                         dependents: vec![],
@@ -1308,7 +1657,7 @@ mod tests {
                     },
                 ])
             } else {
-                // Re-query: still no valid beads
+                // Re-query after cross-workspace mend: still no valid beads
                 Ok(vec![])
             }
         }
