@@ -284,6 +284,35 @@ impl StatsAggregator {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Percentile helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Calculate the 95th percentile from a slice of values.
+///
+/// Returns 0 if the slice is empty. Otherwise, sorts the values
+/// and returns the value at the 95th percentile index.
+///
+/// # Example
+///
+/// ```
+/// use needle::stats::calculate_p95;
+///
+/// let latencies = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200];
+/// let p95 = calculate_p95(&latencies);
+/// assert_eq!(p95, 200); // 95th percentile of 20 values
+/// ```
+pub fn calculate_p95(latencies: &[u128]) -> u128 {
+    if latencies.is_empty() {
+        return 0;
+    }
+
+    let mut sorted = Vec::from(latencies);
+    sorted.sort();
+    let index = (sorted.len() * 95) / 100;
+    sorted[index]
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Stats engine — multi-dimensional outcome aggregation
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -855,5 +884,37 @@ mod tests {
         assert!(row.pass_rate().is_none());
         assert!(row.avg_tokens().is_none());
         assert!(row.avg_cost_usd().is_none());
+    }
+
+    // ── calculate_p95 tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn calculate_p95_empty() {
+        let empty: Vec<u128> = vec![];
+        assert_eq!(calculate_p95(&empty), 0);
+    }
+
+    #[test]
+    fn calculate_p95_single_element() {
+        let data = vec![42u128];
+        assert_eq!(calculate_p95(&data), 42);
+    }
+
+    #[test]
+    fn calculate_p95_sorted() {
+        let data = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        assert_eq!(calculate_p95(&data), 100); // index = (10 * 95) / 100 = 9
+    }
+
+    #[test]
+    fn calculate_p95_unsorted() {
+        let data = vec![100u128, 10, 50, 30, 70, 40, 60, 20, 80, 90];
+        assert_eq!(calculate_p95(&data), 100); // Function sorts internally, index = 9
+    }
+
+    #[test]
+    fn calculate_p95_twenty_elements() {
+        let data = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200];
+        assert_eq!(calculate_p95(&data), 200); // index = (20 * 95) / 100 = 19
     }
 }
