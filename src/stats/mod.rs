@@ -289,17 +289,98 @@ impl StatsAggregator {
 
 /// Calculate the 95th percentile from a slice of values.
 ///
-/// Returns 0 if the slice is empty. Otherwise, sorts the values
-/// and returns the value at the 95th percentile index.
+/// The 95th percentile (p95) is the value below which 95% of observations
+/// fall. It is commonly used to understand the "tail" of a distribution
+/// — for example, in latency metrics, p95 tells you that 95% of requests
+/// completed within this time, while the slowest 5% took longer.
 ///
-/// # Example
+/// # Algorithm
+///
+/// This function uses the **nearest-rank method**:
+///
+/// 1. If the slice is empty, return 0 (no data case)
+/// 2. Sort the values in ascending order
+/// 3. Calculate the index using integer arithmetic: `index = (n * 95) / 100`
+///    where `n` is the number of elements
+/// 4. Return the value at that index
+///
+/// This method was chosen because:
+/// - **Deterministic**: No interpolation between values, always returns an
+///   actual element from the input
+/// - **Efficient**: O(n log n) time due to sorting, O(1) additional space
+/// - **Simple**: Easy to understand and verify
+/// - **Common**: The de facto standard for latency percentile reporting
+///
+/// Note: This is not linear interpolation. For example, with 10 elements
+/// `[0, 10, 20, ..., 90]`, the 95th percentile is `90` (the value at index 9),
+/// not an interpolated value like `85.5`.
+///
+/// # Examples
+///
+/// ## Basic usage with sorted data
 ///
 /// ```
 /// use needle::stats::calculate_p95;
 ///
-/// let latencies = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200];
+/// let latencies = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 /// let p95 = calculate_p95(&latencies);
-/// assert_eq!(p95, 200); // 95th percentile of 20 values
+/// assert_eq!(p95, 100); // index = (10 * 95) / 100 = 9 → value 100
+/// ```
+///
+/// ## Works with unsorted input (sorts internally)
+///
+/// ```
+/// use needle::stats::calculate_p95;
+///
+/// let unsorted = vec![100u128, 10, 50, 30, 70, 40, 60, 20, 80, 90];
+/// let p95 = calculate_p95(&unsorted);
+/// assert_eq!(p95, 100); // Function sorts internally → same result
+/// ```
+///
+/// ## Larger dataset
+///
+/// ```
+/// use needle::stats::calculate_p95;
+///
+/// // 20 elements: 95th percentile is at index (20 * 95) / 100 = 19
+/// let data = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100,
+///                  110, 120, 130, 140, 150, 160, 170, 180, 190, 200];
+/// let p95 = calculate_p95(&data);
+/// assert_eq!(p95, 200); // The 95th percentile value
+/// ```
+///
+/// ## Single element (degenerate case)
+///
+/// ```
+/// use needle::stats::calculate_p95;
+///
+/// let single = vec![42u128];
+/// let p95 = calculate_p95(&single);
+/// assert_eq!(p95, 42); // Only value available
+/// ```
+///
+/// ## Empty input
+///
+/// ```
+/// use needle::stats::calculate_p95;
+///
+/// let empty: Vec<u128> = vec![];
+/// let p95 = calculate_p95(&empty);
+/// assert_eq!(p95, 0); // No data → returns 0
+/// ```
+///
+/// ## Real-world latency example
+///
+/// ```
+/// use needle::stats::calculate_p95;
+///
+/// // Simulated latency data in milliseconds
+/// let latencies = vec![
+///     12, 15, 18, 20, 22, 25, 28, 30, 35, 40,
+///     45, 50, 55, 60, 70, 80, 90, 100, 120, 150
+/// ];
+/// let p95 = calculate_p95(&latencies);
+/// assert_eq!(p95, 150); // 95% of requests completed in ≤150ms
 /// ```
 pub fn calculate_p95(latencies: &[u128]) -> u128 {
     if latencies.is_empty() {
