@@ -818,7 +818,7 @@ async fn deterministic_ordering_same_beads_same_order() {
         reversed
     }));
 
-    let pluck = PluckStrand::new(vec![]);
+    let pluck = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
 
     // Evaluate both — should return the same top candidate.
     let result1 = pluck.evaluate(store1.as_ref()).await;
@@ -874,7 +874,7 @@ async fn deterministic_ordering_tiebreak_by_id() {
     ];
 
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(beads));
-    let pluck = PluckStrand::new(vec![]);
+    let pluck = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
 
     let result = pluck.evaluate(store.as_ref()).await;
 
