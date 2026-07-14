@@ -359,10 +359,37 @@ impl super::Strand for PluckStrand {
             .store(stats.open_count, Ordering::Relaxed);
         self.last_excluded_count
             .store(stats.excluded_count, Ordering::Relaxed);
-        *self.last_exclusion_reasons.lock().unwrap() = stats.exclusion_reasons;
+        *self.last_exclusion_reasons.lock().unwrap() = stats.exclusion_reasons.clone();
 
         if candidates.is_empty() {
-            tracing::debug!("No candidates remaining after filtering, returning NoWork");
+            // Extract workspace path from store for telemetry.
+            // All beads in a single store should have the same workspace.
+            // Follow KnotStrand pattern (src/strand/knot.rs lines 224-233).
+            let workspace_path = if let Ok(beads) = store.list_all().await {
+                beads
+                    .first()
+                    .and_then(|b| b.workspace.to_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            } else {
+                "unknown".to_string()
+            };
+
+            // Emit PluckStarvationDetected telemetry event with filtering statistics.
+            let _ = self
+                .telemetry
+                .emit(crate::telemetry::EventKind::PluckStarvationDetected {
+                    workspace: workspace_path.clone(),
+                    open_count: stats.open_count,
+                    excluded_count: stats.excluded_count,
+                    candidate_exclusion_reasons: stats.exclusion_reasons,
+                });
+
+            tracing::debug!(
+                workspace = %workspace_path,
+                open_count = stats.open_count,
+                excluded_count = stats.excluded_count,
+                "Emitted PluckStarvationDetected telemetry, returning NoWork"
+            );
             StrandResult::NoWork
         } else {
             let candidate_ids: Vec<&str> = candidates.iter().map(|b| b.id.as_ref()).collect();
