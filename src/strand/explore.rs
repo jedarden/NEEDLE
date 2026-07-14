@@ -699,6 +699,74 @@ mod tests {
 
     // ── Deadlock Scenario Tests ────────────────────────────────────────────────────
 
+    /// Unit test for multi-workspace deadlock with excluded first workspace.
+    ///
+    /// DEADLOCK SCENARIO (from bf-1d64q):
+    /// - Workspace 1 has candidates but all are excluded (blocked/deferred/human labels)
+    /// - Workspace 2 has valid unassigned candidates
+    /// - EXPECTED: Strand advances past workspace 1 to workspace 2 and returns candidates
+    /// - BUG: Strand returns NoWork prematurely, never checking workspace 2
+    ///
+    /// This test uses fixture-based mock stores to simulate the scenario and proves
+    /// the bug exists by failing on the current implementation.
+    #[tokio::test]
+    async fn test_deadlock_multi_workspace_with_excluded_first_workspace() {
+        let workspace1 = PathBuf::from("/tmp/test/workspace1");
+        let workspace2 = PathBuf::from("/tmp/test/workspace2");
+        let home = PathBuf::from("/home/test");
+
+        // Create a mock store factory that returns different states per workspace
+        let mock_factory = Arc::new(ExcludedFirstMockFactory::new(
+            workspace1.clone(),
+            workspace2.clone(),
+        ));
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new_with_store_factory(
+            vec![workspace1.clone(), workspace2.clone()],
+            home,
+            registry,
+            telemetry,
+            "test-worker".to_string(),
+            mock_factory,
+        );
+
+        let store = DummyStore;
+        let result = strand.evaluate(&store).await;
+
+        // Verify that workspace 2's candidate was returned
+        match result {
+            StrandResult::BeadFound(candidates) => {
+                assert_eq!(candidates.len(), 1, "should find 1 candidate from workspace 2");
+                assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
+                assert_eq!(candidates[0].workspace, workspace2);
+                assert!(candidates[0].assignee.is_none(), "candidate should be unassigned");
+                assert!(
+                    !candidates[0].labels.iter().any(|l| l == "blocked" || l == "deferred" || l == "human"),
+                    "candidate should not have excluded labels"
+                );
+            }
+            StrandResult::NoWork => {
+                panic!(
+                    "deadlock bug reproduced: strand returned NoWork instead of finding workspace 2's candidate.\n\
+                     This proves the strand is not advancing past workspace 1 even though all its candidates are excluded."
+                );
+            }
+            StrandResult::WorkCreated => {
+                panic!("unexpected WorkCreated result");
+            }
+            StrandResult::Error(e) => {
+                panic!("unexpected Error result: {:?}", e);
+            }
+            StrandResult::Split(_, _) => {
+                panic!("unexpected Split result");
+            }
+        }
+    }
+
     /// Unit test proving the explore strand deadlock scenario.
     ///
     /// DEADLOCK SCENARIO (from bf-1d64q):
@@ -820,6 +888,41 @@ mod tests {
 
     // ── Mock Store Factories ─────────────────────────────────────────────────────
 
+    /// Mock store factory for excluded-first-workspace deadlock scenario.
+    ///
+    /// Simulates the classic deadlock scenario:
+    /// - Workspace 1: ready() returns candidates with excluded labels (blocked/deferred/human)
+    /// - Workspace 2: ready() returns valid unassigned candidates
+    ///
+    /// The bug is that the strand checks workspace 1, finds no valid candidates after
+    /// filtering, and returns NoWork without ever checking workspace 2.
+    struct ExcludedFirstMockFactory {
+        workspace1: PathBuf,
+        workspace2: PathBuf,
+    }
+
+    impl ExcludedFirstMockFactory {
+        fn new(workspace1: PathBuf, workspace2: PathBuf) -> Self {
+            ExcludedFirstMockFactory {
+                workspace1,
+                workspace2,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for ExcludedFirstMockFactory {
+        async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            if workspace == self.workspace1 {
+                Ok(Arc::new(ExcludedCandidatesStore::new(self.workspace1.clone())))
+            } else if workspace == self.workspace2 {
+                Ok(Arc::new(ValidBeadStore::new(self.workspace2.clone())))
+            } else {
+                Err(anyhow::anyhow!("unexpected workspace: {}", workspace.display()))
+            }
+        }
+    }
+
     /// Mock store factory for the deadlock scenario.
     ///
     /// Simulates:
@@ -901,6 +1004,125 @@ mod tests {
     }
 
     // ── Mock BeadStore Implementations ───────────────────────────────────────────
+
+    /// Mock store that returns candidates with excluded labels.
+    ///
+    /// Simulates a workspace that has candidates but all are excluded by the filters
+    /// (deferred, human, or blocked labels). After filtering, no valid candidates remain.
+    struct ExcludedCandidatesStore {
+        workspace: PathBuf,
+    }
+
+    impl ExcludedCandidatesStore {
+        fn new(workspace: PathBuf) -> Self {
+            ExcludedCandidatesStore { workspace }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for ExcludedCandidatesStore {
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            // Return candidates with various excluded labels
+            // These will be filtered out by the strand's Filters
+            Ok(vec![
+                Bead {
+                    id: BeadId::from("ws1-blocked-bead".to_string()),
+                    title: "Blocked Bead".to_string(),
+                    body: None,
+                    priority: 1,
+                    status: BeadStatus::Open,
+                    assignee: None,
+                    labels: vec!["blocked".to_string()],
+                    workspace: self.workspace.clone(),
+                    dependencies: vec![],
+                    dependents: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Bead {
+                    id: BeadId::from("ws1-deferred-bead".to_string()),
+                    title: "Deferred Bead".to_string(),
+                    body: None,
+                    priority: 2,
+                    status: BeadStatus::Open,
+                    assignee: None,
+                    labels: vec!["deferred".to_string()],
+                    workspace: self.workspace.clone(),
+                    dependencies: vec![],
+                    dependents: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                Bead {
+                    id: BeadId::from("ws1-human-bead".to_string()),
+                    title: "Human Bead".to_string(),
+                    body: None,
+                    priority: 3,
+                    status: BeadStatus::Open,
+                    assignee: None,
+                    labels: vec!["human".to_string()],
+                    workspace: self.workspace.clone(),
+                    dependencies: vec![],
+                    dependents: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+            ])
+        }
+
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(vec![])
+        }
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
+    }
 
     /// Mock store that returns only assigned beads.
     struct AssignedBeadsStore {
