@@ -4032,11 +4032,11 @@ stats       ──► telemetry, config, types
 - A bead flushed into any registered store is claimed without a worker restart and without a 15-minute wait.
 - `needle status` answers "when did each workspace last get scanned, and why was nothing claimed" directly.
 
-# Phase 6: Pluck Telemetry Isolation and Fleet Process Tracking
+# Phase 6: Pluck Telemetry Isolation, Fleet Process Tracking, and Loop-Detection Gaps
 
-**Status:** planned (ADR-002).
+**Status:** planned (ADR-002; §6.5 found after ADR-002 was written, not yet its own ADR).
 
-**Goal:** stop Pluck's own operational confusion from leaking into a target repo as fabricated work, and make `needle stop`/`needle status`/`needle list` trustworthy enough to use during incident response without a manual `ps aux` cross-check. Driven by an 8-day incident on `~/ARMOR` (2026-07-06 through 2026-07-14): a Pluck starvation self-diagnostic was written as a bead into ARMOR's own tracker, could never legitimately resolve (its "fix" target was NEEDLE's own config, unreachable from ARMOR), and the unresolved loop spiraled into 346 fabricated beads and ~2,300 wasted bead-cycles across two workers over 8 days — one of which (`bravo`) kept running after `needle stop` reported success, and a third (`alpha`) was invisible to `needle status`/`needle list` entirely. Full evidence and rationale in [ADR-002](../adr/002-pluck-telemetry-isolation-and-process-tracking.md).
+**Goal:** stop Pluck's own operational confusion from leaking into a target repo as fabricated work, make `needle stop`/`needle status`/`needle list` trustworthy enough to use during incident response without a manual `ps aux` cross-check, and make the fleet's own failure-handling strands (Splice, Unravel) actually catch a worker that's stuck retrying a human-gated bead forever. Driven by an 8-day incident on `~/ARMOR` (2026-07-06 through 2026-07-14): a Pluck starvation self-diagnostic was written as a bead into ARMOR's own tracker, could never legitimately resolve (its "fix" target was NEEDLE's own config, unreachable from ARMOR), and the unresolved loop spiraled into 346 fabricated beads and ~2,300 wasted bead-cycles across two workers over 8 days — one of which (`bravo`) kept running after `needle stop` reported success, and a third (`alpha`) was invisible to `needle status`/`needle list` entirely. Full evidence and rationale in [ADR-002](../adr/002-pluck-telemetry-isolation-and-process-tracking.md). A follow-up same-day check (why didn't Splice/Unravel stop this class of incident on their own?) found the §6.5 gap below.
 
 ## Changes
 
@@ -4049,15 +4049,25 @@ stats       ──► telemetry, config, types
 - **`needle stop` kills the full process tree.** Parent `needle run` process, its `bash -c` prompt wrapper, and the dispatched `claude` subprocess — not just the tmux registry entry. Verify the PID is actually gone before reporting success.
 - **`needle status`/`needle list` must have no blind spots.** Every live `needle run --workspace ...` process must be discoverable through standard fleet commands regardless of how it was started (tmux-wrapped or bare background). Add a reconciliation check (registry view vs. `ps aux` process-table view) that WARNs on any unregistered `needle run` process.
 
-### 6.3 Testing
+### 6.5 Splice/Unravel loop-detection gap
+Found investigating whether the fleet's own failure-handling strands activated during the 2026-07-14 ARMOR (`bf-34xw9`) and Commitgraph (`bf-39by`) retry-storm incidents (both: a worker retrying a human-gated-access bead forever). They didn't — confirmed via telemetry (`bf-34xw9`: 41 `bead.claim.succeeded`, 25 `bead.orphaned`, 42 `agent.completed`, only 1 real `bead.completed`, over 24h) and code review, for three compounding reasons:
+- **Detector blind spot.** `SpliceStrand::detect_claim_churn` only counts `bead.claim.race_lost` — this pattern is claim-succeeded-then-orphaned-then-reclaimed, a different signal no detector reads. `detect_state_ping_pong` and `detect_log_runaway` both gate on "no `agent.completed`/`bead.completed` event in the scan window" as their definition of no-forward-progress; a bead that completes an agent run 42 times without ever closing looks identical to real progress under this check, so both are permanently blind to this exact failure mode.
+- **Missing config.** `document_failure`/`document_live_loop` silently no-op if `strands.splice.report_workspace` is unset — no bead, just a debug log line. The lab deployment's config has every other strand's section except `splice`'s, so this defaulted to `None` the whole time (confirmed: 455 `strand.evaluated` events fleet-wide in 24h, zero escalation beads created).
+- **No connection back to the stuck bead.** Even when `document_live_loop` works as designed, it only creates a *new* side-report bead (`["worker-loop", "human"]`) in the report workspace — it never labels the original stuck bead itself. Pluck excludes `human`-labeled beads and Unravel only acts on them (§6.1's third bullet); a working Splice detection still wouldn't stop Pluck from redispatching the actual stuck bead, and Unravel would never see it.
+
+Fix: a new detector for repeated claim+orphan cycles with high completion-without-resolution count; make `report_workspace` a validated, loudly-WARNed-if-missing config value; and have Splice label the *original* bead `human` directly when it detects a live loop, not just file a side report.
+
+### 6.6 Testing
 - Regression test: Pluck starvation detection on a workspace with 0 claimable candidates emits a telemetry event and writes nothing to that workspace's `.beads/`.
 - Regression test: `needle stop` on a worker mid-dispatch leaves no `needle run` or dispatched-agent process alive (process-table assertion, not just registry-state assertion).
 - Regression test: a worker started via the non-tmux boot path (bare `NEEDLE_INNER=1` background invocation) still appears in `needle status`/`needle list`.
+- Regression test: the `bf-34xw9` telemetry shape (41 `claim.succeeded`, 25 `bead.orphaned`, 42 `agent.completed`, 1 `bead.completed`) as fixture input — new detector fires and the original bead gets labeled `human`.
 
-### 6.4 Deployment
+### 6.7 Deployment
 - Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, then staged fleet rollout through the canary channel (`:testing` → `:stable`).
 
 ## Exit criteria
 - A workspace with beads Pluck cannot claim produces zero new beads in that workspace and one telemetry event in NEEDLE's own stream.
 - `needle stop -i <session>` leaves zero matching `needle run`/dispatched-agent processes in `ps aux`, verified, not assumed.
 - `needle status`/`needle list` output matches `ps aux | grep 'needle run'` 1:1 on a host with workers started via both the tmux and bare-background paths.
+- A bead stuck in a claim→orphan→reclaim cycle for N cycles gets labeled `human` automatically and stops being redispatched, without a human having to notice the retry-storm first.
