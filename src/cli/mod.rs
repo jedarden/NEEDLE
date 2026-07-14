@@ -2139,8 +2139,12 @@ fn handle_config_set(set_args: Vec<String>) -> Result<()> {
 
     // Write updated config back to file
     let yaml = serde_yaml::to_string(&config).context("failed to serialize config")?;
-    std::fs::write(&global_config_path, yaml)
-        .with_context(|| format!("failed to write config file: {}", global_config_path.display()))?;
+    std::fs::write(&global_config_path, yaml).with_context(|| {
+        format!(
+            "failed to write config file: {}",
+            global_config_path.display()
+        )
+    })?;
 
     // Report success
     for (key, value) in &updates {

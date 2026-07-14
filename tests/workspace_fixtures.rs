@@ -7,11 +7,11 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
+use chrono::Utc;
 use needle::bead_store::{BeadStore, Filters, RepairReport};
 use needle::registry::Registry;
 use needle::telemetry::Telemetry;
 use needle::types::{Bead, BeadId, BeadStatus, ClaimResult};
-use chrono::Utc;
 
 // ────────────────────────────────────────────────────────────────────────────────
 // Mock Workspace Structures
@@ -148,13 +148,17 @@ impl ScenarioBuilder {
 
     /// Build the scenario and return the workspace list and candidate map.
     pub fn build(self) -> (Vec<PathBuf>, Vec<MockCandidate>) {
-        let workspace_paths: Vec<PathBuf> = self.workspaces.iter().map(|w| w.path.clone()).collect();
+        let workspace_paths: Vec<PathBuf> =
+            self.workspaces.iter().map(|w| w.path.clone()).collect();
         (workspace_paths, self.candidates)
     }
 
     /// Get workspace states for verification.
     pub fn workspace_states(&self) -> Vec<(PathBuf, WorkspaceState)> {
-        self.workspaces.iter().map(|w| (w.path.clone(), w.state.clone())).collect()
+        self.workspaces
+            .iter()
+            .map(|w| (w.path.clone(), w.state.clone()))
+            .collect()
     }
 }
 
@@ -319,7 +323,12 @@ pub fn mixed_states_scenario() -> (Vec<PathBuf>, Vec<MockCandidate>, PathBuf) {
             },
             ws1.clone(),
         ),
-        MockCandidate::new("valid", "Valid Task", CandidateState::Claimable, ws1.clone()),
+        MockCandidate::new(
+            "valid",
+            "Valid Task",
+            CandidateState::Claimable,
+            ws1.clone(),
+        ),
     ];
 
     let workspaces = vec![ws1];
@@ -463,12 +472,7 @@ impl BeadStore for MockCandidateStore {
         Ok(())
     }
 
-    async fn create_bead(
-        &self,
-        _title: &str,
-        _body: &str,
-        _labels: &[&str],
-    ) -> Result<BeadId> {
+    async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
         if self.should_fail {
             anyhow::bail!(self.error_message.clone());
         }
@@ -496,22 +500,14 @@ impl BeadStore for MockCandidateStore {
         Ok(())
     }
 
-    async fn add_dependency(
-        &self,
-        _blocker_id: &BeadId,
-        _blocked_id: &BeadId,
-    ) -> Result<()> {
+    async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
         if self.should_fail {
             anyhow::bail!(self.error_message.clone());
         }
         Ok(())
     }
 
-    async fn remove_dependency(
-        &self,
-        _blocked_id: &BeadId,
-        _blocker_id: &BeadId,
-    ) -> Result<()> {
+    async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> Result<()> {
         if self.should_fail {
             anyhow::bail!(self.error_message.clone());
         }
@@ -541,7 +537,10 @@ pub fn count_candidates_by_state(candidates: &[MockCandidate]) -> (usize, usize,
 }
 
 /// Filter candidates by workspace.
-pub fn candidates_for_workspace(candidates: &[MockCandidate], workspace: &std::path::Path) -> Vec<MockCandidate> {
+pub fn candidates_for_workspace(
+    candidates: &[MockCandidate],
+    workspace: &std::path::Path,
+) -> Vec<MockCandidate> {
     candidates
         .iter()
         .filter(|c| c.workspace == workspace)
@@ -550,7 +549,10 @@ pub fn candidates_for_workspace(candidates: &[MockCandidate], workspace: &std::p
 }
 
 /// Filter candidates by state.
-pub fn candidates_by_state(candidates: &[MockCandidate], state: &CandidateState) -> Vec<MockCandidate> {
+pub fn candidates_by_state(
+    candidates: &[MockCandidate],
+    state: &CandidateState,
+) -> Vec<MockCandidate> {
     candidates
         .iter()
         .filter(|c| &c.state == state)
@@ -631,12 +633,7 @@ mod tests {
             .add_workspace(ws1.clone(), WorkspaceState::Dead)
             .add_workspace(ws2.clone(), WorkspaceState::Alive)
             .add_candidates(vec![
-                MockCandidate::new(
-                    "task1",
-                    "Task 1",
-                    CandidateState::Claimable,
-                    ws1.clone(),
-                ),
+                MockCandidate::new("task1", "Task 1", CandidateState::Claimable, ws1.clone()),
                 MockCandidate::new(
                     "task2",
                     "Task 2",
@@ -692,15 +689,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_candidate_store() {
-        let candidates = vec![
-            MockCandidate::new(
-                "test",
-                "Test",
-                CandidateState::Claimable,
-                test_workspace_path("ws"),
-            )
-            .to_bead(),
-        ];
+        let candidates = vec![MockCandidate::new(
+            "test",
+            "Test",
+            CandidateState::Claimable,
+            test_workspace_path("ws"),
+        )
+        .to_bead()];
 
         let store = MockCandidateStore::new(candidates);
         assert!(store.ready(&Filters::default()).await.is_ok());

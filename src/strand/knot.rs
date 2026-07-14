@@ -215,19 +215,17 @@ impl super::Strand for KnotStrand {
                 // Build candidate exclusion reasons from assignees holding in-progress beads.
                 let mut candidate_exclusion_reasons = Vec::new();
                 for worker in claimed_by {
-                    candidate_exclusion_reasons
-                        .push(format!("held_by_{}", worker));
+                    candidate_exclusion_reasons.push(format!("held_by_{}", worker));
                 }
                 if excluded_count > 0 {
-                    candidate_exclusion_reasons.push(
-                        "excluded_by_status".to_string()
-                    );
+                    candidate_exclusion_reasons.push("excluded_by_status".to_string());
                 }
 
                 // Extract workspace path from beads for telemetry.
                 // All beads in a single store should have the same workspace.
                 let workspace_path = if let Ok(beads) = store.list_all().await {
-                    beads.first()
+                    beads
+                        .first()
                         .and_then(|b| b.workspace.to_str().map(|s| s.to_string()))
                         .unwrap_or_else(|| "unknown".to_string())
                 } else {
@@ -235,14 +233,14 @@ impl super::Strand for KnotStrand {
                 };
 
                 // Emit telemetry instead of creating a bead.
-                let _ = self.telemetry.emit(
-                    crate::telemetry::EventKind::PluckStarvationDetected {
+                let _ = self
+                    .telemetry
+                    .emit(crate::telemetry::EventKind::PluckStarvationDetected {
                         workspace: workspace_path,
                         open_count: *open_count,
                         excluded_count,
                         candidate_exclusion_reasons,
-                    }
-                );
+                    });
 
                 self.record_alert();
                 tracing::warn!(
@@ -452,7 +450,9 @@ mod tests {
 
     /// Create a KnotStrand with test defaults for telemetry.
     /// Returns the knot and the captured events for verification.
-    fn make_test_knot_with_events(config: KnotConfig) -> (KnotStrand, Arc<StdMutex<Vec<TelemetryEvent>>>) {
+    fn make_test_knot_with_events(
+        config: KnotConfig,
+    ) -> (KnotStrand, Arc<StdMutex<Vec<TelemetryEvent>>>) {
         let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
         let telemetry = crate::telemetry::Telemetry::with_sink("test-worker".to_string(), sink);
         let knot = KnotStrand::new(config, telemetry);
@@ -527,7 +527,11 @@ mod tests {
             let result = knot.evaluate(&store).await;
             assert!(matches!(result, StrandResult::NoWork));
         }
-        assert_eq!(events.lock().unwrap().len(), 0, "no telemetry below threshold");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            0,
+            "no telemetry below threshold"
+        );
         assert_eq!(store.created_count(), 0, "no beads created below threshold");
 
         // Third cycle: hits threshold, telemetry emitted.
@@ -565,12 +569,20 @@ mod tests {
         // Allow time for background telemetry task to process the event.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        assert_eq!(events.lock().unwrap().len(), 1, "telemetry emitted on first cycle");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            1,
+            "telemetry emitted on first cycle"
+        );
 
         // Second cycle: within cooldown, no new telemetry.
         knot.evaluate(&store).await;
         assert_eq!(store.created_count(), 0, "no beads created on second cycle");
-        assert_eq!(events.lock().unwrap().len(), 1, "rate limited — no second telemetry event");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            1,
+            "rate limited — no second telemetry event"
+        );
 
         // Third cycle: still within cooldown.
         knot.evaluate(&store).await;
@@ -596,7 +608,11 @@ mod tests {
         knot.evaluate(&store).await;
 
         // Verify no bead was written to the target workspace
-        assert_eq!(store.created_count(), 0, "no beads should be written to target workspace");
+        assert_eq!(
+            store.created_count(),
+            0,
+            "no beads should be written to target workspace"
+        );
 
         // Drop knot to close telemetry channel and flush all events.
         drop(knot);
@@ -612,9 +628,12 @@ mod tests {
         assert_eq!(event.data["excluded_count"], 1);
 
         // Verify candidate exclusion reasons include the worker holding beads
-        let reasons = event.data["candidate_exclusion_reasons"].as_array()
+        let reasons = event.data["candidate_exclusion_reasons"]
+            .as_array()
             .expect("candidate_exclusion_reasons should be an array");
-        assert!(reasons.iter().any(|r| r.as_str().unwrap().contains("held_by_worker-1")));
+        assert!(reasons
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("held_by_worker-1")));
     }
 
     #[tokio::test]

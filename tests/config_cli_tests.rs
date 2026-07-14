@@ -333,8 +333,7 @@ fn config_help_output_includes_set_flag() {
     config_cmd
         .write_long_help(&mut help_buffer)
         .expect("should be able to write help text");
-    let help_text = String::from_utf8(help_buffer)
-        .expect("help text should be valid UTF-8");
+    let help_text = String::from_utf8(help_buffer).expect("help text should be valid UTF-8");
 
     // Verify the help text contains the --set flag
     assert!(
