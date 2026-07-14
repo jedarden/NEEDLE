@@ -216,3 +216,82 @@ fn routing_baseline_invalid_pattern_skipped() {
         chosen_adapter
     );
 }
+
+#[test]
+fn routing_baseline_specific_rule_wins_when_first() {
+    /// Test that verifies first-match-wins semantics by showing that a
+    /// more-specific rule wins when positioned before a less-specific rule.
+    ///
+    /// This test demonstrates:
+    /// 1. Both rules match the model
+    /// 2. The more-specific rule is positioned first
+    /// 3. The first (more-specific) rule wins
+    /// 4. Rule order matters (different order = different result)
+    ///
+    /// Current behavior: The first matching rule in the list determines routing,
+    /// regardless of whether later rules might be more specific.
+    // Configure rules with specific BEFORE broad:
+    // - First rule: "claude-sonnet-.*" -> claude-code (specific, matches first)
+    // - Second rule: "claude-.*" -> claude-print (broad, would also match but not checked)
+    let rules = vec![
+        make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+        make_rule("claude-.*", "claude-print"),
+    ];
+
+    let result = match_adapter("claude-sonnet-4-6", &rules, "fallback");
+
+    assert!(result.is_some(), "routing should succeed when rules match");
+
+    let chosen_adapter = result.unwrap();
+
+    // First-match-wins: The more-specific rule wins because it comes first
+    assert_eq!(
+        chosen_adapter, "claude-code-glm-4.7",
+        "should route to claude-code when specific rule is positioned first"
+    );
+
+    println!(
+        "BASELINE: Specific rule won when positioned first. chosen_adapter={}",
+        chosen_adapter
+    );
+    println!("Both rules matched, but first (claude-sonnet-.*) won");
+}
+
+#[test]
+fn routing_baseline_broad_rule_wins_when_first() {
+    /// Test that verifies first-match-wins semantics by showing that a
+    /// less-specific (broad) rule wins when positioned before a more-specific rule.
+    ///
+    /// This test complements `routing_baseline_specific_rule_wins_when_first`
+    /// by showing the REVERSE case: when the broad rule comes first, the
+    /// specific rule never gets checked.
+    ///
+    /// Current behavior: Rule order is significant - the first matching rule
+    /// wins, even if a later rule would be "better" or more specific.
+    // Configure rules with broad BEFORE specific (opposite order):
+    // - First rule: "claude-.*" -> claude-print (broad, matches first)
+    // - Second rule: "claude-sonnet-.*" -> claude-code (specific, never checked)
+    let rules = vec![
+        make_rule("claude-.*", "claude-print"),
+        make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+    ];
+
+    let result = match_adapter("claude-sonnet-4-6", &rules, "fallback");
+
+    assert!(result.is_some(), "routing should succeed when rules match");
+
+    let chosen_adapter = result.unwrap();
+
+    // First-match-wins: The broad rule wins because it comes first
+    // The more-specific rule never gets checked
+    assert_eq!(
+        chosen_adapter, "claude-print",
+        "should route to claude-print when broad rule is positioned first"
+    );
+
+    println!(
+        "BASELINE: Broad rule won when positioned first. chosen_adapter={}",
+        chosen_adapter
+    );
+    println!("Specific rule (claude-sonnet-.*) never got checked");
+}
