@@ -96,6 +96,7 @@ impl ExploreStrand {
     /// This constructor skips workspace discovery and uses the provided list directly.
     /// Useful for tests that need precise control over which workspaces are scanned.
     #[cfg(test)]
+    #[allow(dead_code)]
     fn new_for_test(
         workspaces: Vec<PathBuf>,
         home_workspace: PathBuf,
@@ -190,6 +191,7 @@ impl ExploreStrand {
     }
 
     /// Create a BrCliBeadStore for a given workspace path.
+    #[allow(dead_code)]
     async fn store_for_workspace(workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
         Ok(Arc::new(BrCliBeadStore::discover(workspace.to_path_buf())?))
     }
@@ -198,6 +200,7 @@ impl ExploreStrand {
     ///
     /// This internal version is marked pub(crate) to allow testing with store injection.
     #[cfg(test)]
+    #[allow(dead_code)]
     async fn create_store_for(
         &self,
         workspace: &Path,

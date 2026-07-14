@@ -1643,7 +1643,7 @@ impl CompilationError {
 impl fmt::Display for CompilationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CompilationError::RustError { code, message, file, line, column } => {
+            CompilationError::RustError { code, message, file: _, line: _, column: _ } => {
                 if let Some(loc) = self.location_string() {
                     write!(f, "error[{}][{}]: {}", code, loc, message)
                 } else {

@@ -263,7 +263,7 @@ impl super::Strand for KnotStrand {
 mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
-    use crate::telemetry::{test_utils::MemorySink, TelemetryEvent};
+    use crate::telemetry::TelemetryEvent;
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
     use anyhow::Result;

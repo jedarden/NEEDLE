@@ -211,7 +211,7 @@ impl super::Strand for PluckStrand {
                     .labels
                     .iter()
                     .filter(|l| self.exclude_labels.contains(l))
-                    .map(|l| l.clone())
+                    .cloned()
                     .collect();
                 (b.id.as_ref().to_string(), excluded_labels)
             })
@@ -1135,9 +1135,9 @@ mod tests {
                     .collect();
 
                 // Should exclude all 3 beads by label
-                assert!(reason_strings.iter().any(|r| *r == "label:deferred"));
-                assert!(reason_strings.iter().any(|r| *r == "label:human"));
-                assert!(reason_strings.iter().any(|r| *r == "label:blocked"));
+                assert!(reason_strings.contains(&"label:deferred"));
+                assert!(reason_strings.contains(&"label:human"));
+                assert!(reason_strings.contains(&"label:blocked"));
             } else {
                 panic!("candidate_exclusion_reasons should be an array");
             }
@@ -1212,9 +1212,9 @@ mod tests {
                     .collect();
 
                 // Should exclude all 3 beads by stale assignee
-                assert!(reason_strings.iter().any(|r| *r == "assignee:worker-1"));
-                assert!(reason_strings.iter().any(|r| *r == "assignee:worker-2"));
-                assert!(reason_strings.iter().any(|r| *r == "assignee:worker-3"));
+                assert!(reason_strings.contains(&"assignee:worker-1"));
+                assert!(reason_strings.contains(&"assignee:worker-2"));
+                assert!(reason_strings.contains(&"assignee:worker-3"));
             } else {
                 panic!("candidate_exclusion_reasons should be an array");
             }
@@ -1358,9 +1358,9 @@ mod tests {
                     .collect();
 
                 // Should include both label and assignee exclusions
-                assert!(reason_strings.iter().any(|r| *r == "label:deferred"));
-                assert!(reason_strings.iter().any(|r| *r == "assignee:worker-1"));
-                assert!(reason_strings.iter().any(|r| *r == "label:blocked"));
+                assert!(reason_strings.contains(&"label:deferred"));
+                assert!(reason_strings.contains(&"assignee:worker-1"));
+                assert!(reason_strings.contains(&"label:blocked"));
             } else {
                 panic!("candidate_exclusion_reasons should be an array");
             }
