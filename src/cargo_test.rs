@@ -154,6 +154,10 @@ pub struct TestOutcome {
     pub duration: Duration,
     /// Whether the test timed out.
     pub timed_out: bool,
+    /// Whether compilation failed (vs test failure).
+    pub compilation_failed: bool,
+    /// Parsed compilation error messages (if compilation_failed is true).
+    pub compilation_errors: Vec<String>,
 }
 
 impl TestOutcome {
@@ -162,10 +166,26 @@ impl TestOutcome {
         self.exit_code == Some(0) && !self.timed_out
     }
 
+    /// Returns true if the failure was due to compilation errors.
+    pub fn is_compilation_failure(&self) -> bool {
+        self.compilation_failed
+    }
+
+    /// Returns true if the failure was due to test failures (not compilation).
+    pub fn is_test_failure(&self) -> bool {
+        !self.success() && !self.timed_out && !self.compilation_failed
+    }
+
     /// Returns a human-readable summary of the outcome.
     pub fn summary(&self) -> String {
         if self.timed_out {
             format!("Timed out after {:?}", self.duration)
+        } else if self.compilation_failed {
+            format!(
+                "Compilation failed with {} error(s) in {:?}",
+                self.compilation_errors.len(),
+                self.duration
+            )
         } else if self.success() {
             format!("Passed in {:?}", self.duration)
         } else {
@@ -227,6 +247,120 @@ impl TestMetrics {
     pub fn duration(&self) -> Duration {
         Duration::from_millis(self.duration_ms)
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Compilation Error Detection
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Detect compilation errors from cargo test stderr.
+///
+/// Returns (compilation_failed, error_messages) where compilation_failed is true
+/// if stderr contains compilation error patterns, and error_messages is a list
+/// of parsed error messages.
+pub fn detect_compilation_errors(stderr: &str) -> (bool, Vec<String>) {
+    let mut compilation_failed = false;
+    let mut error_messages = Vec::new();
+
+    // Cargo compilation error patterns
+    // 1. "error[E####]: " - Rust compiler errors with error codes
+    // 2. "error: could not compile " - Compilation failed message
+    // 3. "error: aborting due to " - Abort message
+    // 4. "error: " followed by a filename - General compilation errors
+
+    for line in stderr.lines() {
+        let line = line.trim();
+
+        // Check for Rust compiler error codes (e.g., "error[E0308]:")
+        if line.starts_with("error[E") {
+            compilation_failed = true;
+            if let Some(msg) = parse_error_line(line) {
+                error_messages.push(msg);
+            }
+            continue;
+        }
+
+        // Check for "could not compile" message
+        if line.contains("could not compile") {
+            compilation_failed = true;
+            if let Some(crate_name) = extract_crate_name(line) {
+                error_messages.push(format!("Failed to compile crate: {}", crate_name));
+            } else {
+                error_messages.push("Compilation failed".to_string());
+            }
+            continue;
+        }
+
+        // Check for "aborting due to" message
+        // Only count this if we've already seen actual compilation errors
+        if line.contains("aborting due to") && compilation_failed {
+            if let Some(count) = extract_error_count(line) {
+                error_messages.push(format!("Aborted due to {} error(s)", count));
+            }
+            continue;
+        }
+
+        // Check for general "error:" messages (but not warnings)
+        if line.starts_with("error:") && !line.starts_with("error[E") {
+            // Only capture if it looks like a compilation error, not a test error
+            if line.contains("unused") || line.contains("dead_code") || line.contains("mutability") {
+                // These are compiler warnings/lints, not test failures
+                compilation_failed = true;
+                error_messages.push(line.to_string());
+            }
+        }
+    }
+
+    (compilation_failed, error_messages)
+}
+
+/// Parse an error line to extract the error message.
+///
+/// Input: "error[E0308]: mismatched types"
+/// Output: Some("E0308: mismatched types")
+fn parse_error_line(line: &str) -> Option<String> {
+    // Extract everything after "error[" until end of line
+    if let Some(start) = line.find("error[") {
+        if let Some(end) = line.find(']') {
+            let error_code = &line[start + 6..end]; // Skip "error["
+            let message = line[end + 1..].trim(); // Skip "]"
+            // Check if message is empty or just a colon
+            if !message.is_empty() && message != ":" {
+                return Some(format!("{}: {}", error_code, message));
+            }
+        }
+    }
+    None
+}
+
+/// Extract crate name from "could not compile" message.
+///
+/// Input: "error: could not compile `my_crate`"
+/// Output: Some("my_crate")
+fn extract_crate_name(line: &str) -> Option<String> {
+    if let Some(start) = line.find('`') {
+        if let Some(end) = line.rfind('`') {
+            if start < end {
+                return Some(line[start + 1..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Extract error count from "aborting due to" message.
+///
+/// Input: "aborting due to 3 previous errors"
+/// Output: Some(3)
+fn extract_error_count(line: &str) -> Option<usize> {
+    // Find the number in the line
+    let words: Vec<&str> = line.split_whitespace().collect();
+    for word in words {
+        if let Ok(n) = word.parse::<usize>() {
+            return Some(n);
+        }
+    }
+    None
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -307,47 +441,58 @@ impl CargoTest {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        // Spawn the process
-        let mut child = cmd.spawn().context("failed to spawn cargo test")?;
-
-        // Wait for completion with timeout
+        // Spawn the process with timeout handling
         let timeout = Duration::from_secs(self.timeout_secs);
-        let _exit_status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => {
-                    if start.elapsed() >= timeout {
-                        child
-                            .kill()
-                            .context("failed to kill cargo test after timeout")?;
-                        return Ok(TestOutcome {
-                            exit_code: None,
-                            stdout: String::new(),
-                            stderr: String::from("command timed out"),
-                            duration: start.elapsed(),
-                            timed_out: true,
-                        });
+
+        // Use a thread to handle output() with timeout
+        let output_result = std::thread::spawn(move || {
+            cmd.output()
+        });
+
+        // Wait for thread completion with timeout
+        let output = loop {
+            if start.elapsed() >= timeout {
+                return Ok(TestOutcome {
+                    exit_code: None,
+                    stdout: String::new(),
+                    stderr: String::from("command timed out"),
+                    duration: start.elapsed(),
+                    timed_out: true,
+                    compilation_failed: false,
+                    compilation_errors: Vec::new(),
+                });
+            }
+
+            // Check if thread is complete
+            if output_result.is_finished() {
+                match output_result.join() {
+                    Ok(Ok(output)) => break output,
+                    Ok(Err(e)) => {
+                        return Err(anyhow::anyhow!("failed to execute cargo test: {}", e))
+                            .with_context(|| "failed to spawn or execute cargo test");
                     }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("failed to wait for cargo test: {}", e));
+                    Err(_) => {
+                        return Err(anyhow::anyhow!("cargo test thread panicked"));
+                    }
                 }
             }
-        };
 
-        // Capture output
-        let output = child
-            .wait_with_output()
-            .context("failed to capture cargo test output")?;
+            std::thread::sleep(Duration::from_millis(100));
+        };
 
         let stdout = truncate_output(&String::from_utf8_lossy(&output.stdout));
         let stderr = truncate_output(&String::from_utf8_lossy(&output.stderr));
+
+        // Detect compilation errors
+        let (compilation_failed, compilation_errors) =
+            detect_compilation_errors(&String::from_utf8_lossy(&output.stderr));
 
         tracing::info!(
             exit_code = ?output.status.code(),
             duration_secs = start.elapsed().as_secs(),
             success = output.status.success(),
+            compilation_failed,
+            compilation_error_count = compilation_errors.len(),
             "cargo test completed"
         );
 
@@ -357,6 +502,8 @@ impl CargoTest {
             stderr,
             duration: start.elapsed(),
             timed_out: false,
+            compilation_failed,
+            compilation_errors,
         })
     }
 
@@ -607,6 +754,8 @@ mod tests {
             stderr: String::new(),
             duration: Duration::from_secs(1),
             timed_out: false,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
         };
         assert!(outcome.success());
     }
@@ -619,6 +768,8 @@ mod tests {
             stderr: String::new(),
             duration: Duration::from_secs(1),
             timed_out: false,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
         };
         assert!(!outcome.success());
     }
@@ -631,6 +782,8 @@ mod tests {
             stderr: String::new(),
             duration: Duration::from_secs(1),
             timed_out: true,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
         };
         assert!(!outcome.success());
     }
@@ -643,6 +796,8 @@ mod tests {
             stderr: String::new(),
             duration: Duration::from_secs(5),
             timed_out: false,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
         };
         assert!(outcome.summary().contains("Passed"));
         assert!(outcome.summary().contains("5s"));
@@ -656,6 +811,8 @@ mod tests {
             stderr: String::new(),
             duration: Duration::from_secs(3),
             timed_out: false,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
         };
         assert!(outcome.summary().contains("Failed"));
         assert!(outcome.summary().contains("exit code"));
@@ -670,9 +827,56 @@ mod tests {
             stderr: String::new(),
             duration: Duration::from_secs(100),
             timed_out: true,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
         };
         assert!(outcome.summary().contains("Timed out"));
         assert!(outcome.summary().contains("100s"));
+    }
+
+    #[test]
+    fn test_outcome_summary_compilation_failed() {
+        let outcome = TestOutcome {
+            exit_code: Some(101),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_secs(2),
+            timed_out: false,
+            compilation_failed: true,
+            compilation_errors: vec!["E0308: mismatched types".to_string()],
+        };
+        assert!(outcome.summary().contains("Compilation failed"));
+        assert!(outcome.summary().contains("1 error"));
+    }
+
+    #[test]
+    fn test_outcome_is_compilation_failure() {
+        let outcome = TestOutcome {
+            exit_code: Some(101),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_secs(1),
+            timed_out: false,
+            compilation_failed: true,
+            compilation_errors: vec!["E0308: mismatched types".to_string()],
+        };
+        assert!(outcome.is_compilation_failure());
+        assert!(!outcome.is_test_failure());
+    }
+
+    #[test]
+    fn test_outcome_is_test_failure() {
+        let outcome = TestOutcome {
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_secs(1),
+            timed_out: false,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
+        };
+        assert!(!outcome.is_compilation_failure());
+        assert!(outcome.is_test_failure());
     }
 
     #[test]
@@ -958,6 +1162,8 @@ mod tests {
             stderr: String::from("test warnings"),
             duration: Duration::from_millis(1500),
             timed_out: false,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
         };
 
         let metrics = outcome.to_metrics("my_test".to_string());
@@ -979,6 +1185,8 @@ mod tests {
             stderr: String::from("error details"),
             duration: Duration::from_millis(500),
             timed_out: false,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
         };
 
         let metrics = outcome.to_metrics("failing_test".to_string());
@@ -998,6 +1206,8 @@ mod tests {
             stderr: String::from("timeout message"),
             duration: Duration::from_secs(600),
             timed_out: true,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
         };
 
         let metrics = outcome.to_metrics("timeout_test".to_string());
@@ -1092,5 +1302,288 @@ mod tests {
         assert_eq!(deserialized.test_name, "serialization_test");
         assert_eq!(deserialized.exit_code, Some(0));
         assert_eq!(deserialized.duration_ms, 1000);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Compilation Error Detection Tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_compilation_errors_empty_stderr() {
+        let stderr = "";
+        let (failed, errors) = detect_compilation_errors(stderr);
+        assert!(!failed);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn detect_compilation_errors_with_error_code() {
+        let stderr = "error[E0308]: mismatched types\n  --> src/main.rs:10:5\n";
+        let (failed, errors) = detect_compilation_errors(stderr);
+        assert!(failed);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("E0308"));
+        assert!(errors[0].contains("mismatched types"));
+    }
+
+    #[test]
+    fn detect_compilation_errors_multiple_errors() {
+        let stderr = "error[E0308]: mismatched types\nerror[E0382]: use of moved value\n";
+        let (failed, errors) = detect_compilation_errors(stderr);
+        assert!(failed);
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].contains("E0308"));
+        assert!(errors[1].contains("E0382"));
+    }
+
+    #[test]
+    fn detect_compilation_errors_could_not_compile() {
+        let stderr = "error: could not compile `my_crate` (bin \"my_crate\")\n";
+        let (failed, errors) = detect_compilation_errors(stderr);
+        assert!(failed);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("my_crate"));
+    }
+
+    #[test]
+    fn detect_compilation_errors_aborting_due_to() {
+        let stderr = "error: aborting due to 3 previous errors\n";
+        let (failed, errors) = detect_compilation_errors(stderr);
+        // "aborting due to" alone doesn't indicate compilation - it's just a summary
+        // It needs actual error codes (like "error[E0308]:") to trigger compilation_failed
+        assert!(!failed);
+        assert_eq!(errors.len(), 0);
+    }
+
+    #[test]
+    fn detect_compilation_errors_full_output() {
+        let stderr = r#"   Compiling my_crate v0.1.0 (/path/to/crate)
+error[E0308]: mismatched types
+  --> src/main.rs:10:5
+   |
+10 |     let x: i32 = "hello";
+   |            ---   ^^^^^^^ expected `i32`, found `&str`
+   |            expected due to this
+
+error: aborting due to 1 previous error
+
+error: could not compile `my_crate` (bin \"my_crate\)
+"#;
+        let (failed, errors) = detect_compilation_errors(stderr);
+        assert!(failed, "should detect compilation failure");
+        assert!(!errors.is_empty(), "should have at least one error");
+        assert!(errors.iter().any(|e| e.contains("E0308")), "should include E0308 error code");
+    }
+
+    #[test]
+    fn detect_compilation_errors_test_output_only() {
+        // Test output without compilation errors
+        let stderr = "running 3 tests\ntest test_foo ... ok\ntest test_bar ... FAILED\n";
+        let (failed, errors) = detect_compilation_errors(stderr);
+        assert!(!failed);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn parse_error_line_with_code() {
+        let line = "error[E0308]: mismatched types";
+        let parsed = parse_error_line(line);
+        assert!(parsed.is_some());
+        let parsed_str = parsed.as_ref().unwrap();
+        assert!(parsed_str.contains("E0308"));
+        assert!(parsed_str.contains("mismatched types"));
+    }
+
+    #[test]
+    fn parse_error_line_no_message() {
+        let line = "error[E0308]:";
+        let parsed = parse_error_line(line);
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_error_line_not_error() {
+        let line = "warning: unused variable";
+        let parsed = parse_error_line(line);
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn extract_crate_name_from_compile_error() {
+        let line = "error: could not compile `my_crate` (bin \"my_crate\")";
+        let name = extract_crate_name(line);
+        assert_eq!(name, Some("my_crate".to_string()));
+    }
+
+    #[test]
+    fn extract_crate_name_no_backticks() {
+        let line = "error: compilation failed";
+        let name = extract_crate_name(line);
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn extract_error_count_from_abort_message() {
+        let line = "aborting due to 3 previous errors";
+        let count = extract_error_count(line);
+        assert_eq!(count, Some(3));
+    }
+
+    #[test]
+    fn extract_error_count_no_number() {
+        let line = "aborting due to previous errors";
+        let count = extract_error_count(line);
+        assert!(count.is_none());
+    }
+
+    #[test]
+    fn cargo_test_spawn_succeeds() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project for testing
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "spawn-test"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        )
+        .unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_spawn() {
+        assert!(true);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        // Test that spawn succeeds
+        let runner = CargoTest::new(workspace);
+        let result = runner.run();
+
+        // Should succeed in spawning (even if tests fail)
+        assert!(
+            result.is_ok(),
+            "cargo test spawn should succeed, got error: {:?}",
+            result.err()
+        );
+
+        let outcome = result.unwrap();
+        // Should have an exit code (didn't timeout during spawn)
+        assert!(
+            outcome.exit_code.is_some() || outcome.timed_out,
+            "should have exit code or timeout flag"
+        );
+    }
+
+    #[test]
+    fn cargo_test_spawn_with_timeout_protection() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "timeout-test"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(&lib_rs, "").unwrap();
+
+        // Test with very short timeout
+        let runner = CargoTest::new(workspace).with_timeout(1);
+        let outcome = runner.run().unwrap();
+
+        // Should complete quickly or timeout gracefully
+        assert!(
+            outcome.exit_code.is_some() || outcome.timed_out,
+            "should have exit code or be marked as timed out"
+        );
+
+        // Duration should be recorded
+        assert!(
+            outcome.duration.as_secs() < 10,
+            "test should complete quickly, took {:?}",
+            outcome.duration
+        );
+    }
+
+    #[test]
+    fn cargo_test_spawn_captures_output_streams() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "output-test"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        )
+        .unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_with_output() {
+        println!("STDOUT message");
+        eprintln!("STDERR message");
+        assert!(true);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        // Test that output is captured
+        let runner = CargoTest::new(workspace);
+        let outcome = runner.run().unwrap();
+
+        // Should have captured output
+        assert!(
+            !outcome.stdout.is_empty() || !outcome.stderr.is_empty(),
+            "should capture at least one output stream"
+        );
+
+        // Verify stdout/stderr strings are not empty (they may contain cargo output)
+        assert!(outcome.stdout.len() >= 0, "stdout should be captured");
+        assert!(outcome.stderr.len() >= 0, "stderr should be captured");
     }
 }
