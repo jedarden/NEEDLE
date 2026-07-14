@@ -758,6 +758,12 @@ mod tests {
             StrandResult::WorkCreated => {
                 panic!("unexpected WorkCreated result");
             }
+            StrandResult::Error(e) => {
+                panic!("unexpected Error result: {:?}", e);
+            }
+            StrandResult::Split(_, _) => {
+                panic!("unexpected Split result");
+            }
         }
     }
 
@@ -802,6 +808,12 @@ mod tests {
             }
             StrandResult::WorkCreated => {
                 panic!("unexpected WorkCreated result");
+            }
+            StrandResult::Error(e) => {
+                panic!("unexpected Error result: {:?}", e);
+            }
+            StrandResult::Split(_, _) => {
+                panic!("unexpected Split result");
             }
         }
     }
