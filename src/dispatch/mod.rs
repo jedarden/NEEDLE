@@ -963,8 +963,20 @@ impl Dispatcher {
         // Finalize trace capture.
         let trace_path = if let Some(capture) = trace_capture {
             // Write stdout and stderr to trace files.
-            let _ = capture.write_stdout(&stdout);
-            let _ = capture.write_stderr(&stderr);
+            if let Err(e) = capture.write_stdout(&stdout) {
+                tracing::warn!(
+                    bead_id = %bead_id.as_ref(),
+                    error = %e,
+                    "failed to write stdout trace file"
+                );
+            }
+            if let Err(e) = capture.write_stderr(&stderr) {
+                tracing::warn!(
+                    bead_id = %bead_id.as_ref(),
+                    error = %e,
+                    "failed to write stderr trace file"
+                );
+            }
 
             // Read normalized trace from agent log file (if transform was configured).
             let trace_lines = if adapter.output_transform.is_some() {
