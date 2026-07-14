@@ -267,6 +267,9 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
     }
 
     latencies.sort();
+    // Note: Using nearest-rank method (simple indexing) for quick p95 estimate in benchmark output.
+    // For accurate p95 calculation with linear interpolation, use needle::stats::calculate_p95.
+    // Criterion.rs also calculates p95 automatically via bootstrap analysis (see criterion.toml).
     let p95_us = latencies[(latencies.len() * 95) / 100];
     let p95_ms = p95_us as f64 / 1000.0;
 

@@ -296,24 +296,26 @@ impl StatsAggregator {
 ///
 /// # Algorithm
 ///
-/// This function uses the **nearest-rank method**:
+/// This function uses **linear interpolation**, which is the same method
+/// used by Criterion.rs and is more accurate than the nearest-rank method:
 ///
 /// 1. If the slice is empty, return 0 (no data case)
-/// 2. Sort the values in ascending order
-/// 3. Calculate the index using integer arithmetic: `index = (n * 95) / 100`
-///    where `n` is the number of elements
-/// 4. Return the value at that index
+/// 2. If the slice has one element, return that element
+/// 3. Sort the values in ascending order
+/// 4. Calculate the rank: `rank = 0.95 * (n - 1)` where `n` is the number of elements
+/// 5. Split the rank into integer and fractional parts
+/// 6. Return the linear interpolation: `floor_value + (ceiling_value - floor_value) * fraction`
+/// 7. Round to the nearest integer for the final result
 ///
 /// This method was chosen because:
-/// - **Deterministic**: No interpolation between values, always returns an
-///   actual element from the input
-/// - **Efficient**: O(n log n) time due to sorting, O(1) additional space
-/// - **Simple**: Easy to understand and verify
-/// - **Common**: The de facto standard for latency percentile reporting
+/// - **Accurate**: Uses linear interpolation like Criterion.rs for smooth percentile estimates
+/// - **Standard**: Matches the behavior of common benchmarking libraries
+/// - **Well-documented**: The algorithm is described in statistical literature
+/// - **Deterministic**: Always produces the same result for the same input
 ///
-/// Note: This is not linear interpolation. For example, with 10 elements
-/// `[0, 10, 20, ..., 90]`, the 95th percentile is `90` (the value at index 9),
-/// not an interpolated value like `85.5`.
+/// Note: This uses linear interpolation, not nearest-rank. For example, with 10 elements
+/// `[10, 20, ..., 100]`, the 95th percentile is approximately `95.5` (rounded to `96`),
+/// not the maximum value `100`.
 ///
 /// # Examples
 ///
@@ -324,7 +326,10 @@ impl StatsAggregator {
 ///
 /// let latencies = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 /// let p95 = calculate_p95(&latencies);
-/// assert_eq!(p95, 100); // index = (10 * 95) / 100 = 9 → value 100
+/// // rank = 0.95 * 9 = 8.55, floor_index = 8, fraction = 0.55
+/// // floor_value = 90, ceiling_value = 100
+/// // interpolated = 90 + 10 * 0.55 = 95.5 → 96
+/// assert_eq!(p95, 96);
 /// ```
 ///
 /// ## Works with unsorted input (sorts internally)
@@ -334,7 +339,7 @@ impl StatsAggregator {
 ///
 /// let unsorted = vec![100u128, 10, 50, 30, 70, 40, 60, 20, 80, 90];
 /// let p95 = calculate_p95(&unsorted);
-/// assert_eq!(p95, 100); // Function sorts internally → same result
+/// assert_eq!(p95, 96); // Function sorts internally → same result
 /// ```
 ///
 /// ## Larger dataset
@@ -342,11 +347,13 @@ impl StatsAggregator {
 /// ```
 /// use needle::stats::calculate_p95;
 ///
-/// // 20 elements: 95th percentile is at index (20 * 95) / 100 = 19
+/// // 20 elements: rank = 0.95 * 19 = 18.05, floor_index = 18, fraction = 0.05
 /// let data = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100,
 ///                  110, 120, 130, 140, 150, 160, 170, 180, 190, 200];
 /// let p95 = calculate_p95(&data);
-/// assert_eq!(p95, 200); // The 95th percentile value
+/// // floor_value = 190, ceiling_value = 200
+/// // interpolated = 190 + 10 * 0.05 = 190.5 → 191
+/// assert_eq!(p95, 191);
 /// ```
 ///
 /// ## Single element (degenerate case)
@@ -380,17 +387,46 @@ impl StatsAggregator {
 ///     45, 50, 55, 60, 70, 80, 90, 100, 120, 150
 /// ];
 /// let p95 = calculate_p95(&latencies);
-/// assert_eq!(p95, 150); // 95% of requests completed in ≤150ms
+/// // rank = 0.95 * 19 = 18.05, floor_index = 18, fraction = 0.05
+/// // floor_value = 120, ceiling_value = 150
+/// // interpolated = 120 + 30 * 0.05 = 121.5 → 122
+/// assert_eq!(p95, 122);
 /// ```
+///
+/// # See Also
+///
+/// - [`docs/p95-calculation-algorithms.md`](../../docs/p95-calculation-algorithms.html) — Comprehensive survey of p95 algorithms and recommendations
 pub fn calculate_p95(latencies: &[u128]) -> u128 {
     if latencies.is_empty() {
         return 0;
     }
 
+    let n = latencies.len();
+    if n == 1 {
+        return latencies[0];
+    }
+
     let mut sorted = Vec::from(latencies);
     sorted.sort();
-    let index = (sorted.len() * 95) / 100;
-    sorted[index]
+
+    // Linear interpolation method (like Criterion.rs)
+    // Formula: rank = (p / 100) * (n - 1)
+    // For p95: rank = 0.95 * (n - 1)
+    let rank = 0.95 * (n - 1) as f64;
+    let floor_index = rank.floor() as usize;
+    let fraction = rank - floor_index as f64;
+
+    let floor_value = sorted[floor_index];
+    let ceiling_value = sorted[floor_index + 1];
+
+    // Linear interpolation: floor + (ceiling - floor) * fraction
+    let interpolated = floor_value as f64 + (ceiling_value - floor_value) as f64 * fraction;
+
+    // Round to nearest integer.
+    // Add a small epsilon to handle floating point precision issues (e.g., 95.5 → 95.4999... → 95).
+    // Standard rounding: 95.0-95.499... → 95, 95.5-96.499... → 96
+    let epsilon = 1e-9;
+    (interpolated + epsilon).round() as u128
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -984,13 +1020,16 @@ mod tests {
     #[test]
     fn calculate_p95_sorted() {
         let data = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-        assert_eq!(calculate_p95(&data), 100); // index = (10 * 95) / 100 = 9
+        // Linear interpolation: rank = 0.95 * 9 = 8.55, floor=8, frac=0.55
+        // 90 + (100-90) * 0.55 = 95.5 → 96
+        assert_eq!(calculate_p95(&data), 96);
     }
 
     #[test]
     fn calculate_p95_unsorted() {
         let data = vec![100u128, 10, 50, 30, 70, 40, 60, 20, 80, 90];
-        assert_eq!(calculate_p95(&data), 100); // Function sorts internally, index = 9
+        // Same as sorted test after internal sorting
+        assert_eq!(calculate_p95(&data), 96);
     }
 
     #[test]
@@ -999,6 +1038,8 @@ mod tests {
             10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170, 180,
             190, 200,
         ];
-        assert_eq!(calculate_p95(&data), 200); // index = (20 * 95) / 100 = 19
+        // Linear interpolation: rank = 0.95 * 19 = 18.05, floor=18, frac=0.05
+        // 190 + (200-190) * 0.05 = 190.5 → 191
+        assert_eq!(calculate_p95(&data), 191);
     }
 }
