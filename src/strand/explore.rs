@@ -269,8 +269,15 @@ impl super::Strand for ExploreStrand {
 
             match remote_store.ready(&filters).await {
                 Ok(mut candidates) => {
-                    // Filter out assigned beads (belt-and-suspenders).
-                    candidates.retain(|b| b.assignee.is_none());
+                    // Defensive belt-and-suspenders filtering.
+                    // The store.ready() method receives exclude_labels in its Filters,
+                    // but some backend implementations may not filter correctly.
+                    // This ensures excluded/assigned beads are never returned as candidates.
+                    candidates.retain(|b| {
+                        let assignee_ok = b.assignee.is_none();
+                        let labels_ok = !b.labels.iter().any(|l| filters.exclude_labels.contains(l));
+                        assignee_ok && labels_ok
+                    });
 
                     if candidates.is_empty() {
                         // No ready candidates. Run cross-workspace mend to release
@@ -298,7 +305,12 @@ impl super::Strand for ExploreStrand {
                                 // Re-query ready after cleanup.
                                 match remote_store.ready(&filters).await {
                                     Ok(mut retry_candidates) => {
-                                        retry_candidates.retain(|b| b.assignee.is_none());
+                                        // Apply the same defensive filtering.
+                                        retry_candidates.retain(|b| {
+                                            let assignee_ok = b.assignee.is_none();
+                                            let labels_ok = !b.labels.iter().any(|l| filters.exclude_labels.contains(l));
+                                            assignee_ok && labels_ok
+                                        });
 
                                         if !retry_candidates.is_empty() {
                                             // Found candidates after releasing orphans.
@@ -711,9 +723,16 @@ mod tests {
     /// the bug exists by failing on the current implementation.
     #[tokio::test]
     async fn test_deadlock_multi_workspace_with_excluded_first_workspace() {
-        let workspace1 = PathBuf::from("/tmp/test/workspace1");
-        let workspace2 = PathBuf::from("/tmp/test/workspace2");
+        let temp_root = tempfile::tempdir().unwrap();
+        let workspace1 = temp_root.path().join("workspace1");
+        let workspace2 = temp_root.path().join("workspace2");
         let home = PathBuf::from("/home/test");
+
+        // Create .beads/ directories so has_beads_dir() returns true
+        fs::create_dir_all(&workspace1).unwrap();
+        fs::create_dir_all(&workspace2).unwrap();
+        fs::create_dir(workspace1.join(".beads")).unwrap();
+        fs::create_dir(workspace2.join(".beads")).unwrap();
 
         // Create a mock store factory that returns different states per workspace
         let mock_factory = Arc::new(ExcludedFirstMockFactory::new(
@@ -785,9 +804,16 @@ mod tests {
     /// candidates.
     #[tokio::test]
     async fn deadlock_scenario_assigned_beads_allow_advancement() {
-        let workspace1 = PathBuf::from("/tmp/test/workspace1");
-        let workspace2 = PathBuf::from("/tmp/test/workspace2");
+        let temp_root = tempfile::tempdir().unwrap();
+        let workspace1 = temp_root.path().join("workspace1");
+        let workspace2 = temp_root.path().join("workspace2");
         let home = PathBuf::from("/home/test");
+
+        // Create .beads/ directories so has_beads_dir() returns true
+        fs::create_dir_all(&workspace1).unwrap();
+        fs::create_dir_all(&workspace2).unwrap();
+        fs::create_dir(workspace1.join(".beads")).unwrap();
+        fs::create_dir(workspace2.join(".beads")).unwrap();
 
         // Create a mock store factory
         let mock_factory = Arc::new(DeadlockMockStoreFactory::new(workspace1.clone(), workspace2.clone()));
@@ -841,9 +867,16 @@ mod tests {
     /// the Filters (deferred/human/blocked labels), not just when assigned.
     #[tokio::test]
     async fn deadlock_scenario_excluded_beads_allow_advancement() {
-        let workspace1 = PathBuf::from("/tmp/test/workspace1");
-        let workspace2 = PathBuf::from("/tmp/test/workspace2");
+        let temp_root = tempfile::tempdir().unwrap();
+        let workspace1 = temp_root.path().join("workspace1");
+        let workspace2 = temp_root.path().join("workspace2");
         let home = PathBuf::from("/home/test");
+
+        // Create .beads/ directories so has_beads_dir() returns true
+        fs::create_dir_all(&workspace1).unwrap();
+        fs::create_dir_all(&workspace2).unwrap();
+        fs::create_dir(workspace1.join(".beads")).unwrap();
+        fs::create_dir(workspace2.join(".beads")).unwrap();
 
         // Create a mock store factory for excluded beads scenario
         let mock_factory = Arc::new(ExcludedBeadsMockFactory::new(workspace1.clone(), workspace2.clone()));
