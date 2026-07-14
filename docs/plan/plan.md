@@ -4032,11 +4032,11 @@ stats       ──► telemetry, config, types
 - A bead flushed into any registered store is claimed without a worker restart and without a 15-minute wait.
 - `needle status` answers "when did each workspace last get scanned, and why was nothing claimed" directly.
 
-# Phase 6: Pluck Telemetry Isolation, Fleet Process Tracking, and Loop-Detection Gaps
+# Phase 6: Pluck Telemetry Isolation, Fleet Process Tracking, and Concurrent-Dispatch Safety
 
-**Status:** planned (ADR-002; §6.5 found after ADR-002 was written, not yet its own ADR).
+**Status:** planned (ADR-002; §6.5/§6.6 found after ADR-002 was written, not yet their own ADR).
 
-**Goal:** stop Pluck's own operational confusion from leaking into a target repo as fabricated work, make `needle stop`/`needle status`/`needle list` trustworthy enough to use during incident response without a manual `ps aux` cross-check, and make the fleet's own failure-handling strands (Splice, Unravel) actually catch a worker that's stuck retrying a human-gated bead forever. Driven by an 8-day incident on `~/ARMOR` (2026-07-06 through 2026-07-14): a Pluck starvation self-diagnostic was written as a bead into ARMOR's own tracker, could never legitimately resolve (its "fix" target was NEEDLE's own config, unreachable from ARMOR), and the unresolved loop spiraled into 346 fabricated beads and ~2,300 wasted bead-cycles across two workers over 8 days — one of which (`bravo`) kept running after `needle stop` reported success, and a third (`alpha`) was invisible to `needle status`/`needle list` entirely. Full evidence and rationale in [ADR-002](../adr/002-pluck-telemetry-isolation-and-process-tracking.md). A follow-up same-day check (why didn't Splice/Unravel stop this class of incident on their own?) found the §6.5 gap below.
+**Goal:** stop Pluck's own operational confusion from leaking into a target repo as fabricated work, make `needle stop`/`needle status`/`needle list` trustworthy enough to use during incident response without a manual `ps aux` cross-check, make the fleet's own failure-handling strands (Splice, Unravel) actually catch a worker that's stuck retrying a human-gated bead forever, and make it safe for two workers to share one workspace without racing on git state. Driven by an 8-day incident on `~/ARMOR` (2026-07-06 through 2026-07-14): a Pluck starvation self-diagnostic was written as a bead into ARMOR's own tracker, could never legitimately resolve (its "fix" target was NEEDLE's own config, unreachable from ARMOR), and the unresolved loop spiraled into 346 fabricated beads and ~2,300 wasted bead-cycles across two workers over 8 days — one of which (`bravo`) kept running after `needle stop` reported success, and a third (`alpha`) was invisible to `needle status`/`needle list` entirely. Full evidence and rationale in [ADR-002](../adr/002-pluck-telemetry-isolation-and-process-tracking.md). Two same-day follow-up checks found further gaps: why didn't Splice/Unravel stop this class of incident on their own (§6.5), and whether it's actually safe to run two workers in one workspace at all (§6.6).
 
 ## Changes
 
@@ -4057,13 +4057,21 @@ Found investigating whether the fleet's own failure-handling strands activated d
 
 Fix: a new detector for repeated claim+orphan cycles with high completion-without-resolution count; make `report_workspace` a validated, loudly-WARNed-if-missing config value; and have Splice label the *original* bead `human` directly when it detects a live loop, not just file a side report.
 
-### 6.6 Testing
+### 6.6 Bead-Id trailer race under concurrent same-workspace dispatch
+Found evaluating whether it's safe to dispatch a second worker into `~/NEEDLE` alongside `charlie`, same workspace, same branch. `commit_hook::inject_bead_id_trailer` (`src/commit_hook.rs`) runs `git commit --amend --no-edit --trailer Bead-Id:X` on whatever commit is at HEAD after a successful dispatch. Its only safety check (`src/worker/mod.rs:2079`) is `current_head != pre_dispatch_head` — it never verifies the commit actually at HEAD is the one its own agent produced. Each `needle run` is a fully separate OS process with no lock or mutex between them, so nothing coordinates this across two workers sharing a workspace.
+
+Race: worker A commits (HEAD=A1); before A reaches the trailer step, worker B also commits (HEAD=B1, on top of A1); A's check (`current_head(B1) != pre_dispatch_head(base)`) passes, so A amends B1 — rewriting its hash and mislabeling B's actual diff as belonging to bead A. This corrupts HOOP's `bead_commit_index` (the reason this trailer exists at all) and invalidates worker B's own subsequent bookkeeping. Unlike ordinary concurrent edits, this doesn't require the two beads to touch overlapping files — it's a race on *which commit is at HEAD*, not on file content.
+
+Fix: a short-lived per-workspace advisory lock (e.g. `flock` on `<workspace>/.git/needle-trailer.lock`) held only across the read-HEAD → verify → amend sequence, not the whole dispatch — bounded by the function's existing 10–30s subprocess timeouts, so the throughput cost is negligible. Inside the lock, verify HEAD's commit message actually references this bead's ID (already present per the `fix(needle-XYZ): ...` commit convention) before amending; skip (and log a miss) rather than mislabel someone else's commit if it doesn't match. A further hardening step — swap `--amend` for `git notes add <verified-sha>`, which attaches metadata without rewriting the commit's hash and works even if the target commit is no longer at HEAD — is noted as a bigger, not-yet-required follow-up (HOOP would need to read notes instead of trailers).
+
+### 6.7 Testing
 - Regression test: Pluck starvation detection on a workspace with 0 claimable candidates emits a telemetry event and writes nothing to that workspace's `.beads/`.
 - Regression test: `needle stop` on a worker mid-dispatch leaves no `needle run` or dispatched-agent process alive (process-table assertion, not just registry-state assertion).
 - Regression test: a worker started via the non-tmux boot path (bare `NEEDLE_INNER=1` background invocation) still appears in `needle status`/`needle list`.
 - Regression test: the `bf-34xw9` telemetry shape (41 `claim.succeeded`, 25 `bead.orphaned`, 42 `agent.completed`, 1 `bead.completed`) as fixture input — new detector fires and the original bead gets labeled `human`.
+- Regression test: two concurrent `inject_bead_id_trailer` calls in the same workspace (simulated racing threads/processes against one repo fixture) never cross-tag each other's commit.
 
-### 6.7 Deployment
+### 6.8 Deployment
 - Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, then staged fleet rollout through the canary channel (`:testing` → `:stable`).
 
 ## Exit criteria
@@ -4071,3 +4079,4 @@ Fix: a new detector for repeated claim+orphan cycles with high completion-withou
 - `needle stop -i <session>` leaves zero matching `needle run`/dispatched-agent processes in `ps aux`, verified, not assumed.
 - `needle status`/`needle list` output matches `ps aux | grep 'needle run'` 1:1 on a host with workers started via both the tmux and bare-background paths.
 - A bead stuck in a claim→orphan→reclaim cycle for N cycles gets labeled `human` automatically and stops being redispatched, without a human having to notice the retry-storm first.
+- Two workers dispatched concurrently in the same workspace never cross-tag each other's commits with the wrong `Bead-Id` trailer.
