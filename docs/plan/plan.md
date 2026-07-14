@@ -3985,3 +3985,33 @@ stats       ──► telemetry, config, types
 - The 2026-07-11 scenario reproduced in a test (24 stores, 1 hot store with unclaimable beads) drains completely with 4 workers in minutes, not hours.
 - A bead flushed into any registered store is claimed without a worker restart and without a 15-minute wait.
 - `needle status` answers "when did each workspace last get scanned, and why was nothing claimed" directly.
+
+# Phase 6: Pluck Telemetry Isolation and Fleet Process Tracking
+
+**Status:** planned (ADR-002).
+
+**Goal:** stop Pluck's own operational confusion from leaking into a target repo as fabricated work, and make `needle stop`/`needle status`/`needle list` trustworthy enough to use during incident response without a manual `ps aux` cross-check. Driven by an 8-day incident on `~/ARMOR` (2026-07-06 through 2026-07-14): a Pluck starvation self-diagnostic was written as a bead into ARMOR's own tracker, could never legitimately resolve (its "fix" target was NEEDLE's own config, unreachable from ARMOR), and the unresolved loop spiraled into 346 fabricated beads and ~2,300 wasted bead-cycles across two workers over 8 days — one of which (`bravo`) kept running after `needle stop` reported success, and a third (`alpha`) was invisible to `needle status`/`needle list` entirely. Full evidence and rationale in [ADR-002](../adr/002-pluck-telemetry-isolation-and-process-tracking.md).
+
+## Changes
+
+### 6.1 Pluck telemetry isolation
+- **Redirect the starvation self-diagnostic to NEEDLE's own telemetry.** `PluckStrand` (`src/strand/pluck.rs`) must never write a bead into the workspace it is scanning. Emit a `pluck.starvation_detected` event through the existing telemetry pipeline instead, with workspace path, open/excluded counts, and candidate exclusion reasons.
+- **If a persistent record is needed, file it in NEEDLE's own workspace**, never the target's — apply the same isolation rule anywhere else Pluck (or any strand) might be tempted to write its own operational state as a bead in a scanned repo.
+- **Filter target-repo auto-decomposition for NEEDLE-internal work.** A worker dispatched against a target repo should never be prompted to "investigate/fix Pluck configuration" or equivalent — that class of task has no legitimate resolution path from inside the target repo and should be recognized and rejected at decomposition time, not left to spiral.
+
+### 6.2 Fleet process tracking
+- **`needle stop` kills the full process tree.** Parent `needle run` process, its `bash -c` prompt wrapper, and the dispatched `claude` subprocess — not just the tmux registry entry. Verify the PID is actually gone before reporting success.
+- **`needle status`/`needle list` must have no blind spots.** Every live `needle run --workspace ...` process must be discoverable through standard fleet commands regardless of how it was started (tmux-wrapped or bare background). Add a reconciliation check (registry view vs. `ps aux` process-table view) that WARNs on any unregistered `needle run` process.
+
+### 6.3 Testing
+- Regression test: Pluck starvation detection on a workspace with 0 claimable candidates emits a telemetry event and writes nothing to that workspace's `.beads/`.
+- Regression test: `needle stop` on a worker mid-dispatch leaves no `needle run` or dispatched-agent process alive (process-table assertion, not just registry-state assertion).
+- Regression test: a worker started via the non-tmux boot path (bare `NEEDLE_INNER=1` background invocation) still appears in `needle status`/`needle list`.
+
+### 6.4 Deployment
+- Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, then staged fleet rollout through the canary channel (`:testing` → `:stable`).
+
+## Exit criteria
+- A workspace with beads Pluck cannot claim produces zero new beads in that workspace and one telemetry event in NEEDLE's own stream.
+- `needle stop -i <session>` leaves zero matching `needle run`/dispatched-agent processes in `ps aux`, verified, not assumed.
+- `needle status`/`needle list` output matches `ps aux | grep 'needle run'` 1:1 on a host with workers started via both the tmux and bare-background paths.
