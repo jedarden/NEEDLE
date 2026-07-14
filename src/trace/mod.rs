@@ -27,6 +27,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::cargo_test::TestMetrics;
 use crate::sanitize::Sanitizer;
 use crate::types::BeadId;
 
@@ -200,6 +201,21 @@ impl TraceCapture {
             serde_json::to_string_pretty(metadata).context("failed to serialize trace metadata")?;
         std::fs::write(&path, json)
             .with_context(|| format!("failed to write metadata: {}", path.display()))
+    }
+
+    /// Write test metrics to `test_metrics.json`.
+    ///
+    /// This stores cargo test execution metrics including exit code,
+    /// duration, and output sizes for later analysis.
+    pub fn write_test_metrics(&self, metrics: &TestMetrics) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let path = self.trace_dir.join("test_metrics.json");
+        let json =
+            serde_json::to_string_pretty(metrics).context("failed to serialize test metrics")?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("failed to write test metrics: {}", path.display()))
     }
 
     /// Finalize the trace and return the trace directory path.

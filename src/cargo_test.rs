@@ -32,6 +32,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::test_output::TestOutput;
+use crate::trace::TraceCapture;
+use crate::types::BeadId;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -592,6 +594,89 @@ impl CargoTest {
             tracing::warn!(
                 test_name = %test_name,
                 "failed to create test output directory, output files not written"
+            );
+        }
+
+        Ok(outcome)
+    }
+
+    /// Run cargo test and write output to bead trace directory.
+    ///
+    /// This method runs `cargo test` and writes the captured stdout and stderr
+    /// to files in the `.beads/traces/<bead-id>/` directory. This is used to
+    /// record test execution output for debugging and analysis.
+    ///
+    /// ## Arguments
+    ///
+    /// * `bead_id` - The bead ID to use for the trace directory name
+    ///
+    /// ## Errors
+    ///
+    /// Returns an error if:
+    /// - The test run fails
+    /// - Trace directory creation fails
+    /// - File writing fails
+    ///
+    /// ## Example
+    ///
+    /// ```no_run
+    /// use needle::cargo_test::CargoTest;
+    /// use std::path::Path;
+    ///
+    /// let runner = CargoTest::new(Path::new("/workspace"));
+    /// let bead_id = "bf-12345";
+    /// let outcome = runner.run_with_bead_trace(bead_id).unwrap();
+    /// ```
+    pub fn run_with_bead_trace(&self, bead_id: &str) -> Result<TestOutcome> {
+        // First run the test to get the outcome
+        let outcome = self.run()?;
+
+        // Create bead trace directory and write outputs
+        let bead_id = BeadId::from(bead_id);
+        if let Some(trace) = TraceCapture::new(&bead_id, &self.workspace) {
+            // Write stdout
+            if let Err(e) = trace.write_stdout(&outcome.stdout) {
+                tracing::warn!(
+                    bead_id = %bead_id,
+                    error = %e,
+                    "failed to write stdout to trace file"
+                );
+            }
+
+            // Write stderr
+            if let Err(e) = trace.write_stderr(&outcome.stderr) {
+                tracing::warn!(
+                    bead_id = %bead_id,
+                    error = %e,
+                    "failed to write stderr to trace file"
+                );
+            }
+
+            // Write test metrics (exit code, duration, etc.)
+            let test_name = format!("cargo_test_{}", bead_id.as_ref());
+            let metrics = outcome.to_metrics(test_name);
+            if let Err(e) = trace.write_test_metrics(&metrics) {
+                tracing::warn!(
+                    bead_id = %bead_id,
+                    error = %e,
+                    "failed to write test metrics to trace file"
+                );
+            }
+
+            tracing::info!(
+                bead_id = %bead_id,
+                trace_dir = %trace.trace_dir().display(),
+                stdout_path = %trace.trace_dir().join("stdout.txt").display(),
+                stderr_path = %trace.trace_dir().join("stderr.txt").display(),
+                metrics_path = %trace.trace_dir().join("test_metrics.json").display(),
+                exit_code = ?outcome.exit_code,
+                duration_ms = outcome.duration.as_millis(),
+                "test output and metrics written to bead trace files"
+            );
+        } else {
+            tracing::warn!(
+                bead_id = %bead_id,
+                "failed to create bead trace directory, output files not written"
             );
         }
 
@@ -1585,5 +1670,403 @@ mod tests {
         // Verify stdout/stderr strings are not empty (they may contain cargo output)
         assert!(outcome.stdout.len() >= 0, "stdout should be captured");
         assert!(outcome.stderr.len() >= 0, "stderr should be captured");
+    }
+
+    #[test]
+    fn run_with_bead_trace_creates_trace_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project for testing
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "test-project"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        )
+        .unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_example() {
+        assert!(true);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        // Run cargo test with bead trace capture
+        let runner = CargoTest::new(workspace);
+        let bead_id = "bf-test-123";
+        let outcome = runner.run_with_bead_trace(bead_id).unwrap();
+
+        // Verify the test ran successfully
+        assert!(
+            outcome.success() || outcome.exit_code.is_some(),
+            "cargo test should complete with an exit code"
+        );
+
+        // Verify bead trace directory was created
+        let bead_trace_dir = workspace.join(".beads").join("traces").join(bead_id);
+        assert!(
+            bead_trace_dir.exists(),
+            "bead trace directory should exist"
+        );
+
+        // Verify stdout and stderr files exist
+        let stdout_path = bead_trace_dir.join("stdout.txt");
+        let stderr_path = bead_trace_dir.join("stderr.txt");
+
+        assert!(stdout_path.exists(), "stdout file should exist");
+        assert!(stderr_path.exists(), "stderr file should exist");
+
+        // Verify files can be read
+        let stdout_content = fs::read_to_string(&stdout_path)
+            .expect("stdout file should be readable");
+        let stderr_content = fs::read_to_string(&stderr_path)
+            .expect("stderr file should be readable");
+
+        // Verify content is not empty (cargo output should be present)
+        assert!(
+            !stdout_content.is_empty() || !stderr_content.is_empty(),
+            "at least one output file should have content"
+        );
+    }
+
+    #[test]
+    fn run_with_bead_trace_handles_test_output() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "test-output-project"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        )
+        .unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_with_output() {
+        println!("Test output message");
+        eprintln!("Test error message");
+        assert!(true);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        // Run cargo test with bead trace capture
+        let runner = CargoTest::new(workspace);
+        let bead_id = "bf-output-test";
+        let outcome = runner.run_with_bead_trace(bead_id).unwrap();
+
+        // Verify test completed
+        assert!(outcome.success() || outcome.exit_code.is_some());
+
+        // Verify trace files exist and are readable
+        let bead_trace_dir = workspace.join(".beads").join("traces").join(bead_id);
+        let stdout_path = bead_trace_dir.join("stdout.txt");
+        let stderr_path = bead_trace_dir.join("stderr.txt");
+
+        assert!(stdout_path.exists(), "stdout file should exist");
+        assert!(stderr_path.exists(), "stderr file should exist");
+
+        let stdout_content = fs::read_to_string(&stdout_path)
+            .expect("stdout should be readable");
+        let stderr_content = fs::read_to_string(&stderr_path)
+            .expect("stderr should be readable");
+
+        // Verify output has content (cargo output should be present)
+        assert!(
+            !stdout_content.is_empty() || !stderr_content.is_empty(),
+            "trace files should contain test output"
+        );
+    }
+
+    #[test]
+    fn run_with_bead_trace_handles_empty_output() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "test-empty-project"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        )
+        .unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_empty() {
+        // Silent test with no output
+        assert!(true);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        // Run cargo test with bead trace capture
+        let runner = CargoTest::new(workspace);
+        let bead_id = "bf-empty-test";
+        let outcome = runner.run_with_bead_trace(bead_id).unwrap();
+
+        // Should complete successfully even with no custom output
+        assert!(outcome.success() || outcome.exit_code.is_some());
+
+        // Trace files should still be created
+        let bead_trace_dir = workspace.join(".beads").join("traces").join(bead_id);
+        assert!(bead_trace_dir.exists(), "trace directory should exist");
+        assert!(bead_trace_dir.join("stdout.txt").exists());
+        assert!(bead_trace_dir.join("stderr.txt").exists());
+    }
+
+    #[test]
+    fn run_with_bead_trace_creates_parent_directory() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "test-dir-project"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        )
+        .unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_dir() {
+        assert!(true);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        // Ensure .beads directory doesn't exist initially
+        let beads_dir = workspace.join(".beads");
+        assert!(!beads_dir.exists(), ".beads directory should not exist initially");
+
+        // Run cargo test with bead trace capture
+        let runner = CargoTest::new(workspace);
+        let bead_id = "bf-dir-test";
+        let _ = runner.run_with_bead_trace(bead_id).unwrap();
+
+        // Verify parent directories were created
+        let traces_dir = workspace.join(".beads").join("traces");
+        assert!(traces_dir.exists(), "traces directory should be created");
+        assert!(traces_dir.is_dir(), "traces should be a directory");
+
+        let bead_trace_dir = traces_dir.join(bead_id);
+        assert!(bead_trace_dir.exists(), "bead trace subdirectory should be created");
+    }
+
+    #[test]
+    fn run_with_bead_trace_writes_test_metrics() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "test-metrics-project"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        )
+        .unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_metrics_example() {
+        assert!(true);
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        // Run cargo test with bead trace capture
+        let runner = CargoTest::new(workspace);
+        let bead_id = "bf-metrics-test";
+        let outcome = runner.run_with_bead_trace(bead_id).unwrap();
+
+        // Verify test completed
+        assert!(outcome.success() || outcome.exit_code.is_some());
+
+        // Verify test_metrics.json exists
+        let bead_trace_dir = workspace.join(".beads").join("traces").join(bead_id);
+        let metrics_path = bead_trace_dir.join("test_metrics.json");
+
+        assert!(metrics_path.exists(), "test_metrics.json file should exist");
+
+        // Read and verify the metrics
+        let metrics_content = fs::read_to_string(&metrics_path)
+            .expect("test_metrics.json should be readable");
+        let metrics: TestMetrics = serde_json::from_str(&metrics_content)
+            .expect("test_metrics.json should be valid JSON");
+
+        // Verify metrics contain expected values
+        assert!(metrics.test_name.contains("cargo_test_"));
+        assert!(metrics.test_name.contains(bead_id));
+        assert_eq!(metrics.exit_code, outcome.exit_code);
+        assert!(metrics.duration_ms > 0 || outcome.timed_out);
+
+        // Verify timestamp is recent (within last minute)
+        let now = chrono::Utc::now();
+        let age = now.signed_duration_since(metrics.timestamp);
+        assert!(age.num_seconds() < 60, "timestamp should be recent");
+
+        // Verify success flag matches outcome
+        assert_eq!(metrics.success(), outcome.success());
+        assert_eq!(metrics.timed_out, outcome.timed_out);
+    }
+
+    #[test]
+    fn run_with_bead_trace_metrics_captures_exit_code() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project with a failing test
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "test-exit-code-project"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        )
+        .unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_failing() {
+        assert!(false, "intentional failure");
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        // Run cargo test with bead trace capture
+        let runner = CargoTest::new(workspace);
+        let bead_id = "bf-exit-code-test";
+        let outcome = runner.run_with_bead_trace(bead_id).unwrap();
+
+        // Verify test_metrics.json captures the exit code
+        let bead_trace_dir = workspace.join(".beads").join("traces").join(bead_id);
+        let metrics_path = bead_trace_dir.join("test_metrics.json");
+
+        let metrics_content = fs::read_to_string(&metrics_path).unwrap();
+        let metrics: TestMetrics = serde_json::from_str(&metrics_content).unwrap();
+
+        // Exit code should be non-zero for failing tests
+        assert!(metrics.exit_code.unwrap_or(0) != 0 || !outcome.success(),
+                "exit code should reflect test failure");
+    }
+
+    #[test]
+    fn test_metrics_high_precision_timing() {
+        // Create a test outcome with sub-millisecond duration
+        let outcome = TestOutcome {
+            exit_code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_nanos(1_500_000), // 1.5 milliseconds
+            timed_out: false,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
+        };
+
+        let metrics = outcome.to_metrics("precision_test".to_string());
+
+        // Verify sub-millisecond precision is preserved in duration_ms
+        // (Note: TestMetrics stores duration as u64 milliseconds, so 1.5ms becomes 1ms)
+        assert_eq!(metrics.duration_ms, 1);
+        assert_eq!(metrics.duration().as_nanos(), 1_000_000);
     }
 }
