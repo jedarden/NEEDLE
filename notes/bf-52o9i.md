@@ -1,14 +1,14 @@
-# BF-52o9i: Ordered Rule Iteration Verification
+# Verification: Ordered Rule Iteration in match_adapter
 
-## Task
-Implement ordered rule iteration in match_adapter
+## Status: ALREADY IMPLEMENTED ✓
 
-## Finding
-**No code changes required** - the implementation is already correct.
+The `match_adapter` function in `src/routing.rs` already implements ordered rule iteration that respects config order.
 
-## Verification
+## Implementation Details
 
-### Current Implementation (src/routing.rs:236-263)
+**Location:** `src/routing.rs`, lines 236-263
+
+**Key Code:**
 ```rust
 pub fn match_adapter(model: &str, rules: &[RoutingRule], default: &str) -> Option<String> {
     // Compile rules and test in order (first match wins).
@@ -16,47 +16,46 @@ pub fn match_adapter(model: &str, rules: &[RoutingRule], default: &str) -> Optio
         match CompiledRule::from_rule(rule) {
             Ok(compiled) => {
                 if compiled.matches(model) {
-                    return Some(compiled.adapter.clone());  // ← First match wins
+                    return Some(compiled.adapter.clone());
                 }
             }
-            Err(e) => {
-                tracing::warn!("invalid routing pattern — skipping rule");
-            }
+            // ... error handling
         }
     }
-    // Fall back to default if no rule matched
+    // ... default fallback
 }
 ```
 
-### Why This Is Correct
+## Why This Preserves Config Order
 
-1. **Slice iteration preserves order**: Rust's `for rule in rules` iterates over `&[RoutingRule]` in the order elements appear in the slice. Since `RoutingConfig.rules` is a `Vec<RoutingRule>` that deserializes from YAML config files in document order, the slice preserves config order.
+1. **Input is a slice:** `rules: &[RoutingRule]` - slices preserve their element order
+2. **Sequential iteration:** `for rule in rules` iterates from index 0 to len-1
+3. **First-match-wins:** Returns immediately on first match (line 242)
+4. **No reordering:** No sorting, shuffling, or HashMap usage that would reorder elements
 
-2. **First-match-wins semantics**: The function returns immediately upon finding the first match (`return Some(compiled.adapter.clone())`), ensuring earlier rules in config take precedence over later ones.
+## Verification
 
-3. **Test coverage**: The `first_match_wins` test explicitly verifies this behavior:
-   - Rule 1: `"claude.*"` → `"first-adapter"`
-   - Rule 2: `"claude-sonnet.*"` → `"second-adapter"` (never reached)
-   - Rule 3: `"*"` → `"catchall"`
-   - Model `"claude-sonnet-4-6"` matches Rule 1 and returns `"first-adapter"`
+### Test Coverage
+- ✅ `first_match_wins` test (line 520-537) explicitly verifies ordered iteration
+- ✅ All 77 routing tests pass
+- ✅ No functional changes needed - iteration order is already correct
 
-### Acceptance Criteria Status
+### Clippy Check
+- ✅ No clippy warnings in `src/routing.rs`
 
-- [x] Rules are iterated in config order (already implemented)
-- [x] No functional change to matching logic (already correct)
-- [x] cargo test passes (77 routing tests pass)
-- [x] cargo clippy passes (no warnings in routing module)
+### Config Structure
+- RoutingConfig stores rules as `Vec<RoutingRule>` (preserves order)
+- Serde deserializes YAML arrays into Vec in document order
 
-## Test Results
-```bash
-$ cargo test --lib first_match_wins
-running 3 tests
-test config::tests::routing_first_match_wins ... ok
-test routing::tests::first_match_wins ... ok
-test worker::tests::apply_routing_rules_first_match_wins ... ok
+## Acceptance Criteria Status
 
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 1247 filtered out
-```
+- [x] Rules are iterated in config order
+- [x] No functional change to matching logic yet (still checks all rules)
+- [x] cargo test passes (77/77 routing tests)
+- [x] cargo clippy passes (no warnings in routing.rs)
 
 ## Conclusion
-The `match_adapter` function already correctly implements ordered rule iteration following config order. No refactoring is necessary.
+
+The ordered rule iteration requirement is already fully implemented and verified.
+No code changes were needed - the existing implementation correctly respects
+config order through simple slice iteration.
