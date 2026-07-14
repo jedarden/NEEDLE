@@ -159,7 +159,204 @@ pub struct TestOutcome {
     /// Whether compilation failed (vs test failure).
     pub compilation_failed: bool,
     /// Parsed compilation error messages (if compilation_failed is true).
-    pub compilation_errors: Vec<String>,
+    pub compilation_errors: Vec<CompilationError>,
+}
+
+/// Classification of compilation error variants.
+///
+/// Rust error codes are organized into categories based on the type of
+/// check that failed. This enum provides a high-level classification
+/// that groups related error codes together.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CompilationErrorVariant {
+    /// Type mismatch errors (E0308, E0309, etc.)
+    TypeMismatch,
+    /// Borrow checker errors (E0382, E0502, E0505, E0623, etc.)
+    BorrowChecker,
+    /// Import and path resolution errors (E0433, E0583, E0603, etc.)
+    ImportOrPath,
+    /// Lifetime errors (E0495, E0502, E0597, E0623, etc.)
+    Lifetime,
+    /// Trait bound/satisfaction errors (E0277, E0207, etc.)
+    TraitBound,
+    /// Syntax errors (unrecognized token, unexpected token, etc.)
+    Syntax,
+    /// Unused code warnings (dead_code, unused_variables, etc.)
+    Unused,
+    /// Other compiler errors (warnings that cause failure, etc.)
+    Other,
+    /// Unknown error code pattern
+    Unknown,
+}
+
+impl CompilationErrorVariant {
+    /// Classify a Rust error code into a variant.
+    ///
+    /// ## Examples
+    ///
+    /// ```
+    /// use needle::cargo_test::CompilationErrorVariant;
+    ///
+    /// assert_eq!(CompilationErrorVariant::from_code("E0308"), CompilationErrorVariant::TypeMismatch);
+    /// assert_eq!(CompilationErrorVariant::from_code("E0382"), CompilationErrorVariant::BorrowChecker);
+    /// assert_eq!(CompilationErrorVariant::from_code("E0433"), CompilationErrorVariant::ImportOrPath);
+    /// ```
+    pub fn from_code(code: &str) -> Self {
+        match code {
+            // Type mismatch errors
+            "E0308" | "E0309" | "E0312" | "E0524" | "E0611" | "E0616" | "E0617" | "E0618"
+            | "E0619" | "E0620" | "E0621" | "E0622" | "E0624" | "E0305" | "E0306" | "E0307"
+            | "E0061" | "E0063" => CompilationErrorVariant::TypeMismatch,
+
+            // Borrow checker errors
+            "E0382" | "E0502" | "E0505" | "E0506" | "E0507" | "E0508" | "E0509" | "E0515"
+            | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+            | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+            | "E0401" | "E0402" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0409"
+            | "E0410" | "E0411" | "E0412" | "E0413" | "E0414" | "E0415" | "E0416" | "E0417"
+            | "E0418" | "E0419" | "E0420" | "E0421" | "E0422" | "E0423" | "E0424" | "E0425"
+            | "E0426" | "E0427" | "E0428" | "E0429" | "E0430" | "E0431" | "E0434" | "E0435"
+            | "E0436" | "E0437" | "E0438" | "E0439" | "E0440" | "E0441" | "E0442" | "E0443"
+            | "E0444" | "E0445" | "E0446" | "E0447" | "E0448" | "E0449" | "E0450" | "E0451"
+            | "E0452" => CompilationErrorVariant::BorrowChecker,
+
+            // Import and path resolution errors
+            "E0433" | "E0583" | "E0603" | "E0432" | "E0519" | "E0601" | "E0602" | "E0604"
+            | "E0605" | "E0606" | "E0607" | "E0608" | "E0609" | "E0610" | "E0612" | "E0613"
+            | "E0614" | "E0615" => CompilationErrorVariant::ImportOrPath,
+
+            // Lifetime errors (subset of borrow checker but distinct for UX)
+            "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+            | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+            | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+
+            // Trait bound errors
+            "E0277" | "E0207" | "E0119" | "E0210" | "E0220" | "E0222" | "E0223" | "E0224"
+            | "E0225" | "E0226" | "E0227" | "E0228" | "E0229" | "E0230" | "E0231" | "E0232"
+            | "E0233" | "E0234" | "E0235" | "E0236" | "E0237" | "E0238" | "E0239" | "E0240"
+            | "E0241" | "E0242" | "E0243" | "E0244" | "E0245" | "E0246" | "E0247" | "E0248"
+            | "E0249" | "E0250" | "E0251" | "E0252" | "E0253" | "E0254" | "E0255" | "E0256"
+            | "E0257" | "E0258" | "E0259" | "E0260" | "E0261" | "E0262" | "E0271" | "E0272"
+            | "E0273" | "E0274" | "E0275" | "E0276" | "E0278" | "E0279" | "E0280" | "E0281"
+            | "E0282" | "E0283" | "E0284" => CompilationErrorVariant::TraitBound,
+
+            // Syntax errors (typically no error code, detected via pattern)
+            _ if code.is_empty() => CompilationErrorVariant::Syntax,
+
+            // Unused code warnings
+            _ if code == "unused" || code == "dead_code" || code == "unused_variables"
+                || code == "unused_imports" || code == "unused_mut" =>
+                CompilationErrorVariant::Unused,
+
+            // Default to unknown for unclassified error codes
+            _ => CompilationErrorVariant::Unknown,
+        }
+    }
+
+    /// Get a human-readable name for this variant.
+    pub fn name(&self) -> &str {
+        match self {
+            CompilationErrorVariant::TypeMismatch => "Type Mismatch",
+            CompilationErrorVariant::BorrowChecker => "Borrow Checker",
+            CompilationErrorVariant::ImportOrPath => "Import/Path",
+            CompilationErrorVariant::Lifetime => "Lifetime",
+            CompilationErrorVariant::TraitBound => "Trait Bound",
+            CompilationErrorVariant::Syntax => "Syntax",
+            CompilationErrorVariant::Unused => "Unused Code",
+            CompilationErrorVariant::Other => "Other",
+            CompilationErrorVariant::Unknown => "Unknown",
+        }
+    }
+}
+
+/// Detailed compilation error information.
+///
+/// Represents a single compilation error parsed from cargo test stderr.
+/// Includes the error code, message, file location, and classification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompilationError {
+    /// Rust error code (e.g., "E0308").
+    pub code: Option<String>,
+    /// Error variant classification.
+    pub variant: CompilationErrorVariant,
+    /// Full error message.
+    pub message: String,
+    /// File path where the error occurred.
+    pub file: Option<String>,
+    /// Line number (1-indexed).
+    pub line: Option<usize>,
+    /// Column number (1-indexed).
+    pub column: Option<usize>,
+}
+
+impl CompilationError {
+    /// Create a new compilation error.
+    pub fn new(
+        code: Option<String>,
+        message: String,
+        file: Option<String>,
+        line: Option<usize>,
+        column: Option<usize>,
+    ) -> Self {
+        let variant = if let Some(ref code) = code {
+            CompilationErrorVariant::from_code(code)
+        } else {
+            CompilationErrorVariant::Syntax
+        };
+
+        CompilationError {
+            code,
+            variant,
+            message,
+            file,
+            line,
+            column,
+        }
+    }
+
+    /// Create a compilation error from an error line and optional location info.
+    pub fn from_error_line(line: &str) -> Self {
+        let (code, message) = Self::parse_error_code_and_message(line);
+        let variant = code
+            .as_ref()
+            .map(|c| CompilationErrorVariant::from_code(c))
+            .unwrap_or(CompilationErrorVariant::Syntax);
+
+        CompilationError {
+            code,
+            variant,
+            message,
+            file: None,
+            line: None,
+            column: None,
+        }
+    }
+
+    /// Parse error code and message from an error line.
+    fn parse_error_code_and_message(line: &str) -> (Option<String>, String) {
+        let line = line.trim();
+
+        // Match "error[E0308]: mismatched types" pattern
+        if let Some(start) = line.find("error[") {
+            if let Some(end) = line.find(']') {
+                let error_code = line[start + 6..end].to_string();
+                let message = if end + 1 < line.len() {
+                    let rest = line[end + 1..].trim();
+                    if rest.starts_with(':') {
+                        rest[1..].trim().to_string()
+                    } else {
+                        rest.to_string()
+                    }
+                } else {
+                    String::new()
+                };
+                return (Some(error_code), message);
+            }
+        }
+
+        // No error code found
+        (None, line.to_string())
+    }
 }
 
 impl TestOutcome {
@@ -196,6 +393,47 @@ impl TestOutcome {
                 self.exit_code, self.duration
             )
         }
+    }
+
+    /// Returns a summary of compilation errors, if any.
+    pub fn compilation_error_summary(&self) -> Option<String> {
+        if self.compilation_errors.is_empty() {
+            return None;
+        }
+
+        let mut summary = format!("{} compilation error(s):\n", self.compilation_errors.len());
+
+        for (i, error) in self.compilation_errors.iter().enumerate() {
+            summary.push_str(&format!("  {}. ", i + 1));
+
+            // Add error code if present
+            if let Some(ref code) = error.code {
+                summary.push_str(&format!("[{}] ", code));
+            }
+
+            // Add variant name
+            summary.push_str(&format!("({})", error.variant.name()));
+
+            // Add message (truncated if too long)
+            let message = if error.message.len() > 80 {
+                format!("{}...", &error.message[..77])
+            } else {
+                error.message.clone()
+            };
+            summary.push_str(&format!(": {}\n", message));
+
+            // Add file location if available
+            if let Some(ref file) = error.file {
+                summary.push_str(&format!("     at {}:{}", file,
+                    error.line.unwrap_or(0)));
+                if let Some(col) = error.column {
+                    summary.push_str(&format!(":{}", col));
+                }
+                summary.push('\n');
+            }
+        }
+
+        Some(summary)
     }
 
     /// Convert this outcome to structured metrics.
@@ -257,12 +495,12 @@ impl TestMetrics {
 
 /// Detect compilation errors from cargo test stderr.
 ///
-/// Returns (compilation_failed, error_messages) where compilation_failed is true
-/// if stderr contains compilation error patterns, and error_messages is a list
-/// of parsed error messages.
-pub fn detect_compilation_errors(stderr: &str) -> (bool, Vec<String>) {
+/// Returns (compilation_failed, errors) where compilation_failed is true
+/// if stderr contains compilation error patterns, and errors is a list
+/// of parsed compilation errors.
+pub fn detect_compilation_errors(stderr: &str) -> (bool, Vec<CompilationError>) {
     let mut compilation_failed = false;
-    let mut error_messages = Vec::new();
+    let mut errors = Vec::new();
 
     // Cargo compilation error patterns
     // 1. "error[E####]: " - Rust compiler errors with error codes
@@ -276,20 +514,17 @@ pub fn detect_compilation_errors(stderr: &str) -> (bool, Vec<String>) {
         // Check for Rust compiler error codes (e.g., "error[E0308]:")
         if line.starts_with("error[E") {
             compilation_failed = true;
-            if let Some(msg) = parse_error_line(line) {
-                error_messages.push(msg);
-            }
+            let error = CompilationError::from_error_line(line);
+            errors.push(error);
             continue;
         }
 
         // Check for "could not compile" message
         if line.contains("could not compile") {
             compilation_failed = true;
-            if let Some(crate_name) = extract_crate_name(line) {
-                error_messages.push(format!("Failed to compile crate: {}", crate_name));
-            } else {
-                error_messages.push("Compilation failed".to_string());
-            }
+            // Preserve the original error message for test verification
+            let message = line.trim().to_string();
+            errors.push(CompilationError::new(None, message, None, None, None));
             continue;
         }
 
@@ -297,7 +532,8 @@ pub fn detect_compilation_errors(stderr: &str) -> (bool, Vec<String>) {
         // Only count this if we've already seen actual compilation errors
         if line.contains("aborting due to") && compilation_failed {
             if let Some(count) = extract_error_count(line) {
-                error_messages.push(format!("Aborted due to {} error(s)", count));
+                let message = format!("Aborted due to {} error(s)", count);
+                errors.push(CompilationError::new(None, message, None, None, None));
             }
             continue;
         }
@@ -308,12 +544,19 @@ pub fn detect_compilation_errors(stderr: &str) -> (bool, Vec<String>) {
             if line.contains("unused") || line.contains("dead_code") || line.contains("mutability") {
                 // These are compiler warnings/lints, not test failures
                 compilation_failed = true;
-                error_messages.push(line.to_string());
+                let error = CompilationError::new(
+                    Some("unused".to_string()),
+                    line.to_string(),
+                    None,
+                    None,
+                    None,
+                );
+                errors.push(error);
             }
         }
     }
 
-    (compilation_failed, error_messages)
+    (compilation_failed, errors)
 }
 
 /// Parse an error line to extract the error message.
@@ -663,15 +906,28 @@ impl CargoTest {
                 );
             }
 
+            // Write compilation errors if any were detected
+            if !outcome.compilation_errors.is_empty() {
+                if let Err(e) = trace.write_compilation_errors(&outcome.compilation_errors) {
+                    tracing::warn!(
+                        bead_id = %bead_id,
+                        error = %e,
+                        "failed to write compilation errors to trace file"
+                    );
+                }
+            }
+
             tracing::info!(
                 bead_id = %bead_id,
                 trace_dir = %trace.trace_dir().display(),
                 stdout_path = %trace.trace_dir().join("stdout.txt").display(),
                 stderr_path = %trace.trace_dir().join("stderr.txt").display(),
                 metrics_path = %trace.trace_dir().join("test_metrics.json").display(),
+                compilation_errors_path = %trace.trace_dir().join("compilation_errors.json").display(),
                 exit_code = ?outcome.exit_code,
                 duration_ms = outcome.duration.as_millis(),
-                "test output and metrics written to bead trace files"
+                compilation_error_count = outcome.compilation_errors.len(),
+                "test output, metrics, and compilation errors written to bead trace files"
             );
         } else {
             tracing::warn!(
@@ -928,7 +1184,13 @@ mod tests {
             duration: Duration::from_secs(2),
             timed_out: false,
             compilation_failed: true,
-            compilation_errors: vec!["E0308: mismatched types".to_string()],
+            compilation_errors: vec![CompilationError::new(
+                Some("E0308".to_string()),
+                "mismatched types".to_string(),
+                None,
+                None,
+                None,
+            )],
         };
         assert!(outcome.summary().contains("Compilation failed"));
         assert!(outcome.summary().contains("1 error"));
@@ -943,7 +1205,13 @@ mod tests {
             duration: Duration::from_secs(1),
             timed_out: false,
             compilation_failed: true,
-            compilation_errors: vec!["E0308: mismatched types".to_string()],
+            compilation_errors: vec![CompilationError::new(
+                Some("E0308".to_string()),
+                "mismatched types".to_string(),
+                None,
+                None,
+                None,
+            )],
         };
         assert!(outcome.is_compilation_failure());
         assert!(!outcome.is_test_failure());
@@ -1407,8 +1675,9 @@ mod tests {
         let (failed, errors) = detect_compilation_errors(stderr);
         assert!(failed);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("E0308"));
-        assert!(errors[0].contains("mismatched types"));
+        assert_eq!(errors[0].code.as_deref(), Some("E0308"));
+        assert!(errors[0].message.contains("mismatched types"));
+        assert_eq!(errors[0].variant, CompilationErrorVariant::TypeMismatch);
     }
 
     #[test]
@@ -1417,8 +1686,8 @@ mod tests {
         let (failed, errors) = detect_compilation_errors(stderr);
         assert!(failed);
         assert_eq!(errors.len(), 2);
-        assert!(errors[0].contains("E0308"));
-        assert!(errors[1].contains("E0382"));
+        assert_eq!(errors[0].code.as_deref(), Some("E0308"));
+        assert_eq!(errors[1].code.as_deref(), Some("E0382"));
     }
 
     #[test]
@@ -1427,7 +1696,7 @@ mod tests {
         let (failed, errors) = detect_compilation_errors(stderr);
         assert!(failed);
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("my_crate"));
+        assert!(errors[0].message.contains("my_crate"));
     }
 
     #[test]
@@ -1457,7 +1726,7 @@ error: could not compile `my_crate` (bin \"my_crate\)
         let (failed, errors) = detect_compilation_errors(stderr);
         assert!(failed, "should detect compilation failure");
         assert!(!errors.is_empty(), "should have at least one error");
-        assert!(errors.iter().any(|e| e.contains("E0308")), "should include E0308 error code");
+        assert!(errors.iter().any(|e| e.code.as_deref() == Some("E0308")), "should include E0308 error code");
     }
 
     #[test]

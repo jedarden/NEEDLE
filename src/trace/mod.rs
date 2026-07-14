@@ -218,6 +218,21 @@ impl TraceCapture {
             .with_context(|| format!("failed to write test metrics: {}", path.display()))
     }
 
+    /// Write compilation errors to `compilation_errors.json`.
+    ///
+    /// This stores detailed compilation error information including error codes,
+    /// variant classifications, and file locations for later analysis.
+    pub fn write_compilation_errors(&self, errors: &[crate::cargo_test::CompilationError]) -> Result<()> {
+        if !self.enabled || errors.is_empty() {
+            return Ok(());
+        }
+        let path = self.trace_dir.join("compilation_errors.json");
+        let json = serde_json::to_string_pretty(errors)
+            .context("failed to serialize compilation errors")?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("failed to write compilation errors: {}", path.display()))
+    }
+
     /// Finalize the trace and return the trace directory path.
     ///
     /// Returns `None` if trace capture was disabled.
