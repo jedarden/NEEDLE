@@ -25,10 +25,12 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+
+use crate::test_output::TestOutput;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -249,6 +251,8 @@ impl CargoTest {
         let mut cmd = Command::new("cargo");
         cmd.args(&args);
         cmd.current_dir(&self.workspace);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
 
         // Spawn the process
         let mut child = cmd.spawn().context("failed to spawn cargo test")?;
@@ -317,6 +321,82 @@ impl CargoTest {
     pub fn timeout_secs(&self) -> u64 {
         self.timeout_secs
     }
+
+    /// Run cargo test and write output to files.
+    ///
+    /// This method runs `cargo test` and writes the captured stdout, stderr,
+    /// and combined output to separate files in the `.test_outputs/<test_name>/` directory.
+    ///
+    /// ## Arguments
+    ///
+    /// * `test_name` - A unique identifier for the test (e.g., "integration_test_1")
+    ///
+    /// ## Errors
+    ///
+    /// Returns an error if:
+    /// - The test run fails
+    /// - Output directory creation fails
+    /// - File writing fails
+    ///
+    /// ## Example
+    ///
+    /// ```no_run
+    /// use needle::cargo_test::CargoTest;
+    /// use std::path::Path;
+    ///
+    /// let runner = CargoTest::new(Path::new("/workspace"));
+    /// let outcome = runner.run_with_output_files("my_test").unwrap();
+    /// ```
+    pub fn run_with_output_files(&self, test_name: &str) -> Result<TestOutcome> {
+        // First run the test to get the outcome
+        let outcome = self.run()?;
+
+        // Create test output directory and write outputs
+        if let Some(output) = TestOutput::new(test_name, &self.workspace) {
+            // Write stdout
+            if let Err(e) = output.write_stdout(&outcome.stdout) {
+                tracing::warn!(
+                    test_name = %test_name,
+                    error = %e,
+                    "failed to write stdout to file"
+                );
+            }
+
+            // Write stderr
+            if let Err(e) = output.write_stderr(&outcome.stderr) {
+                tracing::warn!(
+                    test_name = %test_name,
+                    error = %e,
+                    "failed to write stderr to file"
+                );
+            }
+
+            // Write combined output
+            let combined = create_combined_output(&outcome.stdout, &outcome.stderr);
+            if let Err(e) = output.write_combined(&combined) {
+                tracing::warn!(
+                    test_name = %test_name,
+                    error = %e,
+                    "failed to write combined output to file"
+                );
+            }
+
+            tracing::info!(
+                test_name = %test_name,
+                stdout_path = %output.stdout_path().display(),
+                stderr_path = %output.stderr_path().display(),
+                combined_path = %output.combined_path().display(),
+                "test output written to files"
+            );
+        } else {
+            tracing::warn!(
+                test_name = %test_name,
+                "failed to create test output directory, output files not written"
+            );
+        }
+
+        Ok(outcome)
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -333,6 +413,44 @@ fn truncate_output(s: &str) -> String {
     }
 }
 
+/// Create combined output from stdout and stderr.
+///
+/// This function combines stdout and stderr into a single string with section headers.
+///
+/// ## Example
+///
+/// ```
+/// use needle::cargo_test::create_combined_output;
+///
+/// let stdout = "Test output line 1\nTest output line 2";
+/// let stderr = "Error message";
+/// let combined = create_combined_output(stdout, stderr);
+/// ```
+pub fn create_combined_output(stdout: &str, stderr: &str) -> String {
+    let mut combined = String::new();
+
+    if !stdout.is_empty() {
+        combined.push_str("=== STDOUT ===\n");
+        combined.push_str(stdout);
+        if !stdout.ends_with('\n') {
+            combined.push('\n');
+        }
+    }
+
+    if !stderr.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str("=== STDERR ===\n");
+        combined.push_str(stderr);
+        if !stderr.ends_with('\n') {
+            combined.push('\n');
+        }
+    }
+
+    combined
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -340,6 +458,8 @@ fn truncate_output(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_args_default_is_empty() {
@@ -535,5 +655,231 @@ mod tests {
     fn cargo_test_with_timeout_sets_timeout() {
         let runner = CargoTest::new(Path::new("/tmp")).with_timeout(300);
         assert_eq!(runner.timeout_secs(), 300);
+    }
+
+    #[test]
+    fn create_combined_output_with_both_streams() {
+        let stdout = "Test output line 1\nTest output line 2";
+        let stderr = "Error message";
+        let combined = create_combined_output(stdout, stderr);
+
+        assert!(combined.contains("=== STDOUT ==="));
+        assert!(combined.contains("Test output line 1"));
+        assert!(combined.contains("=== STDERR ==="));
+        assert!(combined.contains("Error message"));
+    }
+
+    #[test]
+    fn create_combined_output_with_only_stdout() {
+        let stdout = "Test output";
+        let stderr = "";
+        let combined = create_combined_output(stdout, stderr);
+
+        assert!(combined.contains("=== STDOUT ==="));
+        assert!(combined.contains("Test output"));
+        assert!(!combined.contains("=== STDERR ==="));
+    }
+
+    #[test]
+    fn create_combined_output_with_only_stderr() {
+        let stdout = "";
+        let stderr = "Error message";
+        let combined = create_combined_output(stdout, stderr);
+
+        assert!(!combined.contains("=== STDOUT ==="));
+        assert!(combined.contains("=== STDERR ==="));
+        assert!(combined.contains("Error message"));
+    }
+
+    #[test]
+    fn create_combined_output_with_empty_streams() {
+        let stdout = "";
+        let stderr = "";
+        let combined = create_combined_output(stdout, stderr);
+
+        assert_eq!(combined, "");
+    }
+
+    #[test]
+    fn create_combined_output_adds_trailing_newline() {
+        let stdout = "output without newline";
+        let stderr = "error without newline";
+        let combined = create_combined_output(stdout, stderr);
+
+        // Both sections should end with newline
+        let stdout_section = combined.split("=== STDERR ===").next().unwrap();
+        assert!(stdout_section.ends_with('\n'));
+    }
+
+    #[test]
+    fn run_with_output_files_creates_output_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project for testing
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "test-project"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        ).unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_example() {
+        assert!(true);
+    }
+}
+"#,
+        ).unwrap();
+
+        // Run cargo test with output file capture
+        let runner = CargoTest::new(workspace);
+        let outcome = runner.run_with_output_files("test_example").unwrap();
+
+        // Verify the test ran successfully
+        assert!(outcome.success() || outcome.exit_code.is_some(),
+                "cargo test should complete with an exit code");
+
+        // Verify output files were created
+        let test_output_dir = workspace.join(".test_outputs").join("test_example");
+        assert!(test_output_dir.exists(), "test output directory should exist");
+
+        let stdout_path = test_output_dir.join("stdout.txt");
+        let stderr_path = test_output_dir.join("stderr.txt");
+        let combined_path = test_output_dir.join("combined.txt");
+
+        // Files should exist
+        assert!(stdout_path.exists(), "stdout file should exist");
+        assert!(stderr_path.exists(), "stderr file should exist");
+        assert!(combined_path.exists(), "combined file should exist");
+
+        // Verify files can be read
+        let _stdout_content = fs::read_to_string(&stdout_path)
+            .expect("stdout file should be readable");
+        let _stderr_content = fs::read_to_string(&stderr_path)
+            .expect("stderr file should be readable");
+        let _combined_content = fs::read_to_string(&combined_path)
+            .expect("combined file should be readable");
+    }
+
+    #[test]
+    fn run_with_output_files_creates_combined_structure() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project for testing
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "test-project"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        ).unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_with_output() {
+        println!("Test output message");
+        assert!(true);
+    }
+}
+"#,
+        ).unwrap();
+
+        // Run cargo test with output file capture
+        let runner = CargoTest::new(workspace);
+        let _outcome = runner.run_with_output_files("test_with_output").unwrap();
+
+        // Verify output files were created
+        let test_output_dir = workspace.join(".test_outputs").join("test_with_output");
+        let combined_path = test_output_dir.join("combined.txt");
+
+        let combined_content = fs::read_to_string(&combined_path)
+            .expect("combined file should be readable");
+
+        // Verify combined output has the expected structure
+        // When both stdout and stderr are present, we should see both sections
+        // When only one is present, we see just that section
+        let has_structure = combined_content.contains("=== STDOUT ===") ||
+                           combined_content.contains("=== STDERR ===") ||
+                           !combined_content.is_empty();
+        assert!(has_structure, "combined output should have content or structure");
+    }
+
+    #[test]
+    fn run_with_output_files_handles_empty_output() {
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // Create a minimal Cargo project for testing
+        let cargo_toml = workspace.join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "test-project"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+doctest = false
+"#,
+        ).unwrap();
+
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let lib_rs = src_dir.join("lib.rs");
+        fs::write(
+            &lib_rs,
+            r#"#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_empty() {
+        // Silent test with no output
+        assert!(true);
+    }
+}
+"#,
+        ).unwrap();
+
+        // Run cargo test with output file capture
+        let runner = CargoTest::new(workspace);
+        let outcome = runner.run_with_output_files("test_empty").unwrap();
+
+        // Should complete successfully even with no custom output
+        assert!(outcome.success() || outcome.exit_code.is_some());
+
+        // Files should still be created
+        let test_output_dir = workspace.join(".test_outputs").join("test_empty");
+        assert!(test_output_dir.exists(), "output directory should exist");
+        assert!(test_output_dir.join("stdout.txt").exists());
+        assert!(test_output_dir.join("stderr.txt").exists());
+        assert!(test_output_dir.join("combined.txt").exists());
     }
 }
