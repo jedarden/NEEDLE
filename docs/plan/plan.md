@@ -3948,3 +3948,40 @@ decision    ──► transcript, types
 placement   ──► config, types
 stats       ──► telemetry, config, types
 ```
+
+# Phase 5: Fleet Robustness — Explore Strand Hardening
+
+**Status:** planned (ADR-001). The meta-agent concept sketched above as a "potential Phase 5" remains future, unnumbered work.
+
+**Goal:** make multi-workspace roaming (the explore strand) a reliable dispatch path instead of a best-effort one. Driven by the 2026-07-11 lab incident: 24 ready beads across 24 workspaces, 4 roaming workers, throughput of ~1 bead per 40 minutes, with one workspace's unclaimable beads deadlocking the entire scan loop. Full evidence and rationale in [ADR-001](../adr/001-explore-strand-hardening.md).
+
+## Changes
+
+### 5.1 Selection correctness
+- **Claimable-aware candidate filtering.** `ExploreStrand::evaluate` returns at the first workspace with ready candidates, but "ready" ignores the worker's exclusion state and unclaimable assignees — a workspace whose candidates are all excluded/assigned traps every worker forever. Feed the worker's exclusion set into `Filters` so the loop advances past workspaces with nothing *claimable by this worker*.
+- **Per-worker scan-order rotation.** Start iteration at `hash(qualified_id) % N`, wrapping around, so workers partition the workspace list instead of converging on the same first store and racing.
+- **Store-layer limit correctness.** The `br ready --json` path passes no `--limit` (default truncation hides low-priority beads); another path passes `--limit 0` (returns nothing on deployed bead-forge 0.2.0). Always pass an explicit large limit; add a boot-time `bf --version` handshake that WARNs on known-bad versions.
+
+### 5.2 Stale-state healing
+- **Mend releases stale assignees on open beads.** Cross-workspace mend only handles orphaned in-progress beads today; an open bead with a dead assignee (e.g. after reopen, which does not clear assignee) is permanently invisible to all workers. Clear assignees with no live heartbeat.
+- **Claim-error ≠ race-lost.** Claim CLI errors currently collapse into `claimed_by=(race)`. Distinguish them; after N consecutive claim errors on one bead, emit an ERROR telemetry event and mark the bead/store suspect instead of silently cycling.
+
+### 5.3 Cadence and liveness
+- **Event-driven wakeups + jittered floor.** Replace the flat idle backoff (observed at 900s) with mtime/inotify watches on each workspace's `.beads/issues.jsonl` plus a jittered 60–120s polling floor. Found-but-excluded is a short-retry case, never idle.
+- **Periodic re-discovery.** The workspace list is captured at boot; re-run discovery every N cycles (or on directory-create events) so new stores don't require worker restarts. The no-upward-traversal constraint stays.
+
+### 5.4 Observability
+- **Per-cycle scan telemetry** (workspaces visited, candidates, exclusion reasons) and a **starvation alarm**: ready beads exist in scanned stores but this worker claimed nothing for X minutes → WARN event; surface last-scan-per-workspace in `needle status`.
+
+### 5.5 Testing
+- Liveness property test: N workers × M workspaces, every ready bead eventually claimed.
+- Deadlock regression test: candidates in workspace #2 while workspace #1 has only excluded/assigned beads.
+- CLI-args regression tests pinning explicit `--limit` behavior.
+
+### 5.6 Deployment
+- Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, then staged fleet rollout through the canary channel (`:testing` → `:stable`). Never overwrite a running binary in place; verify with `needle status` on both hosts.
+
+## Exit criteria
+- The 2026-07-11 scenario reproduced in a test (24 stores, 1 hot store with unclaimable beads) drains completely with 4 workers in minutes, not hours.
+- A bead flushed into any registered store is claimed without a worker restart and without a 15-minute wait.
+- `needle status` answers "when did each workspace last get scanned, and why was nothing claimed" directly.
