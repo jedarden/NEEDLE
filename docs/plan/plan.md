@@ -763,6 +763,52 @@ agent:
 **Default behavior:**
 The built-in default routes Anthropic Claude models to `claude-print` and everything else to `claude-code-glm-4.7`. Workspaces can override this by defining their own `agent.routing` section.
 
+### Anthropic Subscription Billing Policy (Pre-June 15, 2026)
+
+**Historical context:** On June 15, 2026, Anthropic's credit split changed. Before this date, the `claude -p` flag (which enables the `--print` adapter) consumed subscription credits. After the deadline, `-p` switched to consuming API credits.
+
+**Routing policy rationale:** To maximize subscription credit value before the June 15 deadline, the default routing configuration was designed to route Anthropic Claude subscription models to the `claude-print` adapter:
+
+```yaml
+agent:
+  default: claude
+  routing:
+    rules:
+      # Route all Anthropic Claude subscription models to claude-print
+      # Patterns match: claude-sonnet-4-6, claude-opus-4-6, claude-fable-5, claude-haiku-4-5-20251001
+      # Also matches without prefix: sonnet-4-6, opus-4-6, fable-5, haiku-4-5
+      - match_model: "(claude-)?(sonnet|opus|fable|haiku).*"
+        adapter: claude-print
+    default_adapter: claude-code-glm-4.7  # Non-Anthropic models
+    strict: false
+```
+
+**Why this matters:**
+- **Subscription value maximization:** Anthropic Claude models (Sonnet, Opus, Fable, Haiku) used subscription credits when invoked via `claude-print` before June 15, 2026.
+- **Cost optimization:** Non-Anthropic models (GLM, GPT-4, Gemini, etc.) default to `claude-code-glm-4.7` to use API credits or other billing mechanisms.
+- **Workspace flexibility:** Individual workspaces can override these defaults by defining their own `agent.routing` section in `.needle.yaml`.
+
+**Example .needle.yaml configuration:**
+
+```yaml
+# .needle.yaml workspace configuration
+agent:
+  default: claude
+  timeout: 3600
+  routing:
+    rules:
+      - match_model: "(claude-)?(sonnet|opus).*"
+        adapter: claude-print
+      - match_model: "(claude-)?(fable|haiku).*"
+        adapter: claude-print
+      - match_model: "glm-.*"
+        adapter: claude-code-glm-4.7
+    default_adapter: claude-code-glm-4.7
+    strict: false
+```
+
+**Post-June 15 behavior:** After the deadline, workspaces may want to update their routing configuration since `claude-print` no longer provides subscription billing advantages. The routing system remains flexible to accommodate whatever billing optimization strategies emerge.
+
 ### outcome
 
 Classifies the agent's exit and routes to the appropriate handler.
