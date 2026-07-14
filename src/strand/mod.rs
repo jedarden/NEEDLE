@@ -106,10 +106,12 @@ impl StrandRunner {
         registry: crate::registry::Registry,
         telemetry: crate::telemetry::Telemetry,
     ) -> Self {
-        let pluck = PluckStrand::with_split_threshold(
+        let pluck = PluckStrand::with_persistent_records(
             config.strands.pluck.exclude_labels.clone(),
             config.strands.pluck.split_after_failures,
             telemetry.clone(),
+            config.workspace.home.clone(),
+            config.strands.pluck.persistent_starvation_records,
         );
 
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");

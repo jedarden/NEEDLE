@@ -285,11 +285,24 @@ pub struct PluckConfig {
     /// parent into an umbrella (parent depends on last child, parent set non-ready).
     #[serde(default = "PluckConfig::default_split_after_failures")]
     pub split_after_failures: u32,
+
+    /// Write persistent starvation records to NEEDLE workspace (default: false).
+    ///
+    /// When enabled, starvation events are written to a persistent log file in
+    /// NEEDLE's workspace (~/.needle/state/starvation-records.jsonl) rather than
+    /// only being emitted as telemetry. Records are never written to target scanned
+    /// workspaces, only to NEEDLE's own workspace.
+    #[serde(default = "PluckConfig::default_persistent_starvation_records")]
+    pub persistent_starvation_records: bool,
 }
 
 impl PluckConfig {
     fn default_split_after_failures() -> u32 {
         3
+    }
+
+    fn default_persistent_starvation_records() -> bool {
+        false
     }
 }
 

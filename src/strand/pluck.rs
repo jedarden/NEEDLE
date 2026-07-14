@@ -9,6 +9,10 @@
 use crate::bead_store::{BeadStore, Filters};
 use crate::telemetry::Telemetry;
 use crate::types::{Bead, StrandError, StrandResult};
+use anyhow::{Context, Result};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 
 /// Default labels excluded from Pluck selection when not configured.
@@ -25,6 +29,21 @@ struct FilteringStats {
     exclusion_reasons: Vec<String>,
 }
 
+/// Persistent starvation record written to NEEDLE workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StarvationRecord {
+    /// UTC timestamp when starvation was detected.
+    timestamp: chrono::DateTime<chrono::Utc>,
+    /// Target workspace that was being processed (not NEEDLE workspace).
+    target_workspace: String,
+    /// Count of open beads before filtering.
+    open_count: usize,
+    /// Count of beads excluded during filtering.
+    excluded_count: usize,
+    /// Reasons why beads were excluded.
+    exclusion_reasons: Vec<String>,
+}
+
 /// The Pluck strand — primary work selection.
 pub struct PluckStrand {
     /// Labels to exclude from candidate selection.
@@ -33,6 +52,10 @@ pub struct PluckStrand {
     split_after_failures: u32,
     /// Telemetry emitter for starvation events.
     telemetry: Telemetry,
+    /// NEEDLE workspace path for persistent starvation records.
+    needle_workspace: Option<PathBuf>,
+    /// Whether to write persistent starvation records to NEEDLE workspace.
+    persistent_starvation_records: bool,
     /// Count of open beads from the most recent evaluation.
     /// Uses AtomicUsize for thread-safe interior mutability.
     last_open_count: AtomicUsize,
@@ -61,6 +84,8 @@ impl PluckStrand {
             exclude_labels: labels,
             split_after_failures: 3, // default threshold
             telemetry,
+            needle_workspace: None,
+            persistent_starvation_records: false,
             last_open_count: AtomicUsize::new(0),
             last_excluded_count: AtomicUsize::new(0),
             last_exclusion_reasons: Mutex::new(Vec::new()),
@@ -88,6 +113,40 @@ impl PluckStrand {
             exclude_labels: labels,
             split_after_failures,
             telemetry,
+            needle_workspace: None,
+            persistent_starvation_records: false,
+            last_open_count: AtomicUsize::new(0),
+            last_excluded_count: AtomicUsize::new(0),
+            last_exclusion_reasons: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Create a new PluckStrand with persistent starvation records enabled.
+    ///
+    /// When `persistent_starvation_records` is true, starvation events are
+    /// written to `needle_workspace/state/starvation-records.jsonl`.
+    /// Records are never written to target workspaces, only to NEEDLE workspace.
+    pub fn with_persistent_records(
+        exclude_labels: Vec<String>,
+        split_after_failures: u32,
+        telemetry: Telemetry,
+        needle_workspace: PathBuf,
+        persistent_starvation_records: bool,
+    ) -> Self {
+        let labels = if exclude_labels.is_empty() {
+            DEFAULT_EXCLUDE_LABELS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            exclude_labels
+        };
+        PluckStrand {
+            exclude_labels: labels,
+            split_after_failures,
+            telemetry,
+            needle_workspace: Some(needle_workspace),
+            persistent_starvation_records,
             last_open_count: AtomicUsize::new(0),
             last_excluded_count: AtomicUsize::new(0),
             last_exclusion_reasons: Mutex::new(Vec::new()),
@@ -132,6 +191,60 @@ impl PluckStrand {
             self.last_excluded_count.load(Ordering::Relaxed),
             self.last_exclusion_reasons.lock().unwrap().clone(),
         )
+    }
+
+    /// Write a persistent starvation record to NEEDLE workspace.
+    ///
+    /// Records are written in JSONL format to `~/.needle/state/starvation-records.jsonl`.
+    /// This method is called only when `persistent_starvation_records` is enabled.
+    fn write_starvation_record(
+        &self,
+        target_workspace: &str,
+        open_count: usize,
+        excluded_count: usize,
+        exclusion_reasons: &[String],
+    ) -> Result<()> {
+        let needle_home = self
+            .needle_workspace
+            .as_ref()
+            .context("needle_workspace not set - cannot write persistent record")?;
+
+        // Create state directory if it doesn't exist
+        let state_dir = needle_home.join("state");
+        std::fs::create_dir_all(&state_dir)
+            .with_context(|| format!("failed to create state directory: {}", state_dir.display()))?;
+
+        // Write record to starvation-records.jsonl (append mode)
+        let record_path = state_dir.join("starvation-records.jsonl");
+        let record = StarvationRecord {
+            timestamp: Utc::now(),
+            target_workspace: target_workspace.to_string(),
+            open_count,
+            excluded_count,
+            exclusion_reasons: exclusion_reasons.to_vec(),
+        };
+
+        // Serialize to JSON and append to file
+        let record_json = serde_json::to_string(&record)
+            .context("failed to serialize starvation record")?;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&record_path)
+            .with_context(|| format!("failed to open starvation records file: {}", record_path.display()))?;
+
+        use std::io::Write;
+        writeln!(file, "{}", record_json)
+            .with_context(|| format!("failed to write starvation record to: {}", record_path.display()))?;
+
+        tracing::debug!(
+            record_path = %record_path.display(),
+            target_workspace = %target_workspace,
+            "Wrote persistent starvation record"
+        );
+
+        Ok(())
     }
 }
 
@@ -381,8 +494,23 @@ impl super::Strand for PluckStrand {
                     workspace: workspace_path.clone(),
                     open_count: stats.open_count,
                     excluded_count: stats.excluded_count,
-                    candidate_exclusion_reasons: stats.exclusion_reasons,
+                    candidate_exclusion_reasons: stats.exclusion_reasons.clone(),
                 });
+
+            // Write persistent starvation record to NEEDLE workspace if enabled.
+            if self.persistent_starvation_records {
+                if let Err(e) = self.write_starvation_record(
+                    &workspace_path,
+                    stats.open_count,
+                    stats.excluded_count,
+                    &stats.exclusion_reasons,
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to write persistent starvation record"
+                    );
+                }
+            }
 
             tracing::debug!(
                 workspace = %workspace_path,
@@ -702,6 +830,18 @@ mod tests {
     fn make_bead_with_assignee(id: &str, assignee: &str) -> Bead {
         let mut bead = make_bead(id, 1, "2026-01-01 00:00:00");
         bead.assignee = Some(assignee.to_string());
+        bead
+    }
+
+    fn make_bead_with_workspace_and_labels(
+        id: &str,
+        priority: u8,
+        workspace: &str,
+        labels: Vec<&str>,
+    ) -> Bead {
+        let mut bead = make_bead(id, priority, "2026-01-01 00:00:00");
+        bead.workspace = PathBuf::from(workspace);
+        bead.labels = labels.into_iter().map(|s| s.to_string()).collect();
         bead
     }
 
@@ -1367,5 +1507,217 @@ mod tests {
         } else {
             panic!("candidate_exclusion_reasons field missing from starvation event");
         }
+    }
+
+    #[tokio::test]
+    async fn starvation_persistent_record_written_to_needle_workspace() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // Create a temporary directory to act as the NEEDLE workspace
+        let needle_workspace = tempfile::tempdir().unwrap();
+        let needle_workspace_path = needle_workspace.path();
+
+        // Use UnfilteredStore to test the strand's own filtering logic
+        let store = UnfilteredStore {
+            beads: vec![
+                make_bead_with_labels("deferred-bead", 1, vec!["deferred"]),
+                make_bead_with_labels("human-bead", 2, vec!["human"]),
+                make_bead_with_labels("blocked-bead", 3, vec!["blocked"]),
+            ],
+        };
+
+        let strand = PluckStrand::with_persistent_records(
+            vec![],
+            3,
+            helper.telemetry().clone(),
+            needle_workspace_path.to_path_buf(),
+            true, // Enable persistent records
+        );
+
+        let result = strand.evaluate(&store).await;
+
+        // Should return NoWork since all beads are excluded
+        match result {
+            StrandResult::NoWork => {
+                // Expected - all beads excluded
+            }
+            other => panic!("expected NoWork when all beads excluded, got: {other:?}"),
+        }
+
+        // Verify that a persistent record was written to the NEEDLE workspace
+        let state_dir = needle_workspace_path.join("state");
+        let record_path = state_dir.join("starvation-records.jsonl");
+
+        assert!(
+            record_path.exists(),
+            "starvation record should exist at {:?}",
+            record_path
+        );
+
+        // Read and verify the record content
+        let record_content = std::fs::read_to_string(&record_path)
+            .expect("should be able to read starvation record file");
+
+        // Parse the JSONL record
+        let record: serde_json::Value = serde_json::from_str(&record_content)
+            .expect("starvation record should be valid JSON");
+
+        // Verify record structure
+        assert!(record.get("timestamp").is_some(), "record should have timestamp");
+        assert!(
+            record.get("target_workspace").is_some(),
+            "record should have target_workspace"
+        );
+        assert!(
+            record.get("open_count").is_some(),
+            "record should have open_count"
+        );
+        assert!(
+            record.get("excluded_count").is_some(),
+            "record should have excluded_count"
+        );
+        assert!(
+            record.get("exclusion_reasons").is_some(),
+            "record should have exclusion_reasons"
+        );
+
+        // Verify the target_workspace field contains the workspace being processed
+        // (not the NEEDLE workspace itself)
+        let target_workspace = record["target_workspace"].as_str().unwrap();
+        assert_eq!(target_workspace, "/tmp/test", "target_workspace should be the processed workspace");
+
+        // Verify counts
+        let open_count = record["open_count"].as_u64().unwrap();
+        let excluded_count = record["excluded_count"].as_u64().unwrap();
+        assert_eq!(open_count, 3, "open_count should be 3");
+        assert_eq!(excluded_count, 3, "excluded_count should be 3");
+
+        // Verify exclusion reasons
+        let exclusion_reasons = record["exclusion_reasons"].as_array().unwrap();
+        assert_eq!(exclusion_reasons.len(), 3, "should have 3 exclusion reasons");
+    }
+
+    #[tokio::test]
+    async fn starvation_persistent_record_disabled_when_flag_false() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // Create a temporary directory to act as the NEEDLE workspace
+        let needle_workspace = tempfile::tempdir().unwrap();
+        let needle_workspace_path = needle_workspace.path();
+
+        // Use UnfilteredStore to test the strand's own filtering logic
+        let store = UnfilteredStore {
+            beads: vec![
+                make_bead_with_labels("deferred-bead", 1, vec!["deferred"]),
+            ],
+        };
+
+        let strand = PluckStrand::with_persistent_records(
+            vec![],
+            3,
+            helper.telemetry().clone(),
+            needle_workspace_path.to_path_buf(),
+            false, // Disable persistent records
+        );
+
+        let result = strand.evaluate(&store).await;
+
+        // Should return NoWork since all beads are excluded
+        match result {
+            StrandResult::NoWork => {
+                // Expected - all beads excluded
+            }
+            other => panic!("expected NoWork when all beads excluded, got: {other:?}"),
+        }
+
+        // Verify that NO persistent record was written
+        let state_dir = needle_workspace_path.join("state");
+        let record_path = state_dir.join("starvation-records.jsonl");
+
+        assert!(
+            !record_path.exists(),
+            "starvation record should NOT exist when persistent records are disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn starvation_persistent_record_not_written_to_target_workspace() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // Create a temporary directory to act as the NEEDLE workspace
+        let needle_workspace = tempfile::tempdir().unwrap();
+        let needle_workspace_path = needle_workspace.path();
+
+        // Create a temporary directory to act as the TARGET workspace
+        let target_workspace = tempfile::tempdir().unwrap();
+        let target_workspace_path = target_workspace.path();
+
+        // Create beads with the target workspace path
+        let store = UnfilteredStore {
+            beads: vec![
+                make_bead_with_workspace_and_labels(
+                    "deferred-bead",
+                    1,
+                    target_workspace_path.to_str().unwrap(),
+                    vec!["deferred"],
+                ),
+            ],
+        };
+
+        let strand = PluckStrand::with_persistent_records(
+            vec![],
+            3,
+            helper.telemetry().clone(),
+            needle_workspace_path.to_path_buf(),
+            true, // Enable persistent records
+        );
+
+        let result = strand.evaluate(&store).await;
+
+        // Should return NoWork since all beads are excluded
+        match result {
+            StrandResult::NoWork => {
+                // Expected - all beads excluded
+            }
+            other => panic!("expected NoWork when all beads excluded, got: {other:?}"),
+        }
+
+        // Verify record was written to NEEDLE workspace
+        let needle_state_dir = needle_workspace_path.join("state");
+        let needle_record_path = needle_state_dir.join("starvation-records.jsonl");
+
+        assert!(
+            needle_record_path.exists(),
+            "starvation record should exist in NEEDLE workspace"
+        );
+
+        // Verify record was NOT written to target workspace
+        let target_state_dir = target_workspace_path.join("state");
+        let target_record_path = target_state_dir.join("starvation-records.jsonl");
+
+        assert!(
+            !target_record_path.exists(),
+            "starvation record should NOT exist in target workspace"
+        );
+
+        // Verify the record contains the target workspace path in its content
+        let record_content = std::fs::read_to_string(&needle_record_path)
+            .expect("should be able to read starvation record file");
+
+        let record: serde_json::Value = serde_json::from_str(&record_content)
+            .expect("starvation record should be valid JSON");
+
+        // The record should mention the target workspace in its data
+        let target_workspace_field = record["target_workspace"].as_str().unwrap();
+        assert!(
+            target_workspace_field.contains(target_workspace_path.to_str().unwrap()),
+            "record should reference the target workspace, not the NEEDLE workspace"
+        );
     }
 }
