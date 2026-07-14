@@ -29,6 +29,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::test_output::TestOutput;
 
@@ -173,6 +174,58 @@ impl TestOutcome {
                 self.exit_code, self.duration
             )
         }
+    }
+
+    /// Convert this outcome to structured metrics.
+    pub fn to_metrics(&self, test_name: String) -> TestMetrics {
+        TestMetrics {
+            test_name,
+            exit_code: self.exit_code,
+            duration_ms: self.duration.as_millis() as u64,
+            timed_out: self.timed_out,
+            stdout_len: self.stdout.len(),
+            stderr_len: self.stderr.len(),
+            timestamp: chrono::Utc::now(),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Test Metrics
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Structured test metrics for storage and analysis.
+///
+/// This type captures the essential metrics from a test run in a
+/// serializable format that can be written to disk or sent to
+/// telemetry systems.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestMetrics {
+    /// Name of the test that was run.
+    pub test_name: String,
+    /// Exit code from cargo test (None if killed by signal).
+    pub exit_code: Option<i32>,
+    /// Duration of the test run in milliseconds.
+    pub duration_ms: u64,
+    /// Whether the test timed out.
+    pub timed_out: bool,
+    /// Length of captured stdout in bytes.
+    pub stdout_len: usize,
+    /// Length of captured stderr in bytes.
+    pub stderr_len: usize,
+    /// When the test completed.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+impl TestMetrics {
+    /// Returns true if the test succeeded (exit code 0 and no timeout).
+    pub fn success(&self) -> bool {
+        self.exit_code == Some(0) && !self.timed_out
+    }
+
+    /// Get the duration as a Duration.
+    pub fn duration(&self) -> Duration {
+        Duration::from_millis(self.duration_ms)
     }
 }
 
@@ -728,7 +781,8 @@ edition = "2021"
 [lib]
 doctest = false
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let src_dir = workspace.join("src");
         fs::create_dir_all(&src_dir).unwrap();
@@ -744,19 +798,25 @@ mod tests {
     }
 }
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Run cargo test with output file capture
         let runner = CargoTest::new(workspace);
         let outcome = runner.run_with_output_files("test_example").unwrap();
 
         // Verify the test ran successfully
-        assert!(outcome.success() || outcome.exit_code.is_some(),
-                "cargo test should complete with an exit code");
+        assert!(
+            outcome.success() || outcome.exit_code.is_some(),
+            "cargo test should complete with an exit code"
+        );
 
         // Verify output files were created
         let test_output_dir = workspace.join(".test_outputs").join("test_example");
-        assert!(test_output_dir.exists(), "test output directory should exist");
+        assert!(
+            test_output_dir.exists(),
+            "test output directory should exist"
+        );
 
         let stdout_path = test_output_dir.join("stdout.txt");
         let stderr_path = test_output_dir.join("stderr.txt");
@@ -768,12 +828,12 @@ mod tests {
         assert!(combined_path.exists(), "combined file should exist");
 
         // Verify files can be read
-        let _stdout_content = fs::read_to_string(&stdout_path)
-            .expect("stdout file should be readable");
-        let _stderr_content = fs::read_to_string(&stderr_path)
-            .expect("stderr file should be readable");
-        let _combined_content = fs::read_to_string(&combined_path)
-            .expect("combined file should be readable");
+        let _stdout_content =
+            fs::read_to_string(&stdout_path).expect("stdout file should be readable");
+        let _stderr_content =
+            fs::read_to_string(&stderr_path).expect("stderr file should be readable");
+        let _combined_content =
+            fs::read_to_string(&combined_path).expect("combined file should be readable");
     }
 
     #[test]
@@ -793,7 +853,8 @@ edition = "2021"
 [lib]
 doctest = false
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let src_dir = workspace.join("src");
         fs::create_dir_all(&src_dir).unwrap();
@@ -810,7 +871,8 @@ mod tests {
     }
 }
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Run cargo test with output file capture
         let runner = CargoTest::new(workspace);
@@ -820,16 +882,19 @@ mod tests {
         let test_output_dir = workspace.join(".test_outputs").join("test_with_output");
         let combined_path = test_output_dir.join("combined.txt");
 
-        let combined_content = fs::read_to_string(&combined_path)
-            .expect("combined file should be readable");
+        let combined_content =
+            fs::read_to_string(&combined_path).expect("combined file should be readable");
 
         // Verify combined output has the expected structure
         // When both stdout and stderr are present, we should see both sections
         // When only one is present, we see just that section
-        let has_structure = combined_content.contains("=== STDOUT ===") ||
-                           combined_content.contains("=== STDERR ===") ||
-                           !combined_content.is_empty();
-        assert!(has_structure, "combined output should have content or structure");
+        let has_structure = combined_content.contains("=== STDOUT ===")
+            || combined_content.contains("=== STDERR ===")
+            || !combined_content.is_empty();
+        assert!(
+            has_structure,
+            "combined output should have content or structure"
+        );
     }
 
     #[test]
@@ -849,7 +914,8 @@ edition = "2021"
 [lib]
 doctest = false
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let src_dir = workspace.join("src");
         fs::create_dir_all(&src_dir).unwrap();
@@ -866,7 +932,8 @@ mod tests {
     }
 }
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Run cargo test with output file capture
         let runner = CargoTest::new(workspace);
@@ -881,5 +948,149 @@ mod tests {
         assert!(test_output_dir.join("stdout.txt").exists());
         assert!(test_output_dir.join("stderr.txt").exists());
         assert!(test_output_dir.join("combined.txt").exists());
+    }
+
+    #[test]
+    fn test_metrics_from_successful_outcome() {
+        let outcome = TestOutcome {
+            exit_code: Some(0),
+            stdout: String::from("test output"),
+            stderr: String::from("test warnings"),
+            duration: Duration::from_millis(1500),
+            timed_out: false,
+        };
+
+        let metrics = outcome.to_metrics("my_test".to_string());
+
+        assert_eq!(metrics.test_name, "my_test");
+        assert_eq!(metrics.exit_code, Some(0));
+        assert_eq!(metrics.duration_ms, 1500);
+        assert!(!metrics.timed_out);
+        assert_eq!(metrics.stdout_len, 11);
+        assert_eq!(metrics.stderr_len, 13);
+        assert!(metrics.success());
+    }
+
+    #[test]
+    fn test_metrics_from_failed_outcome() {
+        let outcome = TestOutcome {
+            exit_code: Some(1),
+            stdout: String::from("failed output"),
+            stderr: String::from("error details"),
+            duration: Duration::from_millis(500),
+            timed_out: false,
+        };
+
+        let metrics = outcome.to_metrics("failing_test".to_string());
+
+        assert_eq!(metrics.test_name, "failing_test");
+        assert_eq!(metrics.exit_code, Some(1));
+        assert_eq!(metrics.duration_ms, 500);
+        assert!(!metrics.timed_out);
+        assert!(!metrics.success());
+    }
+
+    #[test]
+    fn test_metrics_from_timeout_outcome() {
+        let outcome = TestOutcome {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::from("timeout message"),
+            duration: Duration::from_secs(600),
+            timed_out: true,
+        };
+
+        let metrics = outcome.to_metrics("timeout_test".to_string());
+
+        assert_eq!(metrics.test_name, "timeout_test");
+        assert_eq!(metrics.exit_code, None);
+        assert_eq!(metrics.duration_ms, 600000);
+        assert!(metrics.timed_out);
+        assert!(!metrics.success());
+    }
+
+    #[test]
+    fn test_metrics_success_returns_true_for_zero_exit() {
+        let metrics = TestMetrics {
+            test_name: "test".to_string(),
+            exit_code: Some(0),
+            duration_ms: 100,
+            timed_out: false,
+            stdout_len: 50,
+            stderr_len: 0,
+            timestamp: chrono::Utc::now(),
+        };
+        assert!(metrics.success());
+    }
+
+    #[test]
+    fn test_metrics_success_returns_false_for_nonzero_exit() {
+        let metrics = TestMetrics {
+            test_name: "test".to_string(),
+            exit_code: Some(1),
+            duration_ms: 100,
+            timed_out: false,
+            stdout_len: 50,
+            stderr_len: 0,
+            timestamp: chrono::Utc::now(),
+        };
+        assert!(!metrics.success());
+    }
+
+    #[test]
+    fn test_metrics_success_returns_false_for_timeout() {
+        let metrics = TestMetrics {
+            test_name: "test".to_string(),
+            exit_code: Some(0),
+            duration_ms: 100,
+            timed_out: true,
+            stdout_len: 50,
+            stderr_len: 0,
+            timestamp: chrono::Utc::now(),
+        };
+        assert!(!metrics.success());
+    }
+
+    #[test]
+    fn test_metrics_duration_conversion() {
+        let metrics = TestMetrics {
+            test_name: "test".to_string(),
+            exit_code: Some(0),
+            duration_ms: 2500,
+            timed_out: false,
+            stdout_len: 50,
+            stderr_len: 0,
+            timestamp: chrono::Utc::now(),
+        };
+
+        let duration = metrics.duration();
+        assert_eq!(duration.as_secs(), 2);
+        assert_eq!(duration.as_millis() % 1000, 500);
+    }
+
+    #[test]
+    fn test_metrics_serialization() {
+        let metrics = TestMetrics {
+            test_name: "serialization_test".to_string(),
+            exit_code: Some(0),
+            duration_ms: 1000,
+            timed_out: false,
+            stdout_len: 100,
+            stderr_len: 50,
+            timestamp: chrono::Utc::now(),
+        };
+
+        // Test JSON serialization
+        let json = serde_json::to_string(&metrics).unwrap();
+        assert!(json.contains("\"test_name\":\"serialization_test\""));
+        assert!(json.contains("\"exit_code\":0"));
+        assert!(json.contains("\"duration_ms\":1000"));
+        assert!(json.contains("\"timed_out\":false"));
+
+        // Test JSON deserialization
+        let deserialized: TestMetrics = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.test_name, "serialization_test");
+        assert_eq!(deserialized.exit_code, Some(0));
+        assert_eq!(deserialized.duration_ms, 1000);
     }
 }

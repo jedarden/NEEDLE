@@ -566,6 +566,19 @@ pub enum EventKind {
         reason: String,
     },
 
+    // ── Cargo testing ──
+    CargoTestStarted {
+        test_name: String,
+    },
+    CargoTestCompleted {
+        test_name: String,
+        exit_code: Option<i32>,
+        duration_ms: u64,
+        timed_out: bool,
+        stdout_len: usize,
+        stderr_len: usize,
+    },
+
     // ── Output transform ──
     OutputTransformSpawned {
         bead_id: BeadId,
@@ -756,6 +769,8 @@ impl EventKind {
             EventKind::CanarySuiteCompleted { .. } => "canary.suite_completed",
             EventKind::CanaryPromoted { .. } => "canary.promoted",
             EventKind::CanaryRejected { .. } => "canary.rejected",
+            EventKind::CargoTestStarted { .. } => "cargo_test.started",
+            EventKind::CargoTestCompleted { .. } => "cargo_test.completed",
             EventKind::OutputTransformSpawned { .. } => "agent.transform.spawned",
             EventKind::OutputTransformExited { .. } => "agent.transform.exited",
             EventKind::OutputTransformSkipped { .. } => "agent.transform.skipped",
@@ -878,6 +893,8 @@ impl EventKind {
             | EventKind::CanarySuiteCompleted { .. }
             | EventKind::CanaryPromoted { .. }
             | EventKind::CanaryRejected { .. }
+            | EventKind::CargoTestStarted { .. }
+            | EventKind::CargoTestCompleted { .. }
             | EventKind::ClaimRaceLostSkipped { .. }
             | EventKind::SinkError { .. }
             | EventKind::OtlpDropped { .. }
@@ -1588,6 +1605,26 @@ impl EventKind {
             EventKind::CanaryRejected { reason } => {
                 serde_json::json!({ "reason": reason })
             }
+            EventKind::CargoTestStarted { test_name } => {
+                serde_json::json!({ "test_name": test_name })
+            }
+            EventKind::CargoTestCompleted {
+                test_name,
+                exit_code,
+                duration_ms,
+                timed_out,
+                stdout_len,
+                stderr_len,
+            } => {
+                serde_json::json!({
+                    "test_name": test_name,
+                    "exit_code": exit_code,
+                    "duration_ms": duration_ms,
+                    "timed_out": timed_out,
+                    "stdout_len": stdout_len,
+                    "stderr_len": stderr_len,
+                })
+            }
             EventKind::ReflectStarted { beads_since_last } => {
                 serde_json::json!({ "beads_since_last": beads_since_last })
             }
@@ -1830,7 +1867,8 @@ impl EventKind {
             | EventKind::EffortRecorded {
                 elapsed_ms: duration_ms,
                 ..
-            } => Some(*duration_ms),
+            }
+            | EventKind::CargoTestCompleted { duration_ms, .. } => Some(*duration_ms),
             EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
@@ -1903,6 +1941,7 @@ impl EventKind {
             | EventKind::CanarySuiteCompleted { .. }
             | EventKind::CanaryPromoted { .. }
             | EventKind::CanaryRejected { .. }
+            | EventKind::CargoTestStarted { .. }
             | EventKind::OutputTransformSpawned { .. }
             | EventKind::OutputTransformExited { .. }
             | EventKind::OutputTransformSkipped { .. }
