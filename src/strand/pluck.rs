@@ -1056,4 +1056,316 @@ mod tests {
         let bead = make_bead("normal", 1, "2026-01-01 00:00:00");
         assert_eq!(PluckStrand::extract_failure_count(&bead), 0);
     }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // PluckStarvationDetected telemetry tests
+    // ──────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn starvation_when_all_beads_excluded_by_labels_emits_telemetry() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // Use UnfilteredStore to test the strand's own filtering logic
+        let store = UnfilteredStore {
+            beads: vec![
+                make_bead_with_labels("deferred-bead", 1, vec!["deferred"]),
+                make_bead_with_labels("human-bead", 2, vec!["human"]),
+                make_bead_with_labels("blocked-bead", 3, vec!["blocked"]),
+            ],
+        };
+
+        let strand = PluckStrand::new(
+            vec![],
+            helper.telemetry().clone(),
+        );
+
+        let result = strand.evaluate(&store).await;
+
+        // Should return NoWork since all beads are excluded
+        match result {
+            StrandResult::NoWork => {
+                // Expected - all beads excluded
+            }
+            other => panic!("expected NoWork when all beads excluded, got: {other:?}"),
+        }
+
+        // Wait for telemetry events to be flushed
+        helper.sync().await;
+
+        // Verify starvation event was emitted
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+        // Get the starvation event and verify its contents
+        let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
+        assert_eq!(starvation_events.len(), 1, "should emit exactly one starvation event");
+
+        let event = &starvation_events[0];
+
+        // Verify workspace - should be "/tmp/test" since beads exist
+        if let Some(workspace) = event.data.get("workspace") {
+            assert_eq!(workspace.as_str(), Some("/tmp/test"));
+        } else {
+            panic!("workspace field missing from starvation event");
+        }
+
+        // Verify open_count - should be 3 (all beads returned by UnfilteredStore)
+        if let Some(open_count) = event.data.get("open_count") {
+            assert_eq!(open_count.as_u64(), Some(3));
+        } else {
+            panic!("open_count field missing from starvation event");
+        }
+
+        // Verify excluded_count - should be 3 (all excluded by strand's filtering)
+        if let Some(excluded_count) = event.data.get("excluded_count") {
+            assert_eq!(excluded_count.as_u64(), Some(3));
+        } else {
+            panic!("excluded_count field missing from starvation event");
+        }
+
+        // Verify exclusion reasons - should include label:reason for each bead
+        if let Some(reasons) = event.data.get("candidate_exclusion_reasons") {
+            if let Some(reasons_array) = reasons.as_array() {
+                assert_eq!(reasons_array.len(), 3, "should have 3 exclusion reasons");
+
+                let reason_strings: Vec<&str> = reasons_array
+                    .iter()
+                    .filter_map(|r| r.as_str())
+                    .collect();
+
+                // Should exclude all 3 beads by label
+                assert!(reason_strings.iter().any(|r| *r == "label:deferred"));
+                assert!(reason_strings.iter().any(|r| *r == "label:human"));
+                assert!(reason_strings.iter().any(|r| *r == "label:blocked"));
+            } else {
+                panic!("candidate_exclusion_reasons should be an array");
+            }
+        } else {
+            panic!("candidate_exclusion_reasons field missing from starvation event");
+        }
+    }
+
+    #[tokio::test]
+    async fn starvation_when_all_beads_have_stale_assignees_emits_telemetry() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_assignee("stale-worker-1", "worker-1"),
+                make_bead_with_assignee("stale-worker-2", "worker-2"),
+                make_bead_with_assignee("stale-worker-3", "worker-3"),
+            ],
+        };
+
+        let strand = PluckStrand::new(
+            vec![],
+            helper.telemetry().clone(),
+        );
+
+        let result = strand.evaluate(&store).await;
+
+        // Should return NoWork since all beads have stale assignees
+        match result {
+            StrandResult::NoWork => {
+                // Expected - all beads have stale assignees
+            }
+            other => panic!("expected NoWork when all beads have stale assignees, got: {other:?}"),
+        }
+
+        // Wait for telemetry events to be flushed
+        helper.sync().await;
+
+        // Verify starvation event was emitted
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+        // Get the starvation event and verify its contents
+        let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
+        assert_eq!(starvation_events.len(), 1, "should emit exactly one starvation event");
+
+        let event = &starvation_events[0];
+
+        // Verify open_count - should be 3 (all beads are open but assigned)
+        if let Some(open_count) = event.data.get("open_count") {
+            assert_eq!(open_count.as_u64(), Some(3));
+        } else {
+            panic!("open_count field missing from starvation event");
+        }
+
+        // Verify excluded_count - should be 3 (all excluded due to stale assignees)
+        if let Some(excluded_count) = event.data.get("excluded_count") {
+            assert_eq!(excluded_count.as_u64(), Some(3));
+        } else {
+            panic!("excluded_count field missing from starvation event");
+        }
+
+        // Verify exclusion reasons - should include assignee:worker_id for each
+        if let Some(reasons) = event.data.get("candidate_exclusion_reasons") {
+            if let Some(reasons_array) = reasons.as_array() {
+                assert_eq!(reasons_array.len(), 3, "should have 3 exclusion reasons");
+
+                let reason_strings: Vec<&str> = reasons_array
+                    .iter()
+                    .filter_map(|r| r.as_str())
+                    .collect();
+
+                // Should exclude all 3 beads by stale assignee
+                assert!(reason_strings.iter().any(|r| *r == "assignee:worker-1"));
+                assert!(reason_strings.iter().any(|r| *r == "assignee:worker-2"));
+                assert!(reason_strings.iter().any(|r| *r == "assignee:worker-3"));
+            } else {
+                panic!("candidate_exclusion_reasons should be an array");
+            }
+        } else {
+            panic!("candidate_exclusion_reasons field missing from starvation event");
+        }
+    }
+
+    #[tokio::test]
+    async fn starvation_when_queue_is_genuinely_empty_emits_telemetry() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // Empty store - no beads at all
+        let store = MemoryStore { beads: vec![] };
+
+        let strand = PluckStrand::new(
+            vec![],
+            helper.telemetry().clone(),
+        );
+
+        let result = strand.evaluate(&store).await;
+
+        // Should return NoWork since queue is empty
+        match result {
+            StrandResult::NoWork => {
+                // Expected - queue is empty
+            }
+            other => panic!("expected NoWork when queue is empty, got: {other:?}"),
+        }
+
+        // Wait for telemetry events to be flushed
+        helper.sync().await;
+
+        // Verify starvation event was emitted
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+        // Get the starvation event and verify its contents
+        let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
+        assert_eq!(starvation_events.len(), 1, "should emit exactly one starvation event");
+
+        let event = &starvation_events[0];
+
+        // Verify workspace - should be "unknown" since no beads exist
+        if let Some(workspace) = event.data.get("workspace") {
+            assert_eq!(workspace.as_str(), Some("unknown"));
+        } else {
+            panic!("workspace field missing from starvation event");
+        }
+
+        // Verify open_count - should be 0 (no beads)
+        if let Some(open_count) = event.data.get("open_count") {
+            assert_eq!(open_count.as_u64(), Some(0));
+        } else {
+            panic!("open_count field missing from starvation event");
+        }
+
+        // Verify excluded_count - should be 0 (nothing to exclude)
+        if let Some(excluded_count) = event.data.get("excluded_count") {
+            assert_eq!(excluded_count.as_u64(), Some(0));
+        } else {
+            panic!("excluded_count field missing from starvation event");
+        }
+
+        // Verify exclusion reasons - should be empty (no beads to exclude)
+        if let Some(reasons) = event.data.get("candidate_exclusion_reasons") {
+            if let Some(reasons_array) = reasons.as_array() {
+                assert_eq!(reasons_array.len(), 0, "should have no exclusion reasons");
+            } else {
+                panic!("candidate_exclusion_reasons should be an array");
+            }
+        } else {
+            panic!("candidate_exclusion_reasons field missing from starvation event");
+        }
+    }
+
+    #[tokio::test]
+    async fn starvation_mixed_label_and_assignee_exclusions_emits_telemetry() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // Use UnfilteredStore to test the strand's own filtering logic
+        let store = UnfilteredStore {
+            beads: vec![
+                make_bead_with_labels("deferred-bead", 1, vec!["deferred"]),
+                make_bead_with_assignee("stale-assignee", "worker-1"),
+                make_bead_with_labels("blocked-bead", 3, vec!["blocked"]),
+            ],
+        };
+
+        let strand = PluckStrand::new(
+            vec![],
+            helper.telemetry().clone(),
+        );
+
+        let result = strand.evaluate(&store).await;
+
+        // Should return NoWork since all beads are excluded
+        match result {
+            StrandResult::NoWork => {
+                // Expected - all beads excluded
+            }
+            other => panic!("expected NoWork when all beads excluded, got: {other:?}"),
+        }
+
+        // Wait for telemetry events to be flushed
+        helper.sync().await;
+
+        // Verify starvation event was emitted
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+        // Get the starvation event and verify its contents
+        let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
+        assert_eq!(starvation_events.len(), 1, "should emit exactly one starvation event");
+
+        let event = &starvation_events[0];
+
+        // Verify counts
+        if let Some(open_count) = event.data.get("open_count") {
+            assert_eq!(open_count.as_u64(), Some(3));
+        } else {
+            panic!("open_count field missing from starvation event");
+        }
+
+        if let Some(excluded_count) = event.data.get("excluded_count") {
+            assert_eq!(excluded_count.as_u64(), Some(3));
+        } else {
+            panic!("excluded_count field missing from starvation event");
+        }
+
+        // Verify both label and assignee exclusion reasons are present
+        if let Some(reasons) = event.data.get("candidate_exclusion_reasons") {
+            if let Some(reasons_array) = reasons.as_array() {
+                assert_eq!(reasons_array.len(), 3, "should have 3 exclusion reasons");
+
+                let reason_strings: Vec<&str> = reasons_array
+                    .iter()
+                    .filter_map(|r| r.as_str())
+                    .collect();
+
+                // Should include both label and assignee exclusions
+                assert!(reason_strings.iter().any(|r| *r == "label:deferred"));
+                assert!(reason_strings.iter().any(|r| *r == "assignee:worker-1"));
+                assert!(reason_strings.iter().any(|r| *r == "label:blocked"));
+            } else {
+                panic!("candidate_exclusion_reasons should be an array");
+            }
+        } else {
+            panic!("candidate_exclusion_reasons field missing from starvation event");
+        }
+    }
 }
