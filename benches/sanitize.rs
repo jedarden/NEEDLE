@@ -25,6 +25,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use needle::sanitize::Sanitizer;
+use needle::stats::calculate_p95;
 
 /// Configure Criterion for p95 latency reporting.
 ///
@@ -35,11 +36,9 @@ use needle::sanitize::Sanitizer;
 /// - Measurement time: 5 seconds (sufficient samples for stable percentiles)
 /// - Noise threshold: 0.02 (2% noise filtering for stable measurements)
 ///
-/// Criterion.rs automatically calculates and reports p95 (and other percentiles)
-/// when given sufficient samples. The key for accurate p95 is sample_size:
-/// - More samples → more accurate bootstrap percentile estimation
-/// - 100 samples provides reasonable accuracy for p95
-/// - For production-grade p95 accuracy, consider 500+ samples
+/// P95 calculation is done using `needle::stats::calculate_p95()` which implements
+/// linear interpolation for accurate percentile estimation. Criterion.rs also
+/// calculates p95 automatically via bootstrap analysis (see criterion.toml).
 ///
 /// The confidence_level affects the confidence interval around the mean,
 /// not the percentile calculation itself. Percentiles use bootstrap analysis.
@@ -212,8 +211,7 @@ fn bench_sanitize_10kb(c: &mut Criterion) {
         latencies.push(start.elapsed().as_micros());
     }
 
-    latencies.sort();
-    let p95_us = latencies[(latencies.len() * 95) / 100];
+    let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
 
     eprintln!(
@@ -266,11 +264,7 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
         latencies.push(start.elapsed().as_micros());
     }
 
-    latencies.sort();
-    // Note: Using nearest-rank method (simple indexing) for quick p95 estimate in benchmark output.
-    // For accurate p95 calculation with linear interpolation, use needle::stats::calculate_p95.
-    // Criterion.rs also calculates p95 automatically via bootstrap analysis (see criterion.toml).
-    let p95_us = latencies[(latencies.len() * 95) / 100];
+    let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
 
     eprintln!(
@@ -323,8 +317,7 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
         latencies.push(start.elapsed().as_micros());
     }
 
-    latencies.sort();
-    let p95_us = latencies[(latencies.len() * 95) / 100];
+    let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
 
     eprintln!(
@@ -426,7 +419,7 @@ fn assertion_test() {
     let min = *latencies.first().unwrap();
     let max = *latencies.last().unwrap();
     let avg = latencies.iter().sum::<u128>() / latencies.len() as u128;
-    let p95 = latencies[(latencies.len() * 95) / 100];
+    let p95 = calculate_p95(&latencies);
 
     eprintln!(
         "Sanitizer latency assertion test (100KB trace, {} iterations):",
@@ -470,7 +463,7 @@ fn bench_median_latency(c: &mut Criterion) {
     latencies.sort();
     let median_us = latencies[ASSERTION_SAMPLE_COUNT / 2];
     let median_ms = median_us as f64 / 1000.0;
-    let p95_us = latencies[(latencies.len() * 95) / 100];
+    let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
 
     eprintln!(
