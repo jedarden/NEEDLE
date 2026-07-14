@@ -49,6 +49,42 @@ impl CompiledRule {
     }
 }
 
+/// Check if a pattern is a glob pattern.
+///
+/// A simple heuristic that returns true if the pattern contains glob-style
+/// wildcards (`*` or `**`). This is a basic check that doesn't attempt to
+/// distinguish between glob and regex patterns - it just reports whether
+/// the pattern contains wildcard characters.
+///
+/// # Arguments
+///
+/// * `pattern` - The pattern string to check.
+///
+/// # Returns
+///
+/// * `true` if the pattern contains `*` or `**`.
+/// * `false` otherwise.
+///
+/// # Examples
+///
+/// ```
+/// use needle::routing::is_glob_pattern;
+///
+/// // Glob patterns with wildcards
+/// assert!(is_glob_pattern("*"));
+/// assert!(is_glob_pattern("**"));
+/// assert!(is_glob_pattern("gpt-*"));
+/// assert!(is_glob_pattern("test/**"));
+///
+/// // Non-glob patterns (no wildcards)
+/// assert!(!is_glob_pattern("exact-match"));
+/// assert!(!is_glob_pattern("gpt-4"));
+/// assert!(!is_glob_pattern("claude-sonnet"));
+/// ```
+pub fn is_glob_pattern(pattern: &str) -> bool {
+    pattern.contains('*')
+}
+
 /// Check if a pattern contains glob-style wildcards that need conversion.
 ///
 /// Returns true if the pattern appears to be a glob pattern rather than
@@ -613,6 +649,25 @@ mod tests {
             match_adapter("provider/foo/bar/model", &rules, "fallback"),
             Some("adapter".to_string())
         );
+    }
+
+    #[test]
+    fn is_glob_pattern_detection() {
+        // Glob patterns with wildcards
+        assert!(is_glob_pattern("*"));
+        assert!(is_glob_pattern("**"));
+        assert!(is_glob_pattern("gpt-*"));
+        assert!(is_glob_pattern("test/**"));
+
+        // Non-glob patterns (no wildcards)
+        assert!(!is_glob_pattern("exact-match"));
+        assert!(!is_glob_pattern("gpt-4"));
+        assert!(!is_glob_pattern("claude-sonnet"));
+
+        // Mixed patterns
+        assert!(is_glob_pattern("claude-*"));
+        assert!(is_glob_pattern("provider/**"));
+        assert!(is_glob_pattern("*-sonnet-*"));
     }
 
     #[test]
