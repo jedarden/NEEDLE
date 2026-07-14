@@ -3,6 +3,7 @@ Cargo.lock
 *.orig
 .env
 .needle/
+.test_outputs/
 test_telemetry_write
 test_telemetry_write_debug
 

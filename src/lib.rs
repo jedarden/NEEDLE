@@ -30,6 +30,7 @@ pub mod stats;
 pub mod strand;
 pub mod supervisor;
 pub mod telemetry;
+pub mod test_output;
 pub mod trace;
 pub mod transcript;
 pub mod types;
