@@ -9,9 +9,21 @@
 use crate::bead_store::{BeadStore, Filters};
 use crate::telemetry::Telemetry;
 use crate::types::{Bead, StrandError, StrandResult};
+use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 
 /// Default labels excluded from Pluck selection when not configured.
 const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked"];
+
+/// Statistics collected during candidate filtering for starvation telemetry.
+#[derive(Debug, Default)]
+struct FilteringStats {
+    /// Count of open beads before any filtering.
+    open_count: usize,
+    /// Count of beads excluded during filtering.
+    excluded_count: usize,
+    /// Aggregated reasons why candidates were excluded.
+    exclusion_reasons: Vec<String>,
+}
 
 /// The Pluck strand — primary work selection.
 pub struct PluckStrand {
@@ -21,6 +33,14 @@ pub struct PluckStrand {
     split_after_failures: u32,
     /// Telemetry emitter for starvation events.
     telemetry: Telemetry,
+    /// Count of open beads from the most recent evaluation.
+    /// Uses AtomicUsize for thread-safe interior mutability.
+    last_open_count: AtomicUsize,
+    /// Count of beads excluded during the most recent evaluation.
+    last_excluded_count: AtomicUsize,
+    /// Aggregated exclusion reasons from the most recent evaluation.
+    /// Uses Mutex for thread-safe interior mutability.
+    last_exclusion_reasons: Mutex<Vec<String>>,
 }
 
 impl PluckStrand {
@@ -41,6 +61,9 @@ impl PluckStrand {
             exclude_labels: labels,
             split_after_failures: 3, // default threshold
             telemetry,
+            last_open_count: AtomicUsize::new(0),
+            last_excluded_count: AtomicUsize::new(0),
+            last_exclusion_reasons: Mutex::new(Vec::new()),
         }
     }
 
@@ -48,7 +71,11 @@ impl PluckStrand {
     ///
     /// If `exclude_labels` is empty, the default set (`deferred`, `human`,
     /// `blocked`) is used.
-    pub fn with_split_threshold(exclude_labels: Vec<String>, split_after_failures: u32, telemetry: Telemetry) -> Self {
+    pub fn with_split_threshold(
+        exclude_labels: Vec<String>,
+        split_after_failures: u32,
+        telemetry: Telemetry,
+    ) -> Self {
         let labels = if exclude_labels.is_empty() {
             DEFAULT_EXCLUDE_LABELS
                 .iter()
@@ -61,6 +88,9 @@ impl PluckStrand {
             exclude_labels: labels,
             split_after_failures,
             telemetry,
+            last_open_count: AtomicUsize::new(0),
+            last_excluded_count: AtomicUsize::new(0),
+            last_exclusion_reasons: Mutex::new(Vec::new()),
         }
     }
 
@@ -88,6 +118,20 @@ impl PluckStrand {
                 .then_with(|| a.created_at.cmp(&b.created_at))
                 .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
         });
+    }
+
+    /// Get the filtering statistics from the most recent evaluation.
+    ///
+    /// Returns `(open_count, excluded_count, exclusion_reasons)` where:
+    /// - `open_count` is the count of beads returned by the store before filtering
+    /// - `excluded_count` is the count of beads excluded during filtering
+    /// - `exclusion_reasons` is a vector of strings describing why each bead was excluded
+    pub fn last_filtering_stats(&self) -> (usize, usize, Vec<String>) {
+        (
+            self.last_open_count.load(Ordering::Relaxed),
+            self.last_excluded_count.load(Ordering::Relaxed),
+            self.last_exclusion_reasons.lock().unwrap().clone(),
+        )
     }
 }
 
@@ -143,6 +187,12 @@ impl super::Strand for PluckStrand {
             }
         };
 
+        // Initialize filtering statistics for starvation telemetry.
+        let mut stats = FilteringStats {
+            open_count: candidates.len(),
+            ..Default::default()
+        };
+
         // 2. Filter: remove beads with excluded labels.
         //    Defensive guard — store.ready() passes exclude_labels in its Filters,
         //    but the backing CLI may not include label data in every query type.
@@ -151,38 +201,51 @@ impl super::Strand for PluckStrand {
         //    SELECTING→CLAIMING→RETRYING spin loop observed when br ready --json
         //    omits label fields for some beads.
         let before_label_filter = candidates.len();
+
+        // First pass: collect excluded beads and their reasons for telemetry.
+        let excluded_beads: Vec<_> = candidates
+            .iter()
+            .filter(|b| b.labels.iter().any(|l| self.exclude_labels.contains(l)))
+            .map(|b| {
+                let excluded_labels: Vec<_> = b
+                    .labels
+                    .iter()
+                    .filter(|l| self.exclude_labels.contains(l))
+                    .map(|l| l.clone())
+                    .collect();
+                (b.id.as_ref().to_string(), excluded_labels)
+            })
+            .collect();
+
+        // Second pass: perform the actual filtering.
         candidates.retain(|b| !b.labels.iter().any(|l| self.exclude_labels.contains(l)));
         let after_label_filter = candidates.len();
 
         if before_label_filter != after_label_filter {
+            let label_excluded_count = before_label_filter - after_label_filter;
+            stats.excluded_count += label_excluded_count;
+
             tracing::debug!(
-                excluded_count = before_label_filter - after_label_filter,
+                excluded_count = label_excluded_count,
                 remaining = after_label_filter,
                 excluded_labels = ?self.exclude_labels,
                 "Label filtering excluded {} beads",
-                before_label_filter - after_label_filter
+                label_excluded_count
             );
 
-            // Log each excluded bead at DEBUG level
-            let excluded_beads: Vec<_> = candidates.iter()
-                .filter(|b| b.labels.iter().any(|l| self.exclude_labels.contains(l)))
-                .map(|b| (b.id.as_ref(), b.labels.clone()))
-                .collect();
-            for (id, labels) in excluded_beads {
-                let excluded_reasons: Vec<_> = labels.iter()
-                    .filter(|l| self.exclude_labels.contains(l))
-                    .map(|l| l.as_str())
-                    .collect();
+            // Log each excluded bead at DEBUG level and collect reasons for telemetry.
+            for (id, excluded_labels) in &excluded_beads {
                 tracing::debug!(
                     bead_id = %id,
-                    labels = ?labels,
-                    excluded_reasons = ?excluded_reasons,
+                    labels = ?excluded_labels,
                     "Excluded bead due to labels"
                 );
-            }
 
-            // Re-filter since we logged them
-            candidates.retain(|b| !b.labels.iter().any(|l| self.exclude_labels.contains(l)));
+                // Add to exclusion reasons for telemetry.
+                for label in excluded_labels {
+                    stats.exclusion_reasons.push(format!("label:{}", label));
+                }
+            }
         } else {
             tracing::debug!(
                 count = after_label_filter,
@@ -194,6 +257,25 @@ impl super::Strand for PluckStrand {
         //    and Open beads with a stale assignee. These are never claimable — the claimer
         //    will reject them every time, causing a hot loop.
         let before_status_filter = candidates.len();
+
+        // First pass: collect excluded beads and their reasons for telemetry.
+        let excluded_by_status: Vec<_> = candidates
+            .iter()
+            .filter(|b| {
+                matches!(b.status, crate::types::BeadStatus::InProgress)
+                    || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some())
+            })
+            .map(|b| {
+                let reason = if matches!(b.status, crate::types::BeadStatus::InProgress) {
+                    "status:in_progress".to_string()
+                } else {
+                    format!("assignee:{}", b.assignee.as_ref().unwrap())
+                };
+                (b.id.as_ref().to_string(), reason)
+            })
+            .collect();
+
+        // Second pass: perform the actual filtering.
         candidates.retain(|b| {
             !(matches!(b.status, crate::types::BeadStatus::InProgress)
                 || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some()))
@@ -201,12 +283,27 @@ impl super::Strand for PluckStrand {
         let after_status_filter = candidates.len();
 
         if before_status_filter != after_status_filter {
+            let status_excluded_count = before_status_filter - after_status_filter;
+            stats.excluded_count += status_excluded_count;
+
             tracing::debug!(
-                filtered_count = before_status_filter - after_status_filter,
+                filtered_count = status_excluded_count,
                 remaining = after_status_filter,
                 "Status/assignee filtering removed {} beads",
-                before_status_filter - after_status_filter
+                status_excluded_count
             );
+
+            // Log each excluded bead at DEBUG level and collect reasons for telemetry.
+            for (id, reason) in &excluded_by_status {
+                tracing::debug!(
+                    bead_id = %id,
+                    reason = %reason,
+                    "Excluded bead due to status/assignee"
+                );
+
+                // Add to exclusion reasons for telemetry.
+                stats.exclusion_reasons.push(reason.clone());
+            }
         } else {
             tracing::debug!(
                 count = after_status_filter,
@@ -256,14 +353,19 @@ impl super::Strand for PluckStrand {
             tracing::debug!("Split trigger disabled (threshold = 0)");
         }
 
-        // 6. Return result.
+        // 6. Store filtering stats for telemetry access and return result.
+        // These fields persist on the strand instance for access by telemetry emission.
+        self.last_open_count
+            .store(stats.open_count, Ordering::Relaxed);
+        self.last_excluded_count
+            .store(stats.excluded_count, Ordering::Relaxed);
+        *self.last_exclusion_reasons.lock().unwrap() = stats.exclusion_reasons;
+
         if candidates.is_empty() {
             tracing::debug!("No candidates remaining after filtering, returning NoWork");
             StrandResult::NoWork
         } else {
-            let candidate_ids: Vec<&str> = candidates.iter()
-                .map(|b| b.id.as_ref())
-                .collect();
+            let candidate_ids: Vec<&str> = candidates.iter().map(|b| b.id.as_ref()).collect();
             tracing::info!(
                 count = candidates.len(),
                 candidates = ?candidate_ids,
@@ -665,7 +767,10 @@ mod tests {
         };
 
         // Custom excludes: only "wip" — "deferred" is NOT excluded.
-        let strand = PluckStrand::new(vec!["wip".to_string()], Telemetry::new("test-worker".to_string()));
+        let strand = PluckStrand::new(
+            vec!["wip".to_string()],
+            Telemetry::new("test-worker".to_string()),
+        );
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -843,7 +948,10 @@ mod tests {
 
     #[test]
     fn custom_exclude_labels_used_when_provided() {
-        let strand = PluckStrand::new(vec!["custom".to_string()], Telemetry::new("test-worker".to_string()));
+        let strand = PluckStrand::new(
+            vec!["custom".to_string()],
+            Telemetry::new("test-worker".to_string()),
+        );
         assert_eq!(strand.exclude_labels, vec!["custom"]);
     }
 
@@ -858,7 +966,8 @@ mod tests {
             beads: vec![bead_with_failures],
         };
 
-        let strand = PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
+        let strand =
+            PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -877,7 +986,8 @@ mod tests {
             beads: vec![bead_with_failures],
         };
 
-        let strand = PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
+        let strand =
+            PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -895,7 +1005,8 @@ mod tests {
             beads: vec![bead_with_failures],
         };
 
-        let strand = PluckStrand::with_split_threshold(vec![], 0, Telemetry::new("test-worker".to_string()));
+        let strand =
+            PluckStrand::with_split_threshold(vec![], 0, Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
