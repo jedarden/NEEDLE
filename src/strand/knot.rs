@@ -513,6 +513,7 @@ mod tests {
         let store = KnotTestStore::new(vec![
             make_bead("open-1", BeadStatus::Open, None),
             make_bead("ip-1", BeadStatus::InProgress, Some("worker-1")),
+            make_bead("done-1", BeadStatus::Done, None), // excluded bead
         ]);
         let config = KnotConfig {
             exhaustion_threshold: 3,
@@ -533,6 +534,10 @@ mod tests {
         let result = knot.evaluate(&store).await;
         assert!(matches!(result, StrandResult::NoWork));
         assert_eq!(store.created_count(), 0, "no beads created at threshold");
+
+        // Drop knot to close telemetry channel and flush all events.
+        drop(knot);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let events_guard = events.lock().unwrap();
         assert_eq!(events_guard.len(), 1, "telemetry emitted at threshold");
@@ -556,6 +561,10 @@ mod tests {
         // First cycle: emits telemetry.
         knot.evaluate(&store).await;
         assert_eq!(store.created_count(), 0, "no beads created on first cycle");
+
+        // Allow time for background telemetry task to process the event.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
         assert_eq!(events.lock().unwrap().len(), 1, "telemetry emitted on first cycle");
 
         // Second cycle: within cooldown, no new telemetry.
@@ -575,6 +584,7 @@ mod tests {
             make_bead("open-1", BeadStatus::Open, None),
             make_bead("open-2", BeadStatus::Open, None),
             make_bead("ip-1", BeadStatus::InProgress, Some("worker-1")),
+            make_bead("done-1", BeadStatus::Done, None), // excluded bead
         ]);
         let config = KnotConfig {
             exhaustion_threshold: 1,
@@ -587,6 +597,10 @@ mod tests {
 
         // Verify no bead was written to the target workspace
         assert_eq!(store.created_count(), 0, "no beads should be written to target workspace");
+
+        // Drop knot to close telemetry channel and flush all events.
+        drop(knot);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Verify telemetry event contains diagnostic details
         let events_guard = events.lock().unwrap();
