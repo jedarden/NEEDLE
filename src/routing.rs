@@ -226,6 +226,75 @@ pub fn match_adapter(model: &str, rules: &[RoutingRule], default: &str) -> Optio
     }
 }
 
+/// Match a model name against a single glob pattern using the glob crate.
+///
+/// This is a lower-level function that tests if a glob pattern matches a model name.
+/// It uses the `glob` crate's Pattern type directly for glob-style pattern matching.
+///
+/// # Arguments
+///
+/// * `pattern` - Glob pattern to match (e.g., "claude-*", "gpt-*", "*").
+/// * `model_name` - The model name to test against the pattern.
+///
+/// # Returns
+///
+/// * `Some(())` - The pattern matches the model name.
+/// * `None` - The pattern does not match or is invalid.
+///
+/// # Edge Cases
+///
+/// * Empty pattern: Returns `None` (no match).
+/// * Empty model name: Returns `None` (no match).
+/// * Invalid glob pattern: Returns `None` (no match).
+///
+/// # Glob Pattern Syntax
+///
+/// * `*` - Matches any sequence of non-separator characters.
+/// * `**` - Matches any sequence of characters, including path separators.
+/// * `?` - Matches any single non-separator character.
+/// * `[a-z]` - Matches any character in the bracket.
+/// * `[!a-z]` - Matches any character not in the bracket.
+///
+/// # Examples
+///
+/// ```
+/// use needle::routing::match_adapter_with_glob;
+///
+/// // Match with wildcard
+/// assert!(match_adapter_with_glob("claude-*", "claude-sonnet-4-6").is_some());
+/// assert!(match_adapter_with_glob("claude-*", "claude-opus-4-6").is_some());
+/// assert!(match_adapter_with_glob("claude-*", "gpt-4").is_none());
+///
+/// // Match with double wildcard
+/// assert!(match_adapter_with_glob("**", "any-model").is_some());
+///
+/// // Edge cases
+/// assert!(match_adapter_with_glob("", "model").is_none());
+/// assert!(match_adapter_with_glob("pattern", "").is_none());
+/// ```
+pub fn match_adapter_with_glob(pattern: &str, model_name: &str) -> Option<()> {
+    // Handle edge cases
+    if pattern.is_empty() || model_name.is_empty() {
+        return None;
+    }
+
+    // Use the glob crate to compile and match the pattern
+    match glob::Pattern::new(pattern) {
+        Ok(glob_pattern) => {
+            // The glob crate's Pattern::matches takes a &str directly
+            if glob_pattern.matches(model_name) {
+                Some(())
+            } else {
+                None
+            }
+        }
+        Err(_) => {
+            // Invalid glob pattern
+            None
+        }
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -799,5 +868,148 @@ mod tests {
             match_adapter("claude-sonnet", &rules, "fallback"),
             Some("fallback".to_string())
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tests for match_adapter_with_glob
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn glob_match_with_wildcard() {
+        // Single asterisk wildcard
+        assert!(match_adapter_with_glob("claude-*", "claude-sonnet-4-6").is_some());
+        assert!(match_adapter_with_glob("claude-*", "claude-opus-4-6").is_some());
+        assert!(match_adapter_with_glob("claude-*", "claude-haiku-4-5").is_some());
+        assert!(match_adapter_with_glob("gpt-*", "gpt-4").is_some());
+        assert!(match_adapter_with_glob("gpt-*", "gpt-3.5").is_some());
+
+        // Non-matching patterns
+        assert!(match_adapter_with_glob("claude-*", "gpt-4").is_none());
+        assert!(match_adapter_with_glob("gpt-*", "claude-sonnet").is_none());
+    }
+
+    #[test]
+    fn glob_match_catchall() {
+        // Catch-all pattern with *
+        assert!(match_adapter_with_glob("*", "any-model").is_some());
+        assert!(match_adapter_with_glob("*", "claude-sonnet-4-6").is_some());
+        assert!(match_adapter_with_glob("*", "gpt-4").is_some());
+        assert!(match_adapter_with_glob("*", "provider/model").is_some());
+    }
+
+    #[test]
+    fn glob_match_double_wildcard() {
+        // Double asterisk matches any characters including slashes
+        assert!(match_adapter_with_glob("**", "any-model").is_some());
+        assert!(match_adapter_with_glob("**", "provider/model").is_some());
+        assert!(match_adapter_with_glob("**", "nested/path/model").is_some());
+    }
+
+    #[test]
+    fn glob_match_question_mark() {
+        // Question mark matches exactly one character
+        assert!(match_adapter_with_glob("gpt-?", "gpt-4").is_some());
+        assert!(match_adapter_with_glob("gpt-?", "gpt-3").is_some());
+        assert!(match_adapter_with_glob("gpt-?", "gpt-35").is_none()); // Two chars
+        assert!(match_adapter_with_glob("gpt-?", "gpt-").is_none()); // Zero chars after dash
+        assert!(match_adapter_with_glob("gpt-?", "gpt-4.5").is_none()); // Has extra chars
+    }
+
+    #[test]
+    fn glob_match_character_class() {
+        // Character class [a-z]
+        assert!(match_adapter_with_glob("claude-[a-z]*", "claude-sonnet").is_some());
+        assert!(match_adapter_with_glob("claude-[a-z]*", "claude-opus").is_some());
+        assert!(match_adapter_with_glob("gpt-[0-9]", "gpt-4").is_some());
+        assert!(match_adapter_with_glob("gpt-[0-9]", "gpt-35").is_none()); // Two digits
+    }
+
+    #[test]
+    fn glob_match_empty_pattern() {
+        // Empty pattern returns None
+        assert!(match_adapter_with_glob("", "model").is_none());
+        assert!(match_adapter_with_glob("", "").is_none());
+    }
+
+    #[test]
+    fn glob_match_empty_model_name() {
+        // Empty model name returns None
+        assert!(match_adapter_with_glob("pattern", "").is_none());
+        assert!(match_adapter_with_glob("", "").is_none());
+        assert!(match_adapter_with_glob("*", "").is_none());
+    }
+
+    #[test]
+    fn glob_match_exact_string() {
+        // Exact string match without wildcards
+        assert!(match_adapter_with_glob("claude-sonnet-4-6", "claude-sonnet-4-6").is_some());
+        assert!(match_adapter_with_glob("gpt-4", "gpt-4").is_some());
+        assert!(match_adapter_with_glob("claude-sonnet-4-6", "claude-opus-4-6").is_none());
+        assert!(match_adapter_with_glob("gpt-4", "gpt-3.5").is_none());
+    }
+
+    #[test]
+    fn glob_match_complex_patterns() {
+        // More complex patterns
+        assert!(match_adapter_with_glob("*-sonnet-*", "claude-sonnet-4-6").is_some());
+        assert!(match_adapter_with_glob("*-sonnet-*", "anthropic-sonnet-4-6").is_some());
+        assert!(match_adapter_with_glob("*-sonnet-*", "claude-opus-4-6").is_none());
+
+        assert!(match_adapter_with_glob("claude-*-4-*", "claude-sonnet-4-6").is_some());
+        assert!(match_adapter_with_glob("claude-*-4-*", "claude-opus-4-6").is_some());
+        assert!(match_adapter_with_glob("claude-*-4-*", "claude-sonnet-3-5").is_none());
+    }
+
+    #[test]
+    fn glob_match_with_slashes() {
+        // Patterns with path separators
+        assert!(match_adapter_with_glob("provider/*", "provider/model").is_some());
+        assert!(match_adapter_with_glob("provider/*", "provider/gpt-4").is_some());
+        assert!(match_adapter_with_glob("provider/*", "other/model").is_none());
+
+        // Double wildcard with slashes
+        assert!(match_adapter_with_glob("provider/**", "provider/model").is_some());
+        assert!(match_adapter_with_glob("provider/**", "provider/nested/model").is_some());
+    }
+
+    #[test]
+    fn glob_match_invalid_pattern() {
+        // Invalid glob patterns return None
+        // The glob crate is more permissive than regex, so most patterns are valid
+        // But we can test extreme cases
+        assert!(match_adapter_with_glob("[", "model").is_none()); // Unclosed bracket
+    }
+
+    #[test]
+    fn glob_match_real_world_patterns() {
+        // Real-world model routing patterns
+        assert!(match_adapter_with_glob("claude-sonnet-*", "claude-sonnet-4-6").is_some());
+        assert!(match_adapter_with_glob("claude-opus-*", "claude-opus-4-6").is_some());
+        assert!(match_adapter_with_glob("claude-haiku-*", "claude-haiku-4-5").is_some());
+        assert!(match_adapter_with_glob("claude-fable-*", "claude-fable-5").is_some());
+
+        // OpenAI models
+        assert!(match_adapter_with_glob("gpt-*", "gpt-4").is_some());
+        assert!(match_adapter_with_glob("gpt-*", "gpt-3.5-turbo").is_some());
+
+        // Generic catch-all
+        assert!(match_adapter_with_glob("*", "any-unknown-model").is_some());
+    }
+
+    #[test]
+    fn glob_match_case_sensitive() {
+        // Glob matching is case-sensitive
+        assert!(match_adapter_with_glob("Claude-*", "Claude-Sonnet").is_some());
+        assert!(match_adapter_with_glob("Claude-*", "claude-sonnet").is_none());
+        assert!(match_adapter_with_glob("claude-*", "CLAUDE-SONNET").is_none());
+    }
+
+    #[test]
+    fn glob_match_with_special_characters() {
+        // Model names with special characters
+        assert!(match_adapter_with_glob("claude-*", "claude-sonnet_4_6").is_some());
+        assert!(match_adapter_with_glob("gpt-*", "gpt-4.turbo").is_some());
+        assert!(match_adapter_with_glob("*", "model-with-dashes").is_some());
+        assert!(match_adapter_with_glob("*", "model_with_underscores").is_some());
     }
 }
