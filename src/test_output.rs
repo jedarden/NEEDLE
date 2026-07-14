@@ -29,8 +29,8 @@
 //! output.write_combined("Combined output").unwrap();
 //! ```
 
-use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -77,9 +77,7 @@ impl TestOutput {
     /// let output = TestOutput::new("my_test", Path::new(".")).unwrap();
     /// ```
     pub fn new(test_name: &str, workspace_root: &Path) -> Option<Self> {
-        let output_dir = workspace_root
-            .join(TEST_OUTPUT_DIR_NAME)
-            .join(test_name);
+        let output_dir = workspace_root.join(TEST_OUTPUT_DIR_NAME).join(test_name);
 
         // Create the output directory with proper error handling
         if let Err(e) = std::fs::create_dir_all(&output_dir) {
@@ -185,20 +183,32 @@ impl TestOutput {
 
     /// Read stdout content if it exists.
     pub fn read_stdout(&self) -> Result<String> {
-        std::fs::read_to_string(self.stdout_path())
-            .with_context(|| format!("failed to read test stdout: {}", self.stdout_path().display()))
+        std::fs::read_to_string(self.stdout_path()).with_context(|| {
+            format!(
+                "failed to read test stdout: {}",
+                self.stdout_path().display()
+            )
+        })
     }
 
     /// Read stderr content if it exists.
     pub fn read_stderr(&self) -> Result<String> {
-        std::fs::read_to_string(self.stderr_path())
-            .with_context(|| format!("failed to read test stderr: {}", self.stderr_path().display()))
+        std::fs::read_to_string(self.stderr_path()).with_context(|| {
+            format!(
+                "failed to read test stderr: {}",
+                self.stderr_path().display()
+            )
+        })
     }
 
     /// Read combined output content if it exists.
     pub fn read_combined(&self) -> Result<String> {
-        std::fs::read_to_string(self.combined_path())
-            .with_context(|| format!("failed to read test combined output: {}", self.combined_path().display()))
+        std::fs::read_to_string(self.combined_path()).with_context(|| {
+            format!(
+                "failed to read test combined output: {}",
+                self.combined_path().display()
+            )
+        })
     }
 
     /// Delete all test output files and the directory.
@@ -208,8 +218,12 @@ impl TestOutput {
     /// Returns an error if the directory removal fails.
     pub fn cleanup(&self) -> Result<()> {
         if self.output_dir.exists() {
-            std::fs::remove_dir_all(&self.output_dir)
-                .with_context(|| format!("failed to cleanup test output directory: {}", self.output_dir.display()))?;
+            std::fs::remove_dir_all(&self.output_dir).with_context(|| {
+                format!(
+                    "failed to cleanup test output directory: {}",
+                    self.output_dir.display()
+                )
+            })?;
         }
         Ok(())
     }
@@ -336,7 +350,10 @@ mod tests {
 
         // This should fail because the parent path exists as a file
         let output = TestOutput::new("test_fail", &file_path);
-        assert!(output.is_none(), "Should return None when directory creation fails");
+        assert!(
+            output.is_none(),
+            "Should return None when directory creation fails"
+        );
     }
 
     #[test]
