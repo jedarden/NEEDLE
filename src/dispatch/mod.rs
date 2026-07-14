@@ -754,11 +754,18 @@ impl Dispatcher {
         // the agent exits.  The log-writer task reads transform stdout and writes
         // normalized JSONL to ~/.needle/logs/<worker>-<bead_id>.agent.jsonl.
         #[allow(clippy::type_complexity)]
-        let (transform_tx, transform_child_opt, transform_log_task, transform_start): (
+        let (
+            transform_tx,
+            transform_child_opt,
+            transform_log_task,
+            transform_start,
+            transform_feeder_task,
+        ): (
             Option<tokio::sync::mpsc::Sender<String>>,
             Option<tokio::process::Child>,
             Option<tokio::task::JoinHandle<u64>>,
             Option<Instant>,
+            Option<tokio::task::JoinHandle<()>>,
         ) = if let Some(ref transform_cmd) = adapter.output_transform {
             // Check if the transform binary is available.
             if which::which(transform_cmd).is_err() {
@@ -766,7 +773,7 @@ impl Dispatcher {
                     bead_id: bead_id.clone(),
                     reason: format!("binary not found: {transform_cmd}"),
                 });
-                (None, None, None, None)
+                (None, None, None, None, None)
             } else {
                 let _ = self.telemetry.emit(EventKind::TransformStarted {
                     bead_id: bead_id.clone(),
@@ -774,13 +781,26 @@ impl Dispatcher {
                     agent: adapter.name.clone(),
                 });
 
-                match tokio::process::Command::new("bash")
-                    .arg("-c")
-                    .arg(transform_cmd)
-                    .stdin(std::process::Stdio::piped())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::inherit())
-                    .spawn()
+                // Safety: setpgid(0,0) is async-signal-safe and idempotent. Puts
+                // the transform in its own process group (mirroring the agent's
+                // own spawn above) so a post-T2 kill can killpg() it — a plain
+                // start_kill() only signals this direct child, leaving any
+                // subprocess IT forked (e.g. a `sleep` from a hung shell
+                // pipeline) alive and holding the stdout pipe open, which would
+                // wedge write_transform_log's EOF read forever.
+                match unsafe {
+                    tokio::process::Command::new("bash")
+                        .arg("-c")
+                        .arg(transform_cmd)
+                        .stdin(std::process::Stdio::piped())
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::inherit())
+                        .pre_exec(|| {
+                            libc::setpgid(0, 0);
+                            Ok(())
+                        })
+                        .spawn()
+                }
                 {
                     Ok(mut transform_child) => {
                         match transform_child.stdin.take() {
@@ -795,8 +815,12 @@ impl Dispatcher {
 
                                 // Feeder task: forwards channel lines to
                                 // transform stdin.  Dropping the writer closes
-                                // stdin → transform receives EOF.
-                                tokio::spawn(async move {
+                                // stdin → transform receives EOF.  The handle
+                                // is kept (not fire-and-forget) so the caller
+                                // can confirm the feeder actually finished
+                                // writing and closing stdin before deciding
+                                // whether the transform deserves a kill.
+                                let feeder_task = tokio::spawn(async move {
                                     let mut writer = tokio::io::BufWriter::new(transform_stdin);
                                     while let Some(line) = rx.recv().await {
                                         if writer.write_all(line.as_bytes()).await.is_err() {
@@ -824,6 +848,7 @@ impl Dispatcher {
                                     Some(transform_child),
                                     Some(log_task),
                                     Some(transform_start),
+                                    Some(feeder_task),
                                 )
                             }
                             None => {
@@ -832,7 +857,7 @@ impl Dispatcher {
                                     error: "failed to open transform stdin".to_string(),
                                     exit_code: -1,
                                 });
-                                (None, None, None, None)
+                                (None, None, None, None, None)
                             }
                         }
                     }
@@ -842,7 +867,7 @@ impl Dispatcher {
                             error: e.to_string(),
                             exit_code: -1,
                         });
-                        (None, None, None, None)
+                        (None, None, None, None, None)
                     }
                 }
             }
@@ -851,7 +876,7 @@ impl Dispatcher {
                 bead_id: bead_id.clone(),
                 reason: "not configured".to_string(),
             });
-            (None, None, None, None)
+            (None, None, None, None, None)
         };
 
         let stdout_task = tokio::spawn(async move {
@@ -927,13 +952,71 @@ impl Dispatcher {
         let stdout = stdout_task.await.unwrap_or_default();
         let stderr = stderr_task.await.unwrap_or_default();
 
-        // Kill transform after agent exits (requirement: transform is always
-        // killed when agent exits, regardless of exit code).  start_kill() is
-        // a no-op if the process has already exited.
+        // Give the transform a fair chance to drain stdin and exit on its own
+        // before killing it. Two distinct grace periods on two distinct
+        // targets, not one blanket kill:
+        //   T1 (FEEDER_DRAIN_TIMEOUT) — await the feeder task's own
+        //       JoinHandle, confirming stdin was actually flushed and closed
+        //       by the forwarder, not just that the channel sender was
+        //       dropped (dropping the sender only *starts* that process).
+        //   T2 (TRANSFORM_EXIT_GRACE) — THEN await the transform child's own
+        //       exit, confirming it actually consumed the stdin EOF (which
+        //       includes the final line, e.g. codex's `turn.completed`) and
+        //       exited naturally, before any kill is even considered.
+        const FEEDER_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+        const TRANSFORM_EXIT_GRACE: Duration = Duration::from_secs(2);
+
         if let Some(mut t_child) = transform_child_opt {
-            let _ = t_child.start_kill();
-            let transform_exit = t_child.wait().await.ok();
-            let t_exit_code = transform_exit.and_then(|s| s.code()).unwrap_or(-1);
+            // T1: did the feeder actually finish forwarding and close stdin?
+            let feeder_drained = match transform_feeder_task {
+                Some(feeder) => tokio::time::timeout(FEEDER_DRAIN_TIMEOUT, feeder)
+                    .await
+                    .is_ok(),
+                // No feeder handle at all — can't confirm delivery.
+                None => false,
+            };
+
+            // Three-way outcome, not a binary natural-exit-vs-kill split:
+            //   NaturalExit      — the transform exited on its own within the
+            //                      grace window; use its real exit status.
+            //   KilledAfterDrain — input delivery was confirmed (T1 passed)
+            //                      but the transform itself hung past T2 and
+            //                      had to be killed. Data reached it; the
+            //                      process did not finish. This must NOT be
+            //                      reported as a clean success.
+            //   KilledNoDrain    — the feeder itself never confirmed finishing
+            //                      within T1, so input delivery is unconfirmed
+            //                      when the kill happens.
+            enum TransformOutcome {
+                NaturalExit(std::process::ExitStatus),
+                KilledAfterDrain,
+                KilledNoDrain,
+            }
+
+            let outcome = match tokio::time::timeout(TRANSFORM_EXIT_GRACE, t_child.wait()).await {
+                Ok(Ok(status)) => TransformOutcome::NaturalExit(status),
+                Ok(Err(_)) | Err(_) => {
+                    // wait() itself errored, or T2 elapsed with no exit. Kill the
+                    // transform's entire process group (it was spawned into its
+                    // own group above), not just the direct child — a plain
+                    // start_kill() leaves any subprocess it forked (e.g. a
+                    // `sleep` from a hung pipeline) alive as an orphan holding
+                    // the stdout pipe open, wedging the log-writer task's EOF
+                    // read forever. Mirrors the agent's own timeout-kill path.
+                    if let Some(t_pid) = t_child.id() {
+                        unsafe {
+                            libc::killpg(t_pid as libc::pid_t, libc::SIGKILL);
+                        }
+                    }
+                    let _ = t_child.start_kill();
+                    let _ = t_child.wait().await;
+                    if feeder_drained {
+                        TransformOutcome::KilledAfterDrain
+                    } else {
+                        TransformOutcome::KilledNoDrain
+                    }
+                }
+            };
 
             // Await log writer: flushes and closes the file before we return
             // (i.e., before HANDLING state begins).
@@ -945,18 +1028,55 @@ impl Dispatcher {
 
             let duration_ms = transform_start.map_or(0, |s| s.elapsed().as_millis() as u64);
 
-            if t_exit_code == 0 {
-                let _ = self.telemetry.emit(EventKind::TransformCompleted {
-                    bead_id: bead_id.clone(),
-                    events_written,
-                    duration_ms,
-                });
-            } else {
-                let _ = self.telemetry.emit(EventKind::TransformFailed {
-                    bead_id: bead_id.clone(),
-                    error: format!("exit code {t_exit_code}"),
-                    exit_code: t_exit_code,
-                });
+            match outcome {
+                TransformOutcome::NaturalExit(status) => {
+                    if status.success() {
+                        let _ = self.telemetry.emit(EventKind::TransformCompleted {
+                            bead_id: bead_id.clone(),
+                            events_written,
+                            duration_ms,
+                        });
+                    } else {
+                        use std::os::unix::process::ExitStatusExt;
+                        let t_exit_code = status.code().unwrap_or(-1);
+                        let error = match status.code() {
+                            Some(code) => format!("exit code {code}"),
+                            None => match status.signal() {
+                                Some(sig) => {
+                                    format!("terminated by signal {sig} (not initiated by needle)")
+                                }
+                                None => "exited with unknown status".to_string(),
+                            },
+                        };
+                        let _ = self.telemetry.emit(EventKind::TransformFailed {
+                            bead_id: bead_id.clone(),
+                            error,
+                            exit_code: t_exit_code,
+                        });
+                    }
+                }
+                TransformOutcome::KilledAfterDrain => {
+                    let _ = self.telemetry.emit(EventKind::TransformFailed {
+                        bead_id: bead_id.clone(),
+                        error: format!(
+                            "transform did not exit within {}s of receiving stdin EOF \
+                             (all input confirmed delivered); killed as cleanup",
+                            TRANSFORM_EXIT_GRACE.as_secs()
+                        ),
+                        exit_code: -1,
+                    });
+                }
+                TransformOutcome::KilledNoDrain => {
+                    let _ = self.telemetry.emit(EventKind::TransformFailed {
+                        bead_id: bead_id.clone(),
+                        error: format!(
+                            "transform feeder did not finish forwarding stdin within {}ms \
+                             (input delivery unconfirmed); killed as cleanup",
+                            FEEDER_DRAIN_TIMEOUT.as_millis()
+                        ),
+                        exit_code: -1,
+                    });
+                }
             }
         }
 
