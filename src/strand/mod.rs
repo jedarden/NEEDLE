@@ -109,6 +109,7 @@ impl StrandRunner {
         let pluck = PluckStrand::with_split_threshold(
             config.strands.pluck.exclude_labels.clone(),
             config.strands.pluck.split_after_failures,
+            telemetry.clone(),
         );
 
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");

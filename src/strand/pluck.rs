@@ -7,6 +7,7 @@
 //! Given the same queue state, every worker computes the same candidate list.
 
 use crate::bead_store::{BeadStore, Filters};
+use crate::telemetry::Telemetry;
 use crate::types::{Bead, StrandError, StrandResult};
 
 /// Default labels excluded from Pluck selection when not configured.
@@ -18,14 +19,16 @@ pub struct PluckStrand {
     exclude_labels: Vec<String>,
     /// Auto-split beads after this many consecutive failures (0 = disabled).
     split_after_failures: u32,
+    /// Telemetry emitter for starvation events.
+    telemetry: Telemetry,
 }
 
 impl PluckStrand {
-    /// Create a new PluckStrand with the given exclude labels.
+    /// Create a new PluckStrand with the given exclude labels and telemetry.
     ///
     /// If `exclude_labels` is empty, the default set (`deferred`, `human`,
     /// `blocked`) is used.
-    pub fn new(exclude_labels: Vec<String>) -> Self {
+    pub fn new(exclude_labels: Vec<String>, telemetry: Telemetry) -> Self {
         let labels = if exclude_labels.is_empty() {
             DEFAULT_EXCLUDE_LABELS
                 .iter()
@@ -37,14 +40,15 @@ impl PluckStrand {
         PluckStrand {
             exclude_labels: labels,
             split_after_failures: 3, // default threshold
+            telemetry,
         }
     }
 
-    /// Create a new PluckStrand with the given exclude labels and split threshold.
+    /// Create a new PluckStrand with the given exclude labels, split threshold, and telemetry.
     ///
     /// If `exclude_labels` is empty, the default set (`deferred`, `human`,
     /// `blocked`) is used.
-    pub fn with_split_threshold(exclude_labels: Vec<String>, split_after_failures: u32) -> Self {
+    pub fn with_split_threshold(exclude_labels: Vec<String>, split_after_failures: u32, telemetry: Telemetry) -> Self {
         let labels = if exclude_labels.is_empty() {
             DEFAULT_EXCLUDE_LABELS
                 .iter()
@@ -56,6 +60,7 @@ impl PluckStrand {
         PluckStrand {
             exclude_labels: labels,
             split_after_failures,
+            telemetry,
         }
     }
 
@@ -587,7 +592,7 @@ mod tests {
             ],
         };
 
-        let strand = PluckStrand::new(vec![]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -610,7 +615,7 @@ mod tests {
             ],
         };
 
-        let strand = PluckStrand::new(vec![]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -637,7 +642,7 @@ mod tests {
             ],
         };
 
-        let strand = PluckStrand::new(vec![]); // Uses default excludes
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string())); // Uses default excludes
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -660,7 +665,7 @@ mod tests {
         };
 
         // Custom excludes: only "wip" — "deferred" is NOT excluded.
-        let strand = PluckStrand::new(vec!["wip".to_string()]);
+        let strand = PluckStrand::new(vec!["wip".to_string()], Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -689,7 +694,7 @@ mod tests {
             ],
         };
 
-        let strand = PluckStrand::new(vec![]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -714,7 +719,7 @@ mod tests {
             ],
         };
 
-        let strand = PluckStrand::new(vec![]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -735,7 +740,7 @@ mod tests {
             ],
         };
 
-        let strand = PluckStrand::new(vec![]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -758,7 +763,7 @@ mod tests {
     #[tokio::test]
     async fn empty_queue_returns_no_work() {
         let store = MemoryStore { beads: vec![] };
-        let strand = PluckStrand::new(vec![]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -770,7 +775,7 @@ mod tests {
     #[tokio::test]
     async fn store_error_returns_error_not_no_work() {
         let store = FailingStore;
-        let strand = PluckStrand::new(vec![]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -793,7 +798,7 @@ mod tests {
             make_bead("m-bead-2", 1, "2026-01-01 00:00:00"),
         ];
 
-        let strand = PluckStrand::new(vec![]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
 
         let store1 = MemoryStore {
             beads: beads.clone(),
@@ -822,7 +827,7 @@ mod tests {
 
     #[test]
     fn strand_name_is_pluck() {
-        let strand = PluckStrand::new(vec![]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
         assert_eq!(strand.name(), "pluck");
     }
 
@@ -832,13 +837,13 @@ mod tests {
 
     #[test]
     fn default_exclude_labels_applied_when_empty() {
-        let strand = PluckStrand::new(vec![]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
         assert_eq!(strand.exclude_labels, vec!["deferred", "human", "blocked"]);
     }
 
     #[test]
     fn custom_exclude_labels_used_when_provided() {
-        let strand = PluckStrand::new(vec!["custom".to_string()]);
+        let strand = PluckStrand::new(vec!["custom".to_string()], Telemetry::new("test-worker".to_string()));
         assert_eq!(strand.exclude_labels, vec!["custom"]);
     }
 
@@ -853,7 +858,7 @@ mod tests {
             beads: vec![bead_with_failures],
         };
 
-        let strand = PluckStrand::with_split_threshold(vec![], 3);
+        let strand = PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -872,7 +877,7 @@ mod tests {
             beads: vec![bead_with_failures],
         };
 
-        let strand = PluckStrand::with_split_threshold(vec![], 3);
+        let strand = PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
@@ -890,7 +895,7 @@ mod tests {
             beads: vec![bead_with_failures],
         };
 
-        let strand = PluckStrand::with_split_threshold(vec![], 0);
+        let strand = PluckStrand::with_split_threshold(vec![], 0, Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store).await;
 
         match result {
