@@ -4663,4 +4663,128 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn apply_routing_rules_first_match_wins() {
+        // Test that when multiple rules match the same model, the first rule wins.
+        use crate::config::{RoutingConfig, RoutingRule};
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+
+        // Configure two rules that both match "claude-sonnet-4-6":
+        // - First rule: more specific pattern "claude-sonnet-.*" -> claude-print
+        // - Second rule: broader pattern "claude-.*" -> claude-code-glm-4.7
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "claude-sonnet-.*".to_string(),
+                    adapter: "claude-print".to_string(),
+                },
+                RoutingRule {
+                    match_model: "claude-.*".to_string(),
+                    adapter: "claude-code-glm-4.7".to_string(),
+                },
+            ],
+            default_adapter: None,
+            strict: true,
+        });
+
+        let worker = Worker::new(
+            config,
+            "test-routing-first-match".to_string(),
+            Arc::clone(&store),
+        );
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "claude".to_string(),
+            description: None,
+            agent_cli: "claude".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "claude {prompt}".to_string(),
+            environment: std::collections::HashMap::new(),
+            timeout_secs: 3600,
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+        };
+
+        let result = worker.apply_routing_rules(&adapter);
+        assert!(result.is_ok());
+        let (chosen_adapter, matched_rule) = result.unwrap();
+
+        // Should use the FIRST matching rule (claude-print), not the second.
+        assert_eq!(
+            chosen_adapter, "claude-print",
+            "first matching rule should win when both rules match"
+        );
+        assert_eq!(
+            matched_rule, "claude-sonnet-.*",
+            "should report the first matching pattern"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_routing_rules_order_matters() {
+        // Test that rule order matters - swap the order from the previous test
+        // and verify the second rule now wins.
+        use crate::config::{RoutingConfig, RoutingRule};
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = Config::default();
+        config.self_modification.hot_reload = false;
+
+        // Same two patterns as previous test, but in REVERSED order:
+        // - First rule: broader pattern "claude-.*" -> claude-code-glm-4.7
+        // - Second rule: more specific pattern "claude-sonnet-.*" -> claude-print
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![
+                RoutingRule {
+                    match_model: "claude-.*".to_string(),
+                    adapter: "claude-code-glm-4.7".to_string(),
+                },
+                RoutingRule {
+                    match_model: "claude-sonnet-.*".to_string(),
+                    adapter: "claude-print".to_string(),
+                },
+            ],
+            default_adapter: None,
+            strict: true,
+        });
+
+        let worker = Worker::new(
+            config,
+            "test-routing-order-matters".to_string(),
+            Arc::clone(&store),
+        );
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "claude".to_string(),
+            description: None,
+            agent_cli: "claude".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "claude {prompt}".to_string(),
+            environment: std::collections::HashMap::new(),
+            timeout_secs: 3600,
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+        };
+
+        let result = worker.apply_routing_rules(&adapter);
+        assert!(result.is_ok());
+        let (chosen_adapter, matched_rule) = result.unwrap();
+
+        // Now the FIRST rule (claude-code-glm-4.7 with broader pattern) wins,
+        // even though the second rule is more specific.
+        assert_eq!(
+            chosen_adapter, "claude-code-glm-4.7",
+            "swapped rule order should cause first rule to win"
+        );
+        assert_eq!(
+            matched_rule, "claude-.*",
+            "should report the first (broader) matching pattern"
+        );
+    }
 }
