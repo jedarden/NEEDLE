@@ -1,0 +1,573 @@
+warning: value assigned to `last_error` is never read
+    --> src/bead_store/mod.rs:1010:30
+     |
+1010 |         let mut last_error = None;
+     |                              ^^^^ this value is reassigned later and never used
+...
+1098 |             last_error = None; // Clear last_error since we're retrying
+     |             ---------- `last_error` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `last_error` is never read
+    --> src/bead_store/mod.rs:1098:13
+     |
+1098 |             last_error = None; // Clear last_error since we're retrying
+     |             ^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:33
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                         ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                 ^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:43
+    |
+212 |             "E0382" | "E0502" | "E0505" | "E0506" | "E0507" | "E0508" | "E0509" | "E0515"
+    |                                                                                   ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                           ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:53
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                             ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                     ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:63
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                       ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:73
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                 ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:83
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                           ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                                                   ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:15
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                                     ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:25
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |               ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:35
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                         ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                   ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:45
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                   ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                             ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:55
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                             ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                       ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:65
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                       ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                 ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:75
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                 ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                           ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:85
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                           ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                                     ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:15
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                                     ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:25
+    |
+215 |             | "E0401" | "E0402" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0409"
+    |               ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:35
+    |
+215 |             | "E0401" | "E0402" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0409"
+    |                         ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |                                   ^^^^^^^ no value can reach this
+
+warning: unused variable: `tmux_procs`
+    --> src/cli/mod.rs:1506:9
+     |
+1506 |     let tmux_procs: Vec<&DiscoveredProcess> = discovered
+     |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tmux_procs`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `tmux_pids`
+    --> src/cli/mod.rs:2081:9
+     |
+2081 |     let tmux_pids: HashSet<u32> = sessions.iter().filter_map(|s| s.pid).collect();
+     |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tmux_pids`
+
+warning: unused variable: `registered_procs`
+    --> src/cli/mod.rs:2084:9
+     |
+2084 |     let registered_procs: Vec<&DiscoveredProcess> = discovered
+     |         ^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_registered_procs`
+
+warning: function `parse_error_line` is never used
+   --> src/cargo_test.rs:571:4
+    |
+571 | fn parse_error_line(line: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_crate_name` is never used
+   --> src/cargo_test.rs:590:4
+    |
+590 | fn extract_crate_name(line: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: constant `WEAVE_AGENT_TIMEOUT_SECS` is never used
+   --> src/strand/weave.rs:558:7
+    |
+558 | const WEAVE_AGENT_TIMEOUT_SECS: u64 = 60;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `needle` (lib) generated 25 warnings (run `cargo fix --lib -p needle` to apply 3 suggestions)
+warning: unused variable: `bead_id`
+   --> examples/test_bf_write_concurrency.rs:168:5
+    |
+168 |     bead_id: &str,
+    |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bead_id`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `needle` (example "test_bf_write_concurrency") generated 1 warning (run `cargo fix --example "test_bf_write_concurrency" -p needle` to apply 1 suggestion)
+   Compiling needle v0.2.11 (/home/coding/NEEDLE)
+warning: unused import: `std::path::PathBuf`
+  --> tests/verify_process_discovery.rs:10:5
+   |
+10 | use std::path::PathBuf;
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Command` and `Stdio`
+  --> tests/verify_process_discovery.rs:11:20
+   |
+11 | use std::process::{Command, Stdio};
+   |                    ^^^^^^^  ^^^^^
+
+warning: unused import: `std::thread`
+  --> tests/verify_process_discovery.rs:12:5
+   |
+12 | use std::thread;
+   |     ^^^^^^^^^^^
+
+warning: unused import: `std::time::Duration`
+  --> tests/verify_process_discovery.rs:13:5
+   |
+13 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: `needle` (test "verify_process_discovery") generated 4 warnings (run `cargo fix --test "verify_process_discovery" -p needle` to apply 4 suggestions)
+warning: unused variable: `global_routing`
+   --> tests/routing_integration.rs:735:9
+    |
+735 |     let global_routing = RoutingConfig {
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_global_routing`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `global_routing`
+   --> tests/routing_integration.rs:795:9
+    |
+795 |     let global_routing = RoutingConfig {
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_global_routing`
+
+warning: unused variable: `dispatcher`
+    --> tests/routing_integration.rs:1908:9
+     |
+1908 |     let dispatcher = make_test_dispatcher(vec![make_test_adapter(
+     |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dispatcher`
+
+warning: `needle` (test "routing_integration") generated 3 warnings (run `cargo fix --test "routing_integration" -p needle` to apply 3 suggestions)
+warning: unused import: `std::path::PathBuf`
+ --> examples/test_bf_list_error_output.rs:6:5
+  |
+6 | use std::path::PathBuf;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `needle::types::StrandError`
+ --> examples/test_bf_list_error_output.rs:9:5
+  |
+9 | use needle::types::StrandError;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `needle` (example "test_bf_list_error_output") generated 2 warnings (run `cargo fix --example "test_bf_list_error_output" -p needle` to apply 2 suggestions)
+warning: unused import: `std::fs::File`
+  --> tests/process_discovery_integration.rs:10:5
+   |
+10 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::io::Write`
+  --> tests/process_discovery_integration.rs:11:5
+   |
+11 | use std::io::Write;
+   |     ^^^^^^^^^^^^^^
+
+warning: `needle` (test "process_discovery_integration") generated 2 warnings (run `cargo fix --test "process_discovery_integration" -p needle` to apply 2 suggestions)
+warning: unused import: `std::path::PathBuf`
+ --> examples/test_actual_bf_error_format.rs:6:5
+  |
+6 | use std::path::PathBuf;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `needle::types::StrandError`
+ --> examples/test_actual_bf_error_format.rs:9:5
+  |
+9 | use needle::types::StrandError;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Context`
+ --> examples/test_actual_bf_error_format.rs:5:22
+  |
+5 | use anyhow::{anyhow, Context, Result};
+  |                      ^^^^^^^
+
+warning: `needle` (example "test_actual_bf_error_format") generated 3 warnings (run `cargo fix --example "test_actual_bf_error_format" -p needle` to apply 2 suggestions)
+warning: unused doc comment
+  --> tests/routing_matcher_baseline.rs:22:5
+   |
+22 | /     /// Baseline test documenting CURRENT matcher behavior when multiple rules
+23 | |     /// both match the same model AND route to the same adapter.
+24 | |     ///
+25 | |     /// This test verifies that the matcher implements "first-match-wins" behavior:
+...  |
+29 | |     ///
+30 | |     /// Current behavior: The first rule in the list that matches determines routing.
+   | |_____________________________________________________________________________________^
+...
+35 | /     let rules = vec![
+36 | |         make_rule("claude-.*", "claude-print"),
+37 | |         make_rule("claude-sonnet-.*", "claude-print"),
+38 | |     ];
+   | |______- rustdoc does not generate documentation for statements
+   |
+   = help: use `//` for a plain comment
+   = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> tests/routing_matcher_baseline.rs:63:5
+   |
+63 | /     /// Baseline test documenting CURRENT matcher behavior when multiple rules
+64 | |     /// match the same model but route to DIFFERENT adapters.
+65 | |     ///
+66 | |     /// This test verifies that "first-match-wins" is enforced even when
+...  |
+69 | |     /// Current behavior: The first matching rule determines routing, regardless
+70 | |     /// of whether later rules might be "more appropriate".
+   | |___________________________________________________________^
+...
+75 | /     let rules = vec![
+76 | |         make_rule("claude-.*", "claude-print"),
+77 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+78 | |         make_rule(".*", "fallback"),
+79 | |     ];
+   | |______- rustdoc does not generate documentation for statements
+   |
+   = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:103:5
+    |
+103 | /     /// Baseline test documenting that rule ORDER is significant.
+104 | |     ///
+105 | |     /// This test verifies that swapping rule order changes the outcome,
+106 | |     /// confirming that the matcher uses first-match-wins semantics.
+107 | |     ///
+108 | |     /// Current behavior: Rules are evaluated in order, first match wins.
+    | |_________________________________________________________________________^
+...
+112 | /     let rules = vec![
+113 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+114 | |         make_rule("claude-.*", "claude-print"),
+115 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:139:5
+    |
+139 | /     /// Baseline test to verify whether the matcher stops at the first match
+140 | |     /// or continues checking all rules.
+141 | |     ///
+142 | |     /// This test uses counter-like adapters to detect whether all rules are
+...   |
+145 | |     /// Current behavior: The matcher stops evaluation after the first match
+146 | |     /// and does not check subsequent rules.
+    | |____________________________________________^
+...
+151 | /     let rules = vec![
+152 | |         make_rule("^claude-sonnet-4-6$", "adapter-1"),
+153 | |         make_rule("claude-.*", "adapter-2"),
+154 | |         make_rule("*", "adapter-3"),
+155 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:181:5
+    |
+181 | /     /// Baseline test documenting CURRENT matcher behavior when an invalid
+182 | |     /// pattern precedes valid matching patterns.
+183 | |     ///
+184 | |     /// This test verifies that invalid patterns are skipped gracefully and
+...   |
+187 | |     /// Current behavior: Invalid regex patterns are logged as warnings and
+188 | |     /// skipped, then the next valid pattern is checked.
+    | |________________________________________________________^
+...
+193 | /     let rules = vec![
+194 | |         make_rule("claude-.*", "first-adapter"),
+195 | |         make_rule("[invalid(regex", "invalid-adapter"),
+196 | |         make_rule("claude-sonnet-.*", "third-adapter"),
+197 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:222:5
+    |
+222 | /     /// Test that verifies first-match-wins semantics by showing that a
+223 | |     /// more-specific rule wins when positioned before a less-specific rule.
+224 | |     ///
+225 | |     /// This test demonstrates:
+...   |
+231 | |     /// Current behavior: The first matching rule in the list determines routing,
+232 | |     /// regardless of whether later rules might be more specific.
+    | |_________________________________________________________________^
+...
+236 | /     let rules = vec![
+237 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+238 | |         make_rule("claude-.*", "claude-print"),
+239 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:262:5
+    |
+262 | /     /// Test that verifies first-match-wins semantics by showing that a
+263 | |     /// less-specific (broad) rule wins when positioned before a more-specific rule.
+264 | |     ///
+265 | |     /// This test complements `routing_baseline_specific_rule_wins_when_first`
+...   |
+269 | |     /// Current behavior: Rule order is significant - the first matching rule
+270 | |     /// wins, even if a later rule would be "better" or more specific.
+    | |______________________________________________________________________^
+...
+274 | /     let rules = vec![
+275 | |         make_rule("claude-.*", "claude-print"),
+276 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+277 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: `needle` (test "routing_matcher_baseline") generated 7 warnings
+warning: unused import: `std::path::Path`
+ --> tests/verify_bf_4390q.rs:4:5
+  |
+4 | use std::path::Path;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `needle` (test "verify_bf_4390q") generated 1 warning (run `cargo fix --test "verify_bf_4390q" -p needle` to apply 1 suggestion)
+warning: unused import: `std::path::Path`
+ --> examples/test_4390q_debug.rs:2:5
+  |
+2 | use std::path::Path;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `needle` (example "test_4390q_debug") generated 1 warning (run `cargo fix --example "test_4390q_debug" -p needle` to apply 1 suggestion)
+error[E0004]: non-exhaustive patterns: `types::StrandResult::NoHomeStore` not covered
+   --> src/strand/explore.rs:770:15
+    |
+770 |         match result {
+    |               ^^^^^^ pattern `types::StrandResult::NoHomeStore` not covered
+    |
+note: `types::StrandResult` defined here
+   --> src/types/mod.rs:302:10
+    |
+302 | pub enum StrandResult {
+    |          ^^^^^^^^^^^^
+...
+320 |     NoHomeStore,
+    |     ----------- not covered
+    = note: the matched value is of type `types::StrandResult`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+    |
+805 ~             },
+806 +             types::StrandResult::NoHomeStore => todo!()
+    |
+
+error[E0004]: non-exhaustive patterns: `types::StrandResult::NoHomeStore` not covered
+   --> src/strand/explore.rs:869:15
+    |
+869 |         match result {
+    |               ^^^^^^ pattern `types::StrandResult::NoHomeStore` not covered
+    |
+note: `types::StrandResult` defined here
+   --> src/types/mod.rs:302:10
+    |
+302 | pub enum StrandResult {
+    |          ^^^^^^^^^^^^
+...
+320 |     NoHomeStore,
+    |     ----------- not covered
+    = note: the matched value is of type `types::StrandResult`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+    |
+894 ~             },
+895 +             types::StrandResult::NoHomeStore => todo!()
+    |
+
+error[E0004]: non-exhaustive patterns: `types::StrandResult::NoHomeStore` not covered
+   --> src/strand/explore.rs:938:15
+    |
+938 |         match result {
+    |               ^^^^^^ pattern `types::StrandResult::NoHomeStore` not covered
+    |
+note: `types::StrandResult` defined here
+   --> src/types/mod.rs:302:10
+    |
+302 | pub enum StrandResult {
+    |          ^^^^^^^^^^^^
+...
+320 |     NoHomeStore,
+    |     ----------- not covered
+    = note: the matched value is of type `types::StrandResult`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+    |
+959 ~             },
+960 +             types::StrandResult::NoHomeStore => todo!()
+    |
+
+error[E0004]: non-exhaustive patterns: `types::StrandResult::NoHomeStore` not covered
+    --> src/strand/explore.rs:1023:15
+     |
+1023 |         match result {
+     |               ^^^^^^ pattern `types::StrandResult::NoHomeStore` not covered
+     |
+note: `types::StrandResult` defined here
+    --> src/types/mod.rs:302:10
+     |
+ 302 | pub enum StrandResult {
+     |          ^^^^^^^^^^^^
+...
+ 320 |     NoHomeStore,
+     |     ----------- not covered
+     = note: the matched value is of type `types::StrandResult`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+     |
+1058 ~             },
+1059 +             types::StrandResult::NoHomeStore => todo!()
+     |
+
+For more information about this error, try `rustc --explain E0004`.
+warning: `needle` (lib test) generated 22 warnings (22 duplicates)
+error: could not compile `needle` (lib test) due to 4 previous errors; 22 warnings emitted
