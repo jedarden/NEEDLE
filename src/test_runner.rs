@@ -1,7 +1,7 @@
 //! Basic test runner module for executing cargo test commands.
 //!
 //! This module provides a simple interface for running cargo test
-//! with proper process spawning and result handling.
+//! with proper process spawning, output capture, and result handling.
 //!
 //! ## Usage
 //!
@@ -11,8 +11,14 @@
 //!
 //! let runner = TestRunner::new(Path::new("/workspace"));
 //! match runner.run_tests(&[]) {
-//!     Ok(TestResult::Success) => println!("Tests passed!"),
-//!     Ok(TestResult::Failed) => println!("Tests failed"),
+//!     Ok(result) => {
+//!         println!("Exit code: {:?}", result.exit_code);
+//!         println!("Stdout: {}", result.stdout);
+//!         println!("Stderr: {}", result.stderr);
+//!         if result.success() {
+//!             println!("Tests passed!");
+//!         }
+//!     },
 //!     Err(e) => println!("Error running tests: {}", e),
 //! }
 //! ```
@@ -31,12 +37,68 @@ use anyhow::{Context, Result};
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 300;
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Captured Output
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Captured output from test execution.
+///
+/// Holds the stdout and stderr streams captured from the cargo test process.
+#[derive(Debug, Clone)]
+pub struct CapturedOutput {
+    /// Captured stdout from test execution.
+    pub stdout: String,
+    /// Captured stderr from test execution.
+    pub stderr: String,
+}
+
+impl CapturedOutput {
+    /// Create new captured output from raw bytes.
+    pub fn new(stdout: Vec<u8>, stderr: Vec<u8>) -> Self {
+        Self {
+            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stderr: String::from_utf8_lossy(&stderr).to_string(),
+        }
+    }
+
+    /// Create empty captured output.
+    pub fn empty() -> Self {
+        Self {
+            stdout: String::new(),
+            stderr: String::new(),
+        }
+    }
+
+    /// Returns true if both stdout and stderr are empty.
+    pub fn is_empty(&self) -> bool {
+        self.stdout.is_empty() && self.stderr.is_empty()
+    }
+
+    /// Returns the combined length of stdout and stderr in bytes.
+    pub fn total_len(&self) -> usize {
+        self.stdout.len() + self.stderr.len()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Test Result
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Result of running cargo test.
 #[derive(Debug, Clone)]
-pub enum TestResult {
+pub struct TestResult {
+    /// The test execution status.
+    pub status: TestStatus,
+    /// Captured stdout from test execution.
+    pub stdout: String,
+    /// Captured stderr from test execution.
+    pub stderr: String,
+    /// Exit code from cargo test (None if killed by signal).
+    pub exit_code: Option<i32>,
+}
+
+/// The status of test execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TestStatus {
     /// All tests passed successfully.
     Success,
     /// Some tests failed.
@@ -48,14 +110,104 @@ pub enum TestResult {
 }
 
 impl TestResult {
+    /// Create a new test result from process output.
+    fn from_output(output: Output) -> Self {
+        let exit_code = output.status.code();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        let status = Self::classify_status(&output);
+
+        Self {
+            status,
+            stdout,
+            stderr,
+            exit_code,
+        }
+    }
+
+    /// Create a timeout test result.
+    fn timeout() -> Self {
+        Self {
+            status: TestStatus::TimedOut,
+            stdout: String::new(),
+            stderr: String::from("command timed out"),
+            exit_code: None,
+        }
+    }
+
+    /// Classify the test status based on process output.
+    fn classify_status(output: &Output) -> TestStatus {
+        let exit_code = output.status.code();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Check for compilation errors
+        if stderr.contains("error[E") || stderr.contains("error: aborting") {
+            return TestStatus::CompilationFailed;
+        }
+
+        // Check exit code
+        match exit_code {
+            Some(0) => TestStatus::Success,
+            Some(101) => {
+                // Exit code 101 indicates test failures
+                if stderr.contains("test result:") {
+                    TestStatus::Failed
+                } else {
+                    TestStatus::CompilationFailed
+                }
+            }
+            Some(code) => {
+                tracing::warn!(exit_code = code, "unexpected exit code from cargo test");
+                TestStatus::Failed
+            }
+            None => {
+                tracing::warn!("no exit code available from cargo test");
+                TestStatus::Failed
+            }
+        }
+    }
+
     /// Returns true if the test result indicates success.
     pub fn is_success(&self) -> bool {
-        matches!(self, TestResult::Success)
+        matches!(self.status, TestStatus::Success)
     }
 
     /// Returns true if the test result indicates failure.
     pub fn is_failure(&self) -> bool {
         !self.is_success()
+    }
+
+    /// Returns true if the failure was due to compilation errors.
+    pub fn is_compilation_failure(&self) -> bool {
+        matches!(self.status, TestStatus::CompilationFailed)
+    }
+
+    /// Returns true if the test timed out.
+    pub fn is_timed_out(&self) -> bool {
+        matches!(self.status, TestStatus::TimedOut)
+    }
+
+    /// Returns a human-readable summary of the result.
+    pub fn summary(&self) -> String {
+        match &self.status {
+            TestStatus::TimedOut => "Test execution timed out".to_string(),
+            TestStatus::CompilationFailed => "Compilation failed".to_string(),
+            TestStatus::Success => "All tests passed".to_string(),
+            TestStatus::Failed => {
+                format!("Tests failed with exit code {:?}", self.exit_code)
+            }
+        }
+    }
+
+    /// Get the captured stdout.
+    pub fn captured_stdout(&self) -> &str {
+        &self.stdout
+    }
+
+    /// Get the captured stderr.
+    pub fn captured_stderr(&self) -> &str {
+        &self.stderr
     }
 }
 
@@ -106,12 +258,19 @@ impl TestRunner {
     ///
     /// * `args` - Additional arguments to pass to cargo test
     ///
+    /// ## Returns
+    ///
+    /// Returns `TestResult` containing:
+    /// - `status`: The test execution status (Success, Failed, CompilationFailed, TimedOut)
+    /// - `stdout`: Captured stdout from test execution
+    /// - `stderr`: Captured stderr from test execution
+    /// - `exit_code`: Process exit code (None if killed by signal)
+    ///
     /// ## Errors
     ///
     /// Returns an error if:
     /// - The cargo binary cannot be found
     /// - The process fails to spawn
-    /// - The test execution times out
     pub fn run_tests(&self, args: &[&str]) -> Result<TestResult> {
         let start = Instant::now();
 
@@ -119,6 +278,8 @@ impl TestRunner {
         let mut cmd = Command::new("cargo");
         cmd.arg("test");
         cmd.current_dir(&self.workspace);
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
 
         // Add extra arguments
         for arg in &self.extra_args {
@@ -139,17 +300,19 @@ impl TestRunner {
 
         let result = self.execute_with_timeout(cmd)?;
 
-        // Determine the test result
+        // Build the test result with captured output
         let test_result = match result {
-            Some(output) => self.classify_result(&output),
-            None => TestResult::TimedOut,
+            Some(output) => TestResult::from_output(output),
+            None => TestResult::timeout(),
         };
 
         let duration = start.elapsed();
 
         tracing::info!(
-            result = ?test_result,
+            status = ?test_result.status,
             duration_secs = duration.as_secs(),
+            stdout_len = test_result.stdout.len(),
+            stderr_len = test_result.stderr.len(),
             "cargo test completed"
         );
 
@@ -203,38 +366,6 @@ impl TestRunner {
         }
     }
 
-    /// Classify the test result based on process output.
-    fn classify_result(&self, output: &Output) -> TestResult {
-        let exit_code = output.status.code();
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        // Check for compilation errors
-        if stderr.contains("error[E") || stderr.contains("error: aborting") {
-            return TestResult::CompilationFailed;
-        }
-
-        // Check exit code
-        match exit_code {
-            Some(0) => TestResult::Success,
-            Some(101) => {
-                // Exit code 101 indicates test failures
-                if stderr.contains("test result:") {
-                    TestResult::Failed
-                } else {
-                    TestResult::CompilationFailed
-                }
-            }
-            Some(code) => {
-                tracing::warn!(exit_code = code, "unexpected exit code from cargo test");
-                TestResult::Failed
-            }
-            None => {
-                tracing::warn!("no exit code available from cargo test");
-                TestResult::Failed
-            }
-        }
-    }
-
     /// Get the workspace directory.
     pub fn workspace(&self) -> &Path {
         &self.workspace
@@ -256,19 +387,125 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_result_is_success() {
-        assert!(TestResult::Success.is_success());
-        assert!(!TestResult::Failed.is_success());
-        assert!(!TestResult::CompilationFailed.is_success());
-        assert!(!TestResult::TimedOut.is_success());
+    fn test_captured_output_new() {
+        let stdout = b"test stdout output";
+        let stderr = b"test stderr output";
+        let output = CapturedOutput::new(stdout.to_vec(), stderr.to_vec());
+
+        assert_eq!(output.stdout, "test stdout output");
+        assert_eq!(output.stderr, "test stderr output");
+        assert!(!output.is_empty());
+        assert_eq!(output.total_len(), 36); // 18 + 18
     }
 
     #[test]
-    fn test_result_is_failure() {
-        assert!(!TestResult::Success.is_failure());
-        assert!(TestResult::Failed.is_failure());
-        assert!(TestResult::CompilationFailed.is_failure());
-        assert!(TestResult::TimedOut.is_failure());
+    fn test_captured_output_empty() {
+        let output = CapturedOutput::empty();
+        assert!(output.is_empty());
+        assert_eq!(output.total_len(), 0);
+    }
+
+    #[test]
+    fn test_result_status_success() {
+        let result = TestResult {
+            status: TestStatus::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        };
+        assert!(result.is_success());
+        assert!(!result.is_failure());
+        assert!(!result.is_compilation_failure());
+        assert!(!result.is_timed_out());
+    }
+
+    #[test]
+    fn test_result_status_failed() {
+        let result = TestResult {
+            status: TestStatus::Failed,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(1),
+        };
+        assert!(!result.is_success());
+        assert!(result.is_failure());
+    }
+
+    #[test]
+    fn test_result_status_compilation_failed() {
+        let result = TestResult {
+            status: TestStatus::CompilationFailed,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(101),
+        };
+        assert!(!result.is_success());
+        assert!(result.is_failure());
+        assert!(result.is_compilation_failure());
+    }
+
+    #[test]
+    fn test_result_status_timed_out() {
+        let result = TestResult {
+            status: TestStatus::TimedOut,
+            stdout: String::new(),
+            stderr: String::from("command timed out"),
+            exit_code: None,
+        };
+        assert!(!result.is_success());
+        assert!(result.is_failure());
+        assert!(result.is_timed_out());
+    }
+
+    #[test]
+    fn test_result_captured_stdout() {
+        let result = TestResult {
+            status: TestStatus::Success,
+            stdout: String::from("test output"),
+            stderr: String::new(),
+            exit_code: Some(0),
+        };
+        assert_eq!(result.captured_stdout(), "test output");
+        assert_eq!(result.captured_stderr(), "");
+    }
+
+    #[test]
+    fn test_result_captured_stderr() {
+        let result = TestResult {
+            status: TestStatus::Failed,
+            stdout: String::new(),
+            stderr: String::from("error message"),
+            exit_code: Some(1),
+        };
+        assert_eq!(result.captured_stdout(), "");
+        assert_eq!(result.captured_stderr(), "error message");
+    }
+
+    #[test]
+    fn test_result_summary() {
+        let success = TestResult {
+            status: TestStatus::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        };
+        assert!(success.summary().contains("passed"));
+
+        let failed = TestResult {
+            status: TestStatus::Failed,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(1),
+        };
+        assert!(failed.summary().contains("failed"));
+
+        let timeout = TestResult {
+            status: TestStatus::TimedOut,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+        };
+        assert!(timeout.summary().contains("timed out"));
     }
 
     #[test]
