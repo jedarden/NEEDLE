@@ -16,6 +16,7 @@
 //! ├── trace.jsonl     # Structured trace events (one JSON object per line)
 //! ├── stdout.txt      # Raw stdout from agent process
 //! ├── stderr.txt      # Raw stderr from agent process
+//! ├── test-output.txt # Processed test output (for test runs)
 //! └── metadata.json   # Timing, tokens, cost, template version
 //! ```
 
@@ -30,6 +31,13 @@ use serde::{Deserialize, Serialize};
 use crate::cargo_test::TestMetrics;
 use crate::sanitize::Sanitizer;
 use crate::types::BeadId;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Constants
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Test output file name.
+pub const TEST_OUTPUT_FILE: &str = "test-output.txt";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Trace metadata
@@ -168,6 +176,20 @@ impl TraceCapture {
             .with_context(|| format!("failed to write stderr trace: {}", path.display()))
     }
 
+    /// Write test output to `test-output.txt`.
+    ///
+    /// This stores processed/formatted test output (e.g., parsed cargo test results).
+    /// Content is sanitized before writing if a sanitizer is configured.
+    pub fn write_test_output(&self, output: &str) -> Result<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let content = self.sanitize(output);
+        let path = self.trace_dir.join(TEST_OUTPUT_FILE);
+        std::fs::write(&path, content.as_bytes())
+            .with_context(|| format!("failed to write test output: {}", path.display()))
+    }
+
     /// Write structured trace JSONL to `trace.jsonl`.
     ///
     /// Each line should be a valid JSON object. Lines are sanitized before
@@ -222,7 +244,10 @@ impl TraceCapture {
     ///
     /// This stores detailed compilation error information including error codes,
     /// variant classifications, and file locations for later analysis.
-    pub fn write_compilation_errors(&self, errors: &[crate::cargo_test::CompilationError]) -> Result<()> {
+    pub fn write_compilation_errors(
+        &self,
+        errors: &[crate::cargo_test::CompilationError],
+    ) -> Result<()> {
         if !self.enabled || errors.is_empty() {
             return Ok(());
         }
@@ -259,7 +284,7 @@ impl TraceCapture {
 
     /// Prune trace data (keep metadata only).
     ///
-    /// Deletes trace.jsonl, stdout.txt, and stderr.txt, keeping only metadata.json.
+    /// Deletes trace.jsonl, stdout.txt, stderr.txt, and test-output.txt, keeping only metadata.json.
     /// Updates the `pruned` flag in metadata.
     pub fn prune_trace_data(&self) -> Result<()> {
         if !self.enabled {
@@ -267,7 +292,7 @@ impl TraceCapture {
         }
 
         // Delete trace data files.
-        for file in ["trace.jsonl", "stdout.txt", "stderr.txt"] {
+        for file in ["trace.jsonl", "stdout.txt", "stderr.txt", TEST_OUTPUT_FILE] {
             let path = self.trace_dir.join(file);
             if path.exists() {
                 std::fs::remove_file(&path)
@@ -377,7 +402,7 @@ pub fn cleanup_traces(
         // already removed in a previous run but the metadata update failed
         // or was interrupted. This check is crucial for preventing infinite
         // loops where the same trace is counted repeatedly.
-        let has_data_files = ["trace.jsonl", "stdout.txt", "stderr.txt"]
+        let has_data_files = ["trace.jsonl", "stdout.txt", "stderr.txt", TEST_OUTPUT_FILE]
             .iter()
             .any(|file| path.join(file).exists());
 
@@ -475,7 +500,7 @@ fn prune_trace_dir(trace_dir: &Path) -> Result<()> {
     // Step 2: Remove trace data files after metadata is updated.
     // Use ? to propagate errors - if file removal fails, the operator should
     // know so they can investigate. Files that don't exist are skipped.
-    for file in ["trace.jsonl", "stdout.txt", "stderr.txt"] {
+    for file in ["trace.jsonl", "stdout.txt", "stderr.txt", TEST_OUTPUT_FILE] {
         let path = trace_dir.join(file);
         if path.exists() {
             std::fs::remove_file(&path)
@@ -537,6 +562,20 @@ mod tests {
         assert!(stderr_path.exists());
         let content = std::fs::read_to_string(stderr_path).unwrap();
         assert_eq!(content, "error output");
+    }
+
+    #[test]
+    fn trace_capture_writes_test_output() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+
+        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        capture.write_test_output("test output content").unwrap();
+
+        let test_output_path = capture.trace_dir().join(TEST_OUTPUT_FILE);
+        assert!(test_output_path.exists());
+        let content = std::fs::read_to_string(test_output_path).unwrap();
+        assert_eq!(content, "test output content");
     }
 
     #[test]
@@ -613,6 +652,7 @@ mod tests {
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
         capture.write_stdout("stdout").unwrap();
         capture.write_stderr("stderr").unwrap();
+        capture.write_test_output("test output").unwrap();
 
         let metadata = TraceMetadata {
             bead_id: test_bead_id(),
@@ -635,6 +675,7 @@ mod tests {
         // Verify files exist.
         assert!(capture.trace_dir().join("stdout.txt").exists());
         assert!(capture.trace_dir().join("stderr.txt").exists());
+        assert!(capture.trace_dir().join(TEST_OUTPUT_FILE).exists());
         assert!(capture.trace_dir().join("metadata.json").exists());
 
         // Prune.
@@ -643,6 +684,7 @@ mod tests {
         // Verify data files removed, metadata remains.
         assert!(!capture.trace_dir().join("stdout.txt").exists());
         assert!(!capture.trace_dir().join("stderr.txt").exists());
+        assert!(!capture.trace_dir().join(TEST_OUTPUT_FILE).exists());
         assert!(capture.trace_dir().join("metadata.json").exists());
 
         // Verify metadata marked as pruned.
@@ -768,6 +810,7 @@ mod tests {
         std::fs::write(bead_dir.join("stdout.txt"), "stdout").unwrap();
         std::fs::write(bead_dir.join("stderr.txt"), "stderr").unwrap();
         std::fs::write(bead_dir.join("trace.jsonl"), "{\"event\":\"test\"}").unwrap();
+        std::fs::write(bead_dir.join(TEST_OUTPUT_FILE), "test output").unwrap();
 
         let old_metadata = TraceMetadata {
             bead_id: BeadId::from("needle-success"),
@@ -803,6 +846,7 @@ mod tests {
         assert!(!bead_dir.join("stdout.txt").exists());
         assert!(!bead_dir.join("stderr.txt").exists());
         assert!(!bead_dir.join("trace.jsonl").exists());
+        assert!(!bead_dir.join(TEST_OUTPUT_FILE).exists());
         assert!(bead_dir.join("metadata.json").exists());
 
         // Verify metadata marked as pruned.
