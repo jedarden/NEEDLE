@@ -244,9 +244,14 @@ impl CompilationErrorVariant {
             _ if code.is_empty() => CompilationErrorVariant::Syntax,
 
             // Unused code warnings
-            _ if code == "unused" || code == "dead_code" || code == "unused_variables"
-                || code == "unused_imports" || code == "unused_mut" =>
-                CompilationErrorVariant::Unused,
+            _ if code == "unused"
+                || code == "dead_code"
+                || code == "unused_variables"
+                || code == "unused_imports"
+                || code == "unused_mut" =>
+            {
+                CompilationErrorVariant::Unused
+            }
 
             // Default to unknown for unclassified error codes
             _ => CompilationErrorVariant::Unknown,
@@ -424,8 +429,7 @@ impl TestOutcome {
 
             // Add file location if available
             if let Some(ref file) = error.file {
-                summary.push_str(&format!("     at {}:{}", file,
-                    error.line.unwrap_or(0)));
+                summary.push_str(&format!("     at {}:{}", file, error.line.unwrap_or(0)));
                 if let Some(col) = error.column {
                     summary.push_str(&format!(":{}", col));
                 }
@@ -541,7 +545,8 @@ pub fn detect_compilation_errors(stderr: &str) -> (bool, Vec<CompilationError>) 
         // Check for general "error:" messages (but not warnings)
         if line.starts_with("error:") && !line.starts_with("error[E") {
             // Only capture if it looks like a compilation error, not a test error
-            if line.contains("unused") || line.contains("dead_code") || line.contains("mutability") {
+            if line.contains("unused") || line.contains("dead_code") || line.contains("mutability")
+            {
                 // These are compiler warnings/lints, not test failures
                 compilation_failed = true;
                 let error = CompilationError::new(
@@ -569,7 +574,7 @@ fn parse_error_line(line: &str) -> Option<String> {
         if let Some(end) = line.find(']') {
             let error_code = &line[start + 6..end]; // Skip "error["
             let message = line[end + 1..].trim(); // Skip "]"
-            // Check if message is empty or just a colon
+                                                  // Check if message is empty or just a colon
             if !message.is_empty() && message != ":" {
                 return Some(format!("{}: {}", error_code, message));
             }
@@ -690,9 +695,7 @@ impl CargoTest {
         let timeout = Duration::from_secs(self.timeout_secs);
 
         // Use a thread to handle output() with timeout
-        let output_result = std::thread::spawn(move || {
-            cmd.output()
-        });
+        let output_result = std::thread::spawn(move || cmd.output());
 
         // Wait for thread completion with timeout
         let output = loop {
@@ -1726,7 +1729,10 @@ error: could not compile `my_crate` (bin \"my_crate\)
         let (failed, errors) = detect_compilation_errors(stderr);
         assert!(failed, "should detect compilation failure");
         assert!(!errors.is_empty(), "should have at least one error");
-        assert!(errors.iter().any(|e| e.code.as_deref() == Some("E0308")), "should include E0308 error code");
+        assert!(
+            errors.iter().any(|e| e.code.as_deref() == Some("E0308")),
+            "should include E0308 error code"
+        );
     }
 
     #[test]
@@ -1991,10 +1997,7 @@ mod tests {
 
         // Verify bead trace directory was created
         let bead_trace_dir = workspace.join(".beads").join("traces").join(bead_id);
-        assert!(
-            bead_trace_dir.exists(),
-            "bead trace directory should exist"
-        );
+        assert!(bead_trace_dir.exists(), "bead trace directory should exist");
 
         // Verify stdout and stderr files exist
         let stdout_path = bead_trace_dir.join("stdout.txt");
@@ -2004,10 +2007,10 @@ mod tests {
         assert!(stderr_path.exists(), "stderr file should exist");
 
         // Verify files can be read
-        let stdout_content = fs::read_to_string(&stdout_path)
-            .expect("stdout file should be readable");
-        let stderr_content = fs::read_to_string(&stderr_path)
-            .expect("stderr file should be readable");
+        let stdout_content =
+            fs::read_to_string(&stdout_path).expect("stdout file should be readable");
+        let stderr_content =
+            fs::read_to_string(&stderr_path).expect("stderr file should be readable");
 
         // Verify content is not empty (cargo output should be present)
         assert!(
@@ -2071,10 +2074,8 @@ mod tests {
         assert!(stdout_path.exists(), "stdout file should exist");
         assert!(stderr_path.exists(), "stderr file should exist");
 
-        let stdout_content = fs::read_to_string(&stdout_path)
-            .expect("stdout should be readable");
-        let stderr_content = fs::read_to_string(&stderr_path)
-            .expect("stderr should be readable");
+        let stdout_content = fs::read_to_string(&stdout_path).expect("stdout should be readable");
+        let stderr_content = fs::read_to_string(&stderr_path).expect("stderr should be readable");
 
         // Verify output has content (cargo output should be present)
         assert!(
@@ -2175,7 +2176,10 @@ mod tests {
 
         // Ensure .beads directory doesn't exist initially
         let beads_dir = workspace.join(".beads");
-        assert!(!beads_dir.exists(), ".beads directory should not exist initially");
+        assert!(
+            !beads_dir.exists(),
+            ".beads directory should not exist initially"
+        );
 
         // Run cargo test with bead trace capture
         let runner = CargoTest::new(workspace);
@@ -2188,7 +2192,10 @@ mod tests {
         assert!(traces_dir.is_dir(), "traces should be a directory");
 
         let bead_trace_dir = traces_dir.join(bead_id);
-        assert!(bead_trace_dir.exists(), "bead trace subdirectory should be created");
+        assert!(
+            bead_trace_dir.exists(),
+            "bead trace subdirectory should be created"
+        );
     }
 
     #[test]
@@ -2243,10 +2250,10 @@ mod tests {
         assert!(metrics_path.exists(), "test_metrics.json file should exist");
 
         // Read and verify the metrics
-        let metrics_content = fs::read_to_string(&metrics_path)
-            .expect("test_metrics.json should be readable");
-        let metrics: TestMetrics = serde_json::from_str(&metrics_content)
-            .expect("test_metrics.json should be valid JSON");
+        let metrics_content =
+            fs::read_to_string(&metrics_path).expect("test_metrics.json should be readable");
+        let metrics: TestMetrics =
+            serde_json::from_str(&metrics_content).expect("test_metrics.json should be valid JSON");
 
         // Verify metrics contain expected values
         assert!(metrics.test_name.contains("cargo_test_"));
@@ -2314,8 +2321,10 @@ mod tests {
         let metrics: TestMetrics = serde_json::from_str(&metrics_content).unwrap();
 
         // Exit code should be non-zero for failing tests
-        assert!(metrics.exit_code.unwrap_or(0) != 0 || !outcome.success(),
-                "exit code should reflect test failure");
+        assert!(
+            metrics.exit_code.unwrap_or(0) != 0 || !outcome.success(),
+            "exit code should reflect test failure"
+        );
     }
 
     #[test]

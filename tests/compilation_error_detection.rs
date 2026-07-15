@@ -561,8 +561,14 @@ mod tests {
     let outcome = runner.run_with_bead_trace(bead_id).unwrap();
 
     // Step 2: Verify compilation errors were detected in the outcome
-    assert!(outcome.is_compilation_failure(), "should detect compilation failure");
-    assert!(!outcome.compilation_errors.is_empty(), "should have detected errors");
+    assert!(
+        outcome.is_compilation_failure(),
+        "should detect compilation failure"
+    );
+    assert!(
+        !outcome.compilation_errors.is_empty(),
+        "should have detected errors"
+    );
     assert!(
         outcome.compilation_errors.len() >= 2,
         "should detect at least 2 errors"
@@ -596,18 +602,17 @@ mod tests {
     assert!(errors_path.exists(), "compilation_errors.json should exist");
 
     // Step 5: Verify stderr contains compilation error messages
-    let stderr_content = fs::read_to_string(&stderr_path)
-        .expect("stderr should be readable");
+    let stderr_content = fs::read_to_string(&stderr_path).expect("stderr should be readable");
     assert!(
         stderr_content.contains("error[E") || stderr_content.contains("could not compile"),
         "stderr should contain compilation error indicators"
     );
 
     // Step 6: Read and verify test_metrics.json
-    let metrics_content = fs::read_to_string(&metrics_path)
-        .expect("test_metrics.json should be readable");
-    let metrics: serde_json::Value = serde_json::from_str(&metrics_content)
-        .expect("test_metrics.json should be valid JSON");
+    let metrics_content =
+        fs::read_to_string(&metrics_path).expect("test_metrics.json should be readable");
+    let metrics: serde_json::Value =
+        serde_json::from_str(&metrics_content).expect("test_metrics.json should be valid JSON");
 
     assert_eq!(
         metrics["exit_code"].as_i64(),
@@ -620,13 +625,16 @@ mod tests {
     );
 
     // Step 7: Read and verify compilation_errors.json
-    let errors_content = fs::read_to_string(&errors_path)
-        .expect("compilation_errors.json should be readable");
+    let errors_content =
+        fs::read_to_string(&errors_path).expect("compilation_errors.json should be readable");
     let errors_json: serde_json::Value = serde_json::from_str(&errors_content)
         .expect("compilation_errors.json should be valid JSON");
 
     // Verify it's an array
-    assert!(errors_json.is_array(), "compilation errors should be an array");
+    assert!(
+        errors_json.is_array(),
+        "compilation errors should be an array"
+    );
 
     let errors_array = errors_json.as_array().unwrap();
     assert!(
@@ -635,12 +643,12 @@ mod tests {
     );
 
     // Step 8: Verify the errors match what was detected in the outcome
-    let json_has_type_mismatch = errors_array.iter().any(|e| {
-        e.get("code").and_then(|c| c.as_str()) == Some("E0308")
-    });
-    let json_has_use_of_moved = errors_array.iter().any(|e| {
-        e.get("code").and_then(|c| c.as_str()) == Some("E0382")
-    });
+    let json_has_type_mismatch = errors_array
+        .iter()
+        .any(|e| e.get("code").and_then(|c| c.as_str()) == Some("E0308"));
+    let json_has_use_of_moved = errors_array
+        .iter()
+        .any(|e| e.get("code").and_then(|c| c.as_str()) == Some("E0382"));
 
     assert!(
         json_has_type_mismatch,
@@ -727,8 +735,14 @@ mod tests {
     let outcome = runner.run_with_bead_trace(bead_id).unwrap();
 
     // Verify no compilation errors
-    assert!(!outcome.is_compilation_failure(), "should not indicate compilation failure");
-    assert!(outcome.compilation_errors.is_empty(), "should have no compilation errors");
+    assert!(
+        !outcome.is_compilation_failure(),
+        "should not indicate compilation failure"
+    );
+    assert!(
+        outcome.compilation_errors.is_empty(),
+        "should have no compilation errors"
+    );
 
     // Verify trace directory exists
     let bead_trace_dir = workspace.join(".beads").join("traces").join(bead_id);
@@ -747,12 +761,15 @@ mod tests {
     // compilation_errors.json should NOT exist when there are no errors
     // (or it should be empty based on the implementation)
     if errors_path.exists() {
-        let errors_content = fs::read_to_string(&errors_path)
-            .expect("compilation_errors.json should be readable");
+        let errors_content =
+            fs::read_to_string(&errors_path).expect("compilation_errors.json should be readable");
         let errors_json: serde_json::Value = serde_json::from_str(&errors_content)
             .expect("compilation_errors.json should be valid JSON");
         assert!(
-            errors_json.as_array().map(|a| a.is_empty()).unwrap_or(false),
+            errors_json
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false),
             "compilation_errors.json should be empty array when no errors"
         );
     }
@@ -812,9 +829,15 @@ mod tests {
     let outcome = runner.run_with_bead_trace(bead_id).unwrap();
 
     // Verify this is a test failure, NOT compilation error
-    assert!(!outcome.is_compilation_failure(), "should not indicate compilation failure");
+    assert!(
+        !outcome.is_compilation_failure(),
+        "should not indicate compilation failure"
+    );
     assert!(outcome.is_test_failure(), "should indicate test failure");
-    assert!(outcome.compilation_errors.is_empty(), "should have no compilation errors");
+    assert!(
+        outcome.compilation_errors.is_empty(),
+        "should have no compilation errors"
+    );
 
     // Verify trace directory exists
     let bead_trace_dir = workspace.join(".beads").join("traces").join(bead_id);
@@ -823,12 +846,15 @@ mod tests {
     // compilation_errors.json should NOT exist for test failures
     let errors_path = bead_trace_dir.join("compilation_errors.json");
     if errors_path.exists() {
-        let errors_content = fs::read_to_string(&errors_path)
-            .expect("compilation_errors.json should be readable");
+        let errors_content =
+            fs::read_to_string(&errors_path).expect("compilation_errors.json should be readable");
         let errors_json: serde_json::Value = serde_json::from_str(&errors_content)
             .expect("compilation_errors.json should be valid JSON");
         assert!(
-            errors_json.as_array().map(|a| a.is_empty()).unwrap_or(false),
+            errors_json
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false),
             "compilation_errors.json should be empty for test failures"
         );
     }

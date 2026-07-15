@@ -1181,10 +1181,7 @@ mod tests {
         let error = CompilationError::General {
             message: "could not compile `my_crate`".to_string(),
         };
-        assert_eq!(
-            error.description(),
-            "could not compile `my_crate`"
-        );
+        assert_eq!(error.description(), "could not compile `my_crate`");
         assert!(error.error_code().is_none());
         assert!(!error.has_location());
     }
@@ -1206,7 +1203,10 @@ mod tests {
             line: Some(42),
             column: Some(10),
         };
-        assert_eq!(error.location_string(), Some("src/lib.rs:42:10".to_string()));
+        assert_eq!(
+            error.location_string(),
+            Some("src/lib.rs:42:10".to_string())
+        );
     }
 
     #[test]
@@ -1218,10 +1218,7 @@ mod tests {
             line: None,
             column: None,
         };
-        assert_eq!(
-            error.location_string(),
-            Some("src/main.rs".to_string())
-        );
+        assert_eq!(error.location_string(), Some("src/main.rs".to_string()));
     }
 
     #[test]
@@ -1615,10 +1612,7 @@ impl CompilationError {
     pub fn location_string(&self) -> Option<String> {
         match self {
             CompilationError::RustError {
-                file,
-                line,
-                column,
-                ..
+                file, line, column, ..
             } => {
                 if let Some(f) = file {
                     let mut loc = f.clone();
@@ -1643,7 +1637,13 @@ impl CompilationError {
 impl fmt::Display for CompilationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CompilationError::RustError { code, message, file: _, line: _, column: _ } => {
+            CompilationError::RustError {
+                code,
+                message,
+                file: _,
+                line: _,
+                column: _,
+            } => {
                 if let Some(loc) = self.location_string() {
                     write!(f, "error[{}][{}]: {}", code, loc, message)
                 } else {

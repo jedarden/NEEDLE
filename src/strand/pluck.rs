@@ -211,8 +211,9 @@ impl PluckStrand {
 
         // Create state directory if it doesn't exist
         let state_dir = needle_home.join("state");
-        std::fs::create_dir_all(&state_dir)
-            .with_context(|| format!("failed to create state directory: {}", state_dir.display()))?;
+        std::fs::create_dir_all(&state_dir).with_context(|| {
+            format!("failed to create state directory: {}", state_dir.display())
+        })?;
 
         // Write record to starvation-records.jsonl (append mode)
         let record_path = state_dir.join("starvation-records.jsonl");
@@ -225,18 +226,27 @@ impl PluckStrand {
         };
 
         // Serialize to JSON and append to file
-        let record_json = serde_json::to_string(&record)
-            .context("failed to serialize starvation record")?;
+        let record_json =
+            serde_json::to_string(&record).context("failed to serialize starvation record")?;
 
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&record_path)
-            .with_context(|| format!("failed to open starvation records file: {}", record_path.display()))?;
+            .with_context(|| {
+                format!(
+                    "failed to open starvation records file: {}",
+                    record_path.display()
+                )
+            })?;
 
         use std::io::Write;
-        writeln!(file, "{}", record_json)
-            .with_context(|| format!("failed to write starvation record to: {}", record_path.display()))?;
+        writeln!(file, "{}", record_json).with_context(|| {
+            format!(
+                "failed to write starvation record to: {}",
+                record_path.display()
+            )
+        })?;
 
         tracing::debug!(
             record_path = %record_path.display(),
@@ -1216,10 +1226,7 @@ mod tests {
             ],
         };
 
-        let strand = PluckStrand::new(
-            vec![],
-            helper.telemetry().clone(),
-        );
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
 
         let result = strand.evaluate(&store).await;
 
@@ -1239,7 +1246,11 @@ mod tests {
 
         // Get the starvation event and verify its contents
         let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
-        assert_eq!(starvation_events.len(), 1, "should emit exactly one starvation event");
+        assert_eq!(
+            starvation_events.len(),
+            1,
+            "should emit exactly one starvation event"
+        );
 
         let event = &starvation_events[0];
 
@@ -1269,10 +1280,8 @@ mod tests {
             if let Some(reasons_array) = reasons.as_array() {
                 assert_eq!(reasons_array.len(), 3, "should have 3 exclusion reasons");
 
-                let reason_strings: Vec<&str> = reasons_array
-                    .iter()
-                    .filter_map(|r| r.as_str())
-                    .collect();
+                let reason_strings: Vec<&str> =
+                    reasons_array.iter().filter_map(|r| r.as_str()).collect();
 
                 // Should exclude all 3 beads by label
                 assert!(reason_strings.contains(&"label:deferred"));
@@ -1300,10 +1309,7 @@ mod tests {
             ],
         };
 
-        let strand = PluckStrand::new(
-            vec![],
-            helper.telemetry().clone(),
-        );
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
 
         let result = strand.evaluate(&store).await;
 
@@ -1323,7 +1329,11 @@ mod tests {
 
         // Get the starvation event and verify its contents
         let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
-        assert_eq!(starvation_events.len(), 1, "should emit exactly one starvation event");
+        assert_eq!(
+            starvation_events.len(),
+            1,
+            "should emit exactly one starvation event"
+        );
 
         let event = &starvation_events[0];
 
@@ -1346,10 +1356,8 @@ mod tests {
             if let Some(reasons_array) = reasons.as_array() {
                 assert_eq!(reasons_array.len(), 3, "should have 3 exclusion reasons");
 
-                let reason_strings: Vec<&str> = reasons_array
-                    .iter()
-                    .filter_map(|r| r.as_str())
-                    .collect();
+                let reason_strings: Vec<&str> =
+                    reasons_array.iter().filter_map(|r| r.as_str()).collect();
 
                 // Should exclude all 3 beads by stale assignee
                 assert!(reason_strings.contains(&"assignee:worker-1"));
@@ -1372,10 +1380,7 @@ mod tests {
         // Empty store - no beads at all
         let store = MemoryStore { beads: vec![] };
 
-        let strand = PluckStrand::new(
-            vec![],
-            helper.telemetry().clone(),
-        );
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
 
         let result = strand.evaluate(&store).await;
 
@@ -1395,7 +1400,11 @@ mod tests {
 
         // Get the starvation event and verify its contents
         let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
-        assert_eq!(starvation_events.len(), 1, "should emit exactly one starvation event");
+        assert_eq!(
+            starvation_events.len(),
+            1,
+            "should emit exactly one starvation event"
+        );
 
         let event = &starvation_events[0];
 
@@ -1447,10 +1456,7 @@ mod tests {
             ],
         };
 
-        let strand = PluckStrand::new(
-            vec![],
-            helper.telemetry().clone(),
-        );
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
 
         let result = strand.evaluate(&store).await;
 
@@ -1470,7 +1476,11 @@ mod tests {
 
         // Get the starvation event and verify its contents
         let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
-        assert_eq!(starvation_events.len(), 1, "should emit exactly one starvation event");
+        assert_eq!(
+            starvation_events.len(),
+            1,
+            "should emit exactly one starvation event"
+        );
 
         let event = &starvation_events[0];
 
@@ -1492,10 +1502,8 @@ mod tests {
             if let Some(reasons_array) = reasons.as_array() {
                 assert_eq!(reasons_array.len(), 3, "should have 3 exclusion reasons");
 
-                let reason_strings: Vec<&str> = reasons_array
-                    .iter()
-                    .filter_map(|r| r.as_str())
-                    .collect();
+                let reason_strings: Vec<&str> =
+                    reasons_array.iter().filter_map(|r| r.as_str()).collect();
 
                 // Should include both label and assignee exclusions
                 assert!(reason_strings.contains(&"label:deferred"));
@@ -1561,11 +1569,14 @@ mod tests {
             .expect("should be able to read starvation record file");
 
         // Parse the JSONL record
-        let record: serde_json::Value = serde_json::from_str(&record_content)
-            .expect("starvation record should be valid JSON");
+        let record: serde_json::Value =
+            serde_json::from_str(&record_content).expect("starvation record should be valid JSON");
 
         // Verify record structure
-        assert!(record.get("timestamp").is_some(), "record should have timestamp");
+        assert!(
+            record.get("timestamp").is_some(),
+            "record should have timestamp"
+        );
         assert!(
             record.get("target_workspace").is_some(),
             "record should have target_workspace"
@@ -1586,7 +1597,10 @@ mod tests {
         // Verify the target_workspace field contains the workspace being processed
         // (not the NEEDLE workspace itself)
         let target_workspace = record["target_workspace"].as_str().unwrap();
-        assert_eq!(target_workspace, "/tmp/test", "target_workspace should be the processed workspace");
+        assert_eq!(
+            target_workspace, "/tmp/test",
+            "target_workspace should be the processed workspace"
+        );
 
         // Verify counts
         let open_count = record["open_count"].as_u64().unwrap();
@@ -1596,7 +1610,11 @@ mod tests {
 
         // Verify exclusion reasons
         let exclusion_reasons = record["exclusion_reasons"].as_array().unwrap();
-        assert_eq!(exclusion_reasons.len(), 3, "should have 3 exclusion reasons");
+        assert_eq!(
+            exclusion_reasons.len(),
+            3,
+            "should have 3 exclusion reasons"
+        );
     }
 
     #[tokio::test]
@@ -1611,9 +1629,7 @@ mod tests {
 
         // Use UnfilteredStore to test the strand's own filtering logic
         let store = UnfilteredStore {
-            beads: vec![
-                make_bead_with_labels("deferred-bead", 1, vec!["deferred"]),
-            ],
+            beads: vec![make_bead_with_labels("deferred-bead", 1, vec!["deferred"])],
         };
 
         let strand = PluckStrand::with_persistent_records(
@@ -1660,14 +1676,12 @@ mod tests {
 
         // Create beads with the target workspace path
         let store = UnfilteredStore {
-            beads: vec![
-                make_bead_with_workspace_and_labels(
-                    "deferred-bead",
-                    1,
-                    target_workspace_path.to_str().unwrap(),
-                    vec!["deferred"],
-                ),
-            ],
+            beads: vec![make_bead_with_workspace_and_labels(
+                "deferred-bead",
+                1,
+                target_workspace_path.to_str().unwrap(),
+                vec!["deferred"],
+            )],
         };
 
         let strand = PluckStrand::with_persistent_records(
@@ -1710,8 +1724,8 @@ mod tests {
         let record_content = std::fs::read_to_string(&needle_record_path)
             .expect("should be able to read starvation record file");
 
-        let record: serde_json::Value = serde_json::from_str(&record_content)
-            .expect("starvation record should be valid JSON");
+        let record: serde_json::Value =
+            serde_json::from_str(&record_content).expect("starvation record should be valid JSON");
 
         // The record should mention the target workspace in its data
         let target_workspace_field = record["target_workspace"].as_str().unwrap();

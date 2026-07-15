@@ -67,12 +67,17 @@ async fn test_pluck_starvation_event_includes_workspace() {
         "blocked:depends_on_bf-456".to_string(),
     ];
 
-    emit_and_wait(&telemetry, EventKind::PluckStarvationDetected {
-        workspace: workspace_path.clone(),
-        open_count: 5,
-        excluded_count: 2,
-        candidate_exclusion_reasons: exclusion_reasons.clone(),
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::PluckStarvationDetected {
+            workspace: workspace_path.clone(),
+            open_count: 5,
+            excluded_count: 2,
+            candidate_exclusion_reasons: exclusion_reasons.clone(),
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     assert_eq!(emitted.len(), 1, "should emit exactly one event");
@@ -108,12 +113,17 @@ async fn test_pluck_starvation_aggregates_exclusion_reasons() {
         "paused:waiting_on_user".to_string(),
     ];
 
-    emit_and_wait(&telemetry, EventKind::PluckStarvationDetected {
-        workspace: "/test/workspace".to_string(),
-        open_count: 3,
-        excluded_count: 5,
-        candidate_exclusion_reasons: exclusion_reasons.clone(),
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::PluckStarvationDetected {
+            workspace: "/test/workspace".to_string(),
+            open_count: 3,
+            excluded_count: 5,
+            candidate_exclusion_reasons: exclusion_reasons.clone(),
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     let event = &emitted[0];
@@ -130,7 +140,11 @@ async fn test_pluck_starvation_aggregates_exclusion_reasons() {
             // Verify each reason is present
             for (i, expected_reason) in exclusion_reasons.iter().enumerate() {
                 let reason = reasons_array.get(i).unwrap().as_str().unwrap();
-                assert_eq!(reason, *expected_reason, "reason at index {} should match", i);
+                assert_eq!(
+                    reason, *expected_reason,
+                    "reason at index {} should match",
+                    i
+                );
             }
         } else {
             panic!("candidate_exclusion_reasons should be an array");
@@ -154,12 +168,17 @@ async fn test_exclusion_reasons_can_be_counted_and_categorized() {
         "unassigned:ready:not_ready".to_string(),
     ];
 
-    emit_and_wait(&telemetry, EventKind::PluckStarvationDetected {
-        workspace: "/test/workspace".to_string(),
-        open_count: 0,
-        excluded_count: 5,
-        candidate_exclusion_reasons: exclusion_reasons.clone(),
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::PluckStarvationDetected {
+            workspace: "/test/workspace".to_string(),
+            open_count: 0,
+            excluded_count: 5,
+            candidate_exclusion_reasons: exclusion_reasons.clone(),
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     let event = &emitted[0];
@@ -181,8 +200,16 @@ async fn test_exclusion_reasons_can_be_counted_and_categorized() {
     }
 
     // Verify categorization
-    assert_eq!(category_counts.get("blocked"), Some(&3), "should have 3 blocked");
-    assert_eq!(category_counts.get("paused"), Some(&1), "should have 1 paused");
+    assert_eq!(
+        category_counts.get("blocked"),
+        Some(&3),
+        "should have 3 blocked"
+    );
+    assert_eq!(
+        category_counts.get("paused"),
+        Some(&1),
+        "should have 1 paused"
+    );
     assert_eq!(
         category_counts.get("unassigned"),
         Some(&1),
@@ -203,12 +230,17 @@ async fn test_pluck_starvation_counts_match_reasons_length() {
         "paused:waiting_on_user".to_string(),
     ];
 
-    emit_and_wait(&telemetry, EventKind::PluckStarvationDetected {
-        workspace: "/test/workspace".to_string(),
-        open_count: 7,
-        excluded_count: 3, // Should match len(exclusion_reasons)
-        candidate_exclusion_reasons: exclusion_reasons.clone(),
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::PluckStarvationDetected {
+            workspace: "/test/workspace".to_string(),
+            open_count: 7,
+            excluded_count: 3, // Should match len(exclusion_reasons)
+            candidate_exclusion_reasons: exclusion_reasons.clone(),
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     let event = &emitted[0];
@@ -252,10 +284,15 @@ async fn test_workspace_path_included_in_event_envelope() {
     let _test_workspace = PathBuf::from("/absolute/path/to/workspace");
 
     // Emit an event that should include workspace context
-    emit_and_wait(&telemetry, EventKind::StateTransition {
-        from: WorkerState::Selecting,
-        to: WorkerState::Exhausted,
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::StateTransition {
+            from: WorkerState::Selecting,
+            to: WorkerState::Exhausted,
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     let event = &emitted[0];
@@ -271,16 +308,24 @@ async fn test_telemetry_event_all_required_fields_present() {
     let (sink, events) = MemorySink::new();
     let telemetry = Telemetry::with_sink("test-worker-2".to_string(), Arc::new(sink));
 
-    emit_and_wait(&telemetry, EventKind::WorkerStarted {
-        worker_name: "test-worker-2".to_string(),
-        version: "1.0.0".to_string(),
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::WorkerStarted {
+            worker_name: "test-worker-2".to_string(),
+            version: "1.0.0".to_string(),
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     let event = &emitted[0];
 
     // Verify all required envelope fields are present
-    assert!(!event.timestamp.to_string().is_empty(), "timestamp should be set");
+    assert!(
+        !event.timestamp.to_string().is_empty(),
+        "timestamp should be set"
+    );
 
     assert_eq!(event.event_type, "worker.started");
     assert_eq!(event.worker_id, "test-worker-2");
@@ -289,7 +334,10 @@ async fn test_telemetry_event_all_required_fields_present() {
     assert_eq!(event.sequence, 0, "first event should have sequence 0");
 
     // bead_id should be None for worker-scoped events
-    assert!(event.bead_id.is_none(), "bead_id should be None for worker events");
+    assert!(
+        event.bead_id.is_none(),
+        "bead_id should be None for worker events"
+    );
 
     // workspace should be None or a valid path
     assert!(event.workspace.is_none() || event.workspace.is_some());
@@ -318,17 +366,29 @@ async fn test_sequence_numbers_increment_correctly() {
     let telemetry = Telemetry::with_sink("test-worker".to_string(), Arc::new(sink));
 
     // Emit multiple events
-    emit_and_wait(&telemetry, EventKind::WorkerStarted {
-        worker_name: "test-worker".to_string(),
-        version: "1.0.0".to_string(),
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::WorkerStarted {
+            worker_name: "test-worker".to_string(),
+            version: "1.0.0".to_string(),
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
-    emit_and_wait(&telemetry, EventKind::StateTransition {
-        from: WorkerState::Booting,
-        to: WorkerState::Selecting,
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::StateTransition {
+            from: WorkerState::Booting,
+            to: WorkerState::Selecting,
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
-    emit_and_wait(&telemetry, EventKind::QueueEmpty).await.expect("emit should succeed");
+    emit_and_wait(&telemetry, EventKind::QueueEmpty)
+        .await
+        .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     assert_eq!(emitted.len(), 3, "should have 3 events");
@@ -346,16 +406,24 @@ async fn test_bead_id_set_correctly_for_bead_scoped_events() {
 
     let test_bead_id = BeadId::from("bf-test123");
 
-    emit_and_wait(&telemetry, EventKind::ClaimAttempt {
-        bead_id: test_bead_id.clone(),
-        attempt: 1,
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::ClaimAttempt {
+            bead_id: test_bead_id.clone(),
+            attempt: 1,
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     let event = &emitted[0];
 
     // Verify bead_id is set
-    assert!(event.bead_id.is_some(), "bead_id should be set for ClaimAttempt");
+    assert!(
+        event.bead_id.is_some(),
+        "bead_id should be set for ClaimAttempt"
+    );
 
     if let Some(bead_id) = &event.bead_id {
         assert_eq!(bead_id.as_ref(), "bf-test123");
@@ -377,12 +445,17 @@ async fn test_exclusion_reasons_empty_list_handled_correctly() {
 
     let empty_reasons: Vec<String> = vec![];
 
-    emit_and_wait(&telemetry, EventKind::PluckStarvationDetected {
-        workspace: "/test/workspace".to_string(),
-        open_count: 0,
-        excluded_count: 0,
-        candidate_exclusion_reasons: empty_reasons,
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::PluckStarvationDetected {
+            workspace: "/test/workspace".to_string(),
+            open_count: 0,
+            excluded_count: 0,
+            candidate_exclusion_reasons: empty_reasons,
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     let event = &emitted[0];
@@ -400,7 +473,11 @@ async fn test_exclusion_reasons_empty_list_handled_correctly() {
 
     // Verify excluded_count is 0
     if let Some(excluded_count) = event.data.get("excluded_count") {
-        assert_eq!(excluded_count.as_u64(), Some(0), "excluded_count should be 0");
+        assert_eq!(
+            excluded_count.as_u64(),
+            Some(0),
+            "excluded_count should be 0"
+        );
     } else {
         panic!("excluded_count field missing from event data");
     }
@@ -414,10 +491,15 @@ async fn test_duration_ms_field_set_correctly() {
 
     let test_bead_id = BeadId::from("bf-test456");
 
-    emit_and_wait(&telemetry, EventKind::BeadCompleted {
-        bead_id: test_bead_id,
-        duration_ms: 1234,
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::BeadCompleted {
+            bead_id: test_bead_id,
+            duration_ms: 1234,
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     let event = &emitted[0];
@@ -448,12 +530,17 @@ async fn test_multiple_exclusion_reasons_of_same_type_aggregated() {
         "blocked:depends_on_bf-005".to_string(),
     ];
 
-    emit_and_wait(&telemetry, EventKind::PluckStarvationDetected {
-        workspace: "/test/workspace".to_string(),
-        open_count: 2,
-        excluded_count: 5,
-        candidate_exclusion_reasons: exclusion_reasons.clone(),
-    }).await.expect("emit should succeed");
+    emit_and_wait(
+        &telemetry,
+        EventKind::PluckStarvationDetected {
+            workspace: "/test/workspace".to_string(),
+            open_count: 2,
+            excluded_count: 5,
+            candidate_exclusion_reasons: exclusion_reasons.clone(),
+        },
+    )
+    .await
+    .expect("emit should succeed");
 
     let emitted = events.lock().unwrap();
     let event = &emitted[0];

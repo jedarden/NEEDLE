@@ -36,6 +36,12 @@ use crate::types::BeadId;
 // Constants
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Stdout file name.
+pub const STDOUT_FILE: &str = "stdout.txt";
+
+/// Stderr file name.
+pub const STDERR_FILE: &str = "stderr.txt";
+
 /// Test output file name.
 pub const TEST_OUTPUT_FILE: &str = "test-output.txt";
 
@@ -158,7 +164,7 @@ impl TraceCapture {
             return Ok(());
         }
         let content = self.sanitize(stdout);
-        let path = self.trace_dir.join("stdout.txt");
+        let path = self.trace_dir.join(STDOUT_FILE);
         std::fs::write(&path, content.as_bytes())
             .with_context(|| format!("failed to write stdout trace: {}", path.display()))
     }
@@ -171,7 +177,7 @@ impl TraceCapture {
             return Ok(());
         }
         let content = self.sanitize(stderr);
-        let path = self.trace_dir.join("stderr.txt");
+        let path = self.trace_dir.join(STDERR_FILE);
         std::fs::write(&path, content.as_bytes())
             .with_context(|| format!("failed to write stderr trace: {}", path.display()))
     }
@@ -292,7 +298,7 @@ impl TraceCapture {
         }
 
         // Delete trace data files.
-        for file in ["trace.jsonl", "stdout.txt", "stderr.txt", TEST_OUTPUT_FILE] {
+        for file in ["trace.jsonl", STDOUT_FILE, STDERR_FILE, TEST_OUTPUT_FILE] {
             let path = self.trace_dir.join(file);
             if path.exists() {
                 std::fs::remove_file(&path)
@@ -402,7 +408,7 @@ pub fn cleanup_traces(
         // already removed in a previous run but the metadata update failed
         // or was interrupted. This check is crucial for preventing infinite
         // loops where the same trace is counted repeatedly.
-        let has_data_files = ["trace.jsonl", "stdout.txt", "stderr.txt", TEST_OUTPUT_FILE]
+        let has_data_files = ["trace.jsonl", STDOUT_FILE, STDERR_FILE, TEST_OUTPUT_FILE]
             .iter()
             .any(|file| path.join(file).exists());
 
@@ -500,7 +506,7 @@ fn prune_trace_dir(trace_dir: &Path) -> Result<()> {
     // Step 2: Remove trace data files after metadata is updated.
     // Use ? to propagate errors - if file removal fails, the operator should
     // know so they can investigate. Files that don't exist are skipped.
-    for file in ["trace.jsonl", "stdout.txt", "stderr.txt", TEST_OUTPUT_FILE] {
+    for file in ["trace.jsonl", STDOUT_FILE, STDERR_FILE, TEST_OUTPUT_FILE] {
         let path = trace_dir.join(file);
         if path.exists() {
             std::fs::remove_file(&path)

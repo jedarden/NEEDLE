@@ -308,10 +308,7 @@ mod tests {
     async fn test_helper_captures_events() {
         let helper = TestHelper::new("test-worker");
 
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
         helper.sync().await;
 
         assert_eq!(helper.event_count(), 1);
@@ -342,17 +339,17 @@ mod tests {
 
         let abc_events = helper.events_by_bead_id("needle-abc");
         assert_eq!(abc_events.len(), 1);
-        assert_eq!(abc_events[0].bead_id.as_ref().unwrap().as_ref(), "needle-abc");
+        assert_eq!(
+            abc_events[0].bead_id.as_ref().unwrap().as_ref(),
+            "needle-abc"
+        );
     }
 
     #[tokio::test]
     async fn assert_event_emitted_works() {
         let helper = TestHelper::new("test-worker");
 
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
         helper.sync().await;
 
         helper.assert_event_emitted("worker.queue_empty");
@@ -369,10 +366,7 @@ mod tests {
     async fn assert_event_not_emitted_works() {
         let helper = TestHelper::new("test-worker");
 
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
 
         helper.assert_event_not_emitted("worker.started");
     }
@@ -382,10 +376,7 @@ mod tests {
     async fn assert_event_not_emitted_panics_when_present() {
         let helper = TestHelper::new("test-worker");
 
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
         helper.sync().await;
 
         helper.assert_event_not_emitted("worker.queue_empty");
@@ -395,14 +386,8 @@ mod tests {
     async fn assert_event_count_works() {
         let helper = TestHelper::new("test-worker");
 
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
         helper.sync().await;
 
         helper.assert_event_count("worker.queue_empty", 2);
@@ -413,10 +398,7 @@ mod tests {
     async fn assert_event_count_panics_on_mismatch() {
         let helper = TestHelper::new("test-worker");
 
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
 
         helper.assert_event_count("worker.queue_empty", 5);
     }
@@ -425,10 +407,7 @@ mod tests {
     async fn find_event_works() {
         let helper = TestHelper::new("test-worker");
 
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
         helper.sync().await;
 
         let found = helper.find_event("worker.queue_empty");
@@ -474,14 +453,8 @@ mod tests {
     async fn clear_works() {
         let helper = TestHelper::new("test-worker");
 
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
         helper.sync().await;
 
         assert_eq!(helper.event_count(), 2);
@@ -495,18 +468,12 @@ mod tests {
 
         assert_eq!(helper.event_count(), 0);
 
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
         helper.sync().await;
 
         assert_eq!(helper.event_count(), 1);
 
-        helper
-            .telemetry()
-            .emit(EventKind::QueueEmpty)
-            .unwrap();
+        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
         helper.sync().await;
 
         assert_eq!(helper.event_count(), 2);
