@@ -1,0 +1,2009 @@
+
+running 11 tests
+test test_borrow_checker_error_detection ... ok
+test test_compilation_error_summary ... ok
+test test_could_not_compile_detection ... ok
+test test_end_to_end_compilation_error_workflow ... ok
+test test_end_to_end_successful_compilation_workflow ... ok
+test test_end_to_end_test_failure_workflow ... ok
+test test_import_path_error_detection ... ok
+test test_successful_compilation_no_errors ... ok
+test test_multiple_compilation_errors_detection ... ok
+test test_test_failure_vs_compilation_error ... ok
+test test_type_mismatch_error_detection ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+
+
+running 10 tests
+test config_help_output_includes_set_flag ... ok
+test config_help_includes_set_flag ... ok
+test config_set_flag_has_proper_metadata ... ok
+test config_set_empty_value_fails_validation ... ok
+test config_set_key_equals_value_format_parses ... ok
+test config_set_key_value_format_parses ... ok
+test config_set_missing_key_fails_validation ... ok
+test config_set_mixed_format_parses ... ok
+test config_set_multiple_key_equals_value_format_parses ... ok
+test config_set_multiple_key_value_format_parses ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test heartbeat_file_created_on_startup ... ok
+test heartbeat_contains_required_fields ... ok
+test heartbeat_refreshes_every_30_seconds ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.61s
+
+
+running 27 tests
+test cross_workspace_mend_skips_beads_with_live_assignees ... FAILED
+test cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead ... FAILED
+test dead_worker_cleanup_integration ... FAILED
+test deterministic_ordering_same_beads_same_order ... ok
+test deterministic_ordering_tiebreak_by_id ... ok
+test dispatcher_captures_stdout_and_stderr ... ok
+test cross_workspace_mend_skips_own_worker_beads ... FAILED
+test dispatcher_timeout_kills_process ... ok
+test end_to_end_single_bead_success ... FAILED
+test end_to_end_worker_loops_to_next_bead ... FAILED
+test exhaustion_empty_workspace ... ok
+test exhaustion_with_idle_action_exit ... FAILED
+test exhaustion_with_idle_action_wait_survives_sleep ... FAILED
+test idle_worker_flagging_detects_stuck_workers ... ok
+test mend_removes_stale_dependency_links ... FAILED
+test outcome_classify_covers_all_exit_code_ranges ... ok
+test full_cycle_produces_telemetry_state_transitions ... FAILED
+test outcome_path_agent_not_found_exit_127 ... FAILED
+test outcome_path_crash_exit_137 ... FAILED
+test outcome_path_failure_exit_1 ... FAILED
+test outcome_path_interrupted_via_shutdown_flag ... ok
+test outcome_path_success_exit_0 ... FAILED
+test outcome_path_timeout_exit_124 ... FAILED
+test shutdown_during_selecting_exits_cleanly ... ok
+test shutdown_flag_preempts_execution ... ok
+test worker_boot_rejects_invalid_config ... ok
+test worker_processes_high_priority_beads_first ... FAILED
+
+failures:
+
+---- cross_workspace_mend_skips_beads_with_live_assignees stdout ----
+
+thread 'cross_workspace_mend_skips_beads_with_live_assignees' (3186747) panicked at tests/integration_tests.rs:1505:10:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead stdout ----
+
+thread 'cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead' (3186746) panicked at tests/integration_tests.rs:1377:10:
+called `Option::unwrap()` on a `None` value
+
+---- dead_worker_cleanup_integration stdout ----
+
+thread 'dead_worker_cleanup_integration' (3186751) panicked at tests/integration_tests.rs:2031:5:
+assertion `left == right` failed: both workers should be registered initially
+  left: 1
+ right: 2
+
+---- cross_workspace_mend_skips_own_worker_beads stdout ----
+
+thread 'cross_workspace_mend_skips_own_worker_beads' (3186750) panicked at tests/integration_tests.rs:1623:10:
+called `Option::unwrap()` on a `None` value
+
+---- end_to_end_single_bead_success stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'end_to_end_single_bead_success' (3186763) panicked at tests/integration_tests.rs:272:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- end_to_end_worker_loops_to_next_bead stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'end_to_end_worker_loops_to_next_bead' (3186768) panicked at tests/integration_tests.rs:296:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- exhaustion_with_idle_action_exit stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'exhaustion_with_idle_action_exit' (3187016) panicked at src/transcript/mod.rs:278:31:
+start byte index 2275 is not a char boundary; it is inside '─' (bytes 2273..2276 of string)
+
+---- exhaustion_with_idle_action_wait_survives_sleep stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'exhaustion_with_idle_action_wait_survives_sleep' (3187180) panicked at tests/integration_tests.rs:708:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- mend_removes_stale_dependency_links stdout ----
+
+thread 'mend_removes_stale_dependency_links' (3187364) panicked at tests/integration_tests.rs:1724:5:
+br create failed
+
+---- full_cycle_produces_telemetry_state_transitions stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'full_cycle_produces_telemetry_state_transitions' (3187242) panicked at tests/integration_tests.rs:989:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_agent_not_found_exit_127 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_agent_not_found_exit_127' (3187368) panicked at tests/integration_tests.rs:404:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_crash_exit_137 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_crash_exit_137' (3187472) panicked at tests/integration_tests.rs:427:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_failure_exit_1 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_failure_exit_1' (3187571) panicked at tests/integration_tests.rs:339:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_success_exit_0 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_success_exit_0' (3187838) panicked at tests/integration_tests.rs:322:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_timeout_exit_124 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_timeout_exit_124' (3187952) panicked at tests/integration_tests.rs:370:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- worker_processes_high_priority_beads_first stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'worker_processes_high_priority_beads_first' (3188488) panicked at tests/integration_tests.rs:1087:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+
+failures:
+    cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead
+    cross_workspace_mend_skips_beads_with_live_assignees
+    cross_workspace_mend_skips_own_worker_beads
+    dead_worker_cleanup_integration
+    end_to_end_single_bead_success
+    end_to_end_worker_loops_to_next_bead
+    exhaustion_with_idle_action_exit
+    exhaustion_with_idle_action_wait_survives_sleep
+    full_cycle_produces_telemetry_state_transitions
+    mend_removes_stale_dependency_links
+    outcome_path_agent_not_found_exit_127
+    outcome_path_crash_exit_137
+    outcome_path_failure_exit_1
+    outcome_path_success_exit_0
+    outcome_path_timeout_exit_124
+    worker_processes_high_priority_beads_first
+
+test result: FAILED. 11 passed; 16 failed; 0 ignored; 0 measured; 0 filtered out; finished in 175.48s
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:33
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                         ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                 ^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:43
+    |
+212 |             "E0382" | "E0502" | "E0505" | "E0506" | "E0507" | "E0508" | "E0509" | "E0515"
+    |                                                                                   ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                           ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:53
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                             ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                     ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:63
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                       ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:73
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                 ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:83
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                           ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                                                   ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:15
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                                     ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:25
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |               ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:35
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                         ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                   ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:45
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                   ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                             ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:55
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                             ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                       ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:65
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                       ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                 ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:75
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                 ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                           ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:85
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                           ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                                     ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:15
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                                     ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:25
+    |
+215 |             | "E0401" | "E0402" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0409"
+    |               ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:35
+    |
+215 |             | "E0401" | "E0402" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0409"
+    |                         ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |                                   ^^^^^^^ no value can reach this
+
+warning: function `parse_error_line` is never used
+   --> src/cargo_test.rs:566:4
+    |
+566 | fn parse_error_line(line: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_crate_name` is never used
+   --> src/cargo_test.rs:585:4
+    |
+585 | fn extract_crate_name(line: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: `needle` (lib) generated 19 warnings
+warning: unused doc comment
+  --> tests/routing_matcher_baseline.rs:22:5
+   |
+22 | /     /// Baseline test documenting CURRENT matcher behavior when multiple rules
+23 | |     /// both match the same model AND route to the same adapter.
+24 | |     ///
+25 | |     /// This test verifies that the matcher implements "first-match-wins" behavior:
+...  |
+29 | |     ///
+30 | |     /// Current behavior: The first rule in the list that matches determines routing.
+   | |_____________________________________________________________________________________^
+...
+35 | /     let rules = vec![
+36 | |         make_rule("claude-.*", "claude-print"),
+37 | |         make_rule("claude-sonnet-.*", "claude-print"),
+38 | |     ];
+   | |______- rustdoc does not generate documentation for statements
+   |
+   = help: use `//` for a plain comment
+   = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> tests/routing_matcher_baseline.rs:63:5
+   |
+63 | /     /// Baseline test documenting CURRENT matcher behavior when multiple rules
+64 | |     /// match the same model but route to DIFFERENT adapters.
+65 | |     ///
+66 | |     /// This test verifies that "first-match-wins" is enforced even when
+...  |
+69 | |     /// Current behavior: The first matching rule determines routing, regardless
+70 | |     /// of whether later rules might be "more appropriate".
+   | |___________________________________________________________^
+...
+75 | /     let rules = vec![
+76 | |         make_rule("claude-.*", "claude-print"),
+77 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+78 | |         make_rule(".*", "fallback"),
+79 | |     ];
+   | |______- rustdoc does not generate documentation for statements
+   |
+   = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:103:5
+    |
+103 | /     /// Baseline test documenting that rule ORDER is significant.
+104 | |     ///
+105 | |     /// This test verifies that swapping rule order changes the outcome,
+106 | |     /// confirming that the matcher uses first-match-wins semantics.
+107 | |     ///
+108 | |     /// Current behavior: Rules are evaluated in order, first match wins.
+    | |_________________________________________________________________________^
+...
+112 | /     let rules = vec![
+113 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+114 | |         make_rule("claude-.*", "claude-print"),
+115 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:139:5
+    |
+139 | /     /// Baseline test to verify whether the matcher stops at the first match
+140 | |     /// or continues checking all rules.
+141 | |     ///
+142 | |     /// This test uses counter-like adapters to detect whether all rules are
+...   |
+145 | |     /// Current behavior: The matcher stops evaluation after the first match
+146 | |     /// and does not check subsequent rules.
+    | |____________________________________________^
+...
+151 | /     let rules = vec![
+152 | |         make_rule("^claude-sonnet-4-6$", "adapter-1"),
+153 | |         make_rule("claude-.*", "adapter-2"),
+154 | |         make_rule("*", "adapter-3"),
+155 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:181:5
+    |
+181 | /     /// Baseline test documenting CURRENT matcher behavior when an invalid
+182 | |     /// pattern precedes valid matching patterns.
+183 | |     ///
+184 | |     /// This test verifies that invalid patterns are skipped gracefully and
+...   |
+187 | |     /// Current behavior: Invalid regex patterns are logged as warnings and
+188 | |     /// skipped, then the next valid pattern is checked.
+    | |________________________________________________________^
+...
+193 | /     let rules = vec![
+194 | |         make_rule("claude-.*", "first-adapter"),
+195 | |         make_rule("[invalid(regex", "invalid-adapter"),
+196 | |         make_rule("claude-sonnet-.*", "third-adapter"),
+197 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:222:5
+    |
+222 | /     /// Test that verifies first-match-wins semantics by showing that a
+223 | |     /// more-specific rule wins when positioned before a less-specific rule.
+224 | |     ///
+225 | |     /// This test demonstrates:
+...   |
+231 | |     /// Current behavior: The first matching rule in the list determines routing,
+232 | |     /// regardless of whether later rules might be more specific.
+    | |_________________________________________________________________^
+...
+236 | /     let rules = vec![
+237 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+238 | |         make_rule("claude-.*", "claude-print"),
+239 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:262:5
+    |
+262 | /     /// Test that verifies first-match-wins semantics by showing that a
+263 | |     /// less-specific (broad) rule wins when positioned before a more-specific rule.
+264 | |     ///
+265 | |     /// This test complements `routing_baseline_specific_rule_wins_when_first`
+...   |
+269 | |     /// Current behavior: Rule order is significant - the first matching rule
+270 | |     /// wins, even if a later rule would be "better" or more specific.
+    | |______________________________________________________________________^
+...
+274 | /     let rules = vec![
+275 | |         make_rule("claude-.*", "claude-print"),
+276 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+277 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: `needle` (test "routing_matcher_baseline") generated 7 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running tests/compilation_error_detection.rs (target/debug/deps/compilation_error_detection-761bd84edc83ac02)
+
+running 11 tests
+test test_borrow_checker_error_detection ... ok
+test test_compilation_error_summary ... ok
+test test_could_not_compile_detection ... ok
+test test_end_to_end_compilation_error_workflow ... ok
+test test_end_to_end_successful_compilation_workflow ... ok
+test test_end_to_end_test_failure_workflow ... ok
+test test_import_path_error_detection ... ok
+test test_multiple_compilation_errors_detection ... ok
+test test_test_failure_vs_compilation_error ... ok
+test test_successful_compilation_no_errors ... ok
+test test_type_mismatch_error_detection ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.21s
+
+     Running tests/config_cli_tests.rs (target/debug/deps/config_cli_tests-698fa21c6736c75b)
+
+running 10 tests
+test config_help_output_includes_set_flag ... ok
+test config_help_includes_set_flag ... ok
+test config_set_empty_value_fails_validation ... ok
+test config_set_flag_has_proper_metadata ... ok
+test config_set_key_equals_value_format_parses ... ok
+test config_set_key_value_format_parses ... ok
+test config_set_missing_key_fails_validation ... ok
+test config_set_mixed_format_parses ... ok
+test config_set_multiple_key_equals_value_format_parses ... ok
+test config_set_multiple_key_value_format_parses ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/heartbeat_validation.rs (target/debug/deps/heartbeat_validation-f153156cfd1cd059)
+
+running 3 tests
+test heartbeat_contains_required_fields ... ok
+test heartbeat_file_created_on_startup ... ok
+test heartbeat_refreshes_every_30_seconds ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.61s
+
+     Running tests/integration_tests.rs (target/debug/deps/integration_tests-2f8418ff6f635c37)
+
+running 27 tests
+test cross_workspace_mend_skips_beads_with_live_assignees ... FAILED
+test cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead ... FAILED
+test dead_worker_cleanup_integration ... FAILED
+test deterministic_ordering_same_beads_same_order ... ok
+test deterministic_ordering_tiebreak_by_id ... ok
+test dispatcher_captures_stdout_and_stderr ... ok
+test cross_workspace_mend_skips_own_worker_beads ... FAILED
+test dispatcher_timeout_kills_process ... ok
+test end_to_end_worker_loops_to_next_bead ... FAILED
+test end_to_end_single_bead_success ... FAILED
+test exhaustion_empty_workspace ... ok
+test exhaustion_with_idle_action_exit ... FAILED
+test exhaustion_with_idle_action_wait_survives_sleep ... FAILED
+test idle_worker_flagging_detects_stuck_workers ... ok
+test mend_removes_stale_dependency_links ... FAILED
+test outcome_classify_covers_all_exit_code_ranges ... ok
+test full_cycle_produces_telemetry_state_transitions ... FAILED
+test outcome_path_agent_not_found_exit_127 ... FAILED
+test outcome_path_crash_exit_137 ... FAILED
+test outcome_path_failure_exit_1 ... FAILED
+test outcome_path_interrupted_via_shutdown_flag ... ok
+test outcome_path_success_exit_0 ... FAILED
+test outcome_path_timeout_exit_124 ... FAILED
+test shutdown_during_selecting_exits_cleanly ... ok
+test shutdown_flag_preempts_execution ... ok
+test worker_boot_rejects_invalid_config ... ok
+test worker_processes_high_priority_beads_first ... FAILED
+
+failures:
+
+---- cross_workspace_mend_skips_beads_with_live_assignees stdout ----
+
+thread 'cross_workspace_mend_skips_beads_with_live_assignees' (3189751) panicked at tests/integration_tests.rs:1505:10:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead stdout ----
+
+thread 'cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead' (3189750) panicked at tests/integration_tests.rs:1377:10:
+called `Option::unwrap()` on a `None` value
+
+---- dead_worker_cleanup_integration stdout ----
+
+thread 'dead_worker_cleanup_integration' (3189755) panicked at tests/integration_tests.rs:2031:5:
+assertion `left == right` failed: both workers should be registered initially
+  left: 1
+ right: 2
+
+---- cross_workspace_mend_skips_own_worker_beads stdout ----
+
+thread 'cross_workspace_mend_skips_own_worker_beads' (3189754) panicked at tests/integration_tests.rs:1623:10:
+called `Option::unwrap()` on a `None` value
+
+---- end_to_end_worker_loops_to_next_bead stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'end_to_end_worker_loops_to_next_bead' (3189774) panicked at tests/integration_tests.rs:296:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- end_to_end_single_bead_success stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'end_to_end_single_bead_success' (3189767) panicked at tests/integration_tests.rs:272:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- exhaustion_with_idle_action_exit stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'exhaustion_with_idle_action_exit' (3190091) panicked at src/transcript/mod.rs:278:31:
+start byte index 2275 is not a char boundary; it is inside '─' (bytes 2273..2276 of string)
+
+---- exhaustion_with_idle_action_wait_survives_sleep stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'exhaustion_with_idle_action_wait_survives_sleep' (3190493) panicked at tests/integration_tests.rs:708:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- mend_removes_stale_dependency_links stdout ----
+
+thread 'mend_removes_stale_dependency_links' (3190841) panicked at tests/integration_tests.rs:1724:5:
+br create failed
+
+---- full_cycle_produces_telemetry_state_transitions stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'full_cycle_produces_telemetry_state_transitions' (3190650) panicked at tests/integration_tests.rs:989:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_agent_not_found_exit_127 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_agent_not_found_exit_127' (3190845) panicked at tests/integration_tests.rs:404:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_crash_exit_137 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_crash_exit_137' (3190972) panicked at tests/integration_tests.rs:427:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_failure_exit_1 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_failure_exit_1' (3191188) panicked at tests/integration_tests.rs:339:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_success_exit_0 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_success_exit_0' (3191597) panicked at tests/integration_tests.rs:322:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_timeout_exit_124 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_timeout_exit_124' (3191734) panicked at tests/integration_tests.rs:370:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- worker_processes_high_priority_beads_first stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'worker_processes_high_priority_beads_first' (3192294) panicked at tests/integration_tests.rs:1087:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+
+failures:
+    cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead
+    cross_workspace_mend_skips_beads_with_live_assignees
+    cross_workspace_mend_skips_own_worker_beads
+    dead_worker_cleanup_integration
+    end_to_end_single_bead_success
+    end_to_end_worker_loops_to_next_bead
+    exhaustion_with_idle_action_exit
+    exhaustion_with_idle_action_wait_survives_sleep
+    full_cycle_produces_telemetry_state_transitions
+    mend_removes_stale_dependency_links
+    outcome_path_agent_not_found_exit_127
+    outcome_path_crash_exit_137
+    outcome_path_failure_exit_1
+    outcome_path_success_exit_0
+    outcome_path_timeout_exit_124
+    worker_processes_high_priority_beads_first
+
+test result: FAILED. 11 passed; 16 failed; 0 ignored; 0 measured; 0 filtered out; finished in 179.44s
+
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
+This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
+Heartbeat file already removed: /tmp/.tmp72AKf6/state/heartbeats/echo-test-test-worker.json
+error: test failed, to rerun pass `--test integration_tests`
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             test worker::tests::do_select_with_no_beads_transitions_to_exhausted ... ok
+test worker::tests::handle_exhausted_with_exit_returns_stopped ... ok
+test worker::tests::handle_exhausted_with_wait_returns_selecting ... ok
+test worker::tests::is_workspace_unset_dot_path ... ok
+test worker::tests::is_workspace_unset_empty_path ... ok
+test worker::tests::is_workspace_unset_real_path ... ok
+test worker::tests::is_workspace_unset_relative_path ... ok
+test worker::tests::full_cycle_with_echo_agent has been running for over 60 seconds
+test worker::tests::request_shutdown_sets_flag ... ok
+test worker::tests::resolve_adapter_returns_builtin ... ok
+test worker::tests::resolve_provider_returns_none_for_missing_adapter ... ok
+test worker::tests::full_cycle_with_echo_agent ... ok
+test worker::tests::restore_home_store_is_noop_when_stores_match ... ok
+test worker::tests::run_with_empty_store_returns_exhausted_or_stopped ... ok
+test worker::tests::set_state_uses_bead_workspace_for_cross_workspace_bead ... ok
+test worker::tests::set_state_uses_home_workspace_when_bead_workspace_is_unset ... ok
+test worker::tests::set_state_uses_home_workspace_when_no_current_bead ... ok
+test worker::tests::shutdown_flag_causes_stop ... ok
+test worker::tests::stop_returns_stopped_state ... ok
+test worker::tests::worker_starts_in_booting_state ... ok
+
+test result: ok. 1366 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 782.73s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 21 tests
+test tests::all_events_have_schema_version_1 ... ok
+test tests::assistant_mixed_content_preserves_order ... ok
+test tests::assistant_text_emits_agent_message_and_tokens ... ok
+test tests::assistant_tool_use_emits_tool_call_and_tokens ... ok
+test tests::assistant_tool_use_with_cache_tokens ... ok
+test tests::extract_path_bash_is_none ... ok
+test tests::extract_path_edit ... ok
+test tests::emitted_events_are_valid_agent_events ... ok
+test tests::extract_path_glob ... ok
+test tests::extract_path_grep ... ok
+test tests::extract_path_read ... ok
+test tests::extract_path_write ... ok
+test tests::malformed_json_skipped ... ok
+test tests::missing_type_field_skipped ... ok
+test tests::result_error_max_turns ... ok
+test tests::result_success_produces_no_events ... ok
+test tests::top_level_error_type ... ok
+test tests::unknown_type_skipped ... ok
+test tests::user_tool_result_error ... ok
+test tests::user_tool_result_success ... ok
+test tests::user_tool_result_unknown_id_falls_back_to_unknown ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 27 tests
+test tests::all_events_have_schema_version_1 ... ok
+test tests::item_completed_agent_message_emits_agent_message ... ok
+test tests::emitted_events_are_valid_agent_events ... ok
+test tests::item_completed_agent_message_empty_content_produces_no_events ... ok
+test tests::item_completed_command_execution_failure ... ok
+test tests::item_completed_command_execution_success ... ok
+test tests::item_completed_error_emits_error ... ok
+test tests::item_completed_mcp_tool_call_error ... ok
+test tests::item_completed_file_change ... ok
+test tests::item_completed_mcp_tool_call_success ... ok
+test tests::item_completed_without_item_field_skipped ... ok
+test tests::item_completed_without_prior_started_uses_type_as_tool ... ok
+test tests::item_started_agent_message_produces_no_events ... ok
+test tests::item_started_command_execution_emits_tool_call ... ok
+test tests::item_started_file_change_emits_tool_call ... ok
+test tests::item_started_without_item_field_skipped ... ok
+test tests::item_started_mcp_tool_call_emits_tool_call ... ok
+test tests::item_updated_produces_no_events ... ok
+test tests::malformed_json_skipped ... ok
+test tests::missing_type_field_skipped ... ok
+test tests::thread_started_produces_no_events ... ok
+test tests::top_level_error_emits_error ... ok
+test tests::turn_completed_emits_tokens ... ok
+test tests::turn_completed_with_no_usage_produces_no_events ... ok
+test tests::turn_failed_emits_error ... ok
+test tests::turn_started_produces_no_events ... ok
+test tests::unknown_type_skipped ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 11 tests
+test test_borrow_checker_error_detection ... ok
+test test_compilation_error_summary ... ok
+test test_could_not_compile_detection ... ok
+test test_end_to_end_compilation_error_workflow ... ok
+test test_end_to_end_successful_compilation_workflow ... ok
+test test_end_to_end_test_failure_workflow ... ok
+test test_import_path_error_detection ... ok
+test test_multiple_compilation_errors_detection ... ok
+test test_test_failure_vs_compilation_error ... ok
+test test_successful_compilation_no_errors ... ok
+test test_type_mismatch_error_detection ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.21s
+
+
+running 10 tests
+test config_help_includes_set_flag ... ok
+test config_help_output_includes_set_flag ... ok
+test config_set_empty_value_fails_validation ... ok
+test config_set_flag_has_proper_metadata ... ok
+test config_set_key_equals_value_format_parses ... ok
+test config_set_key_value_format_parses ... ok
+test config_set_missing_key_fails_validation ... ok
+test config_set_mixed_format_parses ... ok
+test config_set_multiple_key_equals_value_format_parses ... ok
+test config_set_multiple_key_value_format_parses ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+test heartbeat_file_created_on_startup ... ok
+test heartbeat_contains_required_fields ... ok
+test heartbeat_refreshes_every_30_seconds ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.61s
+
+
+running 27 tests
+test cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead ... FAILED
+test cross_workspace_mend_skips_beads_with_live_assignees ... FAILED
+test dead_worker_cleanup_integration ... FAILED
+test deterministic_ordering_same_beads_same_order ... ok
+test deterministic_ordering_tiebreak_by_id ... ok
+test dispatcher_captures_stdout_and_stderr ... ok
+test cross_workspace_mend_skips_own_worker_beads ... FAILED
+test dispatcher_timeout_kills_process ... ok
+test end_to_end_worker_loops_to_next_bead ... FAILED
+test end_to_end_single_bead_success ... FAILED
+test exhaustion_empty_workspace ... ok
+test exhaustion_with_idle_action_exit ... FAILED
+test exhaustion_with_idle_action_wait_survives_sleep ... FAILED
+test idle_worker_flagging_detects_stuck_workers ... ok
+test mend_removes_stale_dependency_links ... FAILED
+test outcome_classify_covers_all_exit_code_ranges ... ok
+test full_cycle_produces_telemetry_state_transitions ... FAILED
+test outcome_path_agent_not_found_exit_127 ... FAILED
+test outcome_path_crash_exit_137 ... FAILED
+test outcome_path_failure_exit_1 ... FAILED
+test outcome_path_interrupted_via_shutdown_flag ... ok
+test outcome_path_success_exit_0 ... FAILED
+test outcome_path_timeout_exit_124 ... FAILED
+test shutdown_during_selecting_exits_cleanly ... ok
+test shutdown_flag_preempts_execution ... ok
+test worker_boot_rejects_invalid_config ... ok
+test worker_processes_high_priority_beads_first ... FAILED
+
+failures:
+
+---- cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead stdout ----
+
+thread 'cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead' (3189720) panicked at tests/integration_tests.rs:1377:10:
+called `Option::unwrap()` on a `None` value
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- cross_workspace_mend_skips_beads_with_live_assignees stdout ----
+
+thread 'cross_workspace_mend_skips_beads_with_live_assignees' (3189721) panicked at tests/integration_tests.rs:1505:10:
+called `Option::unwrap()` on a `None` value
+
+---- dead_worker_cleanup_integration stdout ----
+
+thread 'dead_worker_cleanup_integration' (3189726) panicked at tests/integration_tests.rs:2031:5:
+assertion `left == right` failed: both workers should be registered initially
+  left: 1
+ right: 2
+
+---- cross_workspace_mend_skips_own_worker_beads stdout ----
+
+thread 'cross_workspace_mend_skips_own_worker_beads' (3189724) panicked at tests/integration_tests.rs:1623:10:
+called `Option::unwrap()` on a `None` value
+
+---- end_to_end_worker_loops_to_next_bead stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'end_to_end_worker_loops_to_next_bead' (3189739) panicked at tests/integration_tests.rs:296:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- end_to_end_single_bead_success stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'end_to_end_single_bead_success' (3189737) panicked at tests/integration_tests.rs:272:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- exhaustion_with_idle_action_exit stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'exhaustion_with_idle_action_exit' (3190057) panicked at src/transcript/mod.rs:278:31:
+start byte index 2275 is not a char boundary; it is inside '─' (bytes 2273..2276 of string)
+
+---- exhaustion_with_idle_action_wait_survives_sleep stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'exhaustion_with_idle_action_wait_survives_sleep' (3190528) panicked at tests/integration_tests.rs:708:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- mend_removes_stale_dependency_links stdout ----
+
+thread 'mend_removes_stale_dependency_links' (3190853) panicked at tests/integration_tests.rs:1724:5:
+br create failed
+
+---- full_cycle_produces_telemetry_state_transitions stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'full_cycle_produces_telemetry_state_transitions' (3190629) panicked at tests/integration_tests.rs:989:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_agent_not_found_exit_127 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_agent_not_found_exit_127' (3190857) panicked at tests/integration_tests.rs:404:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_crash_exit_137 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_crash_exit_137' (3190951) panicked at tests/integration_tests.rs:427:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_failure_exit_1 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_failure_exit_1' (3191151) panicked at tests/integration_tests.rs:339:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_success_exit_0 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_success_exit_0' (3191474) panicked at tests/integration_tests.rs:322:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- outcome_path_timeout_exit_124 stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'outcome_path_timeout_exit_124' (3191593) panicked at tests/integration_tests.rs:370:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+---- worker_processes_high_priority_beads_first stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: worker.booting
+
+thread 'worker_processes_high_priority_beads_first' (3192207) panicked at tests/integration_tests.rs:1087:37:
+called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
+
+
+failures:
+    cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead
+    cross_workspace_mend_skips_beads_with_live_assignees
+    cross_workspace_mend_skips_own_worker_beads
+    dead_worker_cleanup_integration
+    end_to_end_single_bead_success
+    end_to_end_worker_loops_to_next_bead
+    exhaustion_with_idle_action_exit
+    exhaustion_with_idle_action_wait_survives_sleep
+    full_cycle_produces_telemetry_state_transitions
+    mend_removes_stale_dependency_links
+    outcome_path_agent_not_found_exit_127
+    outcome_path_crash_exit_137
+    outcome_path_failure_exit_1
+    outcome_path_success_exit_0
+    outcome_path_timeout_exit_124
+    worker_processes_high_priority_beads_first
+
+test result: FAILED. 11 passed; 16 failed; 0 ignored; 0 measured; 0 filtered out; finished in 175.99s
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:33
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                         ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                 ^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:43
+    |
+212 |             "E0382" | "E0502" | "E0505" | "E0506" | "E0507" | "E0508" | "E0509" | "E0515"
+    |                                                                                   ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                           ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:53
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                             ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                     ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:63
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                       ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:73
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                 ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:83
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                           ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                                                   ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:15
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                                     ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:25
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |               ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:35
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                         ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                   ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:45
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                   ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                             ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:55
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                             ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                       ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:65
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                       ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                 ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:75
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                 ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                           ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:85
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                           ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                                     ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:15
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                                     ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:25
+    |
+215 |             | "E0401" | "E0402" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0409"
+    |               ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:35
+    |
+215 |             | "E0401" | "E0402" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0409"
+    |                         ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |                                   ^^^^^^^ no value can reach this
+
+warning: function `parse_error_line` is never used
+   --> src/cargo_test.rs:566:4
+    |
+566 | fn parse_error_line(line: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_crate_name` is never used
+   --> src/cargo_test.rs:585:4
+    |
+585 | fn extract_crate_name(line: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: `needle` (lib) generated 19 warnings
+warning: unused doc comment
+  --> tests/routing_matcher_baseline.rs:22:5
+   |
+22 | /     /// Baseline test documenting CURRENT matcher behavior when multiple rules
+23 | |     /// both match the same model AND route to the same adapter.
+24 | |     ///
+25 | |     /// This test verifies that the matcher implements "first-match-wins" behavior:
+...  |
+29 | |     ///
+30 | |     /// Current behavior: The first rule in the list that matches determines routing.
+   | |_____________________________________________________________________________________^
+...
+35 | /     let rules = vec![
+36 | |         make_rule("claude-.*", "claude-print"),
+37 | |         make_rule("claude-sonnet-.*", "claude-print"),
+38 | |     ];
+   | |______- rustdoc does not generate documentation for statements
+   |
+   = help: use `//` for a plain comment
+   = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> tests/routing_matcher_baseline.rs:63:5
+   |
+63 | /     /// Baseline test documenting CURRENT matcher behavior when multiple rules
+64 | |     /// match the same model but route to DIFFERENT adapters.
+65 | |     ///
+66 | |     /// This test verifies that "first-match-wins" is enforced even when
+...  |
+69 | |     /// Current behavior: The first matching rule determines routing, regardless
+70 | |     /// of whether later rules might be "more appropriate".
+   | |___________________________________________________________^
+...
+75 | /     let rules = vec![
+76 | |         make_rule("claude-.*", "claude-print"),
+77 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+78 | |         make_rule(".*", "fallback"),
+79 | |     ];
+   | |______- rustdoc does not generate documentation for statements
+   |
+   = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:103:5
+    |
+103 | /     /// Baseline test documenting that rule ORDER is significant.
+104 | |     ///
+105 | |     /// This test verifies that swapping rule order changes the outcome,
+106 | |     /// confirming that the matcher uses first-match-wins semantics.
+107 | |     ///
+108 | |     /// Current behavior: Rules are evaluated in order, first match wins.
+    | |_________________________________________________________________________^
+...
+112 | /     let rules = vec![
+113 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+114 | |         make_rule("claude-.*", "claude-print"),
+115 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:139:5
+    |
+139 | /     /// Baseline test to verify whether the matcher stops at the first match
+140 | |     /// or continues checking all rules.
+141 | |     ///
+142 | |     /// This test uses counter-like adapters to detect whether all rules are
+...   |
+145 | |     /// Current behavior: The matcher stops evaluation after the first match
+146 | |     /// and does not check subsequent rules.
+    | |____________________________________________^
+...
+151 | /     let rules = vec![
+152 | |         make_rule("^claude-sonnet-4-6$", "adapter-1"),
+153 | |         make_rule("claude-.*", "adapter-2"),
+154 | |         make_rule("*", "adapter-3"),
+155 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:181:5
+    |
+181 | /     /// Baseline test documenting CURRENT matcher behavior when an invalid
+182 | |     /// pattern precedes valid matching patterns.
+183 | |     ///
+184 | |     /// This test verifies that invalid patterns are skipped gracefully and
+...   |
+187 | |     /// Current behavior: Invalid regex patterns are logged as warnings and
+188 | |     /// skipped, then the next valid pattern is checked.
+    | |________________________________________________________^
+...
+193 | /     let rules = vec![
+194 | |         make_rule("claude-.*", "first-adapter"),
+195 | |         make_rule("[invalid(regex", "invalid-adapter"),
+196 | |         make_rule("claude-sonnet-.*", "third-adapter"),
+197 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:222:5
+    |
+222 | /     /// Test that verifies first-match-wins semantics by showing that a
+223 | |     /// more-specific rule wins when positioned before a less-specific rule.
+224 | |     ///
+225 | |     /// This test demonstrates:
+...   |
+231 | |     /// Current behavior: The first matching rule in the list determines routing,
+232 | |     /// regardless of whether later rules might be more specific.
+    | |_________________________________________________________________^
+...
+236 | /     let rules = vec![
+237 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+238 | |         make_rule("claude-.*", "claude-print"),
+239 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: unused doc comment
+   --> tests/routing_matcher_baseline.rs:262:5
+    |
+262 | /     /// Test that verifies first-match-wins semantics by showing that a
+263 | |     /// less-specific (broad) rule wins when positioned before a more-specific rule.
+264 | |     ///
+265 | |     /// This test complements `routing_baseline_specific_rule_wins_when_first`
+...   |
+269 | |     /// Current behavior: Rule order is significant - the first matching rule
+270 | |     /// wins, even if a later rule would be "better" or more specific.
+    | |______________________________________________________________________^
+...
+274 | /     let rules = vec![
+275 | |         make_rule("claude-.*", "claude-print"),
+276 | |         make_rule("claude-sonnet-.*", "claude-code-glm-4.7"),
+277 | |     ];
+    | |______- rustdoc does not generate documentation for statements
+    |
+    = help: use `//` for a plain comment
+
+warning: `needle` (test "routing_matcher_baseline") generated 7 warnings
+warning: method `call_count` is never used
+    --> src/strand/explore.rs:1174:12
+     |
+1165 |     impl ExcludedBeadsMockFactory {
+     |     ----------------------------- method in this implementation
+...
+1174 |         fn call_count(&self) -> u32 {
+     |            ^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: comparison is useless due to type limits
+    --> src/cargo_test.rs:1940:17
+     |
+1940 |         assert!(outcome.stdout.len() >= 0, "stdout should be captured");
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(unused_comparisons)]` on by default
+
+warning: comparison is useless due to type limits
+    --> src/cargo_test.rs:1941:17
+     |
+1941 |         assert!(outcome.stderr.len() >= 0, "stderr should be captured");
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `needle` (lib test) generated 20 warnings (17 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running unittests src/lib.rs (target/debug/deps/needle-13447901d1e3ab52)
+
+running 1366 tests
+test agent_event::tests::agent_message_round_trip ... ok
+test agent_event::tests::deserialize_from_literal_jsonl ... ok
+test agent_event::tests::error_round_trip ... ok
+test agent_event::tests::tokens_round_trip ... ok
+test agent_event::tests::tool_result_round_trip ... ok
+test agent_event::tests::tool_call_round_trip ... ok
+test bead_store::tests::bf_parse_beads_accepts_completed_status ... ok
+test bead_store::tests::bf_parse_beads_skips_one_bad_line_keeps_the_rest ... ok
+test bead_store::tests::corruption_in_longer_message ... ok
+test bead_store::tests::detects_case_insensitive ... ok
+test bead_store::tests::detects_locked_db_error ... ok
+test bead_store::tests::detects_malformed_db_error ... ok
+test bead_store::tests::detects_not_a_database_error ... ok
+test bead_store::tests::filters_default_is_empty ... ok
+test bead_store::tests::non_corruption_error_returns_false ... ok
+test bead_store::tests::parse_beads_empty_json_array ... ok
+test bead_store::tests::parse_beads_empty_string_returns_empty ... ok
+test bead_store::tests::parse_beads_whitespace_only_returns_empty ... ok
+test bead_store::tests::parse_beads_malformed_json_is_error ... ok
+test bead_store::tests::parse_doctor_output_empty ... ok
+test bead_store::tests::parse_doctor_output_filters_recovery_artifacts ... ok
+test bead_store::tests::parse_doctor_output_filters_sqlite3_not_available ... ok
+test bead_store::tests::parse_doctor_output_multiple_entries ... ok
+test bead_store::tests::parse_single_bead_empty_array_is_error ... ok
+test bead_store::tests::repair_report_parses_warn_and_fixed_lines ... ok
+test bead_store::tests::sync_conflict_detects_jsonl_is_newer ... ok
+test bead_store::tests::sync_conflict_detects_lowercase_marker ... ok
+test bead_store::tests::sync_conflict_detects_sync_conflict_marker ... ok
+test bead_store::tests::sync_conflict_in_longer_stderr ... ok
+test bead_store::tests::sync_conflict_is_case_sensitive ... ok
+test bead_store::tests::sync_conflict_returns_false_for_non_conflict ... ok
+test canary::tests::canary_report_can_promote ... ok
+test canary::tests::canary_test_result_bead_id ... ok
+test canary::tests::canary_test_result_bead_id_all_variants ... ok
+test canary::tests::canary_test_result_is_pass ... ok
+test canary::tests::discover_test_beads_missing_expected_dir ... ok
+test canary::tests::expected_outcome_default_status ... ok
+test canary::tests::discover_test_beads_reads_yaml_files ... ok
+test canary::tests::failure_with_none_exit_code_does_not_match ... ok
+test canary::tests::expected_outcome_serde_roundtrip ... ok
+test canary::tests::load_expected_outcome_failure_yaml ... ok
+test canary::tests::load_expected_outcome_invalid_yaml ... ok
+test canary::tests::load_expected_outcome_missing_file ... ok
+test canary::tests::mismatch_reason_failure ... ok
+test canary::tests::mismatch_reason_state_machine ... ok
+test canary::tests::mismatch_reason_success ... ok
+test canary::tests::load_expected_outcome_success_yaml ... ok
+test canary::tests::mismatch_reason_timeout ... ok
+test canary::tests::outcomes_match_failure ... ok
+test canary::tests::outcomes_match_state_machine ... ok
+test canary::tests::outcomes_match_timeout ... ok
+test canary::tests::outcomes_match_success ... ok
+test canary::tests::promote_first_time_no_existing_stable ... ok
+test canary::tests::promote_moves_testing_to_stable ... ok
+test canary::tests::promote_no_testing_binary_fails ... ok
+test canary::tests::reject_no_testing_binary_is_ok ... ok
+test canary::tests::rollback_no_prev_binary_fails ... ok
+test canary::tests::reject_removes_testing_binary ... ok
+test canary::tests::run_missing_testing_binary_fails ... ok
+test canary::tests::rollback_restores_previous_stable ... ok
+test canary::tests::run_missing_workspace_fails ... ok
+test canary::tests::status_empty_needle_home ... ok
+test canary::tests::success_with_extra_labels_still_matches ... ok
+test cargo_test::tests::cargo_test_new_creates_runner ... ok
+test canary::tests::status_reports_channel_state ... ok
+test cargo_test::tests::cargo_test_spawn_captures_output_streams ... ok
+test cargo_test::tests::cargo_test_spawn_succeeds ... ok
+test cargo_test::tests::cargo_test_with_args_sets_args ... ok
+test cargo_test::tests::cargo_test_with_timeout_sets_timeout ... ok
+test cargo_test::tests::create_combined_output_adds_trailing_newline ... ok
+test cargo_test::tests::create_combined_output_with_both_streams ... ok
+test cargo_test::tests::create_combined_output_with_empty_streams ... ok
+test cargo_test::tests::create_combined_output_with_only_stderr ... ok
+test cargo_test::tests::create_combined_output_with_only_stdout ... ok
+test cargo_test::tests::detect_compilation_errors_aborting_due_to ... ok
+test cargo_test::tests::detect_compilation_errors_could_not_compile ... ok
+test cargo_test::tests::detect_compilation_errors_empty_stderr ... ok
+test cargo_test::tests::detect_compilation_errors_full_output ... ok
+test cargo_test::tests::detect_compilation_errors_multiple_errors ... ok
+test cargo_test::tests::detect_compilation_errors_test_output_only ... ok
+test cargo_test::tests::detect_compilation_errors_with_error_code ... ok
+test cargo_test::tests::extract_crate_name_from_compile_error ... ok
+test cargo_test::tests::extract_crate_name_no_backticks ... ok
+test cargo_test::tests::extract_error_count_from_abort_message ... ok
+test cargo_test::tests::extract_error_count_no_number ... ok
+test cargo_test::tests::parse_error_line_no_message ... ok
+test cargo_test::tests::parse_error_line_not_error ... ok
+test cargo_test::tests::parse_error_line_with_code ... ok
+test cargo_test::tests::cargo_test_spawn_with_timeout_protection ... ok
+test cargo_test::tests::run_with_bead_trace_creates_parent_directory ... ok
+test cargo_test::tests::run_with_bead_trace_creates_trace_directory ... ok
+test cargo_test::tests::run_with_bead_trace_handles_empty_output ... ok
+test cargo_test::tests::run_with_bead_trace_handles_test_output ... ok
+test cargo_test::tests::run_with_bead_trace_metrics_captures_exit_code ... ok
+test cargo_test::tests::run_with_bead_trace_writes_test_metrics ... ok
+test cargo_test::tests::run_with_output_files_creates_combined_structure ... ok
+test cargo_test::tests::run_with_output_files_creates_output_files ... ok
+test cargo_test::tests::test_args_add_cargo_flag ... ok
+test cargo_test::tests::test_args_add_test_flag ... ok
+test cargo_test::tests::test_args_add_test_name ... ok
+test cargo_test::tests::test_args_build_default ... ok
+test cargo_test::tests::test_args_build_full ... ok
+test cargo_test::tests::test_args_build_with_cargo_flags ... ok
+test cargo_test::tests::test_args_build_with_target ... ok
+test cargo_test::tests::test_args_build_with_test_flags ... ok
+test cargo_test::tests::test_args_default_is_empty ... ok
+test cargo_test::tests::run_with_output_files_handles_empty_output ... ok
+test cargo_test::tests::test_args_with_filter ... ok
+test cargo_test::tests::test_args_with_target ... ok
+test cargo_test::tests::test_metrics_duration_conversion ... ok
+test cargo_test::tests::test_metrics_from_failed_outcome ... ok
+test cargo_test::tests::test_metrics_from_successful_outcome ... ok
+test cargo_test::tests::test_metrics_from_timeout_outcome ... ok
+test cargo_test::tests::test_metrics_high_precision_timing ... ok
+test cargo_test::tests::test_metrics_success_returns_false_for_nonzero_exit ... ok
+test cargo_test::tests::test_metrics_success_returns_false_for_timeout ... ok
+test cargo_test::tests::test_metrics_success_returns_true_for_zero_exit ... ok
+test cargo_test::tests::test_metrics_serialization ... ok
+test cargo_test::tests::test_outcome_is_compilation_failure ... ok
+test cargo_test::tests::test_outcome_is_test_failure ... ok
+test cargo_test::tests::test_outcome_success_false_with_nonzero_exit ... ok
+test cargo_test::tests::test_outcome_success_false_with_timeout ... ok
+test cargo_test::tests::test_outcome_success_with_zero_exit ... ok
+test cargo_test::tests::test_outcome_summary_compilation_failed ... ok
+test cargo_test::tests::test_outcome_summary_failed ... ok
+test cargo_test::tests::test_outcome_summary_passed ... ok
+test cargo_test::tests::test_outcome_summary_timed_out ... ok
+test cargo_test::tests::test_truncate_output_short ... ok
+test cargo_test::tests::test_truncate_output_long ... ok
+test claim::tests::claim_next_all_excluded_returns_no_candidates ... ok
+test claim::tests::claim_next_empty_candidates_returns_no_candidates ... ok
+test claim::tests::claim_next_happy_path_returns_claimed ... ok
+test claim::tests::claim_next_not_claimable_skips_to_next ... ok
+test claim::tests::claim_next_race_lost_tries_next_candidate ... ok
+test claim::tests::claim_one_happy_path ... ok
+test claim::tests::exclusion_set_prevents_reclaim ... ok
+test claim::tests::flock_acquire_and_release ... ok
+test claim::tests::claim_next_all_race_lost_returns_all_race_lost ... ok
+test claim::tests::workspace_lock_path_differs_for_different_workspaces ... ok
+test claim::tests::workspace_lock_path_is_deterministic ... ok
+test claude_md_placement::tests::detect_cross_workspace_patterns_empty_when_no_match ... ok
+test claude_md_placement::tests::detect_cross_workspace_patterns_finds_matches ... ok
+test claude_md_placement::tests::find_lca_nested_workspaces ... ok
+test claude_md_placement::tests::find_lca_sibling_workspaces ... ok
+test claude_md_placement::tests::find_lca_single_workspace ... ok
+test claude_md_placement::tests::find_lca_three_workspaces ... ok
+test claude_md_placement::tests::find_target_creates_at_workspace_when_none_exist ... ok
+test claude_md_placement::tests::find_target_single_workspace_prefers_existing_claude_md ... ok
+test claude_md_placement::tests::observations_not_similar ... ok
+test claude_md_placement::tests::observations_similar_with_word_overlap ... ok
+test claude_md_placement::tests::place_learning_adds_section_when_missing ... ok
+test claude_md_placement::tests::place_learning_appends_to_existing_section ... ok
+test claude_md_placement::tests::place_learning_creates_new_claude_md ... ok
+test claude_md_placement::tests::place_learning_skips_duplicate ... ok
+test cli::tests::check_result_display_fail ... ok
+test cli::tests::check_result_display_pass ... ok
+test cli::tests::check_result_display_warn ... ok
+test cli::tests::check_result_with_detail ... ok
+test cli::tests::cli_attach_requires_identifier ... ok
+test cli::tests::cli_parses_attach ... ok
+test cli::tests::cli_parses_canary ... ok
+test cli::tests::cli_parses_canary_status ... ok
+test cli::tests::cli_parses_config_dump ... ok
+test cli::tests::cli_parses_config_dump_show_source ... ok
+test cli::tests::cli_parses_config_get ... ok
+test cli::tests::cli_parses_doctor ... ok
+test cli::tests::cli_parses_doctor_repair ... ok
+test cli::tests::cli_parses_doctor_with_workspace ... ok
+test cli::tests::cli_parses_list_with_format ... ok
+test cli::tests::cli_parses_logs_all_flags ... ok
+test cli::tests::cli_parses_logs_defaults ... ok
+test cli::tests::cli_parses_logs_filter ... ok
+test cli::tests::cli_parses_logs_filter_field_equals ... ok
+test cli::tests::cli_parses_logs_filter_field_gt ... ok
+test cli::tests::cli_parses_logs_filter_field_regex ... ok
+test cli::tests::cli_parses_logs_follow ... ok
+test cli::tests::cli_parses_logs_format_jsonl ... ok
+test cli::tests::cli_parses_logs_multiple_filters ... ok
+test cli::tests::cli_parses_logs_since ... ok
+test cli::tests::cli_parses_rollback ... ok
+test cli::tests::cli_parses_run_count_5 ... ok
+test cli::tests::cli_parses_run_defaults ... ok
+test cli::tests::cli_parses_run_full ... ok
+test cli::tests::cli_parses_status_by_worker ... ok
+test cli::tests::cli_parses_status_cost ... ok
+test cli::tests::cli_parses_status_cost_since ... ok
+test cli::tests::cli_parses_status_defaults ... ok
+test cli::tests::cli_parses_status_json ... ok
+test cli::tests::cli_parses_stop_all ... ok
+test cli::tests::cli_parses_stop_identifier ... ok
+test cli::tests::cli_parses_test_agent ... ok
+test cli::tests::cli_parses_upgrade ... ok
+test cli::tests::cli_parses_upgrade_check ... ok
+test cli::tests::cli_parses_version ... ok
+test cli::tests::cli_rejects_unknown_subcommand ... ok
+test cli::tests::cli_test_agent_requires_name ... ok
+test cli::tests::config_dump_returns_all_fields ... ok
+test cli::tests::config_get_key_known_keys ... ok
+test cli::tests::config_get_key_unknown_returns_none ... ok
+test cli::tests::default_worker_identifier_is_alpha ... ok
+test cli::tests::doctor_check_heartbeat_dir_existing_writable ... ok
+test cli::tests::doctor_check_heartbeat_dir_missing_no_repair ... ok
+test cli::tests::doctor_check_heartbeat_dir_missing_with_repair ... ok
+test cli::tests::doctor_check_heartbeats_no_dir ... ok
+test cli::tests::doctor_check_heartbeats_no_files ... ok
+test cli::tests::doctor_check_heartbeats_stale_file_repair ... ok
+test cli::tests::doctor_check_heartbeats_stale_file_warns ... ok
+test cli::tests::doctor_check_jsonl_empty_file ... ok
+test cli::tests::doctor_check_jsonl_invalid_lines ... ok
+test cli::tests::doctor_check_jsonl_missing_file ... ok
+test cli::tests::doctor_check_jsonl_valid ... ok
+test cli::tests::doctor_check_lock_files_fresh_not_stale ... ok
+test cli::tests::doctor_check_lock_files_no_locks ... ok
+test cli::tests::doctor_check_lock_files_stale_repair_removes ... ok
+test cli::tests::doctor_check_lock_files_stale_warns_without_repair ... ok
+test cli::tests::doctor_check_peers_no_heartbeats ... ok
+test cli::tests::doctor_check_sqlite_no_db ... ok
+test cli::tests::doctor_check_telemetry_logs_existing_files ... ok
+test cli::tests::doctor_check_telemetry_logs_no_dir ... ok
+test cli::tests::doctor_check_workspace_missing ... ok
+test cli::tests::doctor_check_workspace_no_beads_dir ... ok
+test cli::tests::doctor_check_workspace_valid ... ok
+test cli::tests::first_nato_is_alpha ... ok
+test cli::tests::format_duration_hours ... ok
+test cli::tests::format_duration_minutes ... ok
+test cli::tests::format_duration_seconds ... ok
+test cli::tests::identifier_collision_detected ... ok
+test cli::tests::identifier_no_collision ... ok
+test cli::tests::is_needle_inner_false_by_default ... ok
+test cli::tests::is_needle_inner_false_for_other_values ... ok
+test cli::tests::is_needle_inner_true_when_env_set ... ok
+test claim::tests::max_retries_caps_attempts ... ok
+test cli::tests::is_pid_alive_current_process ... ok
+test cli::tests::is_pid_alive_nonexistent ... ok
+test cli::tests::last_nato_is_zulu ... ok
+test cli::tests::list_format_variants ... ok
+test cli::tests::log_format_variants ... ok
+test cli::tests::max_workers_cap_logic ... ok
+test cli::tests::max_workers_zero_means_unlimited ... ok
+test cli::tests::multi_worker_count_validation ... ok
+test cli::tests::nato_alphabet_has_26_entries ... ok
+test cli::tests::nato_alphabet_sequence ... ok
+test cli::tests::parse_worker_id_different_agent_ignored ... ok
+test cli::tests::parse_worker_id_from_session_name ... ok
+test cli::tests::pick_names_no_sessions_running ... ok
+test cli::tests::pick_names_all_occupied_fails ... ok
+test cli::tests::pick_names_partial_exhaustion_fails ... ok
+test cli::tests::pick_names_skips_non_contiguous_occupied ... ok
+test cli::tests::pick_names_skips_occupied ... ok
+test cli::tests::session_name_format ... ok
+test cli::tests::shell_escape_plain_string ... ok
+test cli::tests::shell_escape_string_with_quotes ... ok
+test cli::tests::shell_escape_string_with_spaces ... ok
+test cli::tests::single_worker_picks_first_available ... ok
+test cli::tests::stop_requires_all_or_identifier ... ok
+test cli::tests::version_string_format ... ok
+test commit_hook::tests::already_has_trailer_logic ... ok
+test commit_hook::tests::empty_head_means_no_op ... ok
+test config::tests::cli_overrides_apply ... ok
+test config::tests::cli_overrides_beat_env_vars ... ok
+test config::tests::config_error_display_format ... ok
+test config::tests::config_source_display ... ok
+test config::tests::agent_config_with_routing_yaml_roundtrip ... ok
+test config::tests::cpu_load_warn_at_one_passes_validation ... ok
+test config::tests::cpu_load_warn_negative_fails_validation ... ok
+test config::tests::cpu_load_warn_zero_fails_validation ... ok
+test config::tests::cpu_load_warn_over_one_fails_validation ... ok
+test config::tests::default_agent_config_values ... ok
+test config::tests::default_explore_config_values ... ok
+test config::tests::default_health_config_values ... ok
+test config::tests::default_knot_config_values ... ok
+test config::tests::default_mend_config_values ... ok
+test config::tests::default_mitosis_config_values ... ok
+test config::tests::default_pulse_config_values ... ok
+test config::tests::default_reflect_config_values ... ok
+test config::tests::default_routing_config_matches_anthropic_models ... ok
+test config::tests::default_self_modification_config_values ... ok
+test config::tests::default_supervisor_config_values ... ok
+test config::tests::default_telemetry_config_values ... ok
+test config::tests::default_unravel_config_values ... ok
+test config::tests::default_weave_config_values ... ok
+test config::tests::default_worker_config_values ... ok
+test config::tests::dump_with_sources_formats_correctly ... ok
+test config::tests::dump_with_sources_includes_all_fields ... ok
+test config::tests::dump_with_sources_shows_env_var_source ... ok
+test config::tests::empty_adapter_in_routing_rule_fails_validation ... ok
+test config::tests::env_override_agent_default ... ok
+test config::tests::env_override_beats_workspace_config ... ok
+test config::tests::env_override_health_heartbeat_interval ... ok
+test config::tests::env_override_health_heartbeat_ttl ... ok
+test config::tests::env_override_invalid_bool_ignored ... ok
+test config::tests::env_override_invalid_integer_ignored ... ok
+test config::tests::env_override_self_modification_auto_promote ... ok
+test config::tests::env_override_self_modification_canary_timeout ... ok
+test config::tests::env_override_self_modification_enabled ... ok
+test config::tests::env_override_supervisor_heartbeat_path ... ok
+test config::tests::default_config_is_valid ... ok
+test config::tests::env_override_supervisor_socket_path ... ok
+test config::tests::env_override_worker_idle_timeout ... ok
+test config::tests::env_override_worker_launch_stagger ... ok
+test config::tests::env_override_worker_max_workers ... ok
+test config::tests::env_var_routing_default_adapter_override ... ok
+test config::tests::env_var_routing_override_beats_workspace ... ok
+test config::tests::heartbeat_ttl_at_3x_interval_passes_validation ... ok
+test config::tests::invalid_regex_in_routing_rule_fails_validation ... ok
+test config::tests::heartbeat_ttl_below_3x_interval_fails_validation ... ok
+test config::tests::load_empty_yaml_returns_default ... ok
+test config::tests::load_invalid_yaml_returns_error ... ok
+test config::tests::load_partial_yaml_uses_defaults_for_missing ... ok
+test config::tests::load_yaml_with_all_sections ... ok
+test config::tests::load_yaml_with_unknown_fields_is_tolerated ... ok
+test config::tests::load_resolved_applies_workspace_then_cli ... ok
+test config::tests::max_workers_over_50_fails_validation ... ok
+test config::tests::missing_agent_binary_fails_validation ... ok
+test config::tests::missing_file_returns_default ... ok
+test config::tests::multiple_validation_errors_in_routing ... ok
+test config::tests::non_overridable_keys_are_detected ... ok
+test config::tests::reflect_config_default_extraction_agent_is_none ... ok
+test config::tests::routing_config_backward_compatibility ... ok
+test config::tests::multiple_validation_errors_collected ... ok
+test config::tests::routing_config_empty_rules_list_is_valid ... ok
+test config::tests::routing_config_with_rules_parses ... ok
+test config::tests::routing_config_from_global_config_file ... ok
+test config::tests::routing_config_yaml_roundtrip ... ok
+test config::tests::routing_default_anthropic_models_to_claude_print ... ok
+test config::tests::routing_default_fallback_no_match ... ok
+test config::tests::routing_glm_47_defaults_to_claude_code_glm_47 ... ok
+test config::tests::routing_first_match_wins ... ok
+test config::tests::routing_patterns_match_bare_aliases ... ok
+test config::tests::routing_patterns_match_full_model_ids ... ok
+test config::tests::routing_strict_mode_failure ... ok
+test config::tests::routing_workspace_override ... ok
+test config::tests::source_map_tracks_cli_overrides ... ok
+test config::tests::splice_config_default_values ... ok
+test config::tests::supervisor_config_empty_section_loads_defaults ... ok
+test config::tests::supervisor_config_from_full_yaml ... ok
+test config::tests::supervisor_config_json_roundtrip ... ok
+test config::tests::supervisor_config_resolved_heartbeat_path_custom ... ok
+test config::tests::supervisor_config_resolved_heartbeat_path_default ... ok
+test config::tests::supervisor_config_with_only_heartbeat_path ... ok
+test config::tests::supervisor_config_with_only_socket_path ... ok
+test config::tests::supervisor_config_yaml_roundtrip ... ok
+test config::tests::routing_patterns_match_with_wildcards ... ok
+test config::tests::workspace_config_global_used_when_absent ... ok
+test config::tests::workspace_config_missing_returns_none ... ok
+test config::tests::workspace_config_overrides_agent_default ... ok
+test config::tests::workspace_config_overrides_prompt ... ok
+test config::tests::workspace_config_overrides_strands_pulse ... ok
+test config::tests::workspace_config_overrides_strands_unravel ... ok
+test config::tests::workspace_config_overrides_strands_weave ... ok
+test config::tests::workspace_config_overrides_verification ... ok
+test config::tests::valid_regex_in_routing_rule_passes_validation ... ok
+test config::tests::workspace_config_partial_agent_override ... ok
+test config::tests::workspace_invalid_yaml_returns_error ... ok
+test config::tests::workspace_config_routing_override ... ok
+test config::tests::workspace_labels_default_empty ... ok
+test config::tests::workspace_labels_not_set_leaves_default ... ok
+test config::tests::workspace_labels_parsed_from_needle_yaml ... ok
+test config::tests::workspace_overrides_deserialize_ignores_non_overridable ... ok
+test config::tests::zero_max_workers_fails_validation ... ok
+test cost::tests::budget_above_stop_returns_stop ... ok
+test cost::tests::budget_at_stop_returns_stop ... ok
+test cost::tests::budget_at_warn_returns_warn ... ok
+test cost::tests::budget_below_warn_returns_ok ... ok
+test cost::tests::budget_between_warn_and_stop ... ok
+test cost::tests::budget_disabled_returns_ok ... ok
+test cost::tests::budget_stop_only_no_warn ... ok
+test cost::tests::budget_warn_only_no_stop ... ok
+test cost::tests::default_pricing_has_known_models ... ok
+test cost::tests::default_pricing_rates_are_positive ... ok
+test config::tests::yaml_roundtrip ... ok
+test cost::tests::estimate_cost_input_only ... ok
+test cost::tests::estimate_cost_no_tokens_returns_none ... ok
+test cost::tests::estimate_cost_opus_typical ... ok
+test cost::tests::estimate_cost_output_only ... ok
+test cost::tests::estimate_cost_sonnet_typical ... ok
+test cost::tests::estimate_cost_zero_tokens_returns_none ... ok
+test cost::tests::estimate_cost_unknown_model_returns_none ... ok
+test cost::tests::scan_daily_cost_empty_dir ... ok
+test cost::tests::scan_daily_cost_handles_null_cost ... ok
+test cost::tests::scan_daily_cost_missing_dir ... ok
+test cost::tests::scan_daily_cost_ignores_non_jsonl_files ... ok
+test cost::tests::scan_daily_cost_skips_corrupt_lines ... ok
+test cost::tests::scan_daily_cost_sums_todays_events ... ok
+test decision::tests::adr_lite_format ... ok
+test decision::tests::adr_to_markdown_format ... ok
+test decision::tests::contains_error_indicator ... ok
+test decision::tests::decision_id_generation ... ok
+test decision::tests::adr_store_write_and_list ... ok
+test decision::tests::detect_exploration_choice_pattern ... ok
+test decision::tests::detect_failure_recovery_pattern ... ok
+test decision::tests::extract_file_path_from_description ... ok
+test dispatch::tests::adapter_yaml_args_input_method ... ok
+test dispatch::tests::adapter_yaml_deserialization ... ok
+test dispatch::tests::adapter_yaml_file_input_method ... ok
+test dispatch::tests::adapter_yaml_output_transform_absent_is_none ... ok
+test dispatch::tests::adapter_yaml_output_transform_deserialized ... ok
+test dispatch::tests::all_builtin_adapters_load ... ok
+test dispatch::tests::build_sample_json_creates_valid_structure ... ok
+test dispatch::tests::adapter_yaml_roundtrip ... ok
+test dispatch::tests::builtin_adapters_are_present ... ok
+test dispatch::tests::builtin_aider_config ... ok
+test dispatch::tests::builtin_claude_opus_config ... ok
+test dispatch::tests::builtin_codex_config ... ok
+test dispatch::tests::builtin_opencode_config ... ok
+test dispatch::tests::claude_opus_adapter_has_genai_attributes ... ok
+test dispatch::tests::claude_sonnet_adapter_has_genai_attributes ... ok
+test dispatch::tests::codex_adapter_has_openai_provider ... ok
+test dispatch::tests::dispatch_captures_exit_code ... ok
+test dispatch::tests::dispatch_captures_stderr ... ok
+test dispatch::tests::dispatch_echo_captures_stdout ... ok
+test dispatch::tests::dispatch_cleans_up_temp_file ... ok
+test dispatch::tests::dispatch_environment_variables ... ok
+test dispatch::tests::dispatch_missing_binary_returns_127 ... ok
+test dispatch::tests::dispatch_template_renders_bead_id ... ok
+test dispatch::tests::dispatch_stdin_redirect_from_prompt_file ... ok
+test dispatch::tests::e2e_adapter_with_custom_env_and_base_url ... ok
+test dispatch::tests::e2e_all_template_variables_substituted ... ok
+test dispatch::tests::e2e_exit_code_0_is_success ... ok
+test dispatch::tests::e2e_exit_code_137_is_crash ... ok
+test dispatch::tests::e2e_exit_code_1_is_failure ... ok
+test dispatch::tests::e2e_exit_code_2_is_failure ... ok
+test dispatch::tests::e2e_json_output_capture_and_token_extraction ... ok
+test dispatch::tests::e2e_multiple_environment_variables ... ok
+test dispatch::tests::e2e_prompt_with_newlines_preserved ... ok
+test dispatch::tests::e2e_prompt_with_shell_metacharacters ... ok
+test dispatch::tests::dispatch_timeout_returns_124 ... ok
+test dispatch::tests::e2e_timeout_kills_agent_returns_124 ... ok
+test dispatch::tests::e2e_workspace_directory_is_correct ... ok
+test dispatch::tests::effective_timeout_falls_back_to_global ... ok
+test dispatch::tests::effective_timeout_uses_adapter_when_nonzero ... ok
+test dispatch::tests::effective_timeout_zero_when_both_zero ... ok
+test dispatch::tests::extract_tokens_dispatches_to_json ... ok
+test dispatch::tests::extract_tokens_json_field ... ok
+test dispatch::tests::extract_tokens_json_invalid ... ok
+test dispatch::tests::extract_tokens_json_missing_path ... ok
+test dispatch::tests::extract_tokens_none_returns_default ... ok
+test dispatch::tests::extract_tokens_regex_aider_format ... ok
+test dispatch::tests::extract_tokens_regex_invalid_pattern ... ok
+test dispatch::tests::extract_tokens_regex_no_match ... ok
+test dispatch::tests::extract_tokens_regex_searches_stderr_too ... ok
+test dispatch::tests::gen_ai_system_returns_local_for_adapter_without_provider ... ok
+test dispatch::tests::gen_ai_system_returns_provider_for_claude_opus ... ok
+test dispatch::tests::gen_ai_system_returns_provider_for_claude_sonnet ... ok
+test dispatch::tests::gen_ai_system_returns_provider_for_codex ... ok
+test dispatch::tests::load_adapters_from_yaml_directory ... ok
+test dispatch::tests::load_adapters_includes_builtins ... ok
+test dispatch::tests::render_template_preserves_unrecognized_placeholders ... ok
+test dispatch::tests::render_template_substitutes_all_variables ... ok
+test dispatch::tests::token_extraction_none_yaml_roundtrip ... ok
+test dispatch::tests::token_extraction_regex_yaml_roundtrip ... ok
+test dispatch::tests::token_extraction_yaml_roundtrip ... ok
+test dispatch::tests::user_adapter_overrides_builtin ... ok
+test dispatch::tests::write_prompt_to_temp_creates_file ... ok
+test dispatch::tests::write_prompt_to_temp_uses_temp_dir ... ok
+test drift::tests::drift_category_as_str ... ok
+test drift::tests::drift_detector_different_tools ... ok
+test drift::tests::drift_detector_no_transcripts ... ok
+test drift::tests::drift_detector_similar_sessions ... ok
+test drift::tests::drift_detector_single_transcript ... ok
+test drift::tests::drift_report_to_markdown ... ok
+test drift::tests::fingerprint_from_transcript ... ok
+test drift::tests::jaccard_similarity_different ... ok
+test drift::tests::jaccard_similarity_identical ... ok
+test health::tests::atomic_write_never_produces_partial ... ok
+test health::tests::check_pid_alive_current_process ... ok
+test health::tests::check_pid_alive_nonexistent ... ok
+test health::tests::check_supervisor_heartbeat_file_fresh_returns_true ... ok
+test health::tests::check_supervisor_heartbeat_file_invalid_returns_false ... ok
+test health::tests::check_supervisor_heartbeat_file_malformed_json_returns_error ... ok
+test health::tests::check_supervisor_heartbeat_file_missing_returns_false ... ok
+test health::tests::check_supervisor_heartbeat_file_stale_returns_false ... ok
+test health::tests::check_supervisor_socket_default_path ... ok
+test health::tests::check_supervisor_socket_exists_returns_true ... ok
+test health::tests::check_supervisor_socket_missing_returns_false ... ok
+test health::tests::cleanup_heartbeat_file_logs_errors_on_failure ... ok
+test health::tests::cleanup_heartbeat_file_ok_when_file_missing ... ok
+test health::tests::cleanup_heartbeat_file_removes_existing_file ... ok
+test health::tests::cleanup_heartbeat_file_with_heartbeat_path ... ok
+test health::tests::detect_stale_peers_excludes_self ... ok
+test health::tests::detect_supervisor_direct_heartbeat_takes_precedence ... ok
+test health::tests::detect_supervisor_direct_no_supervisor_returns_false ... ok
+test health::tests::detect_supervisor_direct_with_heartbeat_returns_true ... ok
+test health::tests::detect_supervisor_direct_with_socket_returns_true ... ok
+test health::tests::detect_supervisor_ignores_stale_heartbeats ... ok
+test health::tests::detect_supervisor_multiple_workers ... ok
+test health::tests::detect_supervisor_no_other_workers ... ok
+test health::tests::detect_supervisor_nonexistent_directory ... ok
+test health::tests::detect_supervisor_recent_spawn_activity ... ok
+test health::tests::emitter_exits_after_consecutive_failures ... ok
+test health::tests::healthmonitor_cleanup_heartbeat_file_logs_errors_on_failure ... ok
+test health::tests::healthmonitor_cleanup_heartbeat_file_ok_when_file_missing ... ok
+test health::tests::healthmonitor_cleanup_heartbeat_file_removes_existing_file ... ok
+test health::tests::healthmonitor_cleanup_heartbeat_file_with_running_emitter ... ok
+test health::tests::heartbeat_cleanup_on_graceful_shutdown ... ok
+test health::tests::heartbeat_cleanup_on_worker_drop ... ok
+test dispatch::tests::e2e_timeout_kills_entire_process_group ... ok
+test health::tests::heartbeat_data_roundtrip ... ok
+test health::tests::heartbeat_file_removed_on_stop ... ok
+test health::tests::heartbeat_file_written_on_start ... ok
+test health::tests::heartbeat_files_dont_collide_across_adapter_pools ... ok
+test health::tests::heartbeat_path_computed_during_construction ... ok
+test health::tests::heartbeat_path_uses_qualified_id_not_bare_worker_id ... ok
+test health::tests::heartbeat_updates_with_shared_state ... ok
+test health::tests::heartbeat_uses_cross_workspace_bead_workspace ... ok
+test health::tests::is_stale_detects_old_heartbeats ... ok
+test health::tests::read_all_heartbeats_nonexistent_dir ... ok
+test health::tests::read_all_heartbeats_reads_files ... ok
+test learning::tests::meaningful_returns_false_with_all_none ... ok
+test learning::tests::meaningful_returns_true_with_content ... ok
+test learning::tests::parse_body_without_retrospective ... ok
+test learning::tests::parse_full_retrospective ... ok
+test learning::tests::parse_partial_retrospective ... ok
+test learning::tests::parse_retrospective_all_empty_returns_none ... ok
+test learning::tests::parse_retrospective_case_sensitive ... ok
+test learning::tests::parse_retrospective_multiline_values ... ok
+test learning::tests::parse_retrospective_with_empty_fields ... ok
+test learning::tests::serialize_retrospective_to_json ... ok
+test mitosis::tests::create_children_all_deduped ... ok
+test mitosis::tests::create_children_with_dedup ... ok
+test mitosis::tests::dedup_ignores_children_of_other_parents ... ok
+test mitosis::tests::evaluate_skips_when_disabled ... ok
+test mitosis::tests::evaluate_skips_when_not_first_failure ... ok
+test mitosis::tests::extract_bare_json ... ok
+test mitosis::tests::extract_from_json_fence ... ok
+test mitosis::tests::parse_response_embedded_json_object ... ok
+test mitosis::tests::parse_response_from_markdown_code_fence ... ok
+test mitosis::tests::parse_response_invalid_json ... ok
+test mitosis::tests::parse_response_not_splittable ... ok
+test mitosis::tests::parse_response_splittable_with_children ... ok
+test mitosis::tests::repeat_interval_skips_max_depth_beads ... ok
+test mitosis::tests::repeat_interval_skips_mitosis_depth_beads ... ok
+test mitosis::tests::repeat_interval_triggers_at_correct_counts ... ok
+test mitosis::tests::repeat_interval_zero_preserves_first_failure_only ... ok
+test mitosis::tests::sanitize_replaces_slashes ... ok
+test mitosis::tests::titles_match_exact ... ok
+test mitosis::tests::titles_match_substring ... ok
+test mitosis::tests::titles_no_match ... ok
+test outcome::tests::classify_no_wildcard_arms ... ok
+test outcome::tests::classify_not_interrupted_uses_exit_code ... ok
+test outcome::tests::classify_was_interrupted_always_returns_interrupted ... ok
+test outcome::tests::handle_agent_not_found_releases ... ok
+test outcome::tests::handle_crash_negative_exit_code ... ok
+test outcome::tests::handle_crash_releases_and_creates_alert_bead ... ok
+test outcome::tests::handle_failure_emits_telemetry_events ... ok
+test outcome::tests::handle_failure_increments_existing_count ... ok
+test outcome::tests::handle_failure_releases_and_increments_count ... ok
+test outcome::tests::handle_failure_with_flush_timeout_continues_gracefully ... ok
+test health::tests::heartbeat_creates_and_refreshes_every_30_seconds has been running for over 60 seconds
+worker::tests::is_workspace_unset_real_path ... ok
+test worker::tests::is_workspace_unset_relative_path ... ok
+test worker::tests::full_cycle_with_echo_agent has been running for over 60 seconds
+test worker::tests::request_shutdown_sets_flag ... ok
+test worker::tests::resolve_adapter_returns_builtin ... ok
+test worker::tests::resolve_provider_returns_none_for_missing_adapter ... ok
+test worker::tests::restore_home_store_is_noop_when_stores_match ... ok
+test worker::tests::full_cycle_with_echo_agent ... ok
