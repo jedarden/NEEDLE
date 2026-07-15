@@ -303,6 +303,89 @@ fn routing_anthropic_all_claude_models_together() {
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn routing_glm_47_to_claude_code_glm_47() {
+    // Test that glm-4.7 models explicitly route to claude-code-glm-4.7 adapter.
+    let routing = RoutingConfig {
+        rules: vec![make_rule("glm-4\\.7.*", "claude-code-glm-4.7")],
+        default_adapter: Some("fallback".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Test various glm-4.7 model names
+    let glm_47_models = vec![
+        "glm-4.7",
+        "glm-4.7-charlie",
+        "glm-4.7-turbo",
+        "glm-4.7-latest",
+    ];
+
+    for model in glm_47_models {
+        let result = match_adapter(
+            model,
+            &config.agent.routing.as_ref().unwrap().rules,
+            config
+                .agent
+                .routing
+                .as_ref()
+                .unwrap()
+                .default_adapter
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or(""),
+        );
+
+        assert_eq!(
+            result,
+            Some("claude-code-glm-4.7".to_string()),
+            "GLM-4.7 model '{}' should route to claude-code-glm-4.7",
+            model
+        );
+    }
+}
+
+#[test]
+fn routing_glm_47_flash_to_claude_code_glm_47() {
+    // Test that glm-4.7-flash models explicitly route to claude-code-glm-4.7 adapter.
+    let routing = RoutingConfig {
+        rules: vec![make_rule("glm-4\\.7-flash.*", "claude-code-glm-4.7")],
+        default_adapter: Some("fallback".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Test glm-4.7-flash model variants
+    let glm_flash_models = vec![
+        "glm-4.7-flash",
+        "glm-4.7-flash-turbo",
+        "glm-4.7-flash-preview",
+    ];
+
+    for model in glm_flash_models {
+        let result = match_adapter(
+            model,
+            &config.agent.routing.as_ref().unwrap().rules,
+            config
+                .agent
+                .routing
+                .as_ref()
+                .unwrap()
+                .default_adapter
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or(""),
+        );
+
+        assert_eq!(
+            result,
+            Some("claude-code-glm-4.7".to_string()),
+            "GLM-4.7-flash model '{}' should route to claude-code-glm-4.7",
+            model
+        );
+    }
+}
+
+#[test]
 fn routing_glm_to_default_adapter() {
     // Test that GLM models route to the default adapter (claude-code-glm-4.7).
     let routing = make_anthropic_subscription_routing();
@@ -583,6 +666,171 @@ fn routing_workspace_override_changes_defaults() {
 }
 
 #[test]
+fn routing_workspace_specific_glm_rules_override_global() {
+    // Test that workspace-specific GLM routing rules override global defaults.
+    //
+    // This demonstrates that a workspace can customize GLM model routing
+    // independently of the global configuration.
+
+    // Global config: GLM models route to default claude-code-glm-4.7
+    let global_routing = RoutingConfig {
+        rules: vec![make_rule("(claude-)?(sonnet|opus).*", "claude-print")],
+        default_adapter: Some("claude-code-glm-4.7".to_string()),
+        strict: false,
+    };
+    let global_config = make_test_config("claude", Some(global_routing));
+
+    // Workspace config: GLM models route to custom adapter
+    let workspace_routing = RoutingConfig {
+        rules: vec![
+            make_rule("glm-4\\.7.*", "workspace-glm-custom"),
+            make_rule("(claude-)?(sonnet|opus).*", "claude-print"),
+        ],
+        default_adapter: Some("workspace-default".to_string()),
+        strict: false,
+    };
+    let workspace_config = make_test_config("claude", Some(workspace_routing));
+
+    // Global: glm-4.7 routes to claude-code-glm-4.7 (default)
+    let global_result = match_adapter(
+        "glm-4.7",
+        &global_config.agent.routing.as_ref().unwrap().rules,
+        global_config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    assert_eq!(global_result, Some("claude-code-glm-4.7".to_string()));
+
+    // Workspace: glm-4.7 routes to custom adapter (explicit rule)
+    let workspace_result = match_adapter(
+        "glm-4.7",
+        &workspace_config.agent.routing.as_ref().unwrap().rules,
+        workspace_config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    assert_eq!(workspace_result, Some("workspace-glm-custom".to_string()));
+}
+
+#[test]
+fn routing_workspace_patterns_take_precedence_over_global() {
+    // Test that workspace-specific patterns take precedence over global patterns.
+    //
+    // This tests the case where both global and workspace configs have rules
+    // for the same model family, and the workspace rule should win.
+
+    // Global config: All Claude models -> global-adapter
+    let global_routing = RoutingConfig {
+        rules: vec![make_rule("claude-.*", "global-adapter")],
+        default_adapter: Some("global-default".to_string()),
+        strict: false,
+    };
+
+    // Workspace config: More specific patterns override
+    let workspace_routing = RoutingConfig {
+        rules: vec![
+            make_rule("claude-sonnet.*", "workspace-sonnet"),
+            make_rule("claude-opus.*", "workspace-opus"),
+            make_rule("claude-.*", "workspace-other-claude"),
+        ],
+        default_adapter: Some("workspace-default".to_string()),
+        strict: false,
+    };
+
+    // Test that workspace patterns are used
+    let sonnet_result = match_adapter(
+        "claude-sonnet-4-6",
+        &workspace_routing.rules,
+        workspace_routing
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    assert_eq!(sonnet_result, Some("workspace-sonnet".to_string()));
+
+    let opus_result = match_adapter(
+        "claude-opus-4-6",
+        &workspace_routing.rules,
+        workspace_routing
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    assert_eq!(opus_result, Some("workspace-opus".to_string()));
+
+    let fable_result = match_adapter(
+        "claude-fable-5",
+        &workspace_routing.rules,
+        workspace_routing
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    assert_eq!(fable_result, Some("workspace-other-claude".to_string()));
+}
+
+#[test]
+fn routing_workspace_can_restrict_global_patterns() {
+    // Test that a workspace can restrict global routing patterns.
+    //
+    // This demonstrates that a workspace can have a more restrictive
+    // routing policy than the global config.
+
+    // Global config: Permissive - routes all Claude models
+    let global_routing = RoutingConfig {
+        rules: vec![make_rule("claude-.*", "claude-print")],
+        default_adapter: Some("claude-code-glm-4.7".to_string()),
+        strict: false,
+    };
+
+    // Workspace config: Restrictive - only routes Sonnet models
+    let workspace_routing = RoutingConfig {
+        rules: vec![make_rule("claude-sonnet.*", "claude-print")],
+        default_adapter: Some("restricted-default".to_string()),
+        strict: true,
+    };
+
+    // Workspace: Sonnet routes successfully
+    let sonnet_result = match_adapter(
+        "claude-sonnet-4-6",
+        &workspace_routing.rules,
+        workspace_routing
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    assert_eq!(sonnet_result, Some("claude-print".to_string()));
+
+    // Workspace: Opus doesn't match any rule, uses default
+    let opus_result = match_adapter(
+        "claude-opus-4-6",
+        &workspace_routing.rules,
+        workspace_routing
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    assert_eq!(opus_result, Some("restricted-default".to_string()));
+}
+
+#[test]
 fn routing_workspace_override_default_adapter() {
     // Test that workspace config can override the default adapter.
 
@@ -838,9 +1086,9 @@ fn routing_first_match_wins_with_overlapping_patterns() {
     let routing = RoutingConfig {
         // Order matters! First pattern that matches wins.
         rules: vec![
-            make_rule("claude-.*", "first-adapter"),           // Matches all claude-*
-            make_rule("claude-sonnet.*", "second-adapter"),   // More specific, but comes second
-            make_rule("sonnet-.*", "third-adapter"),          // Also matches sonnet prefix
+            make_rule("claude-.*", "first-adapter"), // Matches all claude-*
+            make_rule("claude-sonnet.*", "second-adapter"), // More specific, but comes second
+            make_rule("sonnet-.*", "third-adapter"), // Also matches sonnet prefix
         ],
         default_adapter: Some("fallback".to_string()),
         strict: false,
@@ -880,9 +1128,9 @@ fn routing_first_match_wins_reversed_order() {
     let routing = RoutingConfig {
         // Reversed order from the previous test
         rules: vec![
-            make_rule("sonnet-.*", "third-adapter"),          // First now
-            make_rule("claude-sonnet.*", "second-adapter"),   // Second now
-            make_rule("claude-.*", "first-adapter"),           // Last now
+            make_rule("sonnet-.*", "third-adapter"),        // First now
+            make_rule("claude-sonnet.*", "second-adapter"), // Second now
+            make_rule("claude-.*", "first-adapter"),        // Last now
         ],
         default_adapter: Some("fallback".to_string()),
         strict: false,
@@ -921,9 +1169,9 @@ fn routing_first_match_wins_with_specific_patterns() {
     let routing = RoutingConfig {
         // More specific patterns first catch exact matches
         rules: vec![
-            make_rule("claude-sonnet-5", "sonnet-5-exact"),     // Exact match for Sonnet 5
-            make_rule("claude-sonnet.*", "sonnet-family"),      // Fallback for all Sonnet
-            make_rule("claude-.*", "all-claude"),               // Fallback for all Claude
+            make_rule("claude-sonnet-5", "sonnet-5-exact"), // Exact match for Sonnet 5
+            make_rule("claude-sonnet.*", "sonnet-family"),  // Fallback for all Sonnet
+            make_rule("claude-.*", "all-claude"),           // Fallback for all Claude
         ],
         default_adapter: Some("fallback".to_string()),
         strict: false,
