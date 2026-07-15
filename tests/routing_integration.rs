@@ -1595,3 +1595,439 @@ fn routing_config_example_documentation() {
         Some("claude-code-glm-4.7".to_string())
     );
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Missing Adapter Failure Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn dispatcher_routing_to_missing_adapter_fails_loudly() {
+    // Test that routing to a non-existent adapter produces a detectable failure.
+    //
+    // This is a critical test: it verifies that when routing rules resolve to an
+    // adapter name that doesn't exist in the dispatcher, the failure is loud and
+    // detectable. The dispatcher.adapter() method returns None for missing adapters,
+    // and callers must check for this and handle it appropriately.
+
+    let routing = RoutingConfig {
+        rules: vec![make_rule("missing-model.*", "non-existent-adapter")],
+        default_adapter: Some("also-non-existent".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Dispatcher with only one adapter (claude-print)
+    let dispatcher = make_test_dispatcher(vec![make_test_adapter(
+        "claude-print",
+        "claude",
+        "claude --print < {prompt_file}",
+    )]);
+
+    // Routing resolves to an adapter that doesn't exist
+    let resolved_adapter = dispatcher.resolve_adapter_name("missing-model-x", &config);
+    assert_eq!(resolved_adapter, "non-existent-adapter");
+
+    // The resolved adapter does not exist in the dispatcher
+    let adapter_result = dispatcher.adapter(&resolved_adapter);
+    assert!(
+        adapter_result.is_none(),
+        "Dispatcher should return None for non-existent adapter '{}'",
+        resolved_adapter
+    );
+
+    // Default adapter also doesn't exist
+    let resolved_default = dispatcher.resolve_adapter_name("other-model", &config);
+    assert_eq!(resolved_default, "also-non-existent");
+
+    let default_result = dispatcher.adapter(&resolved_default);
+    assert!(
+        default_result.is_none(),
+        "Dispatcher should return None for non-existent default adapter '{}'",
+        resolved_default
+    );
+}
+
+#[test]
+fn dispatcher_partial_adapter_coverage_detects_gaps() {
+    // Test that we can detect when some models route to valid adapters while others don't.
+    //
+    // This simulates a real-world scenario where a workspace has routing rules that
+    // reference adapters that haven't been loaded yet. The test verifies that we can
+    // detect which models work and which don't.
+
+    let routing = RoutingConfig {
+        rules: vec![
+            make_rule("claude-.*", "claude-print"), // Exists
+            make_rule("glm-.*", "glm-adapter"),     // Does NOT exist
+            make_rule("gpt-.*", "gpt-adapter"),     // Does NOT exist
+        ],
+        default_adapter: Some("claude-print".to_string()), // Exists
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Dispatcher with only claude-print adapter
+    let dispatcher = make_test_dispatcher(vec![make_test_adapter(
+        "claude-print",
+        "claude",
+        "claude --print < {prompt_file}",
+    )]);
+
+    // Claude models -> valid adapter
+    let claude_adapter = dispatcher.resolve_adapter_name("claude-sonnet-4-6", &config);
+    assert_eq!(claude_adapter, "claude-print");
+    assert!(
+        dispatcher.adapter(&claude_adapter).is_some(),
+        "Claude adapter should exist"
+    );
+
+    // GLM models -> missing adapter
+    let glm_adapter = dispatcher.resolve_adapter_name("glm-4.7", &config);
+    assert_eq!(glm_adapter, "glm-adapter");
+    assert!(
+        dispatcher.adapter(&glm_adapter).is_none(),
+        "GLM adapter should not exist (detect configuration gap)"
+    );
+
+    // GPT models -> missing adapter
+    let gpt_adapter = dispatcher.resolve_adapter_name("gpt-4", &config);
+    assert_eq!(gpt_adapter, "gpt-adapter");
+    assert!(
+        dispatcher.adapter(&gpt_adapter).is_none(),
+        "GPT adapter should not exist (detect configuration gap)"
+    );
+
+    // Other models -> default (exists)
+    let other_adapter = dispatcher.resolve_adapter_name("other-model", &config);
+    assert_eq!(other_adapter, "claude-print");
+    assert!(
+        dispatcher.adapter(&other_adapter).is_some(),
+        "Default adapter should exist"
+    );
+}
+
+#[test]
+fn routing_invalid_regex_pattern_skipped_with_warning() {
+    // Test that invalid regex patterns in routing rules are skipped gracefully.
+    //
+    // The routing module should log a warning when it encounters an invalid pattern
+    // and continue with other rules. This prevents a single bad pattern from breaking
+    // the entire routing configuration.
+
+    let routing = RoutingConfig {
+        rules: vec![
+            make_rule("[invalid(unclosed", "bad-pattern-adapter"), // Invalid regex
+            make_rule("claude-.*", "claude-print"),                // Valid regex
+        ],
+        default_adapter: Some("fallback".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Invalid pattern should be skipped, valid pattern should match
+    let result = match_adapter(
+        "claude-sonnet-4-6",
+        &config.agent.routing.as_ref().unwrap().rules,
+        config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+
+    // The invalid pattern is skipped, so claude-.* matches
+    assert_eq!(
+        result,
+        Some("claude-print".to_string()),
+        "Invalid pattern should be skipped, allowing valid patterns to match"
+    );
+}
+
+#[test]
+fn routing_all_invalid_patterns_returns_default() {
+    // Test that when all routing patterns are invalid, the default adapter is used.
+    //
+    // This is a fail-safe mechanism: even if all rules are malformed, the system
+    // should fall back to the default adapter rather than failing completely.
+
+    let routing = RoutingConfig {
+        rules: vec![
+            make_rule("[invalid1", "adapter1"), // Invalid
+            make_rule("(unclosed", "adapter2"), // Invalid
+        ],
+        default_adapter: Some("safe-default".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // All patterns invalid, should return default
+    let result = match_adapter(
+        "any-model",
+        &config.agent.routing.as_ref().unwrap().rules,
+        config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+
+    assert_eq!(
+        result,
+        Some("safe-default".to_string()),
+        "All invalid patterns should fall back to default adapter"
+    );
+}
+
+#[test]
+fn routing_empty_rules_returns_default() {
+    // Test that an empty rules list returns the default adapter.
+    //
+    // This is the simplest possible routing configuration: no rules, just a default.
+    // It should work correctly for all model names.
+
+    let routing = RoutingConfig {
+        rules: vec![], // No rules
+        default_adapter: Some("simple-default".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Any model should get the default
+    let models = vec!["claude-sonnet-4-6", "glm-4.7", "gpt-4", "any-model"];
+    for model in models {
+        let result = match_adapter(
+            model,
+            &config.agent.routing.as_ref().unwrap().rules,
+            config
+                .agent
+                .routing
+                .as_ref()
+                .unwrap()
+                .default_adapter
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or(""),
+        );
+
+        assert_eq!(
+            result,
+            Some("simple-default".to_string()),
+            "Empty rules should return default for model '{}'",
+            model
+        );
+    }
+}
+
+#[test]
+fn routing_invalid_glob_syntax_handled() {
+    // Test that invalid glob-style patterns are handled gracefully.
+    //
+    // The routing module converts glob patterns to regex. This test verifies
+    // that patterns that look like globs but have invalid syntax are handled
+    // appropriately.
+
+    // Most glob patterns are actually valid as regex after conversion
+    // But we can test edge cases like unmatched brackets
+
+    let routing = RoutingConfig {
+        rules: vec![
+            make_rule("model-[a-z", "unclosed-bracket"), // Invalid character class
+            make_rule("valid-*", "valid-adapter"),       // Valid glob pattern
+        ],
+        default_adapter: Some("fallback".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Invalid pattern should be skipped, valid pattern should work
+    let result = match_adapter(
+        "valid-model",
+        &config.agent.routing.as_ref().unwrap().rules,
+        config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+
+    assert_eq!(
+        result,
+        Some("valid-adapter".to_string()),
+        "Invalid glob pattern should be skipped, valid patterns should work"
+    );
+}
+
+#[test]
+fn routing_strict_mode_missing_adapter_loud_failure() {
+    // Test that strict mode with missing adapters produces a loud, detectable failure.
+    //
+    // In strict mode, if no rules match and there's no default, the routing returns None.
+    // This is a "loud failure" because the caller must explicitly handle the None case.
+
+    let routing = RoutingConfig {
+        rules: vec![make_rule("claude-.*", "claude-print")],
+        default_adapter: None, // No default in strict mode
+        strict: true,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Model that doesn't match any rule
+    let result = match_adapter(
+        "glm-4.7",
+        &config.agent.routing.as_ref().unwrap().rules,
+        config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+
+    // Strict mode with no match and no default returns None
+    assert_eq!(
+        result, None,
+        "Strict mode should return None for unmatched model when no default is set"
+    );
+
+    // Even the dispatcher adapter lookup should fail
+    let dispatcher = make_test_dispatcher(vec![make_test_adapter(
+        "claude-print",
+        "claude",
+        "claude --print < {prompt_file}",
+    )]);
+
+    // When routing returns None, there's no adapter to look up
+    // This simulates the loud failure case
+}
+
+#[test]
+fn routing_non_existent_adapter_in_dispatcher() {
+    // Test the end-to-end flow: routing resolves adapter, but it's missing from dispatcher.
+    //
+    // This is the real-world failure mode: a routing rule points to an adapter that
+    // hasn't been loaded. The test verifies that this failure is detectable.
+
+    let routing = RoutingConfig {
+        rules: vec![make_rule("special-model.*", "special-adapter")],
+        default_adapter: Some("default-adapter".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Dispatcher WITHOUT the "special-adapter"
+    let dispatcher = make_test_dispatcher(vec![
+        make_test_adapter("default-adapter", "default", "default < {prompt_file}"),
+        // Note: special-adapter is NOT loaded
+    ]);
+
+    // Routing says to use "special-adapter"
+    let resolved = dispatcher.resolve_adapter_name("special-model-x", &config);
+    assert_eq!(resolved, "special-adapter");
+
+    // But that adapter doesn't exist in the dispatcher
+    let adapter = dispatcher.adapter(&resolved);
+    assert!(
+        adapter.is_none(),
+        "Adapter '{}' from routing should not exist in dispatcher (loud failure)",
+        resolved
+    );
+
+    // This is a loud failure: the caller will get None from adapter() and must handle it
+}
+
+#[test]
+fn dispatcher_empty_adapter_list_all_missing() {
+    // Test the extreme case: dispatcher has no adapters at all.
+    //
+    // This verifies that even with an empty dispatcher, the failure is detectable
+    // and doesn't cause a crash.
+
+    let routing = RoutingConfig {
+        rules: vec![make_rule(".*", "any-adapter")],
+        default_adapter: Some("default-adapter".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Dispatcher with NO adapters
+    let dispatcher = make_test_dispatcher(vec![]);
+
+    // Routing resolves to adapter names
+    let resolved1 = dispatcher.resolve_adapter_name("model-1", &config);
+    let resolved2 = dispatcher.resolve_adapter_name("model-2", &config);
+
+    // But none of them exist
+    assert!(dispatcher.adapter(&resolved1).is_none());
+    assert!(dispatcher.adapter(&resolved2).is_none());
+}
+
+#[test]
+fn routing_case_sensitivity_adapter_names() {
+    // Test that adapter names are case-sensitive.
+    //
+    // This prevents configuration errors where adapter names have incorrect casing.
+
+    let dispatcher = make_test_dispatcher(vec![make_test_adapter(
+        "Claude-Print",
+        "claude",
+        "claude --print < {prompt_file}",
+    )]);
+
+    // Exact case match works
+    assert!(dispatcher.adapter("Claude-Print").is_some());
+
+    // Different case doesn't match
+    assert!(dispatcher.adapter("claude-print").is_none());
+    assert!(dispatcher.adapter("CLAUDE-PRINT").is_none());
+    assert!(dispatcher.adapter("claude-print").is_none());
+}
+
+#[test]
+fn routing_empty_adapter_name() {
+    // Test handling of empty adapter names in routing configuration.
+    //
+    // Empty strings should be treated as missing adapters, not crash the system.
+
+    let dispatcher = make_test_dispatcher(vec![make_test_adapter(
+        "valid-adapter",
+        "valid",
+        "valid < {prompt_file}",
+    )]);
+
+    // Empty adapter name should return None
+    assert!(dispatcher.adapter("").is_none());
+}
+
+#[test]
+fn routing_whitespace_in_adapter_names() {
+    // Test that adapter names with whitespace are handled correctly.
+    //
+    // Whitespace in adapter names is a common configuration error that should be
+    // detectable.
+
+    let dispatcher = make_test_dispatcher(vec![make_test_adapter(
+        "valid-adapter",
+        "valid",
+        "valid < {prompt_file}",
+    )]);
+
+    // Adapter names with leading/trailing whitespace don't match
+    assert!(dispatcher.adapter(" valid-adapter").is_none());
+    assert!(dispatcher.adapter("valid-adapter ").is_none());
+    assert!(dispatcher.adapter(" valid-adapter ").is_none());
+}

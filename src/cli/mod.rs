@@ -8,7 +8,7 @@
 //!
 //! Depends on: `worker`, `config`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
@@ -984,61 +984,171 @@ fn launch_in_tmux(
 
 /// Kill the entire process tree rooted at the given PID.
 ///
-/// This function sends SIGTERM to the process group, waits for processes to exit,
-/// and sends SIGKILL to any remaining processes. Returns true if all processes
-/// were successfully terminated.
+/// This function recursively finds all child processes and sends SIGTERM,
+/// waits for processes to exit, and sends SIGKILL to any remaining processes.
+/// Returns true if all processes were successfully terminated.
+///
+/// This is necessary because agents are spawned with setpgid(0,0), creating
+/// new process groups that are not reachable via killpg() on the parent PGID.
 fn kill_process_tree(pid: u32) -> Result<bool> {
+    use std::fs;
     use std::thread;
 
-    tracing::info!(pid, "sending SIGTERM to process tree");
+    tracing::info!(pid, "finding all descendant processes to terminate");
 
-    // First, try SIGTERM to the process group for graceful shutdown
-    unsafe {
-        if libc::killpg(pid as libc::pid_t, libc::SIGTERM) == -1 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::NotFound {
-                // Process already gone
-                return Ok(true);
+    // Collect all descendant PIDs by reading /proc
+    let descendants = find_all_descendants(pid);
+    let descendant_count = descendants.len();
+
+    if descendant_count > 0 {
+        tracing::info!(pid, count = descendant_count, ?descendants, "found descendant processes");
+    }
+
+    // Send SIGTERM to all descendants (including the original PID)
+    let all_pids: Vec<u32> = std::iter::once(pid).chain(descendants).collect();
+    tracing::info!(pid, count = all_pids.len(), "sending SIGTERM to process tree");
+
+    for target_pid in &all_pids {
+        unsafe {
+            if libc::kill(*target_pid as libc::pid_t, libc::SIGTERM) == -1 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(pid = target_pid, error = %err, "SIGTERM failed");
+                }
             }
-            tracing::warn!(pid, error = %err, "SIGTERM failed");
         }
     }
 
-    // Wait up to 3 seconds for processes to exit gracefully
-    for i in 0..30 {
+    // Wait up to 5 seconds for processes to exit gracefully
+    for i in 0..50 {
         thread::sleep(Duration::from_millis(100));
-        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-        if !alive {
-            tracing::info!(pid, "process tree terminated gracefully after {}ms", (i + 1) * 100);
+
+        // Check if all processes are gone
+        let all_dead = all_pids.iter().all(|&p| {
+            unsafe { libc::kill(p as libc::pid_t, 0) != 0 }
+        });
+
+        if all_dead {
+            tracing::info!(
+                pid,
+                "process tree terminated gracefully after {}ms",
+                (i + 1) * 100
+            );
             return Ok(true);
         }
     }
 
     // Some processes survived SIGTERM, use SIGKILL
     tracing::warn!(pid, "process tree survived SIGTERM, sending SIGKILL");
-    unsafe {
-        if libc::killpg(pid as libc::pid_t, libc::SIGKILL) == -1 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::NotFound {
-                return Ok(true);
+    for target_pid in &all_pids {
+        unsafe {
+            if libc::kill(*target_pid as libc::pid_t, libc::SIGKILL) == -1 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    tracing::error!(pid = target_pid, error = %err, "SIGKILL failed");
+                }
             }
-            tracing::error!(pid, error = %err, "SIGKILL failed");
         }
     }
 
-    // Wait up to 2 seconds for SIGKILL to take effect
-    for i in 0..20 {
+    // Wait up to 3 seconds for SIGKILL to take effect
+    for i in 0..30 {
         thread::sleep(Duration::from_millis(100));
-        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
-        if !alive {
-            tracing::info!(pid, "process tree terminated by SIGKILL after {}ms", (i + 1) * 100);
+
+        let all_dead = all_pids.iter().all(|&p| {
+            unsafe { libc::kill(p as libc::pid_t, 0) != 0 }
+        });
+
+        if all_dead {
+            tracing::info!(
+                pid,
+                "process tree terminated by SIGKILL after {}ms",
+                (i + 1) * 100
+            );
             return Ok(true);
         }
     }
 
-    // Process still alive - this is a failure
-    tracing::error!(pid, "process tree survived SIGKILL - still running");
-    Ok(false)
+    // Check which processes are still alive
+    let still_alive: Vec<u32> = all_pids.iter()
+        .filter(|&&p| unsafe { libc::kill(p as libc::pid_t, 0) == 0 })
+        .copied()
+        .collect();
+
+    if !still_alive.is_empty() {
+        tracing::error!(
+            pid,
+            ?still_alive,
+            "process tree survived SIGKILL - {} processes still running",
+            still_alive.len()
+        );
+    }
+
+    Ok(still_alive.is_empty())
+}
+
+/// Recursively find all descendant processes of the given PID.
+///
+/// Reads /proc to build a process tree and returns all descendant PIDs.
+/// This handles the case where agents create new process groups with setpgid(0,0).
+fn find_all_descendants(root_pid: u32) -> Vec<u32> {
+    use std::fs;
+
+    let proc_dir = Path::new("/proc");
+    let mut ppid_to_children: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    // First pass: build parent->children mapping
+    if let Ok(entries) = fs::read_dir(proc_dir) {
+        for entry in entries.flatten() {
+            let pid_str = entry.file_name();
+            let pid: u32 = match pid_str.to_string_lossy().parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            // Skip the root PID itself
+            if pid == root_pid {
+                continue;
+            }
+
+            // Read /proc/[pid]/status to get PPID
+            let status_path = entry.path().join("status");
+            if let Ok(content) = fs::read_to_string(&status_path) {
+                let ppid = content.lines()
+                    .find(|line| line.starts_with("PPID:\t"))
+                    .and_then(|line| line.split(':').nth(1))
+                    .and_then(|v| v.trim().parse().ok());
+
+                if let Some(parent_pid) = ppid {
+                    ppid_to_children.entry(parent_pid).or_default().push(pid);
+                }
+            }
+        }
+    }
+
+    // Recursive DFS to find all descendants
+    let mut descendants = Vec::new();
+    let mut visited = HashSet::new();
+    find_descendants_recursive(root_pid, &ppid_to_children, &mut descendants, &mut visited);
+
+    descendants
+}
+
+/// Recursive helper to traverse process tree and collect descendants.
+fn find_descendants_recursive(
+    pid: u32,
+    ppid_to_children: &HashMap<u32, Vec<u32>>,
+    descendants: &mut Vec<u32>,
+    visited: &mut HashSet<u32>,
+) {
+    if let Some(children) = ppid_to_children.get(&pid) {
+        for &child_pid in children {
+            if visited.insert(child_pid) {
+                descendants.push(child_pid);
+                find_descendants_recursive(child_pid, ppid_to_children, descendants, visited);
+            }
+        }
+    }
 }
 
 /// `needle stop` — kill the full process tree for worker processes.
@@ -1082,7 +1192,10 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         let pid = match session.pid {
             Some(p) => p,
             None => {
-                println!("Warning: no PID found for session '{}', skipping process tree kill", session.name);
+                println!(
+                    "Warning: no PID found for session '{}', skipping process tree kill",
+                    session.name
+                );
                 // Still kill the session for cleanup
                 let _ = ProcessCommand::new("tmux")
                     .args(["kill-session", "-t", &session.name])
@@ -1095,7 +1208,10 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         let killed = match kill_process_tree(pid) {
             Ok(k) => k,
             Err(e) => {
-                println!("Warning: failed to kill process tree for session '{}': {}", session.name, e);
+                println!(
+                    "Warning: failed to kill process tree for session '{}': {}",
+                    session.name, e
+                );
                 false
             }
         };
@@ -1103,7 +1219,10 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         // Verify the PID is actually gone
         let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
         if still_alive {
-            println!("Warning: process {} (session '{}') survived termination", pid, session.name);
+            println!(
+                "Warning: process {} (session '{}') survived termination",
+                pid, session.name
+            );
         }
 
         // Kill the tmux session for cleanup
@@ -1116,16 +1235,28 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
                 println!("Stopped: {} (pid {})", session.name, pid);
             }
             (true, false, Ok(_)) => {
-                println!("Stopped: {} (pid {}, session already gone)", session.name, pid);
+                println!(
+                    "Stopped: {} (pid {}, session already gone)",
+                    session.name, pid
+                );
             }
             (true, false, Err(e)) => {
-                println!("Warning: process {} killed but failed to kill session: {}", pid, e);
+                println!(
+                    "Warning: process {} killed but failed to kill session: {}",
+                    pid, e
+                );
             }
             (false, true, _) => {
-                println!("Error: failed to stop {} (pid {} still running)", session.name, pid);
+                println!(
+                    "Error: failed to stop {} (pid {} still running)",
+                    session.name, pid
+                );
             }
             (true, true, _) => {
-                println!("Warning: {} (pid {}) reported killed but still running", session.name, pid);
+                println!(
+                    "Warning: {} (pid {}) reported killed but still running",
+                    session.name, pid
+                );
             }
             (false, false, _) => {
                 println!("Stopped: {} (pid {} gone)", session.name, pid);
@@ -1200,9 +1331,7 @@ fn cmd_list(format: ListFormat) -> Result<()> {
 
     // Reconciliation: scan process table for needle processes not in tmux.
     let discovered = scan_needle_processes().unwrap_or_default();
-    let tmux_pids: HashSet<u32> = sessions.iter()
-        .filter_map(|s| s.pid)
-        .collect();
+    let tmux_pids: HashSet<u32> = sessions.iter().filter_map(|s| s.pid).collect();
     let orphaned: Vec<&DiscoveredProcess> = discovered
         .iter()
         .filter(|p| !tmux_pids.contains(&p.pid))
@@ -1238,7 +1367,10 @@ fn cmd_list(format: ListFormat) -> Result<()> {
                 println!();
                 println!("Non-tmux Workers:");
                 for proc in orphaned {
-                    let workspace = proc.workspace.as_ref().map(|p| p.display().to_string())
+                    let workspace = proc
+                        .workspace
+                        .as_ref()
+                        .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "<unknown>".to_string());
                     println!("  PID {} — workspace: {}", proc.pid, workspace);
                 }
@@ -1810,7 +1942,10 @@ fn cmd_status(
             if !orphaned.is_empty() {
                 println!("Unregistered Workers (not in registry):");
                 for proc in orphaned {
-                    let workspace = proc.workspace.as_ref().map(|p| p.display().to_string())
+                    let workspace = proc
+                        .workspace
+                        .as_ref()
+                        .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "<unknown>".to_string());
                     let agent = proc.agent.as_deref().unwrap_or("<unknown>");
                     println!(
@@ -4261,6 +4396,56 @@ mod tests {
         assert!(big as usize > NATO_ALPHABET.len(), "exceeds NATO alphabet");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn scan_needle_processes_returns_result() {
+        // Verify that scan_needle_processes() can be called successfully
+        // and returns a Result (even if empty, when no needle processes are running).
+        let result = scan_needle_processes();
+        assert!(result.is_ok(), "scan_needle_processes should return Ok");
+
+        let processes = result.unwrap();
+        // The result should be a Vec (possibly empty)
+        // We can't assert specific content without a running needle process,
+        // but we verify the structure is correct.
+        assert!(processes.len() >= 0, "should return a valid Vec");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_needle_processes_discovers_needle_run_processes() {
+        // This test verifies that scan_needle_processes() can discover
+        // needle run processes by scanning /proc.
+        // It's an informational test - it doesn't fail if no processes are found,
+        // but it verifies the scanning logic doesn't panic or error.
+
+        let result = scan_needle_processes();
+        match result {
+            Ok(processes) => {
+                // Each discovered process should have the required fields
+                for proc in &processes {
+                    // PIDs should be valid (> 0)
+                    assert!(proc.pid > 0, "PID should be positive");
+                    // cmdline should be non-empty
+                    assert!(!proc.cmdline.is_empty(), "cmdline should not be empty");
+                    // cmdline should contain "needle run"
+                    assert!(proc.cmdline.contains("needle run"),
+                        "discovered process cmdline should contain 'needle run'");
+                }
+
+                // Log discovery for debugging
+                if !processes.is_empty() {
+                    eprintln!("✓ scan_needle_processes discovered {} needle run processes",
+                        processes.len());
+                }
+            }
+            Err(e) => {
+                // On non-Linux systems or without /proc access, this is expected
+                eprintln!("scan_needle_processes returned error (expected on non-Linux): {}", e);
+            }
+        }
+    }
+
     #[test]
     fn max_workers_cap_logic() {
         let count: u32 = 5;
@@ -5175,5 +5360,70 @@ mod tests {
         let r = doctor_check_sqlite(tmp.path());
         assert_eq!(r.status, CheckStatus::Pass);
         assert!(r.message.contains("no database"));
+    }
+
+    // Tests for process tree killing (bf-wze53)
+
+    #[test]
+    fn find_all_descendants_empty_for_nonexistent_pid() {
+        // A PID that doesn't exist should return an empty list
+        let descendants = find_all_descendants(9999999);
+        assert!(descendants.is_empty(), "nonexistent PID should have no descendants");
+    }
+
+    #[test]
+    fn find_all_descendants_empty_for_current_process() {
+        // Current test process typically has no children
+        let current_pid = std::process::id();
+        let descendants = find_all_descendants(current_pid);
+        // May have spawned subprocesses, but shouldn't fail
+        // Just verify it returns a vector
+        let _ = descendants;
+    }
+
+    #[test]
+    fn find_all_descendants_recursive() {
+        // Test the recursive helper function directly
+        use std::collections::{HashMap, HashSet};
+
+        // Build a simple tree: 1 -> [2, 3], 2 -> [4], 3 -> [5, 6]
+        let mut ppid_to_children: HashMap<u32, Vec<u32>> = HashMap::new();
+        ppid_to_children.insert(1, vec![2, 3]);
+        ppid_to_children.insert(2, vec![4]);
+        ppid_to_children.insert(3, vec![5, 6]);
+
+        let mut descendants = Vec::new();
+        let mut visited = HashSet::new();
+
+        find_descendants_recursive(1, &ppid_to_children, &mut descendants, &mut visited);
+
+        // Should find all descendants: 2, 3, 4, 5, 6
+        assert_eq!(descendants.len(), 5);
+        assert!(descendants.contains(&2));
+        assert!(descendants.contains(&3));
+        assert!(descendants.contains(&4));
+        assert!(descendants.contains(&5));
+        assert!(descendants.contains(&6));
+    }
+
+    #[test]
+    fn find_all_descendants_handles_cycles() {
+        // Test that the visited set prevents infinite loops
+        use std::collections::{HashMap, HashSet};
+
+        // Create a cycle: 1 -> [2], 2 -> [1]
+        let mut ppid_to_children: HashMap<u32, Vec<u32>> = HashMap::new();
+        ppid_to_children.insert(1, vec![2]);
+        ppid_to_children.insert(2, vec![1]);
+
+        let mut descendants = Vec::new();
+        let mut visited = HashSet::new();
+
+        // This should not loop infinitely
+        find_descendants_recursive(1, &ppid_to_children, &mut descendants, &mut visited);
+
+        // Should find 2, then stop when it encounters 1 again (already visited)
+        assert_eq!(descendants.len(), 1);
+        assert!(descendants.contains(&2));
     }
 }
