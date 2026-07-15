@@ -94,6 +94,8 @@ pub struct TestResult {
     pub stderr: String,
     /// Exit code from cargo test (None if killed by signal).
     pub exit_code: Option<i32>,
+    /// Duration of the test run.
+    pub duration: Duration,
 }
 
 /// The status of test execution.
@@ -110,8 +112,8 @@ pub enum TestStatus {
 }
 
 impl TestResult {
-    /// Create a new test result from process output.
-    fn from_output(output: Output) -> Self {
+    /// Create a new test result from process output and duration.
+    fn from_output(output: Output, duration: Duration) -> Self {
         let exit_code = output.status.code();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -123,16 +125,18 @@ impl TestResult {
             stdout,
             stderr,
             exit_code,
+            duration,
         }
     }
 
-    /// Create a timeout test result.
-    fn timeout() -> Self {
+    /// Create a timeout test result with duration.
+    fn timeout(duration: Duration) -> Self {
         Self {
             status: TestStatus::TimedOut,
             stdout: String::new(),
             stderr: String::from("command timed out"),
             exit_code: None,
+            duration,
         }
     }
 
@@ -300,13 +304,13 @@ impl TestRunner {
 
         let result = self.execute_with_timeout(cmd)?;
 
+        let duration = start.elapsed();
+
         // Build the test result with captured output
         let test_result = match result {
-            Some(output) => TestResult::from_output(output),
-            None => TestResult::timeout(),
+            Some(output) => TestResult::from_output(output, duration),
+            None => TestResult::timeout(duration),
         };
-
-        let duration = start.elapsed();
 
         tracing::info!(
             status = ?test_result.status,
@@ -412,6 +416,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: Some(0),
+            duration: Duration::from_millis(100),
         };
         assert!(result.is_success());
         assert!(!result.is_failure());
@@ -426,6 +431,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: Some(1),
+            duration: Duration::from_millis(200),
         };
         assert!(!result.is_success());
         assert!(result.is_failure());
@@ -438,6 +444,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: Some(101),
+            duration: Duration::from_millis(150),
         };
         assert!(!result.is_success());
         assert!(result.is_failure());
@@ -451,6 +458,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::from("command timed out"),
             exit_code: None,
+            duration: Duration::from_secs(300),
         };
         assert!(!result.is_success());
         assert!(result.is_failure());
@@ -464,6 +472,7 @@ mod tests {
             stdout: String::from("test output"),
             stderr: String::new(),
             exit_code: Some(0),
+            duration: Duration::from_millis(100),
         };
         assert_eq!(result.captured_stdout(), "test output");
         assert_eq!(result.captured_stderr(), "");
@@ -476,6 +485,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::from("error message"),
             exit_code: Some(1),
+            duration: Duration::from_millis(200),
         };
         assert_eq!(result.captured_stdout(), "");
         assert_eq!(result.captured_stderr(), "error message");
@@ -488,6 +498,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: Some(0),
+            duration: Duration::from_millis(100),
         };
         assert!(success.summary().contains("passed"));
 
@@ -496,6 +507,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: Some(1),
+            duration: Duration::from_millis(200),
         };
         assert!(failed.summary().contains("failed"));
 
@@ -504,6 +516,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
             exit_code: None,
+            duration: Duration::from_secs(300),
         };
         assert!(timeout.summary().contains("timed out"));
     }
