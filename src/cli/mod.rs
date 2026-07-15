@@ -18,7 +18,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::bead_store::{BeadStore, BrCliBeadStore};
+use crate::bead_store::{BeadStore, BfCliBeadStore, BrCliBeadStore};
 use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
@@ -2853,15 +2853,22 @@ fn doctor_check_bead_store(
     if !beads_dir.is_dir() {
         return Ok(CheckResult::pass("Bead store", "skipped (no .beads/)"));
     }
-    let store = match BrCliBeadStore::discover(workspace.to_path_buf()) {
-        Ok(s) => s,
-        Err(e) => {
-            return Ok(CheckResult::fail(
-                "Bead store",
-                format!("br CLI not found: {e}"),
-            ))
-        }
-    };
+    // Worker dispatch prefers `bf` (atomic server-selected claiming) but
+    // falls back to `br` for older installs, so check for either — a
+    // machine with only one of the two on PATH should not FAIL here.
+    let store: Box<dyn BeadStore> =
+        match BfCliBeadStore::discover(workspace.to_path_buf(), None, None, None) {
+            Ok(s) => Box::new(s),
+            Err(bf_err) => match BrCliBeadStore::discover(workspace.to_path_buf()) {
+                Ok(s) => Box::new(s),
+                Err(br_err) => {
+                    return Ok(CheckResult::fail(
+                        "Bead store",
+                        format!("no bead store CLI found (bf: {bf_err}; br: {br_err})"),
+                    ))
+                }
+            },
+        };
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     if repair {
         match rt.block_on(store.doctor_repair()) {
@@ -3087,14 +3094,26 @@ fn doctor_check_peers(heartbeat_dir: &Path, ttl_secs: u64) -> CheckResult {
 
 fn doctor_check_agent_binary(config: &Config) -> CheckResult {
     let agent = &config.agent.default;
-    let br_ok = which::which("br").is_ok();
+    // Worker dispatch prefers `bf` (atomic server-selected claiming) but
+    // falls back to `br` for older installs, so accept either being on
+    // PATH rather than hard-requiring `br`.
+    let bead_cli = if which::which("bf").is_ok() {
+        Some("bf")
+    } else if which::which("br").is_ok() {
+        Some("br")
+    } else {
+        None
+    };
     let agent_ok = which::which(agent).is_ok();
-    match (br_ok, agent_ok) {
-        (true, true) => CheckResult::pass("Agent binary", format!("br + {agent} on PATH")),
-        (false, _) => CheckResult::fail("Agent binary", "br CLI not found on PATH"),
-        (true, false) => CheckResult::warn(
+    match (bead_cli, agent_ok) {
+        (Some(cli), true) => CheckResult::pass("Agent binary", format!("{cli} + {agent} on PATH")),
+        (None, _) => CheckResult::fail(
             "Agent binary",
-            format!("{agent} not found on PATH — workers cannot dispatch"),
+            "no bead store CLI found on PATH (checked bf, br)",
+        ),
+        (Some(cli), false) => CheckResult::warn(
+            "Agent binary",
+            format!("{cli} found but {agent} not found on PATH — workers cannot dispatch"),
         ),
     }
 }
