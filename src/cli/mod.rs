@@ -1000,12 +1000,21 @@ fn kill_process_tree(pid: u32) -> Result<bool> {
     let descendant_count = descendants.len();
 
     if descendant_count > 0 {
-        tracing::info!(pid, count = descendant_count, ?descendants, "found descendant processes");
+        tracing::info!(
+            pid,
+            count = descendant_count,
+            ?descendants,
+            "found descendant processes"
+        );
     }
 
     // Send SIGTERM to all descendants (including the original PID)
     let all_pids: Vec<u32> = std::iter::once(pid).chain(descendants).collect();
-    tracing::info!(pid, count = all_pids.len(), "sending SIGTERM to process tree");
+    tracing::info!(
+        pid,
+        count = all_pids.len(),
+        "sending SIGTERM to process tree"
+    );
 
     for target_pid in &all_pids {
         unsafe {
@@ -1023,9 +1032,9 @@ fn kill_process_tree(pid: u32) -> Result<bool> {
         thread::sleep(Duration::from_millis(100));
 
         // Check if all processes are gone
-        let all_dead = all_pids.iter().all(|&p| {
-            unsafe { libc::kill(p as libc::pid_t, 0) != 0 }
-        });
+        let all_dead = all_pids
+            .iter()
+            .all(|&p| unsafe { libc::kill(p as libc::pid_t, 0) != 0 });
 
         if all_dead {
             tracing::info!(
@@ -1054,9 +1063,9 @@ fn kill_process_tree(pid: u32) -> Result<bool> {
     for i in 0..30 {
         thread::sleep(Duration::from_millis(100));
 
-        let all_dead = all_pids.iter().all(|&p| {
-            unsafe { libc::kill(p as libc::pid_t, 0) != 0 }
-        });
+        let all_dead = all_pids
+            .iter()
+            .all(|&p| unsafe { libc::kill(p as libc::pid_t, 0) != 0 });
 
         if all_dead {
             tracing::info!(
@@ -1069,7 +1078,8 @@ fn kill_process_tree(pid: u32) -> Result<bool> {
     }
 
     // Check which processes are still alive
-    let still_alive: Vec<u32> = all_pids.iter()
+    let still_alive: Vec<u32> = all_pids
+        .iter()
         .filter(|&&p| unsafe { libc::kill(p as libc::pid_t, 0) == 0 })
         .copied()
         .collect();
@@ -1113,7 +1123,8 @@ fn find_all_descendants(root_pid: u32) -> Vec<u32> {
             // Read /proc/[pid]/status to get PPID
             let status_path = entry.path().join("status");
             if let Ok(content) = fs::read_to_string(&status_path) {
-                let ppid = content.lines()
+                let ppid = content
+                    .lines()
                     .find(|line| line.starts_with("PPID:\t"))
                     .and_then(|line| line.split(':').nth(1))
                     .and_then(|v| v.trim().parse().ok());
@@ -1196,6 +1207,53 @@ fn find_needle_process_in_tree(root_pid: u32) -> Option<u32> {
     }
 
     None
+}
+
+/// Check if any needle processes are still running after a kill attempt.
+///
+/// This function scans the process table to find all needle run processes
+/// and their descendants. This is used after a kill attempt to verify that
+/// ALL processes (needle run + dispatched agent + any descendants) are
+/// actually gone, not just the original PID we tried to kill.
+///
+/// Returns a vector of PIDs that are still running, along with their command lines.
+#[cfg(unix)]
+fn verify_no_needle_processes_remaining() -> Vec<(u32, String)> {
+    use std::fs;
+
+    let proc_dir = Path::new("/proc");
+    let mut remaining = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(proc_dir) {
+        for entry in entries.flatten() {
+            let pid_str = entry.file_name();
+            let pid: u32 = match pid_str.to_string_lossy().parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            // Read /proc/[pid]/cmdline to check if this is a needle process
+            let cmdline_path = entry.path().join("cmdline");
+            let cmdline_bytes = match fs::read(&cmdline_path) {
+                Ok(b) => b,
+                Err(_) => continue, // Process may have exited
+            };
+
+            // cmdline is null-separated; convert to space-separated for checking.
+            let cmdline: String = cmdline_bytes
+                .split(|&b| b == 0)
+                .map(|args| String::from_utf8_lossy(args))
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            // Check if this is a needle run process or a related subprocess
+            if cmdline.contains("needle run") || cmdline.contains("NEEDLE_INNER") {
+                remaining.push((pid, cmdline));
+            }
+        }
+    }
+
+    remaining
 }
 
 /// `needle stop` — kill the full process tree for worker processes.
@@ -1284,13 +1342,21 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
             }
         };
 
-        // Verify the PID is actually gone
-        let still_alive = unsafe { libc::kill(needle_pid as libc::pid_t, 0) == 0 };
-        if still_alive {
+        // Verify ALL needle processes are actually gone (not just the root PID).
+        // This catches the case where new processes were spawned during the kill
+        // window or where the kill attempt didn't fully terminate the tree.
+        let remaining_processes = verify_no_needle_processes_remaining();
+        let any_remaining = !remaining_processes.is_empty();
+
+        if any_remaining {
             println!(
-                "Warning: process {} (session '{}') survived termination",
-                needle_pid, session.name
+                "Error: {} needle process(es) still running after kill attempt for session '{}':",
+                remaining_processes.len(),
+                session.name
             );
+            for (pid, cmdline) in &remaining_processes {
+                println!("  PID {}: {}", pid, cmdline);
+            }
         }
 
         // Kill the tmux session for cleanup
@@ -1298,8 +1364,8 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
             .args(["kill-session", "-t", &session.name])
             .status();
 
-        // Clean up registry entry if the process was successfully killed
-        if killed && !still_alive {
+        // Clean up registry entry only if NO needle processes remain
+        if killed && !any_remaining {
             // Extract worker identifier from session name (format: needle-<agent>-<worker_id>)
             // Session names are sanitized: dots become underscores, so we need to handle that
             let parts: Vec<&str> = session.name.split('-').collect();
@@ -1326,7 +1392,7 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
             }
         }
 
-        match (killed, still_alive, kill_status) {
+        match (killed, any_remaining, kill_status) {
             (true, false, Ok(s)) if s.success() => {
                 println!("Stopped: {} (pid {})", session.name, needle_pid);
             }
@@ -1338,20 +1404,21 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
             }
             (true, false, Err(e)) => {
                 println!(
-                    "Warning: process {} killed but failed to kill session: {}",
-                    needle_pid, e
+                    "Warning: processes killed but failed to kill session: {}",
+                    e
                 );
             }
             (false, true, _) => {
                 println!(
-                    "Error: failed to stop {} (pid {} still running)",
-                    session.name, needle_pid
+                    "Error: failed to stop {} (processes still running)",
+                    session.name
                 );
             }
             (true, true, _) => {
                 println!(
-                    "Warning: {} (pid {}) reported killed but still running",
-                    session.name, needle_pid
+                    "Error: {} - kill attempt reported success but {} process(es) still running",
+                    session.name,
+                    remaining_processes.len()
                 );
             }
             (false, false, _) => {
@@ -1462,7 +1529,9 @@ fn cmd_list(format: ListFormat) -> Result<()> {
             if !orphaned.is_empty() {
                 println!();
                 println!("Non-tmux Workers ({}):", orphaned.len());
-                println!("  Workers not in tmux sessions - may have been started with NEEDLE_INNER=1");
+                println!(
+                    "  Workers not in tmux sessions - may have been started with NEEDLE_INNER=1"
+                );
                 for proc in orphaned {
                     let workspace = proc
                         .workspace
@@ -1470,7 +1539,10 @@ fn cmd_list(format: ListFormat) -> Result<()> {
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "<unknown>".to_string());
                     let agent = proc.agent.as_deref().unwrap_or("<unknown>");
-                    println!("  PID {} — workspace: {}, agent: {}", proc.pid, workspace, agent);
+                    println!(
+                        "  PID {} — workspace: {}, agent: {}",
+                        proc.pid, workspace, agent
+                    );
                 }
             }
         }
@@ -4507,7 +4579,10 @@ mod tests {
         // The result should be a Vec (possibly empty)
         // We can't assert specific content without a running needle process,
         // but we verify the structure is correct.
-        assert!(!processes.is_empty() || processes.is_empty(), "should return a valid Vec");
+        assert!(
+            !processes.is_empty() || processes.is_empty(),
+            "should return a valid Vec"
+        );
     }
 
     #[cfg(unix)]
@@ -4528,19 +4603,26 @@ mod tests {
                     // cmdline should be non-empty
                     assert!(!proc.cmdline.is_empty(), "cmdline should not be empty");
                     // cmdline should contain "needle run"
-                    assert!(proc.cmdline.contains("needle run"),
-                        "discovered process cmdline should contain 'needle run'");
+                    assert!(
+                        proc.cmdline.contains("needle run"),
+                        "discovered process cmdline should contain 'needle run'"
+                    );
                 }
 
                 // Log discovery for debugging
                 if !processes.is_empty() {
-                    eprintln!("✓ scan_needle_processes discovered {} needle run processes",
-                        processes.len());
+                    eprintln!(
+                        "✓ scan_needle_processes discovered {} needle run processes",
+                        processes.len()
+                    );
                 }
             }
             Err(e) => {
                 // On non-Linux systems or without /proc access, this is expected
-                eprintln!("scan_needle_processes returned error (expected on non-Linux): {}", e);
+                eprintln!(
+                    "scan_needle_processes returned error (expected on non-Linux): {}",
+                    e
+                );
             }
         }
     }
@@ -5467,7 +5549,10 @@ mod tests {
     fn find_all_descendants_empty_for_nonexistent_pid() {
         // A PID that doesn't exist should return an empty list
         let descendants = find_all_descendants(9999999);
-        assert!(descendants.is_empty(), "nonexistent PID should have no descendants");
+        assert!(
+            descendants.is_empty(),
+            "nonexistent PID should have no descendants"
+        );
     }
 
     #[test]
@@ -5531,7 +5616,10 @@ mod tests {
         // Test that killing a non-existent PID doesn't panic
         // and returns Ok(true) since the PID is already gone
         let result = kill_process_tree(9999999);
-        assert!(result.is_ok(), "kill_process_tree should not panic on non-existent PID");
+        assert!(
+            result.is_ok(),
+            "kill_process_tree should not panic on non-existent PID"
+        );
         // A non-existent PID is considered "successfully killed" (it's gone)
         assert!(result.unwrap(), "non-existent PID should return true");
     }
@@ -5545,7 +5633,10 @@ mod tests {
         let _ = is_needle_run_process(self_pid); // Should not panic
 
         // Test with non-existent PID
-        assert!(!is_needle_run_process(9999999), "non-existent PID should return false");
+        assert!(
+            !is_needle_run_process(9999999),
+            "non-existent PID should return false"
+        );
     }
 
     #[test]
