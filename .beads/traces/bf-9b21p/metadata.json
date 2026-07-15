@@ -1,16 +1,16 @@
 {
-  "bead_id": "bf-noet",
+  "bead_id": "bf-9b21p",
   "agent": "claude-code-glm-4.7",
-  "provider": "anthropic",
+  "provider": "zai",
   "model": "glm-4.7",
   "exit_code": 0,
   "outcome": "success",
-  "duration_ms": 544354,
+  "duration_ms": 502198,
   "input_tokens": null,
   "output_tokens": null,
   "cost_usd": null,
-  "captured_at": "2026-07-06T22:46:04.814222885Z",
+  "captured_at": "2026-07-15T01:28:19.300084442Z",
   "trace_format": "claude_json",
-  "pruned": true,
+  "pruned": false,
   "template_version": null
 }
