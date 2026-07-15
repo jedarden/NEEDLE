@@ -308,7 +308,11 @@ mod tests {
     fn get_trailers(dir: &PathBuf) -> String {
         run_git(
             dir,
-            &["log", "-1", "--format=%(trailers:key=Bead-Id,valueonly,separator=,)"],
+            &[
+                "log",
+                "-1",
+                "--format=%(trailers:key=Bead-Id,valueonly,separator=,)",
+            ],
         )
     }
 
@@ -358,7 +362,11 @@ mod tests {
         run_git(&repo_path, &["add", "file-a.txt"]);
         run_git(
             &repo_path,
-            &["commit", "-m", &format!("feat({}): commit A", bead_a_id.as_ref())],
+            &[
+                "commit",
+                "-m",
+                &format!("feat({}): commit A", bead_a_id.as_ref()),
+            ],
         );
         let head_after_a = run_git(&repo_path, &["rev-parse", "HEAD"]);
 
@@ -368,7 +376,11 @@ mod tests {
         run_git(&repo_path, &["add", "file-b.txt"]);
         run_git(
             &repo_path,
-            &["commit", "-m", &format!("fix({}): commit B", bead_b_id.as_ref())],
+            &[
+                "commit",
+                "-m",
+                &format!("fix({}): commit B", bead_b_id.as_ref()),
+            ],
         );
         let head_after_b = run_git(&repo_path, &["rev-parse", "HEAD"]);
 
@@ -427,14 +439,14 @@ mod tests {
         let final_trailers = get_trailers(&repo_path);
 
         // HEAD is still at B's commit (hash may differ if amended)
-        assert!(final_subject.contains(&bead_b_id.as_ref()));
-        assert!(!final_subject.contains(&bead_a_id.as_ref()));
+        assert!(final_subject.contains(bead_b_id.as_ref()));
+        assert!(!final_subject.contains(bead_a_id.as_ref()));
 
         // B's trailer is present
-        assert!(final_trailers.contains(&bead_b_id.as_ref()));
+        assert!(final_trailers.contains(bead_b_id.as_ref()));
 
         // A's trailer is NOT present (no cross-tagging)
-        assert!(!final_trailers.contains(&bead_a_id.as_ref()));
+        assert!(!final_trailers.contains(bead_a_id.as_ref()));
 
         // Additional check: HEAD's parent is A's commit
         let parent = run_git(&repo_path, &["rev-parse", "HEAD^"]);
@@ -462,7 +474,11 @@ mod tests {
         run_git(&repo_path, &["add", "file.txt"]);
         run_git(
             &repo_path,
-            &["commit", "-m", &format!("fix({}): some work", bead_b_id.as_ref())],
+            &[
+                "commit",
+                "-m",
+                &format!("fix({}): some work", bead_b_id.as_ref()),
+            ],
         );
 
         // Try to inject bead-a's trailer (mismatch: HEAD contains bf-yyy, not bf-xxx)
@@ -472,7 +488,7 @@ mod tests {
 
         // Verify no trailer was added
         let trailers = get_trailers(&repo_path);
-        assert!(trailers.is_empty() || !trailers.contains(&bead_a_id.as_ref()));
+        assert!(trailers.is_empty() || !trailers.contains(bead_a_id.as_ref()));
     }
 
     #[tokio::test]
@@ -494,7 +510,11 @@ mod tests {
         run_git(&repo_path, &["add", "file.txt"]);
         run_git(
             &repo_path,
-            &["commit", "-m", &format!("feat({}): some work", bead_id.as_ref())],
+            &[
+                "commit",
+                "-m",
+                &format!("feat({}): some work", bead_id.as_ref()),
+            ],
         );
 
         // Inject the matching trailer
@@ -504,6 +524,6 @@ mod tests {
 
         // Verify the trailer was added
         let trailers = get_trailers(&repo_path);
-        assert!(trailers.contains(&bead_id.as_ref()));
+        assert!(trailers.contains(bead_id.as_ref()));
     }
 }

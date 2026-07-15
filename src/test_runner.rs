@@ -798,7 +798,7 @@ mod tests {
         assert_eq!(metrics.status, "Success");
         assert_eq!(metrics.exit_code, Some(0));
         assert_eq!(metrics.duration_ms, 250);
-        assert!(metrics.timestamp.len() > 0); // Should have ISO timestamp
+        assert!(!metrics.timestamp.is_empty()); // Should have ISO timestamp
 
         // Clean up
         fs::remove_dir_all(&temp_dir).ok();
@@ -929,7 +929,7 @@ mod tests {
         assert_eq!(metrics.status, "CompilationFailed");
         assert_eq!(metrics.exit_code, Some(101));
         assert_eq!(metrics.duration_ms, 500);
-        assert!(metrics.timestamp.len() > 0);
+        assert!(!metrics.timestamp.is_empty());
     }
 
     #[test]
