@@ -296,15 +296,6 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    fn run_git_with_trailer(dir: &Path, trailer: &str) {
-        let output = Command::new("git")
-            .args(["-C", dir.to_str().unwrap()])
-            .args(["commit", "--amend", "--no-edit", "--trailer", trailer])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "git commit --amend failed");
-    }
-
     fn get_trailers(dir: &Path) -> String {
         run_git(
             dir,
@@ -434,7 +425,7 @@ mod tests {
         // - The HEAD commit should have Bead-Id:bf-bbb trailer (B tagged its own)
         // - The HEAD commit should NOT have Bead-Id:bf-aaa (A skipped, no cross-tag)
 
-        let final_head = run_git(&repo_path, &["rev-parse", "HEAD"]);
+        let _final_head = run_git(&repo_path, &["rev-parse", "HEAD"]);
         let final_subject = run_git(&repo_path, &["log", "-1", "--format=%s"]);
         let final_trailers = get_trailers(&repo_path);
 
