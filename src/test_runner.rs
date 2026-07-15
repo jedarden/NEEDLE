@@ -23,11 +23,14 @@
 //! }
 //! ```
 
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -76,6 +79,35 @@ impl CapturedOutput {
     /// Returns the combined length of stdout and stderr in bytes.
     pub fn total_len(&self) -> usize {
         self.stdout.len() + self.stderr.len()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Test Metrics
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Serializable test metrics for persistence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestMetrics {
+    /// The test execution status.
+    pub status: String,
+    /// Exit code from cargo test (None if killed by signal).
+    pub exit_code: Option<i32>,
+    /// Duration of the test run in milliseconds.
+    pub duration_ms: u128,
+    /// Timestamp when the test was completed (ISO 8601).
+    pub timestamp: String,
+}
+
+impl TestMetrics {
+    /// Create test metrics from a test result.
+    pub fn from_result(result: &TestResult) -> Self {
+        Self {
+            status: format!("{:?}", result.status),
+            exit_code: result.exit_code,
+            duration_ms: result.duration.as_millis(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        }
     }
 }
 
@@ -213,6 +245,131 @@ impl TestResult {
     pub fn captured_stderr(&self) -> &str {
         &self.stderr
     }
+
+    /// Persist test output (stdout and stderr) to files.
+    ///
+    /// ## Arguments
+    ///
+    /// * `output_dir` - Directory where output files will be written
+    /// * `base_name` - Base name for the output files (stdout will be `base_name.stdout`, stderr will be `base_name.stderr`)
+    ///
+    /// ## Returns
+    ///
+    /// Returns `Ok(())` if both files were written successfully, or an error if either write failed.
+    ///
+    /// ## Errors
+    ///
+    /// Returns an error if:
+    /// - The output directory cannot be created
+    /// - Either file cannot be written
+    pub fn persist_output(&self, output_dir: &Path, base_name: &str) -> Result<()> {
+        // Create output directory if it doesn't exist
+        fs::create_dir_all(output_dir).with_context(|| {
+            format!(
+                "failed to create output directory: {}",
+                output_dir.display()
+            )
+        })?;
+
+        // Write stdout
+        let stdout_path = output_dir.join(format!("{}.stdout", base_name));
+        self.write_file(&stdout_path, &self.stdout)
+            .with_context(|| format!("failed to write stdout to {}", stdout_path.display()))?;
+
+        // Write stderr
+        let stderr_path = output_dir.join(format!("{}.stderr", base_name));
+        self.write_file(&stderr_path, &self.stderr)
+            .with_context(|| format!("failed to write stderr to {}", stderr_path.display()))?;
+
+        tracing::debug!(
+            stdout_path = %stdout_path.display(),
+            stderr_path = %stderr_path.display(),
+            stdout_len = self.stdout.len(),
+            stderr_len = self.stderr.len(),
+            "persisted test output"
+        );
+
+        Ok(())
+    }
+
+    /// Persist test metrics to a JSON file.
+    ///
+    /// ## Arguments
+    ///
+    /// * `output_dir` - Directory where the metrics file will be written
+    /// * `base_name` - Base name for the metrics file (will be `base_name.metrics.json`)
+    ///
+    /// ## Returns
+    ///
+    /// Returns `Ok(())` if the metrics file was written successfully, or an error if the write failed.
+    ///
+    /// ## Errors
+    ///
+    /// Returns an error if:
+    /// - The output directory cannot be created
+    /// - The file cannot be written
+    /// - The metrics cannot be serialized to JSON
+    pub fn persist_metrics(&self, output_dir: &Path, base_name: &str) -> Result<()> {
+        // Create output directory if it doesn't exist
+        fs::create_dir_all(output_dir).with_context(|| {
+            format!(
+                "failed to create output directory: {}",
+                output_dir.display()
+            )
+        })?;
+
+        // Create metrics from result
+        let metrics = TestMetrics::from_result(self);
+
+        // Serialize to JSON
+        let json = serde_json::to_string_pretty(&metrics)
+            .context("failed to serialize test metrics to JSON")?;
+
+        // Write metrics file
+        let metrics_path = output_dir.join(format!("{}.metrics.json", base_name));
+        self.write_file(&metrics_path, &json)
+            .with_context(|| format!("failed to write metrics to {}", metrics_path.display()))?;
+
+        tracing::debug!(
+            metrics_path = %metrics_path.display(),
+            status = ?metrics.status,
+            duration_ms = metrics.duration_ms,
+            "persisted test metrics"
+        );
+
+        Ok(())
+    }
+
+    /// Persist both test output and metrics.
+    ///
+    /// This is a convenience method that calls both `persist_output` and `persist_metrics`.
+    ///
+    /// ## Arguments
+    ///
+    /// * `output_dir` - Directory where files will be written
+    /// * `base_name` - Base name for the output files
+    ///
+    /// ## Returns
+    ///
+    /// Returns `Ok(())` if all files were written successfully, or an error if any write failed.
+    pub fn persist_all(&self, output_dir: &Path, base_name: &str) -> Result<()> {
+        self.persist_output(output_dir, base_name)?;
+        self.persist_metrics(output_dir, base_name)?;
+        Ok(())
+    }
+
+    /// Helper method to write content to a file.
+    ///
+    /// This method handles the actual file I/O and is used by both `persist_output` and `persist_metrics`.
+    fn write_file(&self, path: &Path, content: &str) -> Result<()> {
+        let mut file = File::create(path)
+            .with_context(|| format!("failed to create file: {}", path.display()))?;
+
+        file.write_all(content.as_bytes())
+            .with_context(|| format!("failed to write to file: {}", path.display()))?;
+
+        Ok(())
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -331,19 +488,14 @@ impl TestRunner {
         let timeout = Duration::from_secs(self.timeout_secs);
 
         // Spawn the process
-        let mut child = cmd
-            .spawn()
-            .context("failed to spawn cargo test process")?;
+        let mut child = cmd.spawn().context("failed to spawn cargo test process")?;
 
         // Wait for completion with timeout
         let start = Instant::now();
         loop {
             // Check if timeout exceeded
             if start.elapsed() > timeout {
-                tracing::error!(
-                    timeout_secs = self.timeout_secs,
-                    "cargo test timed out"
-                );
+                tracing::error!(timeout_secs = self.timeout_secs, "cargo test timed out");
 
                 // Kill the child process
                 let _ = child.kill();
@@ -543,5 +695,263 @@ mod tests {
         assert_eq!(runner.extra_args().len(), 2);
         assert_eq!(runner.extra_args()[0], "--release");
         assert_eq!(runner.extra_args()[1], "--lib");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // File Persistence Tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_persist_output_creates_files() {
+        // Create a temporary directory for output
+        let temp_dir = std::env::temp_dir().join("needle_test_output");
+        let _ = fs::remove_dir_all(&temp_dir); // Clean up any previous test runs
+
+        let result = TestResult {
+            status: TestStatus::Success,
+            stdout: String::from("test stdout content"),
+            stderr: String::from("test stderr content"),
+            exit_code: Some(0),
+            duration: Duration::from_millis(100),
+        };
+
+        // Persist output
+        let result = result.persist_output(&temp_dir, "test_run");
+        assert!(result.is_ok(), "persist_output should succeed");
+
+        // Check that files were created
+        let stdout_path = temp_dir.join("test_run.stdout");
+        let stderr_path = temp_dir.join("test_run.stderr");
+
+        assert!(stdout_path.exists(), "stdout file should exist");
+        assert!(stderr_path.exists(), "stderr file should exist");
+
+        // Verify file contents
+        let stdout_content =
+            fs::read_to_string(&stdout_path).expect("should be able to read stdout file");
+        let stderr_content =
+            fs::read_to_string(&stderr_path).expect("should be able to read stderr file");
+
+        assert_eq!(stdout_content, "test stdout content");
+        assert_eq!(stderr_content, "test stderr content");
+
+        // Clean up
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_persist_output_creates_directory() {
+        let base_dir = std::env::temp_dir().join("needle_test_nested");
+        let temp_dir = base_dir.join("output").join("dir");
+        let _ = fs::remove_dir_all(&base_dir); // Clean up
+
+        let result = TestResult {
+            status: TestStatus::Failed,
+            stdout: String::from("error output"),
+            stderr: String::from("error details"),
+            exit_code: Some(1),
+            duration: Duration::from_millis(50),
+        };
+
+        // Persist output - should create nested directories
+        let result = result.persist_output(&temp_dir, "nested_test");
+        assert!(
+            result.is_ok(),
+            "persist_output should create nested directories"
+        );
+
+        // Check that files were created
+        assert!(temp_dir.join("nested_test.stdout").exists());
+        assert!(temp_dir.join("nested_test.stderr").exists());
+
+        // Clean up
+        fs::remove_dir_all(&base_dir).ok();
+    }
+
+    #[test]
+    fn test_persist_metrics_creates_json() {
+        let temp_dir = std::env::temp_dir().join("needle_test_metrics");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let result = TestResult {
+            status: TestStatus::Success,
+            stdout: String::from("stdout"),
+            stderr: String::from("stderr"),
+            exit_code: Some(0),
+            duration: Duration::from_millis(250),
+        };
+
+        // Persist metrics
+        let result = result.persist_metrics(&temp_dir, "test_metrics");
+        assert!(result.is_ok(), "persist_metrics should succeed");
+
+        // Check that metrics file was created
+        let metrics_path = temp_dir.join("test_metrics.metrics.json");
+        assert!(metrics_path.exists(), "metrics file should exist");
+
+        // Verify JSON can be parsed
+        let json_content =
+            fs::read_to_string(&metrics_path).expect("should be able to read metrics file");
+        let metrics: TestMetrics =
+            serde_json::from_str(&json_content).expect("should be able to parse metrics JSON");
+
+        assert_eq!(metrics.status, "Success");
+        assert_eq!(metrics.exit_code, Some(0));
+        assert_eq!(metrics.duration_ms, 250);
+        assert!(metrics.timestamp.len() > 0); // Should have ISO timestamp
+
+        // Clean up
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_persist_all_writes_all_files() {
+        let temp_dir = std::env::temp_dir().join("needle_test_persist_all");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let result = TestResult {
+            status: TestStatus::TimedOut,
+            stdout: String::from("partial output"),
+            stderr: String::from("timeout error"),
+            exit_code: None,
+            duration: Duration::from_secs(300),
+        };
+
+        // Persist all files
+        let result = result.persist_all(&temp_dir, "complete_test");
+        assert!(result.is_ok(), "persist_all should succeed");
+
+        // Check that all files were created
+        assert!(temp_dir.join("complete_test.stdout").exists());
+        assert!(temp_dir.join("complete_test.stderr").exists());
+        assert!(temp_dir.join("complete_test.metrics.json").exists());
+
+        // Verify metrics content
+        let metrics_path = temp_dir.join("complete_test.metrics.json");
+        let json_content =
+            fs::read_to_string(&metrics_path).expect("should be able to read metrics file");
+        let metrics: TestMetrics =
+            serde_json::from_str(&json_content).expect("should be able to parse metrics JSON");
+
+        assert_eq!(metrics.status, "TimedOut");
+        assert_eq!(metrics.exit_code, None);
+        assert_eq!(metrics.duration_ms, 300000);
+
+        // Clean up
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_persist_output_empty_streams() {
+        let temp_dir = std::env::temp_dir().join("needle_test_empty");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let result = TestResult {
+            status: TestStatus::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            duration: Duration::from_millis(10),
+        };
+
+        // Persist empty output
+        let result = result.persist_output(&temp_dir, "empty_test");
+        assert!(result.is_ok(), "persist_output should handle empty streams");
+
+        // Check that files were created (even if empty)
+        let stdout_path = temp_dir.join("empty_test.stdout");
+        let stderr_path = temp_dir.join("empty_test.stderr");
+
+        assert!(stdout_path.exists());
+        assert!(stderr_path.exists());
+
+        // Verify files are empty
+        let stdout_content =
+            fs::read_to_string(&stdout_path).expect("should be able to read stdout file");
+        let stderr_content =
+            fs::read_to_string(&stderr_path).expect("should be able to read stderr file");
+
+        assert_eq!(stdout_content.len(), 0);
+        assert_eq!(stderr_content.len(), 0);
+
+        // Clean up
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_persist_output_large_output() {
+        let temp_dir = std::env::temp_dir().join("needle_test_large");
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        let large_stdout = "x".repeat(100_000); // 100KB of data
+        let large_stderr = "y".repeat(50_000); // 50KB of data
+
+        let result = TestResult {
+            status: TestStatus::Failed,
+            stdout: large_stdout.clone(),
+            stderr: large_stderr.clone(),
+            exit_code: Some(101),
+            duration: Duration::from_secs(1),
+        };
+
+        // Persist large output
+        let result = result.persist_output(&temp_dir, "large_test");
+        assert!(result.is_ok(), "persist_output should handle large output");
+
+        // Verify file contents
+        let stdout_path = temp_dir.join("large_test.stdout");
+        let stderr_path = temp_dir.join("large_test.stderr");
+
+        let stdout_content =
+            fs::read_to_string(&stdout_path).expect("should be able to read stdout file");
+        let stderr_content =
+            fs::read_to_string(&stderr_path).expect("should be able to read stderr file");
+
+        assert_eq!(stdout_content, large_stdout);
+        assert_eq!(stderr_content, large_stderr);
+
+        // Clean up
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_test_metrics_from_result() {
+        let result = TestResult {
+            status: TestStatus::CompilationFailed,
+            stdout: String::from("compilation error"),
+            stderr: String::from("error[E0001]"),
+            exit_code: Some(101),
+            duration: Duration::from_millis(500),
+        };
+
+        let metrics = TestMetrics::from_result(&result);
+
+        assert_eq!(metrics.status, "CompilationFailed");
+        assert_eq!(metrics.exit_code, Some(101));
+        assert_eq!(metrics.duration_ms, 500);
+        assert!(metrics.timestamp.len() > 0);
+    }
+
+    #[test]
+    fn test_test_metrics_serialization() {
+        let metrics = TestMetrics {
+            status: String::from("Success"),
+            exit_code: Some(0),
+            duration_ms: 1000,
+            timestamp: String::from("2026-07-14T12:00:00Z"),
+        };
+
+        // Test serialization
+        let json =
+            serde_json::to_string_pretty(&metrics).expect("should be able to serialize metrics");
+
+        // Test deserialization
+        let deserialized: TestMetrics =
+            serde_json::from_str(&json).expect("should be able to deserialize metrics");
+
+        assert_eq!(deserialized.status, "Success");
+        assert_eq!(deserialized.exit_code, Some(0));
+        assert_eq!(deserialized.duration_ms, 1000);
+        assert_eq!(deserialized.timestamp, "2026-07-14T12:00:00Z");
     }
 }
