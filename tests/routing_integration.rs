@@ -817,6 +817,181 @@ fn routing_strict_mode_with_matching_rule_succeeds() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// First-Match-Wins Semantics
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn routing_first_match_wins_with_overlapping_patterns() {
+    // Test that when multiple patterns match a model, the FIRST match wins.
+    //
+    // This is critical for predictable routing behavior. When rules overlap,
+    // the first rule in the list that matches takes precedence.
+    //
+    // Example: If we have:
+    //   1. match_model: "claude-.*" -> adapter: "first-adapter"
+    //   2. match_model: "claude-sonnet.*" -> adapter: "second-adapter"
+    //
+    // Then "claude-sonnet-4-6" should route to "first-adapter" because the
+    // first pattern matches and wins, even though the second pattern is more
+    // specific.
+
+    let routing = RoutingConfig {
+        // Order matters! First pattern that matches wins.
+        rules: vec![
+            make_rule("claude-.*", "first-adapter"),           // Matches all claude-*
+            make_rule("claude-sonnet.*", "second-adapter"),   // More specific, but comes second
+            make_rule("sonnet-.*", "third-adapter"),          // Also matches sonnet prefix
+        ],
+        default_adapter: Some("fallback".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // "claude-sonnet-4-6" matches all three patterns, but first wins
+    let result = match_adapter(
+        "claude-sonnet-4-6",
+        &config.agent.routing.as_ref().unwrap().rules,
+        config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+
+    assert_eq!(
+        result,
+        Some("first-adapter".to_string()),
+        "First matching pattern should win, even if later patterns are more specific"
+    );
+}
+
+#[test]
+fn routing_first_match_wins_reversed_order() {
+    // Test that reversing rule order changes the outcome.
+    //
+    // This confirms that routing is order-dependent, not just pattern-dependent.
+    // The same set of rules in a different order should produce different results
+    // for models that match multiple patterns.
+
+    let routing = RoutingConfig {
+        // Reversed order from the previous test
+        rules: vec![
+            make_rule("sonnet-.*", "third-adapter"),          // First now
+            make_rule("claude-sonnet.*", "second-adapter"),   // Second now
+            make_rule("claude-.*", "first-adapter"),           // Last now
+        ],
+        default_adapter: Some("fallback".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // "claude-sonnet-4-6" matches all three patterns, but first wins (now "third-adapter")
+    let result = match_adapter(
+        "claude-sonnet-4-6",
+        &config.agent.routing.as_ref().unwrap().rules,
+        config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+
+    assert_eq!(
+        result,
+        Some("third-adapter".to_string()),
+        "Reversing rule order should change which adapter is selected"
+    );
+}
+
+#[test]
+fn routing_first_match_wins_with_specific_patterns() {
+    // Test first-match-wins with realistic Anthropic model patterns.
+    //
+    // This uses actual model name patterns to verify that order matters
+    // in real-world configurations.
+
+    let routing = RoutingConfig {
+        // More specific patterns first catch exact matches
+        rules: vec![
+            make_rule("claude-sonnet-5", "sonnet-5-exact"),     // Exact match for Sonnet 5
+            make_rule("claude-sonnet.*", "sonnet-family"),      // Fallback for all Sonnet
+            make_rule("claude-.*", "all-claude"),               // Fallback for all Claude
+        ],
+        default_adapter: Some("fallback".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    // Exact match for claude-sonnet-5 -> sonnet-5-exact (first pattern)
+    let result1 = match_adapter(
+        "claude-sonnet-5",
+        &config.agent.routing.as_ref().unwrap().rules,
+        config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    assert_eq!(
+        result1,
+        Some("sonnet-5-exact".to_string()),
+        "Exact match should win when placed first"
+    );
+
+    // Other Sonnet models -> sonnet-family (second pattern, first doesn't match)
+    let result2 = match_adapter(
+        "claude-sonnet-4-6",
+        &config.agent.routing.as_ref().unwrap().rules,
+        config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    assert_eq!(
+        result2,
+        Some("sonnet-family".to_string()),
+        "Second pattern should win when first doesn't match"
+    );
+
+    // Opus models -> all-claude (third pattern, first two don't match)
+    let result3 = match_adapter(
+        "claude-opus-4-8",
+        &config.agent.routing.as_ref().unwrap().rules,
+        config
+            .agent
+            .routing
+            .as_ref()
+            .unwrap()
+            .default_adapter
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(""),
+    );
+    assert_eq!(
+        result3,
+        Some("all-claude".to_string()),
+        "Third pattern should win when first two don't match"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Real-World Configuration Tests
 // ──────────────────────────────────────────────────────────────────────────────
 
