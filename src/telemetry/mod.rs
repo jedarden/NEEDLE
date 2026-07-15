@@ -147,6 +147,14 @@ pub enum EventKind {
         strand_name: String,
         reason: String,
     },
+    BeadStoreError {
+        strand_name: String,
+        operation: String,
+        error_message: String,
+        stderr: String,
+        exit_code: i32,
+        workspace: Option<String>,
+    },
     QueueEmpty,
     PluckStarvationDetected {
         workspace: String,
@@ -692,6 +700,7 @@ impl EventKind {
             EventKind::WorkerBootTimeout { .. } => "worker.boot.timeout",
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
             EventKind::StrandSkipped { .. } => "strand.skipped",
+            EventKind::BeadStoreError { .. } => "bead_store.error",
             EventKind::QueueEmpty => "worker.queue_empty",
             EventKind::PluckStarvationDetected { .. } => "strand.pluck.starvation_detected",
             EventKind::ClaimAttempt { .. } => "bead.claim.attempted",
@@ -847,7 +856,8 @@ impl EventKind {
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::MitosisOutOfScope { bead_id } => Some(bead_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
-            EventKind::WorkerBooting { .. }
+            EventKind::BeadStoreError { .. }
+            | EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
             | EventKind::WorkerErrored { .. }
@@ -1014,6 +1024,28 @@ impl EventKind {
                 reason,
             } => {
                 serde_json::json!({ "strand_name": strand_name, "reason": reason })
+            }
+            EventKind::BeadStoreError {
+                strand_name,
+                operation,
+                error_message,
+                stderr,
+                exit_code,
+                workspace,
+            } => {
+                let mut data = serde_json::json!({
+                    "strand_name": strand_name,
+                    "operation": operation,
+                    "error_message": error_message,
+                    "stderr": stderr,
+                    "exit_code": exit_code,
+                });
+                if let Some(ws) = workspace {
+                    if let Some(obj) = data.as_object_mut() {
+                        obj.insert("workspace".to_string(), serde_json::json!(ws));
+                    }
+                }
+                data
             }
             EventKind::QueueEmpty => serde_json::json!({}),
             EventKind::PluckStarvationDetected {
@@ -2007,7 +2039,8 @@ impl EventKind {
             | EventKind::IdleSleepCompleted { .. }
             | EventKind::IdleSleepEntered { .. }
             | EventKind::RoutingDecision { .. }
-            | EventKind::RoutingFailed { .. } => None,
+            | EventKind::RoutingFailed { .. }
+            | EventKind::BeadStoreError { .. } => None,
             EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
         }
     }
