@@ -396,9 +396,7 @@ impl WeaveStrand {
             Ok(Ok(beads)) => beads,
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "weave strand: failed to list existing beads");
-                return StrandResult::Error(crate::types::StrandError::StoreError(
-                    anyhow::anyhow!(e.to_string()),
-                ));
+                return StrandResult::Error(crate::types::StrandError::StoreError(e.into()));
             }
             Err(_) => {
                 tracing::warn!(
@@ -416,9 +414,7 @@ impl WeaveStrand {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "weave strand: agent dispatch failed");
-                return StrandResult::Error(crate::types::StrandError::StoreError(
-                    anyhow::anyhow!(e.to_string()),
-                ));
+                return StrandResult::Error(crate::types::StrandError::StoreError(e.into()));
             }
         };
 

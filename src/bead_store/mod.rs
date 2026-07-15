@@ -568,10 +568,7 @@ impl BrCliBeadStore {
 #[async_trait]
 impl BeadStore for BrCliBeadStore {
     async fn list_all(&self) -> Result<Vec<Bead>> {
-        let stdout = self
-            .run_br(&["list", "--json", "--limit", "0"])
-            .await
-            .context("br list --json failed")?;
+        let stdout = self.run_br(&["list", "--json", "--limit", "0"]).await?;
         Self::parse_beads(&stdout, "br list --json")
     }
 
@@ -586,7 +583,7 @@ impl BeadStore for BrCliBeadStore {
             args.push(&assignee_arg);
         }
 
-        let stdout = self.run_br(&args).await.context("br ready failed")?;
+        let stdout = self.run_br(&args).await?;
         let mut beads = Self::parse_beads(&stdout, "br ready --json")?;
 
         // Apply label exclusion filter (br CLI doesn't support this natively).
@@ -658,9 +655,7 @@ impl BeadStore for BrCliBeadStore {
     }
 
     async fn flush(&self) -> Result<()> {
-        self.run_br(&["sync", "--flush-only"])
-            .await
-            .context("br sync --flush-only failed")?;
+        self.run_br(&["sync", "--flush-only"]).await?;
         Ok(())
     }
 
@@ -710,7 +705,7 @@ impl BeadStore for BrCliBeadStore {
             args.push(labels.join(","));
         }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let stdout = self.run_br(&arg_refs).await.context("br create failed")?;
+        let stdout = self.run_br(&arg_refs).await?;
         let id_str = stdout.trim();
         if id_str.is_empty() {
             bail!("br create --silent returned empty ID");
@@ -1080,10 +1075,7 @@ impl BfCliBeadStore {
 #[async_trait]
 impl BeadStore for BfCliBeadStore {
     async fn list_all(&self) -> Result<Vec<Bead>> {
-        let stdout = self
-            .run_bf(&["list", "--json", "--limit", "0"])
-            .await
-            .context("bf list --json failed")?;
+        let stdout = self.run_bf(&["list", "--json", "--limit", "0"]).await?;
         Self::parse_beads(&stdout, "bf list --json")
     }
 
@@ -1098,7 +1090,7 @@ impl BeadStore for BfCliBeadStore {
             args.push(&assignee_arg);
         }
 
-        let stdout = self.run_bf(&args).await.context("bf list failed")?;
+        let stdout = self.run_bf(&args).await?;
         let mut beads = Self::parse_beads(&stdout, "bf list --json")?;
 
         // Apply label exclusion filter (bf CLI doesn't support this natively).
@@ -1151,7 +1143,7 @@ impl BeadStore for BfCliBeadStore {
             args.push(harness_version_arg);
         }
 
-        let stdout = self.run_bf(&args).await.context("bf claim failed")?;
+        let stdout = self.run_bf(&args).await?;
 
         // Parse JSON output: {"bead_id": "...", "reclaimed": 0, "assignee": "..."}
         let json: serde_json::Value = serde_json::from_str(&stdout)
@@ -1230,7 +1222,7 @@ impl BeadStore for BfCliBeadStore {
             args.push((*label).into());
         }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let stdout = self.run_bf(&arg_refs).await.context("bf create failed")?;
+        let stdout = self.run_bf(&arg_refs).await?;
         let id_str = stdout.trim();
         if id_str.is_empty() {
             bail!("bf create returned empty ID");

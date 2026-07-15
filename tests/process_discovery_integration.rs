@@ -104,11 +104,7 @@ fn find_needle_processes() -> Vec<u32> {
 #[ignore]
 fn integration_non_tmux_worker_discoverable() {
     // Skip if needle binary not available
-    if Command::new("needle")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
+    if Command::new("needle").arg("--version").output().is_err() {
         println!("Skipping test: needle binary not available");
         return;
     }
@@ -130,16 +126,18 @@ fn integration_non_tmux_worker_discoverable() {
 
     // Start worker via NEEDLE_INNER=1 (non-tmux path)
     // This simulates the path that might be invisible to status/list
-    let needle_binary = std::env::var("NEEDLE_BINARY")
-        .unwrap_or_else(|_| "needle".to_string());
+    let needle_binary = std::env::var("NEEDLE_BINARY").unwrap_or_else(|_| "needle".to_string());
 
     let worker = Command::new(&needle_binary)
         .env("NEEDLE_INNER", "1")
         .args([
             "run",
-            "--workspace", workspace.path().to_str().unwrap(),
-            "--identifier", "test-discovery",
-            "--timeout", "30", // Short timeout for test
+            "--workspace",
+            workspace.path().to_str().unwrap(),
+            "--identifier",
+            "test-discovery",
+            "--timeout",
+            "30", // Short timeout for test
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -167,10 +165,7 @@ fn integration_non_tmux_worker_discoverable() {
         .output()
         .expect("needle list should work");
 
-    assert!(
-        list_output.status.success(),
-        "needle list should succeed"
-    );
+    assert!(list_output.status.success(), "needle list should succeed");
 
     let list_json: serde_json::Value = serde_json::from_slice(&list_output.stdout)
         .expect("needle list output should be valid JSON");
@@ -191,8 +186,8 @@ fn integration_non_tmux_worker_discoverable() {
     }
 
     if !found_in_list {
-        if let Some(orphaned) = list_json.get("orphaned") {
-            if let Some(arr) = orphaned.as_array() {
+        if let Some(discovered) = list_json.get("discovered") {
+            if let Some(arr) = discovered.as_array() {
                 for proc in arr {
                     if let Some(pid) = proc.get("pid") {
                         if pid.as_u64() == Some(worker_pid as u64) {
@@ -207,7 +202,7 @@ fn integration_non_tmux_worker_discoverable() {
 
     assert!(
         found_in_list,
-        "worker should appear in needle list output (tmux_sessions or orphaned).\n\
+        "worker should appear in needle list output (tmux_sessions or discovered).\n\
          List output: {}",
         String::from_utf8_lossy(&list_output.stdout)
     );
@@ -243,8 +238,8 @@ fn integration_non_tmux_worker_discoverable() {
     }
 
     if !found_in_status {
-        if let Some(orphaned) = status_json.get("orphaned") {
-            if let Some(arr) = orphaned.as_array() {
+        if let Some(discovered) = status_json.get("discovered") {
+            if let Some(arr) = discovered.as_array() {
                 for proc in arr {
                     if let Some(pid) = proc.get("pid") {
                         if pid.as_u64() == Some(worker_pid as u64) {
@@ -259,7 +254,7 @@ fn integration_non_tmux_worker_discoverable() {
 
     assert!(
         found_in_status,
-        "worker should appear in needle status output (workers or orphaned).\n\
+        "worker should appear in needle status output (workers or discovered).\n\
          Status output: {}",
         String::from_utf8_lossy(&status_output.stdout)
     );

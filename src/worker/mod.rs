@@ -30,7 +30,7 @@ use crate::config::{Config, ConfigLoader};
 use crate::cost::{self, BudgetCheck, EffortData};
 use crate::dispatch::{self, Dispatcher};
 use crate::health::HealthMonitor;
-use crate::mitosis::MitosisEvaluator;
+use crate::mitosis::{detects_needle_internal_config, MitosisEvaluator};
 use crate::outcome::OutcomeHandler;
 use crate::prompt::{BuiltPrompt, PromptBuilder};
 use crate::rate_limit::RateLimiter;
@@ -830,7 +830,10 @@ impl Worker {
             let worker_id = &entry.id;
             let pid = entry.pid;
             tracing::error!(error = %e, worker_id = %worker_id, pid, "failed to register in worker registry - worker will run but will be invisible to needle status/list");
-            eprintln!("ERROR: Failed to register worker '{}' (PID {}) in registry: {}", worker_id, pid, e);
+            eprintln!(
+                "ERROR: Failed to register worker '{}' (PID {}) in registry: {}",
+                worker_id, pid, e
+            );
             eprintln!("       The worker will continue running but will not appear in 'needle status' or 'needle list'.");
             eprintln!("       This indicates a problem with ~/.needle/state/workers.json - check permissions and disk space.");
         }
@@ -1422,6 +1425,51 @@ impl Worker {
         // Check if we should use SPLIT mode instead of normal PLUCK.
         // Auto-split triggers when a bead has >= split_after_failures consecutive failures.
         let (template_name, failure_count) = self.check_split_mode(&bead).await;
+
+        // If SPLIT mode would be used, check if the bead references NEEDLE-internal
+        // configuration. These tasks have no legitimate resolution path from inside
+        // a target repo and should not be split into child beads there.
+        if template_name == "split" && detects_needle_internal_config(&bead) {
+            heartbeat_handle.abort();
+
+            tracing::info!(
+                bead_id = %bead_id,
+                title = %bead.title,
+                failure_count,
+                "SPLIT mode skipped: bead references NEEDLE-internal configuration"
+            );
+
+            // Set Error status on the bead.prompt_build span
+            tracing::Span::current().record("otel.status_code", 2u64);
+            tracing::Span::current().record(
+                "otel.status_description",
+                "skipped: references NEEDLE-internal configuration",
+            );
+
+            // Emit split.skipped event.
+            let _ = self.telemetry.emit(EventKind::SplitSkipped {
+                bead_id: bead_id.clone(),
+                reason: "references NEEDLE-internal configuration".to_string(),
+            });
+
+            // Release the bead with timeout protection.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.store.release(&bead_id),
+            )
+            .await;
+
+            // Emit bead.released event.
+            let _ = self.telemetry.emit(EventKind::BeadReleased {
+                bead_id: bead_id.clone(),
+                reason: "split_out_of_scope".to_string(),
+            });
+
+            // Clear current bead and transition to RETRYING.
+            self.current_bead = None;
+            self.set_state(WorkerState::Retrying)?;
+            return Ok(());
+        }
 
         let mut prompt = match tokio::time::timeout(
             timeout_dur,
@@ -2052,6 +2100,13 @@ impl Worker {
                         bead_id = %bead.id,
                         reason = %reason,
                         "mitosis skipped"
+                    );
+                }
+                Ok(Ok(crate::mitosis::MitosisResult::OutOfScope)) => {
+                    tracing::Span::current().record("needle.mitosis.result", "out_of_scope");
+                    tracing::debug!(
+                        bead_id = %bead.id,
+                        "mitosis: bead references NEEDLE-internal config, out of scope for workspace"
                     );
                 }
                 Ok(Err(e)) => {

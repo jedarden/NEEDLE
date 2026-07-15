@@ -1492,9 +1492,21 @@ fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
 fn cmd_list(format: ListFormat) -> Result<()> {
     let sessions = list_needle_sessions()?;
 
-    // Reconciliation: scan process table for needle processes not in tmux.
+    // ALWAYS scan process table for ALL needle run processes (both tmux and non-tmux).
+    // This ensures we discover workers regardless of how they were started.
     let discovered = scan_needle_processes().unwrap_or_default();
     let tmux_pids: HashSet<u32> = sessions.iter().filter_map(|s| s.pid).collect();
+
+    // Reconciliation check: compare process table against registry
+    let config = ConfigLoader::load_global()?;
+    let registry = Registry::default_location(&config.workspace.home);
+    let _ = reconcile_process_registry(&discovered, &registry);
+
+    // Separate discovered processes into tmux and non-tmux groups
+    let tmux_procs: Vec<&DiscoveredProcess> = discovered
+        .iter()
+        .filter(|p| tmux_pids.contains(&p.pid))
+        .collect();
     let orphaned: Vec<&DiscoveredProcess> = discovered
         .iter()
         .filter(|p| !tmux_pids.contains(&p.pid))
@@ -1508,7 +1520,8 @@ fn cmd_list(format: ListFormat) -> Result<()> {
         );
     }
 
-    if sessions.is_empty() && orphaned.is_empty() {
+    // Show all discovered processes, not just tmux sessions
+    if sessions.is_empty() && discovered.is_empty() {
         match format {
             ListFormat::Table => println!("No needle sessions running."),
             ListFormat::Json => println!("[]"),
@@ -1526,36 +1539,49 @@ fn cmd_list(format: ListFormat) -> Result<()> {
                 }
             }
 
-            if !orphaned.is_empty() {
+            // ALWAYS show discovered processes, even if they're in tmux
+            // This ensures visibility even if registry registration failed
+            if !discovered.is_empty() {
                 println!();
-                println!("Non-tmux Workers ({}):", orphaned.len());
-                println!(
-                    "  Workers not in tmux sessions - may have been started with NEEDLE_INNER=1"
-                );
-                for proc in orphaned {
+                println!("Discovered Workers ({}):", discovered.len());
+                println!("  All running needle run processes found via process table scan");
+                for proc in &discovered {
                     let workspace = proc
                         .workspace
                         .as_ref()
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "<unknown>".to_string());
                     let agent = proc.agent.as_deref().unwrap_or("<unknown>");
+                    let identifier = proc.identifier.as_deref().unwrap_or("<unknown>");
+                    let in_tmux = if tmux_pids.contains(&proc.pid) {
+                        " (tmux)"
+                    } else {
+                        " (non-tmux)"
+                    };
                     println!(
-                        "  PID {} — workspace: {}, agent: {}",
-                        proc.pid, workspace, agent
+                        "  PID {} — workspace: {}, agent: {}, identifier: {}{}",
+                        proc.pid, workspace, agent, identifier, in_tmux
                     );
                 }
+            }
+
+            // Additional warning if there are orphaned processes
+            if !orphaned.is_empty() {
+                println!();
+                println!("  ⚠️  {} worker(s) running outside tmux (started with NEEDLE_INNER=1 or direct invocation)", orphaned.len());
             }
         }
         ListFormat::Json => {
             let json = serde_json::json!({
                 "tmux_sessions": sessions,
-                "orphaned": orphaned.iter().map(|p| {
+                "discovered": discovered.iter().map(|p| {
                     serde_json::json!({
                         "pid": p.pid,
                         "workspace": p.workspace,
                         "agent": p.agent,
                         "identifier": p.identifier,
                         "cmdline": p.cmdline,
+                        "in_tmux": tmux_pids.contains(&p.pid),
                     })
                 }).collect::<Vec<_>>(),
             });
@@ -2048,25 +2074,37 @@ fn cmd_status(
     let workers = registry.list().unwrap_or_default();
     let sessions = list_needle_sessions().unwrap_or_default();
 
-    // Reconciliation: scan process table for orphaned needle run processes.
+    // ALWAYS scan process table for ALL needle run processes (both registered and unregistered).
+    // This ensures we discover workers regardless of registry registration status.
     let discovered = scan_needle_processes().unwrap_or_default();
     let registered_pids: HashSet<u32> = workers.iter().map(|w| w.pid).collect();
-    let orphaned: Vec<&DiscoveredProcess> = discovered
+    let tmux_pids: HashSet<u32> = sessions.iter().filter_map(|s| s.pid).collect();
+
+    // Separate discovered processes into registered and unregistered groups
+    let registered_procs: Vec<&DiscoveredProcess> = discovered
+        .iter()
+        .filter(|p| registered_pids.contains(&p.pid))
+        .collect();
+    let unregistered: Vec<&DiscoveredProcess> = discovered
         .iter()
         .filter(|p| !registered_pids.contains(&p.pid))
         .collect();
 
-    if !orphaned.is_empty() {
+    if !unregistered.is_empty() {
         tracing::warn!(
-            count = orphaned.len(),
-            pids = ?orphaned.iter().map(|p| p.pid).collect::<Vec<_>>(),
+            count = unregistered.len(),
+            pids = ?unregistered.iter().map(|p| p.pid).collect::<Vec<_>>(),
             "found unregistered needle run processes"
         );
     }
 
+    // Run comprehensive reconciliation check
+    let _ = reconcile_process_registry(&discovered, &registry);
+
     // Build a fleet summary.
     let active_count = sessions.len();
     let registered_count = workers.len();
+    let discovered_count = discovered.len();
     let total_beads: u64 = workers.iter().map(|w| w.beads_processed).sum();
 
     // Check heartbeat health for registered workers.
@@ -2102,59 +2140,76 @@ fn cmd_status(
             println!("{}", "-".repeat(50));
             println!("  Active tmux sessions: {active_count}");
             println!("  Registered workers:   {registered_count}");
+            println!("  Discovered workers:   {discovered_count}");
             println!("  Total beads processed: {total_beads}");
-            if !orphaned.is_empty() {
-                println!("  Unregistered workers: {} (WARN)", orphaned.len());
+            if !unregistered.is_empty() {
+                println!("  Unregistered workers: {} (WARN)", unregistered.len());
             }
             println!();
 
-            // Show unregistered workers if any.
-            if !orphaned.is_empty() {
-                println!("Unregistered Workers (not in registry):");
-                for proc in orphaned {
-                    let workspace = proc
-                        .workspace
-                        .as_ref()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "<unknown>".to_string());
-                    let agent = proc.agent.as_deref().unwrap_or("<unknown>");
-                    println!(
-                        "  PID {} — workspace: {}, agent: {}",
-                        proc.pid, workspace, agent
-                    );
-                }
-                println!();
-            }
-
-            if by_worker && !heartbeat_statuses.is_empty() {
+            // Show ALL discovered workers (both registered and unregistered)
+            if !discovered.is_empty() {
+                println!("Discovered Workers (all needle run processes):");
                 println!(
-                    "{:<16} {:<8} {:<14} {:<12} {:<10} {:<8}",
-                    "WORKER", "PID", "STATE", "BEAD", "UPTIME", "ALIVE"
+                    "  Found {} running worker(s) via process table scan",
+                    discovered.len()
                 );
-                println!("{}", "-".repeat(68));
-                for ws in &heartbeat_statuses {
-                    let state = ws.heartbeat_state.as_deref().unwrap_or("unknown");
-                    let bead = ws.current_bead.as_deref().unwrap_or("-");
-                    let uptime = format_duration(ws.uptime_secs);
-                    let alive = if ws.pid_alive { "yes" } else { "no" };
-                    println!(
-                        "{:<16} {:<8} {:<14} {:<12} {:<10} {:<8}",
-                        ws.entry.id, ws.entry.pid, state, bead, uptime, alive
-                    );
+                println!();
+
+                // Registered workers with heartbeat info
+                if !heartbeat_statuses.is_empty() {
+                    if by_worker {
+                        println!(
+                            "{:<16} {:<8} {:<14} {:<12} {:<10} {:<8} {:<12}",
+                            "WORKER", "PID", "STATE", "BEAD", "UPTIME", "ALIVE", "REGISTERED"
+                        );
+                        println!("{}", "-".repeat(80));
+                        for ws in &heartbeat_statuses {
+                            let state = ws.heartbeat_state.as_deref().unwrap_or("unknown");
+                            let bead = ws.current_bead.as_deref().unwrap_or("-");
+                            let uptime = format_duration(ws.uptime_secs);
+                            let alive = if ws.pid_alive { "yes" } else { "no" };
+                            println!(
+                                "{:<16} {:<8} {:<14} {:<12} {:<10} {:<8} {:<12}",
+                                ws.entry.id, ws.entry.pid, state, bead, uptime, alive, "yes"
+                            );
+                        }
+                    } else {
+                        println!("Registered Workers:");
+                        for ws in &heartbeat_statuses {
+                            let state = ws.heartbeat_state.as_deref().unwrap_or("unknown");
+                            let alive = if ws.pid_alive { "" } else { " (DEAD)" };
+                            println!(
+                                "  {} — {} beads, state: {state}{alive}",
+                                ws.entry.id, ws.entry.beads_processed,
+                            );
+                        }
+                    }
+                    println!();
                 }
-            } else if !heartbeat_statuses.is_empty() {
-                println!("Workers:");
-                for ws in &heartbeat_statuses {
-                    let state = ws.heartbeat_state.as_deref().unwrap_or("unknown");
-                    let alive = if ws.pid_alive { "" } else { " (DEAD)" };
-                    println!(
-                        "  {} — {} beads, state: {state}{alive}",
-                        ws.entry.id, ws.entry.beads_processed,
-                    );
+
+                // Unregistered workers (discovered but not in registry)
+                if !unregistered.is_empty() {
+                    println!("Unregistered Workers (not in registry):");
+                    println!("  ⚠️  These workers failed to register during boot");
+                    for proc in unregistered {
+                        let workspace = proc
+                            .workspace
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<unknown>".to_string());
+                        let agent = proc.agent.as_deref().unwrap_or("<unknown>");
+                        let identifier = proc.identifier.as_deref().unwrap_or("<unknown>");
+                        println!(
+                            "  PID {} — workspace: {}, agent: {}, identifier: {}",
+                            proc.pid, workspace, agent, identifier
+                        );
+                    }
+                    println!();
                 }
             }
 
-            if heartbeat_statuses.is_empty() && active_count == 0 {
+            if discovered.is_empty() && active_count == 0 {
                 println!("No workers running.");
             }
         }
@@ -2162,8 +2217,9 @@ fn cmd_status(
             let summary = serde_json::json!({
                 "active_sessions": active_count,
                 "registered_workers": registered_count,
+                "discovered_workers": discovered_count,
                 "total_beads_processed": total_beads,
-                "unregistered_workers": orphaned.len(),
+                "unregistered_workers": unregistered.len(),
                 "workers": heartbeat_statuses.iter().map(|ws| {
                     serde_json::json!({
                         "id": ws.entry.id,
@@ -2175,15 +2231,18 @@ fn cmd_status(
                         "current_bead": ws.current_bead,
                         "pid_alive": ws.pid_alive,
                         "uptime_secs": ws.uptime_secs,
+                        "registered": true,
                     })
                 }).collect::<Vec<_>>(),
-                "orphaned": orphaned.iter().map(|p| {
+                "discovered": discovered.iter().map(|p| {
+                    let registered = registered_pids.contains(&p.pid);
                     serde_json::json!({
                         "pid": p.pid,
                         "workspace": p.workspace,
                         "agent": p.agent,
                         "identifier": p.identifier,
                         "cmdline": p.cmdline,
+                        "registered": registered,
                     })
                 }).collect::<Vec<_>>(),
             });
@@ -4058,12 +4117,32 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
 
         // Check if this is a needle run process.
         // The command line looks like: "/path/to/needle run --workspace /path --count 1 ..."
+        // Also handle NEEDLE_INNER=1 invocations: "NEEDLE_INNER=1 /path/to/needle run ..."
         // Also handle cases where the binary is called via symlink or absolute path.
-        if !cmdline.contains("needle run") && !cmdline.contains("needle-worker") {
+        //
+        // IMPORTANT: Exclude shell wrapper processes (bash -c "NEEDLE_INNER=1 needle run ...")
+        // We only want to discover the actual needle worker process, not the shell wrapper.
+        // The shell wrapper has a cmdline like: "bash -c NEEDLE_INNER=1 /path/to/needle run ..."
+        if !cmdline.contains("needle run")
+            && !cmdline.contains("needle-worker")
+            && !cmdline.contains("NEEDLE_INNER")
+        {
+            continue;
+        }
+
+        // Filter out shell wrapper processes (bash -c "NEEDLE_INNER=1 needle run ...").
+        // These are created by tmux sessions and are not the actual needle worker processes.
+        // We only want to discover processes that are directly executing needle, not shell wrappers.
+        if cmdline.starts_with("bash -c")
+            || cmdline.starts_with("sh -c")
+            || cmdline.starts_with("/bin/bash -c")
+            || cmdline.starts_with("/bin/sh -c")
+        {
             continue;
         }
 
         // Parse arguments to extract workspace, agent, identifier.
+        // Handle NEEDLE_INNER=1 prefix in cmdline: "NEEDLE_INNER=1 /path/to/needle run ..."
         let args: Vec<&str> = cmdline.split_whitespace().collect();
         let mut workspace = None;
         let mut agent = None;
@@ -4072,6 +4151,10 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
         let mut i = 0;
         while i < args.len() {
             match args[i] {
+                // Skip NEEDLE_INNER environment variable prefix
+                "NEEDLE_INNER=1" => {
+                    i += 1;
+                }
                 "--workspace" | "-w" => {
                     if i + 1 < args.len() {
                         workspace = Some(PathBuf::from(args[i + 1]));
@@ -4119,6 +4202,68 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
 fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
     // No /proc on these platforms.
     Ok(vec![])
+}
+
+/// Reconcile discovered processes against the registry and emit warnings.
+///
+/// This function compares processes found in the process table against the
+/// worker registry and emits warnings for any unregistered needle run processes.
+/// It helps identify workers that failed to register during boot due to disk
+/// errors, permission issues, or other failures.
+#[cfg(unix)]
+fn reconcile_process_registry(discovered: &[DiscoveredProcess], registry: &Registry) -> Result<()> {
+    use std::collections::HashSet;
+
+    let workers = registry.list().unwrap_or_default();
+    let registered_pids: HashSet<u32> = workers.iter().map(|w| w.pid).collect();
+
+    // Find processes not in the registry
+    let unregistered: Vec<&DiscoveredProcess> = discovered
+        .iter()
+        .filter(|p| !registered_pids.contains(&p.pid))
+        .collect();
+
+    if !unregistered.is_empty() {
+        eprintln!(
+            "⚠️  WARNING: Found {} unregistered needle run process(es):",
+            unregistered.len()
+        );
+        for proc in &unregistered {
+            let workspace = proc
+                .workspace
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let agent = proc.agent.as_deref().unwrap_or("<unknown>");
+            let identifier = proc.identifier.as_deref().unwrap_or("<unknown>");
+            eprintln!(
+                "  PID {} — workspace: {}, agent: {}, identifier: {}",
+                proc.pid, workspace, agent, identifier
+            );
+        }
+        eprintln!("These workers may have failed to register during boot due to:");
+        eprintln!("  - Disk full or permission errors on ~/.needle/state/workers.json");
+        eprintln!("  - Registry file corruption or concurrent write conflicts");
+        eprintln!("  - Early termination during worker boot before registry registration");
+        eprintln!("The workers will continue processing beads but are invisible to 'needle status' and 'needle list'.");
+        eprintln!("To fix:");
+        eprintln!("  1. Check disk space: df -h ~/.needle");
+        eprintln!("  2. Check permissions: ls -la ~/.needle/state/");
+        eprintln!("  3. Kill and restart affected workers to force re-registration");
+        eprintln!();
+    }
+
+    Ok(())
+}
+
+/// Stub for non-Unix platforms (Windows, etc.).
+#[cfg(not(unix))]
+fn reconcile_process_registry(
+    _discovered: &[DiscoveredProcess],
+    _registry: &Registry,
+) -> Result<()> {
+    // No /proc on these platforms - cannot reconcile.
+    Ok(())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

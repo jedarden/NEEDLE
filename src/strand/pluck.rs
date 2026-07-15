@@ -7,6 +7,7 @@
 //! Given the same queue state, every worker computes the same candidate list.
 
 use crate::bead_store::{BeadStore, Filters};
+use crate::mitosis::detects_needle_internal_config;
 use crate::telemetry::Telemetry;
 use crate::types::{Bead, StrandError, StrandResult};
 use anyhow::{Context, Result};
@@ -301,8 +302,16 @@ impl super::Strand for PluckStrand {
                 beads
             }
             Err(e) => {
+                // Log the full error chain to capture stderr/exit code details.
+                // The Display impl (%e) only shows the top-level message, losing
+                // the underlying stderr from br/bf commands. Use {:?} or iterate
+                // the chain to preserve diagnostic information.
+                let error_chain: Vec<String> = std::iter::once(format!("{}", e))
+                    .chain(e.chain().map(|cause| format!("  caused by: {}", cause)))
+                    .collect();
                 tracing::error!(
                     error = %e,
+                    error_chain = ?error_chain,
                     "Bead store query failed"
                 );
                 // Bead store error is semantically different from NoWork.
@@ -463,6 +472,29 @@ impl super::Strand for PluckStrand {
                 );
 
                 if failure_count >= self.split_after_failures {
+                    // Check if this bead references NEEDLE-internal configuration.
+                    // Such beads have no legitimate resolution path from inside a target repo
+                    // and should not be split into child beads there.
+                    if detects_needle_internal_config(first_candidate) {
+                        tracing::info!(
+                            bead_id = %first_candidate.id,
+                            title = %first_candidate.title,
+                            failure_count = failure_count,
+                            "Split skipped: bead references NEEDLE-internal configuration, out of scope for target workspace"
+                        );
+                        // Filter out this candidate and re-evaluate the remaining candidates.
+                        let excluded_id = first_candidate.id.clone();
+                        candidates.retain(|b| b.id != excluded_id);
+                        if candidates.is_empty() {
+                            // All remaining candidates were filtered out, return NoWork.
+                            return StrandResult::NoWork;
+                        }
+                        // Continue with remaining candidates - do not trigger split.
+                        // Jump to stats storage and return the next valid candidate.
+                        // (Skip the rest of the split trigger logic for this iteration.)
+                        return self.evaluate(store).await;
+                    }
+
                     tracing::info!(
                         bead_id = %first_candidate.id,
                         failure_count = failure_count,
@@ -1205,6 +1237,101 @@ mod tests {
     fn extract_failure_count_returns_zero_when_no_label() {
         let bead = make_bead("normal", 1, "2026-01-01 00:00:00");
         assert_eq!(PluckStrand::extract_failure_count(&bead), 0);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // NEEDLE-internal config filter tests (ADR-002 Phase 6.1)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn split_not_triggered_for_needle_internal_config_references() {
+        // Regression test for ADR-002 Phase 6.1
+        // Uses real bf-3b64 lineage text as fixture:
+        // - "Starvation alert: beads invisible to worker" (bf-3b64 title)
+        // - "bead discovery configuration" (bf-36co)
+        // - "exclude_labels" (config being investigated)
+        //
+        // These beads reference NEEDLE's own dispatch configuration and have no
+        // legitimate resolution path from inside a target repo. The split path
+        // must recognize and reject them, not create child beads.
+
+        // Bead matching bf-3b64: "Starvation alert: beads invisible to worker"
+        let starvation_bead = make_bead_with_labels(
+            "Starvation alert: beads invisible to worker",
+            1,
+            vec!["failure-count:3"],
+        );
+
+        let store = MemoryStore {
+            beads: vec![starvation_bead],
+        };
+
+        let strand =
+            PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store).await;
+
+        // Should NOT trigger split - should return NoWork because the bead is filtered out
+        match result {
+            StrandResult::NoWork => {
+                // Expected - bead filtered due to NEEDLE-internal config reference
+            }
+            other => panic!(
+                "expected NoWork when bead references NEEDLE-internal config, got: {:?}",
+                other
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn split_not_triggered_for_pluck_config_beads() {
+        // Regression test for "Pluck configuration" and "exclude_labels" references
+        let config_bead = make_bead_with_labels(
+            "Fix bead discovery configuration",
+            1,
+            vec!["failure-count:3"],
+        );
+
+        let store = MemoryStore {
+            beads: vec![config_bead],
+        };
+
+        let strand =
+            PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store).await;
+
+        // Should NOT trigger split
+        match result {
+            StrandResult::NoWork => {
+                // Expected - bead filtered due to NEEDLE-internal config reference
+            }
+            other => panic!("expected NoWork for Pluck config bead, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn split_triggered_for_normal_failing_beads() {
+        // Verify that normal beads (not referencing NEEDLE-internal config)
+        // still trigger split correctly after the filter is in place.
+
+        let normal_bead =
+            make_bead_with_labels("Add authentication endpoint", 1, vec!["failure-count:3"]);
+
+        let store = MemoryStore {
+            beads: vec![normal_bead],
+        };
+
+        let strand =
+            PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store).await;
+
+        // Should trigger split normally for non-NEEDLE-internal beads
+        match result {
+            StrandResult::Split(bead, failure_count) => {
+                assert_eq!(bead.id.as_ref(), "Add authentication endpoint");
+                assert_eq!(failure_count, 3);
+            }
+            other => panic!("expected Split for normal failing bead, got: {:?}", other),
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────

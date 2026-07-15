@@ -37,6 +37,8 @@ pub enum MitosisResult {
     NotSplittable,
     /// Mitosis was skipped (disabled, not first failure, etc.).
     Skipped { reason: String },
+    /// Bead references NEEDLE-internal configuration and is out-of-scope for target workspace.
+    OutOfScope,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -98,6 +100,20 @@ impl MitosisEvaluator {
             return Ok(MitosisResult::Skipped {
                 reason: "disabled".to_string(),
             });
+        }
+
+        // Check if bead references NEEDLE-internal configuration.
+        // These tasks have no legitimate resolution path from inside a target repo.
+        if detects_needle_internal_config(bead) {
+            tracing::info!(
+                bead_id = %bead.id,
+                title = %bead.title,
+                "mitosis skipped: bead references NEEDLE-internal configuration"
+            );
+            self.telemetry.emit(EventKind::MitosisOutOfScope {
+                bead_id: bead.id.clone(),
+            })?;
+            return Ok(MitosisResult::OutOfScope);
         }
 
         // Check failure count conditions.
@@ -545,6 +561,53 @@ fn titles_match(existing: &str, proposed: &str) -> bool {
     let p = normalize(proposed);
 
     e == p || e.contains(&p) || p.contains(&e)
+}
+
+/// Detect if a bead references NEEDLE-internal configuration.
+///
+/// Returns true if the bead content suggests investigating or fixing NEEDLE's own
+/// dispatch configuration (Pluck, exclude_labels, bead discovery, etc.).
+/// These tasks have no legitimate resolution path from inside a target repo.
+pub fn detects_needle_internal_config(bead: &Bead) -> bool {
+    let combined_text = format!(
+        "{} {}",
+        bead.title.to_lowercase(),
+        bead.body
+            .as_ref()
+            .map(|b| b.to_lowercase())
+            .unwrap_or_default()
+    );
+
+    // Patterns that indicate NEEDLE-internal configuration work.
+    // These are derived from the real ARMOR incident (bead bf-3b64 and its lineage).
+    let internal_config_patterns = [
+        "pluck configuration",
+        "pluck config",
+        "exclude_labels",
+        "exclude labels",
+        "bead discovery",
+        "starvation alert",
+        "beads invisible to worker",
+        "open beads exist but pluck found none",
+        "needle dispatch",
+        "strand configuration",
+        "worker configuration",
+        "bead filtering",
+        "candidate exclusion",
+    ];
+
+    for pattern in &internal_config_patterns {
+        if combined_text.contains(pattern) {
+            tracing::debug!(
+                bead_id = %bead.id,
+                pattern,
+                "bead references NEEDLE-internal configuration"
+            );
+            return true;
+        }
+    }
+
+    false
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1240,6 +1303,162 @@ End of response."#;
         assert!(
             matches!(result, MitosisResult::Skipped { .. }),
             "bead with mitosis-depth:1 should be skipped even at repeat tick (failure_count=51)"
+        );
+    }
+
+    // ── OutOfScope tests (ADR-002 Phase 6.1) ──
+
+    #[tokio::test]
+    async fn evaluate_returns_out_of_scope_for_needle_internal_config() {
+        // Regression test for ADR-002 Phase 6.1
+        // Uses real bf-3b64 lineage text as fixture:
+        // - "Starvation alert: beads invisible to worker" (bf-3b64 title)
+        // - Body referencing "bead discovery configuration" and "exclude_labels"
+        //
+        // These beads reference NEEDLE's own dispatch configuration and have no
+        // legitimate resolution path from inside a target repo. The mitosis
+        // evaluator must return OutOfScope and NOT create any child beads.
+
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // Bead matching bf-3b64: "Starvation alert: beads invisible to worker"
+        // with body referencing NEEDLE-internal configuration
+        let mut bead = test_bead();
+        bead.title = "Starvation alert: beads invisible to worker".to_string();
+        bead.body = Some(
+            "Pluck found no candidates but open beads exist.\n\
+             This may be due to exclude_labels filtering or bead discovery configuration.\n\
+             Investigate Pluck configuration and adjust exclude_labels setting."
+                .to_string(),
+        );
+        bead.labels = vec!["failure-count:1".to_string()];
+
+        let store = MockStore::new().with_labels(vec!["failure-count:1".to_string()]);
+
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+
+        // Should return OutOfScope, not create children
+        match result {
+            MitosisResult::OutOfScope => {
+                // Expected - bead references NEEDLE-internal configuration
+            }
+            other => panic!(
+                "expected OutOfScope for NEEDLE-internal config bead, got: {:?}",
+                other
+            ),
+        }
+
+        // Assert that NO child beads were created in the store
+        let created = store.created.lock().unwrap();
+        assert!(
+            created.is_empty(),
+            "expected no child beads to be created, but found: {:?}",
+            created
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_returns_out_of_scope_for_pluck_config_beads() {
+        // Additional regression test for "Pluck configuration" references
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        let mut bead = test_bead();
+        bead.title = "Fix bead discovery configuration".to_string();
+        bead.body = Some(
+            "Investigate why Pluck is not finding beads.\n\
+             Check exclude_labels configuration and adjust filters."
+                .to_string(),
+        );
+        bead.labels = vec!["failure-count:1".to_string()];
+
+        let store = MockStore::new().with_labels(vec!["failure-count:1".to_string()]);
+
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MitosisResult::OutOfScope));
+
+        let created = store.created.lock().unwrap();
+        assert!(
+            created.is_empty(),
+            "expected no child beads for Pluck config bead"
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_returns_out_of_scope_for_strand_config_beads() {
+        // Test for "strand configuration" and "worker configuration" references
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        let mut bead = test_bead();
+        bead.title = "Configure strand filters".to_string();
+        bead.body = Some(
+            "Update strand configuration to improve candidate filtering.\n\
+             Adjust worker settings for better dispatch behavior."
+                .to_string(),
+        );
+        bead.labels = vec!["failure-count:1".to_string()];
+
+        let store = MockStore::new().with_labels(vec!["failure-count:1".to_string()]);
+
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MitosisResult::OutOfScope));
+
+        let created = store.created.lock().unwrap();
+        assert!(
+            created.is_empty(),
+            "expected no child beads for strand config bead"
         );
     }
 }

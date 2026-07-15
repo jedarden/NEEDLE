@@ -1,11 +1,12 @@
 
-running 1250 tests
+running 1399 tests
 test agent_event::tests::agent_message_round_trip ... ok
 test agent_event::tests::deserialize_from_literal_jsonl ... ok
 test agent_event::tests::error_round_trip ... ok
 test agent_event::tests::tokens_round_trip ... ok
 test agent_event::tests::tool_result_round_trip ... ok
 test agent_event::tests::tool_call_round_trip ... ok
+test bead_store::tests::bf_parse_beads_accepts_completed_status ... ok
 test bead_store::tests::bf_parse_beads_skips_one_bad_line_keeps_the_rest ... ok
 test bead_store::tests::corruption_in_longer_message ... ok
 test bead_store::tests::detects_case_insensitive ... ok
@@ -16,8 +17,8 @@ test bead_store::tests::filters_default_is_empty ... ok
 test bead_store::tests::non_corruption_error_returns_false ... ok
 test bead_store::tests::parse_beads_empty_json_array ... ok
 test bead_store::tests::parse_beads_empty_string_returns_empty ... ok
-test bead_store::tests::parse_beads_malformed_json_is_error ... ok
 test bead_store::tests::parse_beads_whitespace_only_returns_empty ... ok
+test bead_store::tests::parse_beads_malformed_json_is_error ... ok
 test bead_store::tests::parse_doctor_output_empty ... ok
 test bead_store::tests::parse_doctor_output_filters_recovery_artifacts ... ok
 test bead_store::tests::parse_doctor_output_filters_sqlite3_not_available ... ok
@@ -30,40 +31,104 @@ test bead_store::tests::sync_conflict_detects_sync_conflict_marker ... ok
 test bead_store::tests::sync_conflict_in_longer_stderr ... ok
 test bead_store::tests::sync_conflict_is_case_sensitive ... ok
 test bead_store::tests::sync_conflict_returns_false_for_non_conflict ... ok
-test bead_store::tests::bf_parse_beads_accepts_completed_status ... ok
-test canary::tests::canary_report_can_promote ... ok
 test canary::tests::canary_test_result_bead_id ... ok
+test canary::tests::canary_report_can_promote ... ok
 test canary::tests::canary_test_result_bead_id_all_variants ... ok
 test canary::tests::canary_test_result_is_pass ... ok
 test canary::tests::discover_test_beads_missing_expected_dir ... ok
 test canary::tests::expected_outcome_default_status ... ok
 test canary::tests::discover_test_beads_reads_yaml_files ... ok
 test canary::tests::failure_with_none_exit_code_does_not_match ... ok
-test canary::tests::load_expected_outcome_failure_yaml ... ok
 test canary::tests::expected_outcome_serde_roundtrip ... ok
-test canary::tests::load_expected_outcome_invalid_yaml ... ok
+test canary::tests::load_expected_outcome_failure_yaml ... ok
 test canary::tests::load_expected_outcome_missing_file ... ok
+test canary::tests::load_expected_outcome_invalid_yaml ... ok
 test canary::tests::mismatch_reason_failure ... ok
-test canary::tests::load_expected_outcome_success_yaml ... ok
 test canary::tests::mismatch_reason_state_machine ... ok
+test canary::tests::load_expected_outcome_success_yaml ... ok
 test canary::tests::mismatch_reason_success ... ok
-test canary::tests::outcomes_match_failure ... ok
 test canary::tests::mismatch_reason_timeout ... ok
-test canary::tests::outcomes_match_success ... ok
+test canary::tests::outcomes_match_failure ... ok
 test canary::tests::outcomes_match_state_machine ... ok
 test canary::tests::outcomes_match_timeout ... ok
-test canary::tests::promote_moves_testing_to_stable ... ok
+test canary::tests::outcomes_match_success ... ok
 test canary::tests::promote_first_time_no_existing_stable ... ok
+test canary::tests::promote_moves_testing_to_stable ... ok
 test canary::tests::promote_no_testing_binary_fails ... ok
 test canary::tests::reject_no_testing_binary_is_ok ... ok
 test canary::tests::reject_removes_testing_binary ... ok
 test canary::tests::rollback_no_prev_binary_fails ... ok
-test canary::tests::rollback_restores_previous_stable ... ok
 test canary::tests::run_missing_testing_binary_fails ... ok
+test canary::tests::rollback_restores_previous_stable ... ok
 test canary::tests::run_missing_workspace_fails ... ok
 test canary::tests::status_empty_needle_home ... ok
-test canary::tests::status_reports_channel_state ... ok
 test canary::tests::success_with_extra_labels_still_matches ... ok
+test cargo_test::tests::cargo_test_new_creates_runner ... ok
+test canary::tests::status_reports_channel_state ... ok
+test cargo_test::tests::cargo_test_spawn_succeeds ... ok
+test cargo_test::tests::cargo_test_spawn_captures_output_streams ... ok
+test cargo_test::tests::cargo_test_with_args_sets_args ... ok
+test cargo_test::tests::cargo_test_with_timeout_sets_timeout ... ok
+test cargo_test::tests::create_combined_output_adds_trailing_newline ... ok
+test cargo_test::tests::create_combined_output_with_both_streams ... ok
+test cargo_test::tests::create_combined_output_with_empty_streams ... ok
+test cargo_test::tests::create_combined_output_with_only_stderr ... ok
+test cargo_test::tests::create_combined_output_with_only_stdout ... ok
+test cargo_test::tests::detect_compilation_errors_aborting_due_to ... ok
+test cargo_test::tests::detect_compilation_errors_could_not_compile ... ok
+test cargo_test::tests::detect_compilation_errors_empty_stderr ... ok
+test cargo_test::tests::detect_compilation_errors_full_output ... ok
+test cargo_test::tests::detect_compilation_errors_multiple_errors ... ok
+test cargo_test::tests::detect_compilation_errors_test_output_only ... ok
+test cargo_test::tests::detect_compilation_errors_with_error_code ... ok
+test cargo_test::tests::extract_crate_name_from_compile_error ... ok
+test cargo_test::tests::extract_crate_name_no_backticks ... ok
+test cargo_test::tests::extract_error_count_from_abort_message ... ok
+test cargo_test::tests::extract_error_count_no_number ... ok
+test cargo_test::tests::parse_error_line_no_message ... ok
+test cargo_test::tests::parse_error_line_not_error ... ok
+test cargo_test::tests::parse_error_line_with_code ... ok
+test cargo_test::tests::cargo_test_spawn_with_timeout_protection ... ok
+test cargo_test::tests::run_with_bead_trace_creates_parent_directory ... ok
+test cargo_test::tests::run_with_bead_trace_creates_trace_directory ... ok
+test cargo_test::tests::run_with_bead_trace_handles_empty_output ... ok
+test cargo_test::tests::run_with_bead_trace_handles_test_output ... ok
+test cargo_test::tests::run_with_bead_trace_metrics_captures_exit_code ... ok
+test cargo_test::tests::run_with_bead_trace_writes_test_metrics ... ok
+test cargo_test::tests::run_with_output_files_creates_combined_structure ... ok
+test cargo_test::tests::run_with_output_files_creates_output_files ... ok
+test cargo_test::tests::run_with_output_files_handles_empty_output ... ok
+test cargo_test::tests::test_args_add_test_flag ... ok
+test cargo_test::tests::test_args_add_cargo_flag ... ok
+test cargo_test::tests::test_args_add_test_name ... ok
+test cargo_test::tests::test_args_build_default ... ok
+test cargo_test::tests::test_args_build_full ... ok
+test cargo_test::tests::test_args_build_with_cargo_flags ... ok
+test cargo_test::tests::test_args_build_with_target ... ok
+test cargo_test::tests::test_args_build_with_test_flags ... ok
+test cargo_test::tests::test_args_default_is_empty ... ok
+test cargo_test::tests::test_args_with_filter ... ok
+test cargo_test::tests::test_args_with_target ... ok
+test cargo_test::tests::test_metrics_duration_conversion ... ok
+test cargo_test::tests::test_metrics_from_failed_outcome ... ok
+test cargo_test::tests::test_metrics_from_successful_outcome ... ok
+test cargo_test::tests::test_metrics_from_timeout_outcome ... ok
+test cargo_test::tests::test_metrics_high_precision_timing ... ok
+test cargo_test::tests::test_metrics_success_returns_false_for_nonzero_exit ... ok
+test cargo_test::tests::test_metrics_success_returns_false_for_timeout ... ok
+test cargo_test::tests::test_metrics_success_returns_true_for_zero_exit ... ok
+test cargo_test::tests::test_metrics_serialization ... ok
+test cargo_test::tests::test_outcome_is_compilation_failure ... ok
+test cargo_test::tests::test_outcome_is_test_failure ... ok
+test cargo_test::tests::test_outcome_success_false_with_nonzero_exit ... ok
+test cargo_test::tests::test_outcome_success_false_with_timeout ... ok
+test cargo_test::tests::test_outcome_success_with_zero_exit ... ok
+test cargo_test::tests::test_outcome_summary_compilation_failed ... ok
+test cargo_test::tests::test_outcome_summary_failed ... ok
+test cargo_test::tests::test_outcome_summary_passed ... ok
+test cargo_test::tests::test_outcome_summary_timed_out ... ok
+test cargo_test::tests::test_truncate_output_short ... ok
+test cargo_test::tests::test_truncate_output_long ... ok
 test claim::tests::claim_next_all_excluded_returns_no_candidates ... ok
 test claim::tests::claim_next_empty_candidates_returns_no_candidates ... ok
 test claim::tests::claim_next_happy_path_returns_claimed ... ok
@@ -119,7 +184,6 @@ test cli::tests::cli_parses_run_count_5 ... ok
 test cli::tests::cli_parses_run_defaults ... ok
 test cli::tests::cli_parses_run_full ... ok
 test cli::tests::cli_parses_status_by_worker ... ok
-test claim::tests::max_retries_caps_attempts ... ok
 test cli::tests::cli_parses_status_cost ... ok
 test cli::tests::cli_parses_status_cost_since ... ok
 test cli::tests::cli_parses_status_defaults ... ok
@@ -131,9 +195,9 @@ test cli::tests::cli_parses_upgrade ... ok
 test cli::tests::cli_parses_upgrade_check ... ok
 test cli::tests::cli_parses_version ... ok
 test cli::tests::cli_rejects_unknown_subcommand ... ok
+test cli::tests::cli_test_agent_requires_name ... ok
 test cli::tests::config_dump_returns_all_fields ... ok
 test cli::tests::config_get_key_known_keys ... ok
-test cli::tests::cli_test_agent_requires_name ... ok
 test cli::tests::config_get_key_unknown_returns_none ... ok
 test cli::tests::default_worker_identifier_is_alpha ... ok
 test cli::tests::doctor_check_heartbeat_dir_existing_writable ... ok
@@ -153,19 +217,24 @@ test cli::tests::doctor_check_lock_files_stale_repair_removes ... ok
 test cli::tests::doctor_check_lock_files_stale_warns_without_repair ... ok
 test cli::tests::doctor_check_peers_no_heartbeats ... ok
 test cli::tests::doctor_check_sqlite_no_db ... ok
+test cli::tests::doctor_check_telemetry_logs_existing_files ... ok
 test cli::tests::doctor_check_telemetry_logs_no_dir ... ok
 test cli::tests::doctor_check_workspace_missing ... ok
-test cli::tests::doctor_check_telemetry_logs_existing_files ... ok
 test cli::tests::doctor_check_workspace_no_beads_dir ... ok
+test cli::tests::doctor_check_workspace_valid ... ok
+test claim::tests::max_retries_caps_attempts ... ok
+test cli::tests::find_all_descendants_empty_for_current_process ... ok
+test cli::tests::find_all_descendants_handles_cycles ... FAILED
+test cli::tests::find_all_descendants_recursive ... ok
 test cli::tests::first_nato_is_alpha ... ok
 test cli::tests::format_duration_hours ... ok
-test cli::tests::doctor_check_workspace_valid ... ok
 test cli::tests::format_duration_minutes ... ok
 test cli::tests::format_duration_seconds ... ok
 test cli::tests::identifier_collision_detected ... ok
 test cli::tests::identifier_no_collision ... ok
 test cli::tests::is_needle_inner_false_by_default ... ok
 test cli::tests::is_needle_inner_false_for_other_values ... ok
+test cli::tests::find_all_descendants_empty_for_nonexistent_pid ... ok
 test cli::tests::is_pid_alive_current_process ... ok
 test cli::tests::is_pid_alive_nonexistent ... ok
 test cli::tests::last_nato_is_zulu ... ok
@@ -183,6 +252,9 @@ test cli::tests::pick_names_no_sessions_running ... ok
 test cli::tests::pick_names_partial_exhaustion_fails ... ok
 test cli::tests::pick_names_skips_non_contiguous_occupied ... ok
 test cli::tests::pick_names_skips_occupied ... ok
+test cli::tests::is_needle_inner_true_when_env_set ... ok
+test cli::tests::scan_needle_processes_returns_result ... ok
+test cli::tests::scan_needle_processes_discovers_needle_run_processes ... ok
 test cli::tests::session_name_format ... ok
 test cli::tests::shell_escape_plain_string ... ok
 test cli::tests::shell_escape_string_with_quotes ... ok
@@ -192,17 +264,19 @@ test cli::tests::stop_requires_all_or_identifier ... ok
 test cli::tests::version_string_format ... ok
 test commit_hook::tests::already_has_trailer_logic ... ok
 test commit_hook::tests::empty_head_means_no_op ... ok
+test commit_hook::tests::identity_check_allows_matched_commit ... ok
+test commit_hook::tests::identity_check_skips_mismatched_commit ... ok
 test config::tests::agent_config_with_routing_yaml_roundtrip ... ok
 test config::tests::cli_overrides_apply ... ok
 test config::tests::cli_overrides_beat_env_vars ... ok
 test config::tests::config_error_display_format ... ok
 test config::tests::config_source_display ... ok
-test cli::tests::is_needle_inner_true_when_env_set ... ok
 test config::tests::cpu_load_warn_at_one_passes_validation ... ok
 test config::tests::cpu_load_warn_negative_fails_validation ... ok
 test config::tests::cpu_load_warn_over_one_fails_validation ... ok
-test config::tests::default_agent_config_values ... ok
 test config::tests::cpu_load_warn_zero_fails_validation ... ok
+test config::tests::default_agent_config_values ... ok
+test config::tests::default_config_is_valid ... ok
 test config::tests::default_explore_config_values ... ok
 test config::tests::default_health_config_values ... ok
 test config::tests::default_knot_config_values ... ok
@@ -215,17 +289,16 @@ test config::tests::default_self_modification_config_values ... ok
 test config::tests::default_supervisor_config_values ... ok
 test config::tests::default_telemetry_config_values ... ok
 test config::tests::default_unravel_config_values ... ok
-test config::tests::default_config_is_valid ... ok
 test config::tests::default_weave_config_values ... ok
 test config::tests::default_worker_config_values ... ok
 test config::tests::dump_with_sources_formats_correctly ... ok
 test config::tests::dump_with_sources_includes_all_fields ... ok
 test config::tests::dump_with_sources_shows_env_var_source ... ok
-test config::tests::env_override_agent_default ... ok
 test config::tests::empty_adapter_in_routing_rule_fails_validation ... ok
+test config::tests::env_override_agent_default ... ok
+test config::tests::env_override_beats_workspace_config ... ok
 test config::tests::env_override_health_heartbeat_interval ... ok
 test config::tests::env_override_health_heartbeat_ttl ... ok
-test config::tests::env_override_beats_workspace_config ... ok
 test config::tests::env_override_invalid_bool_ignored ... ok
 test config::tests::env_override_invalid_integer_ignored ... ok
 test config::tests::env_override_self_modification_auto_promote ... ok
@@ -239,21 +312,21 @@ test config::tests::env_override_worker_max_workers ... ok
 test config::tests::env_var_routing_default_adapter_override ... ok
 test config::tests::env_var_routing_override_beats_workspace ... ok
 test config::tests::heartbeat_ttl_at_3x_interval_passes_validation ... ok
+test config::tests::heartbeat_ttl_below_3x_interval_fails_validation ... ok
 test config::tests::invalid_regex_in_routing_rule_fails_validation ... ok
 test config::tests::load_empty_yaml_returns_default ... ok
 test config::tests::load_invalid_yaml_returns_error ... ok
-test config::tests::heartbeat_ttl_below_3x_interval_fails_validation ... ok
 test config::tests::load_partial_yaml_uses_defaults_for_missing ... ok
+test config::tests::load_resolved_applies_workspace_then_cli ... ok
 test config::tests::load_yaml_with_all_sections ... ok
 test config::tests::load_yaml_with_unknown_fields_is_tolerated ... ok
-test config::tests::load_resolved_applies_workspace_then_cli ... ok
 test config::tests::max_workers_over_50_fails_validation ... ok
 test config::tests::missing_agent_binary_fails_validation ... ok
 test config::tests::missing_file_returns_default ... ok
+test config::tests::multiple_validation_errors_collected ... ok
 test config::tests::multiple_validation_errors_in_routing ... ok
 test config::tests::non_overridable_keys_are_detected ... ok
 test config::tests::reflect_config_default_extraction_agent_is_none ... ok
-test config::tests::multiple_validation_errors_collected ... ok
 test config::tests::routing_config_backward_compatibility ... ok
 test config::tests::routing_config_empty_rules_list_is_valid ... ok
 test config::tests::routing_config_from_global_config_file ... ok
@@ -261,10 +334,11 @@ test config::tests::routing_config_with_rules_parses ... ok
 test config::tests::routing_config_yaml_roundtrip ... ok
 test config::tests::routing_default_anthropic_models_to_claude_print ... ok
 test config::tests::routing_default_fallback_no_match ... ok
-test config::tests::routing_glm_47_defaults_to_claude_code_glm_47 ... ok
 test config::tests::routing_first_match_wins ... ok
+test config::tests::routing_glm_47_defaults_to_claude_code_glm_47 ... ok
 test config::tests::routing_patterns_match_bare_aliases ... ok
 test config::tests::routing_patterns_match_full_model_ids ... ok
+test config::tests::routing_patterns_match_with_wildcards ... ok
 test config::tests::routing_strict_mode_failure ... ok
 test config::tests::routing_workspace_override ... ok
 test config::tests::source_map_tracks_cli_overrides ... ok
@@ -277,7 +351,7 @@ test config::tests::supervisor_config_resolved_heartbeat_path_default ... ok
 test config::tests::supervisor_config_with_only_heartbeat_path ... ok
 test config::tests::supervisor_config_with_only_socket_path ... ok
 test config::tests::supervisor_config_yaml_roundtrip ... ok
-test config::tests::routing_patterns_match_with_wildcards ... ok
+test config::tests::valid_regex_in_routing_rule_passes_validation ... ok
 test config::tests::workspace_config_global_used_when_absent ... ok
 test config::tests::workspace_config_missing_returns_none ... ok
 test config::tests::workspace_config_overrides_agent_default ... ok
@@ -290,7 +364,6 @@ test config::tests::workspace_config_partial_agent_override ... ok
 test config::tests::workspace_config_routing_override ... ok
 test config::tests::workspace_invalid_yaml_returns_error ... ok
 test config::tests::workspace_labels_default_empty ... ok
-test config::tests::valid_regex_in_routing_rule_passes_validation ... ok
 test config::tests::workspace_labels_not_set_leaves_default ... ok
 test config::tests::workspace_labels_parsed_from_needle_yaml ... ok
 test config::tests::workspace_overrides_deserialize_ignores_non_overridable ... ok
@@ -317,38 +390,39 @@ test cost::tests::scan_daily_cost_empty_dir ... ok
 test cost::tests::scan_daily_cost_handles_null_cost ... ok
 test cost::tests::scan_daily_cost_ignores_non_jsonl_files ... ok
 test cost::tests::scan_daily_cost_missing_dir ... ok
-test cost::tests::scan_daily_cost_sums_todays_events ... ok
 test cost::tests::scan_daily_cost_skips_corrupt_lines ... ok
+test cost::tests::scan_daily_cost_sums_todays_events ... ok
 test decision::tests::adr_lite_format ... ok
+test decision::tests::adr_store_write_and_list ... ok
 test decision::tests::adr_to_markdown_format ... ok
 test decision::tests::contains_error_indicator ... ok
-test decision::tests::adr_store_write_and_list ... ok
 test decision::tests::decision_id_generation ... ok
-test decision::tests::detect_failure_recovery_pattern ... ok
 test decision::tests::detect_exploration_choice_pattern ... ok
+test decision::tests::detect_failure_recovery_pattern ... ok
 test decision::tests::extract_file_path_from_description ... ok
 test dispatch::tests::adapter_yaml_args_input_method ... ok
-test dispatch::tests::adapter_yaml_file_input_method ... ok
 test dispatch::tests::adapter_yaml_deserialization ... ok
+test dispatch::tests::adapter_yaml_file_input_method ... ok
 test dispatch::tests::adapter_yaml_output_transform_absent_is_none ... ok
 test dispatch::tests::adapter_yaml_output_transform_deserialized ... ok
+test dispatch::tests::adapter_yaml_roundtrip ... ok
 test dispatch::tests::all_builtin_adapters_load ... ok
 test dispatch::tests::build_sample_json_creates_valid_structure ... ok
 test dispatch::tests::builtin_adapters_are_present ... ok
 test dispatch::tests::builtin_aider_config ... ok
-test dispatch::tests::adapter_yaml_roundtrip ... ok
 test dispatch::tests::builtin_claude_opus_config ... ok
 test dispatch::tests::builtin_codex_config ... ok
 test dispatch::tests::builtin_opencode_config ... ok
 test dispatch::tests::claude_opus_adapter_has_genai_attributes ... ok
 test dispatch::tests::claude_sonnet_adapter_has_genai_attributes ... ok
 test dispatch::tests::codex_adapter_has_openai_provider ... ok
-test dispatch::tests::dispatch_captures_stderr ... ok
+test commit_hook::tests::concurrent_inject_never_cross_tags ... ok
 test dispatch::tests::dispatch_captures_exit_code ... ok
+test dispatch::tests::dispatch_captures_stderr ... ok
 test dispatch::tests::dispatch_cleans_up_temp_file ... ok
 test dispatch::tests::dispatch_echo_captures_stdout ... ok
-test dispatch::tests::dispatch_missing_binary_returns_127 ... ok
 test dispatch::tests::dispatch_environment_variables ... ok
+test dispatch::tests::dispatch_missing_binary_returns_127 ... ok
 test dispatch::tests::dispatch_template_renders_bead_id ... ok
 test dispatch::tests::dispatch_stdin_redirect_from_prompt_file ... ok
 test dispatch::tests::e2e_adapter_with_custom_env_and_base_url ... ok
@@ -648,16 +722,16 @@ test routing::tests::regex_pattern_match ... ok
 test routing::tests::whitespace_in_patterns ... ok
 test sanitize::tests::normalize_regex_posix_classes ... ok
 test sanitize::tests::sanitizer_builds_from_vendored_toml ... ok
-test health::tests::heartbeat_creates_and_refreshes_every_30_seconds ... ok
 test sanitize::tests::sanitizer_handles_low_entropy_placeholder ... ok
+test health::tests::heartbeat_creates_and_refreshes_every_30_seconds ... ok
 test sanitize::tests::sanitizer_multiline_sanitizes_each_line ... ok
 test sanitize::tests::sanitizer_performance ... ok
-test sanitize::tests::sanitizer_preserves_already_redacted ... ok
 test sanitize::tests::sanitizer_performance_100kb_median ... ok
+test sanitize::tests::sanitizer_preserves_already_redacted ... ok
 test sanitize::tests::sanitizer_preserves_bead_ids ... ok
 test sanitize::tests::sanitizer_preserves_short_line ... ok
 test sanitize::tests::sanitizer_redacts_anthropic_api_key ... ok
-test sanitize::tests::sanitizer_with_custom_pattern ... ok
+test sanitize::tests::sanitizer_redacts_gcp_api_key ... ok
 test sanitize::tests::shannon_entropy_empty ... ok
 test sanitize::tests::shannon_entropy_high ... ok
 test sanitize::tests::shannon_entropy_uniform ... ok
@@ -844,6 +918,13 @@ test strand::pluck::tests::same_queue_state_produces_same_ordering ... ok
 test strand::pluck::tests::split_disabled_when_threshold_is_zero ... ok
 test strand::pluck::tests::split_not_triggered_when_failure_count_below_threshold ... ok
 test strand::pluck::tests::split_triggered_when_failure_count_exceeds_threshold ... ok
+test strand::pluck::tests::starvation_mixed_label_and_assignee_exclusions_emits_telemetry ... ok
+test strand::pluck::tests::starvation_persistent_record_disabled_when_flag_false ... ok
+test strand::pluck::tests::starvation_persistent_record_not_written_to_target_workspace ... ok
+test strand::pluck::tests::starvation_persistent_record_written_to_needle_workspace ... ok
+test strand::pluck::tests::starvation_when_all_beads_excluded_by_labels_emits_telemetry ... ok
+test strand::pluck::tests::starvation_when_all_beads_have_stale_assignees_emits_telemetry ... ok
+test strand::pluck::tests::starvation_when_queue_is_genuinely_empty_emits_telemetry ... ok
 test strand::pluck::tests::store_error_returns_error_not_no_work ... ok
 test strand::pluck::tests::strand_filters_excluded_labels_when_store_does_not ... ok
 test strand::pluck::tests::strand_name_is_pluck ... ok
@@ -894,6 +975,9 @@ test strand::reflect::tests::truncate_does_not_panic_on_multibyte_char_boundary 
 test strand::reflect::tests::truncate_exact ... ok
 test strand::reflect::tests::truncate_long ... ok
 test strand::reflect::tests::truncate_short ... ok
+test strand::splice::tests::detect_completion_without_resolution_finds_bf_34xw9_pattern ... ok
+test strand::splice::tests::detect_completion_without_resolution_ignores_resolved_beads ... ok
+test strand::splice::tests::detect_completion_without_resolution_requires_minimum_thresholds ... ok
 test strand::splice::tests::splice_disabled_returns_no_work ... ok
 test strand::splice::tests::splice_no_heartbeats_returns_no_work ... ok
 test strand::splice::tests::splice_state_roundtrip ... ok
@@ -1009,6 +1093,19 @@ test telemetry::otlp::tests::test_tokens_input_records_with_attributes ... ok
 test telemetry::otlp::tests::test_tokens_output_records_with_attributes ... ok
 test telemetry::otlp::tests::test_workers_active_decrements_on_stopped ... ok
 test telemetry::otlp::tests::test_workers_active_increments_on_started ... ok
+test telemetry::test_utils::tests::assert_event_count_panics_on_mismatch - should panic ... ok
+test telemetry::test_utils::tests::assert_event_count_works ... ok
+test telemetry::test_utils::tests::assert_event_emitted_panics_when_missing - should panic ... ok
+test telemetry::test_utils::tests::assert_event_emitted_works ... ok
+test telemetry::test_utils::tests::assert_event_not_emitted_panics_when_present - should panic ... ok
+test telemetry::test_utils::tests::assert_event_not_emitted_works ... ok
+test telemetry::test_utils::tests::clear_works ... ok
+test telemetry::test_utils::tests::event_count_works ... ok
+test telemetry::test_utils::tests::find_event_returns_none_when_missing ... ok
+test telemetry::test_utils::tests::find_event_works ... ok
+test telemetry::test_utils::tests::last_event_works ... ok
+test telemetry::test_utils::tests::test_helper_captures_events ... ok
+test telemetry::test_utils::tests::test_helper_filters_by_bead_id ... ok
 test telemetry::tests::all_event_kinds_produce_valid_events ... ok
 test telemetry::tests::boot_event_written_to_file_on_telemetry_creation ... ok
 test telemetry::tests::broken_sink_does_not_crash_emitter ... ok
@@ -1022,25 +1119,25 @@ test telemetry::tests::emit_omits_trace_and_span_ids_outside_span ... ok
 test telemetry::tests::emit_outside_span_has_no_trace_ids ... ok
 test telemetry::tests::emit_try_lock_delivers_events_when_lock_available ... ok
 test telemetry::tests::emit_try_lock_gracefully_degrades_when_lock_contended ... ok
-test sanitize::tests::sanitizer_redacts_gcp_api_key ... ok
 test telemetry::tests::emitter_delivers_events_to_sink ... ok
-test telemetry::tests::event_kind_duration_ms_extracted ... ok
 test telemetry::tests::event_kind_bead_id_extracted_correctly ... ok
-test telemetry::tests::event_kind_types_are_dotted_strings ... ok
+test telemetry::tests::event_kind_duration_ms_extracted ... ok
 test telemetry::tests::event_kind_to_data_is_valid_json ... ok
+test telemetry::tests::event_kind_types_are_dotted_strings ... ok
 test telemetry::tests::file_sink_accept_is_visible_without_explicit_flush ... ok
 test telemetry::tests::file_sink_creates_nested_directory ... ok
+test telemetry::tests::file_sink_writes_jsonl ... ok
 test telemetry::tests::format_duration_ms_milliseconds ... ok
 test telemetry::tests::format_duration_ms_minutes ... ok
 test telemetry::tests::format_duration_ms_seconds ... ok
-test telemetry::tests::file_sink_writes_jsonl ... ok
 test telemetry::tests::glob_to_regex_double_wildcard ... ok
 test telemetry::tests::glob_to_regex_exact ... ok
-test telemetry::tests::hook_sink_dispatch_captures_failure ... ok
 test telemetry::tests::glob_to_regex_wildcard ... ok
+test telemetry::tests::hook_sink_dispatch_captures_failure ... ok
+test telemetry::tests::hook_sink_dispatch_matches_filter ... ok
 test telemetry::tests::hook_sink_dispatch_prevents_recursion_on_sink_error ... ok
 test telemetry::tests::hook_sink_dispatch_skips_non_matching ... ok
-test telemetry::tests::hook_sink_dispatch_matches_filter ... ok
+test telemetry::tests::hook_sink_dispatches_json_to_stdin ... ok
 test telemetry::tests::hook_sink_empty_when_no_configs ... ok
 test telemetry::tests::hook_sink_invalid_filter_returns_error ... ok
 test telemetry::tests::hook_sink_multiple_hooks_matching_same_event ... ok
@@ -1062,7 +1159,7 @@ test telemetry::tests::sequence_numbers_monotonic_in_emitter ... ok
 test telemetry::tests::session_id_is_8_hex_chars ... ok
 test telemetry::tests::session_ids_are_unique ... ok
 test telemetry::tests::short_type_mappings ... ok
-test telemetry::tests::hook_sink_dispatches_json_to_stdin ... ok
+test sanitize::tests::sanitizer_with_custom_pattern ... ok
 test telemetry::tests::shutdown_flush_calls_flush_with_deadline ... ok
 test telemetry::tests::shutdown_flushes_bufwriter_on_short_lived_session ... ok
 test telemetry::tests::stdout_sink_colorize_returns_ansi_codes ... ok
@@ -1075,6 +1172,37 @@ test telemetry::tests::telemetry_event_serializes_to_valid_json ... ok
 test telemetry::tests::telemetry_new_does_not_require_runtime ... ok
 test telemetry::tests::telemetry_start_spawns_writer_and_delivers_events ... ok
 test telemetry::tests::timestamps_are_utc_iso8601 ... ok
+test test_output::tests::cleanup_all_test_outputs_removes_directory ... ok
+test test_output::tests::ensure_test_output_dir_creates_directory ... ok
+test test_output::tests::test_output_cleanup_removes_directory ... ok
+test test_output::tests::test_output_creates_directory ... ok
+test test_output::tests::test_output_directory_creation_failure_returns_none ... ok
+test test_output::tests::test_output_disabled_returns_ok ... ok
+test test_output::tests::test_output_paths ... ok
+test test_output::tests::test_output_read_empty_file ... ok
+test test_output::tests::test_output_writes_combined ... ok
+test test_output::tests::test_output_writes_stderr ... ok
+test test_output::tests::test_output_writes_stdout ... ok
+test test_runner::tests::test_captured_output_empty ... ok
+test test_runner::tests::test_captured_output_new ... ok
+test test_runner::tests::test_persist_all_writes_all_files ... ok
+test test_runner::tests::test_persist_metrics_creates_json ... ok
+test test_runner::tests::test_persist_output_creates_directory ... ok
+test test_runner::tests::test_persist_output_creates_files ... ok
+test test_runner::tests::test_persist_output_empty_streams ... ok
+test test_runner::tests::test_persist_output_large_output ... ok
+test test_runner::tests::test_result_captured_stderr ... ok
+test test_runner::tests::test_result_captured_stdout ... ok
+test test_runner::tests::test_result_status_compilation_failed ... ok
+test test_runner::tests::test_result_status_failed ... ok
+test test_runner::tests::test_result_status_success ... ok
+test test_runner::tests::test_result_status_timed_out ... ok
+test test_runner::tests::test_result_summary ... ok
+test test_runner::tests::test_runner_new ... ok
+test test_runner::tests::test_runner_with_extra_arg ... ok
+test test_runner::tests::test_runner_with_timeout ... ok
+test test_runner::tests::test_test_metrics_from_result ... ok
+test test_runner::tests::test_test_metrics_serialization ... ok
 test trace::tests::detect_trace_format_aider ... ok
 test trace::tests::detect_trace_format_claude ... ok
 test trace::tests::detect_trace_format_generic ... ok
@@ -1085,6 +1213,7 @@ test trace::tests::trace_capture_prune_removes_data_keeps_metadata ... ok
 test trace::tests::trace_capture_writes_metadata ... ok
 test trace::tests::trace_capture_writes_stderr ... ok
 test trace::tests::trace_capture_writes_stdout ... ok
+test trace::tests::trace_capture_writes_test_output ... ok
 test trace::tests::trace_capture_writes_trace_jsonl ... ok
 test trace::tests::trace_cleanup_already_pruned_trace_skipped ... ok
 test trace::tests::trace_cleanup_missing_traces_dir_ok ... ok
@@ -1124,6 +1253,19 @@ test types::tests::bead_status_display ... ok
 test types::tests::bead_status_is_done ... ok
 test types::tests::bead_status_serialization ... ok
 test types::tests::br_dependency_deserialization ... ok
+test types::tests::compilation_error_abort_description ... ok
+test types::tests::compilation_error_all_variants_have_display_impl ... ok
+test types::tests::compilation_error_display_abort ... ok
+test types::tests::compilation_error_display_general ... ok
+test types::tests::compilation_error_display_rust_error ... ok
+test types::tests::compilation_error_general_description ... ok
+test types::tests::compilation_error_location_string ... ok
+test types::tests::compilation_error_location_string_no_file ... ok
+test types::tests::compilation_error_location_string_no_line ... ok
+test types::tests::compilation_error_rust_error_description ... ok
+test types::tests::compilation_error_serde_abort ... ok
+test types::tests::compilation_error_serde_general ... ok
+test types::tests::compilation_error_serde_rust_error ... ok
 test types::tests::exhaustion_diagnosis_display ... ok
 test types::tests::exhaustion_diagnosis_serde_roundtrip ... ok
 test types::tests::identifier_scheme_default_is_hostname_random ... ok
@@ -1140,6 +1282,13 @@ test types::tests::outcome_classify_common_signals ... ok
 test types::tests::outcome_classify_interrupted_flag ... ok
 test types::tests::outcome_classify_key_codes ... ok
 test types::tests::outcome_classify_ranges ... ok
+test types::tests::output_capture_duration_ms ... ok
+test types::tests::output_capture_failed_with_nonzero_exit ... ok
+test types::tests::output_capture_no_exit_code_is_failure ... ok
+test types::tests::output_capture_serde_serialization ... ok
+test types::tests::output_capture_serde_with_none_exit_code ... ok
+test types::tests::output_capture_success_with_zero_exit ... ok
+test types::tests::output_capture_total_output_len ... ok
 test types::tests::strand_error_display ... ok
 test types::tests::strand_error_source ... ok
 test types::tests::worker_state_deserialization_roundtrip ... ok
@@ -1191,16 +1340,16 @@ test validation::tests::validation_gate_workspace ... ok
 test upgrade::tests::check_hot_reload_same_binary_returns_no_change ... ok
 test worker::tests::apply_routing_rules_baseline_first_match_stops_evaluation ... ok
 test worker::tests::apply_routing_rules_baseline_invalid_then_valid ... ok
-test worker::tests::apply_routing_rules_baseline_three_rules_all_match ... ok
 test worker::tests::apply_routing_rules_baseline_multiple_rules_same_adapter ... ok
+test worker::tests::apply_routing_rules_baseline_three_rules_all_match ... ok
 test worker::tests::apply_routing_rules_first_match_wins ... ok
 test worker::tests::apply_routing_rules_order_matters ... ok
 test worker::tests::apply_routing_rules_strict_false_no_match_returns_default ... ok
 test worker::tests::apply_routing_rules_strict_false_uses_default_adapter ... ok
 test worker::tests::apply_routing_rules_strict_true_match_returns_ok ... ok
 test worker::tests::apply_routing_rules_strict_true_no_match_returns_err ... ok
-test worker::tests::boot_transitions_to_selecting ... ok
 test worker::tests::beads_processed_starts_at_zero ... ok
+test worker::tests::boot_transitions_to_selecting ... ok
 test worker::tests::boot_validates_config ... ok
 test worker::tests::check_auto_canary_no_op_when_auto_promote_false ... ok
 test worker::tests::check_auto_canary_no_op_when_no_testing_binary ... ok
@@ -1211,8 +1360,8 @@ test worker::tests::check_budget_warn_does_not_stop ... ok
 test worker::tests::do_build_with_bead_transitions_to_dispatching ... ok
 test worker::tests::do_build_without_bead_is_invariant_error ... ok
 test worker::tests::do_claim_no_current_bead_resets_to_selecting ... ok
-test worker::tests::default_routing_rules_anthropic_subscription_models has been running for over 60 seconds
 test worker::tests::do_claim_not_claimable_increments_consecutive_counter ... ok
+test worker::tests::default_routing_rules_anthropic_subscription_models has been running for over 60 seconds
 test worker::tests::do_claim_not_claimable_transitions_to_retrying ... ok
 test worker::tests::do_claim_race_lost_adds_to_exclusion_and_retries ... ok
 test worker::tests::do_claim_race_lost_increments_consecutive_counter ... ok
@@ -1232,8 +1381,8 @@ test worker::tests::do_retry_below_max_transitions_to_selecting ... ok
 test worker::tests::do_retry_below_skip_threshold_applies_backoff ... ok
 test worker::tests::do_retry_skip_threshold_transitions_to_exhausted ... ok
 test worker::tests::do_select_clears_race_lost_this_cycle_and_retry_count ... ok
-test worker::tests::do_select_with_no_beads_transitions_to_exhausted ... ok
 test worker::tests::do_select_with_beads_transitions_to_claiming ... ok
+test worker::tests::do_select_with_no_beads_transitions_to_exhausted ... ok
 test worker::tests::handle_exhausted_with_exit_returns_stopped ... ok
 test worker::tests::handle_exhausted_with_wait_returns_selecting ... ok
 test worker::tests::is_workspace_unset_dot_path ... ok
@@ -1243,332 +1392,252 @@ test worker::tests::is_workspace_unset_relative_path ... ok
 test worker::tests::full_cycle_with_echo_agent has been running for over 60 seconds
 test worker::tests::request_shutdown_sets_flag ... ok
 test worker::tests::resolve_adapter_returns_builtin ... ok
-test worker::tests::full_cycle_with_echo_agent ... ok
 test worker::tests::resolve_provider_returns_none_for_missing_adapter ... ok
 test worker::tests::restore_home_store_is_noop_when_stores_match ... ok
+test worker::tests::full_cycle_with_echo_agent ... ok
 test worker::tests::run_with_empty_store_returns_exhausted_or_stopped ... ok
 test worker::tests::set_state_uses_bead_workspace_for_cross_workspace_bead ... ok
 test worker::tests::set_state_uses_home_workspace_when_bead_workspace_is_unset ... ok
 test worker::tests::set_state_uses_home_workspace_when_no_current_bead ... ok
-test worker::tests::stop_returns_stopped_state ... ok
 test worker::tests::shutdown_flag_causes_stop ... ok
+test worker::tests::stop_returns_stopped_state ... ok
 test worker::tests::worker_starts_in_booting_state ... ok
 
-test result: ok. 1250 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 909.68s
-
-
-running 0 tests
-
-test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-running 21 tests
-test tests::all_events_have_schema_version_1 ... ok
-test tests::assistant_mixed_content_preserves_order ... ok
-test tests::assistant_text_emits_agent_message_and_tokens ... ok
-test tests::assistant_tool_use_with_cache_tokens ... ok
-test tests::assistant_tool_use_emits_tool_call_and_tokens ... ok
-test tests::extract_path_bash_is_none ... ok
-test tests::emitted_events_are_valid_agent_events ... ok
-test tests::extract_path_edit ... ok
-test tests::extract_path_glob ... ok
-test tests::extract_path_grep ... ok
-test tests::extract_path_read ... ok
-test tests::extract_path_write ... ok
-test tests::malformed_json_skipped ... ok
-test tests::missing_type_field_skipped ... ok
-test tests::result_error_max_turns ... ok
-test tests::result_success_produces_no_events ... ok
-test tests::top_level_error_type ... ok
-test tests::unknown_type_skipped ... ok
-test tests::user_tool_result_error ... ok
-test tests::user_tool_result_success ... ok
-test tests::user_tool_result_unknown_id_falls_back_to_unknown ... ok
-
-test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-running 27 tests
-test tests::all_events_have_schema_version_1 ... ok
-test tests::emitted_events_are_valid_agent_events ... ok
-test tests::item_completed_agent_message_emits_agent_message ... ok
-test tests::item_completed_agent_message_empty_content_produces_no_events ... ok
-test tests::item_completed_command_execution_failure ... ok
-test tests::item_completed_command_execution_success ... ok
-test tests::item_completed_error_emits_error ... ok
-test tests::item_completed_file_change ... ok
-test tests::item_completed_mcp_tool_call_error ... ok
-test tests::item_completed_mcp_tool_call_success ... ok
-test tests::item_completed_without_item_field_skipped ... ok
-test tests::item_completed_without_prior_started_uses_type_as_tool ... ok
-test tests::item_started_agent_message_produces_no_events ... ok
-test tests::item_started_command_execution_emits_tool_call ... ok
-test tests::item_started_file_change_emits_tool_call ... ok
-test tests::item_started_mcp_tool_call_emits_tool_call ... ok
-test tests::item_started_without_item_field_skipped ... ok
-test tests::item_updated_produces_no_events ... ok
-test tests::malformed_json_skipped ... ok
-test tests::missing_type_field_skipped ... ok
-test tests::thread_started_produces_no_events ... ok
-test tests::top_level_error_emits_error ... ok
-test tests::turn_completed_emits_tokens ... ok
-test tests::turn_completed_with_no_usage_produces_no_events ... ok
-test tests::turn_failed_emits_error ... ok
-test tests::turn_started_produces_no_events ... ok
-test tests::unknown_type_skipped ... ok
-
-test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-running 10 tests
-test config_help_output_includes_set_flag ... ok
-test config_help_includes_set_flag ... ok
-test config_set_flag_has_proper_metadata ... ok
-test config_set_empty_value_fails_validation ... ok
-test config_set_key_equals_value_format_parses ... ok
-test config_set_key_value_format_parses ... ok
-test config_set_missing_key_fails_validation ... ok
-test config_set_mixed_format_parses ... ok
-test config_set_multiple_key_equals_value_format_parses ... ok
-test config_set_multiple_key_value_format_parses ... ok
-
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-
-running 3 tests
-test heartbeat_file_created_on_startup ... ok
-test heartbeat_contains_required_fields ... ok
-test heartbeat_refreshes_every_30_seconds ... ok
-
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.61s
-
-
-running 27 tests
-test cross_workspace_mend_skips_beads_with_live_assignees ... FAILED
-test cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead ... FAILED
-test dead_worker_cleanup_integration ... FAILED
-test deterministic_ordering_same_beads_same_order ... ok
-test deterministic_ordering_tiebreak_by_id ... ok
-test dispatcher_captures_stdout_and_stderr ... ok
-test cross_workspace_mend_skips_own_worker_beads ... FAILED
-test dispatcher_timeout_kills_process ... ok
-test end_to_end_worker_loops_to_next_bead ... FAILED
-test end_to_end_single_bead_success ... FAILED
-test exhaustion_with_idle_action_exit ... FAILED
-test exhaustion_empty_workspace ... ok
-test exhaustion_with_idle_action_wait_survives_sleep ... FAILED
-test idle_worker_flagging_detects_stuck_workers ... ok
-test mend_removes_stale_dependency_links ... FAILED
-test outcome_classify_covers_all_exit_code_ranges ... ok
-test full_cycle_produces_telemetry_state_transitions ... FAILED
-test outcome_path_agent_not_found_exit_127 ... FAILED
-test outcome_path_crash_exit_137 ... FAILED
-test outcome_path_failure_exit_1 ... FAILED
-test outcome_path_interrupted_via_shutdown_flag ... ok
-test outcome_path_success_exit_0 ... FAILED
-test outcome_path_timeout_exit_124 ... FAILED
-test shutdown_flag_preempts_execution ... ok
-test shutdown_during_selecting_exits_cleanly ... ok
-test worker_boot_rejects_invalid_config ... ok
-test worker_processes_high_priority_beads_first ... FAILED
-
 failures:
 
----- cross_workspace_mend_skips_beads_with_live_assignees stdout ----
+---- cli::tests::find_all_descendants_handles_cycles stdout ----
 
-thread 'cross_workspace_mend_skips_beads_with_live_assignees' (2747264) panicked at tests/integration_tests.rs:1505:10:
-called `Option::unwrap()` on a `None` value
+thread 'cli::tests::find_all_descendants_handles_cycles' (3552876) panicked at src/cli/mod.rs:5474:9:
+assertion `left == right` failed
+  left: 2
+ right: 1
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
----- cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead stdout ----
-
-thread 'cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead' (2747262) panicked at tests/integration_tests.rs:1377:10:
-called `Option::unwrap()` on a `None` value
-
----- dead_worker_cleanup_integration stdout ----
-
-thread 'dead_worker_cleanup_integration' (2747274) panicked at tests/integration_tests.rs:2031:5:
-assertion `left == right` failed: both workers should be registered initially
-  left: 1
- right: 2
-
----- cross_workspace_mend_skips_own_worker_beads stdout ----
-
-thread 'cross_workspace_mend_skips_own_worker_beads' (2747273) panicked at tests/integration_tests.rs:1623:10:
-called `Option::unwrap()` on a `None` value
-
----- end_to_end_worker_loops_to_next_bead stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'end_to_end_worker_loops_to_next_bead' (2747311) panicked at tests/integration_tests.rs:296:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- end_to_end_single_bead_success stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'end_to_end_single_bead_success' (2747286) panicked at tests/integration_tests.rs:272:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- exhaustion_with_idle_action_exit stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'exhaustion_with_idle_action_exit' (2747734) panicked at src/transcript/mod.rs:278:31:
-start byte index 2275 is not a char boundary; it is inside '─' (bytes 2273..2276 of string)
-
----- exhaustion_with_idle_action_wait_survives_sleep stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'exhaustion_with_idle_action_wait_survives_sleep' (2748195) panicked at tests/integration_tests.rs:708:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- mend_removes_stale_dependency_links stdout ----
-
-thread 'mend_removes_stale_dependency_links' (2748632) panicked at tests/integration_tests.rs:1724:5:
-br create failed
-
----- full_cycle_produces_telemetry_state_transitions stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'full_cycle_produces_telemetry_state_transitions' (2748231) panicked at tests/integration_tests.rs:989:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- outcome_path_agent_not_found_exit_127 stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'outcome_path_agent_not_found_exit_127' (2748636) panicked at tests/integration_tests.rs:404:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- outcome_path_crash_exit_137 stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'outcome_path_crash_exit_137' (2748649) panicked at tests/integration_tests.rs:427:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- outcome_path_failure_exit_1 stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'outcome_path_failure_exit_1' (2749080) panicked at tests/integration_tests.rs:339:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- outcome_path_success_exit_0 stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'outcome_path_success_exit_0' (2750175) panicked at tests/integration_tests.rs:322:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- outcome_path_timeout_exit_124 stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'outcome_path_timeout_exit_124' (2750260) panicked at tests/integration_tests.rs:370:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- worker_processes_high_priority_beads_first stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'worker_processes_high_priority_beads_first' (2751100) panicked at tests/integration_tests.rs:1087:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
 
 failures:
-    cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead
-    cross_workspace_mend_skips_beads_with_live_assignees
-    cross_workspace_mend_skips_own_worker_beads
-    dead_worker_cleanup_integration
-    end_to_end_single_bead_success
-    end_to_end_worker_loops_to_next_bead
-    exhaustion_with_idle_action_exit
-    exhaustion_with_idle_action_wait_survives_sleep
-    full_cycle_produces_telemetry_state_transitions
-    mend_removes_stale_dependency_links
-    outcome_path_agent_not_found_exit_127
-    outcome_path_crash_exit_137
-    outcome_path_failure_exit_1
-    outcome_path_success_exit_0
-    outcome_path_timeout_exit_124
-    worker_processes_high_priority_beads_first
+    cli::tests::find_all_descendants_handles_cycles
 
-test result: FAILED. 11 passed; 16 failed; 0 ignored; 0 measured; 0 filtered out; finished in 223.45s
+test result: FAILED. 1398 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 652.17s
 
-warning: associated function `store_for_workspace` is never used
-   --> src/strand/explore.rs:193:14
+warning: unused import: `std::fs`
+   --> src/cli/mod.rs:994:9
     |
- 63 | impl ExploreStrand {
-    | ------------------ associated function in this implementation
-...
-193 |     async fn store_for_workspace(workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
-    |              ^^^^^^^^^^^^^^^^^^^
-    |
-    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
-
-warning: `needle` (lib) generated 1 warning
-warning: unused import: `test_utils::MemorySink`
-   --> src/strand/knot.rs:266:28
-    |
-266 |     use crate::telemetry::{test_utils::MemorySink, TelemetryEvent};
-    |                            ^^^^^^^^^^^^^^^^^^^^^^
+994 |     use std::fs;
+    |         ^^^^^^^
     |
     = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
-warning: associated items `new_for_test`, `store_for_workspace`, and `create_store_for` are never used
-   --> src/strand/explore.rs:99:8
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:33
     |
- 63 | impl ExploreStrand {
-    | ------------------ associated items in this implementation
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                         ------- matches all the relevant values
 ...
- 99 |     fn new_for_test(
-    |        ^^^^^^^^^^^^
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                 ^^^^^^^ no value can reach this
+    |
+    = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:43
+    |
+212 |             "E0382" | "E0502" | "E0505" | "E0506" | "E0507" | "E0508" | "E0509" | "E0515"
+    |                                                                                   ------- matches all the relevant values
 ...
-193 |     async fn store_for_workspace(workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
-    |              ^^^^^^^^^^^^^^^^^^^
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                           ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:53
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                             ------- matches all the relevant values
 ...
-201 |     async fn create_store_for(
-    |              ^^^^^^^^^^^^^^^^
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                     ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:63
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                       ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:73
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                 ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:229:83
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                           ------- matches all the relevant values
+...
+229 |             "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
+    |                                                                                   ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:15
+    |
+213 |             | "E0521" | "E0623" | "E0383" | "E0503" | "E0504" | "E0510" | "E0391" | "E0392"
+    |                                                                                     ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:25
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |               ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:35
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                         ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                   ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:45
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                   ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                             ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:55
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                             ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                       ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:65
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                       ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                 ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:75
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                 ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                           ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:230:85
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                           ------- matches all the relevant values
+...
+230 |             | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+    |                                                                                     ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:15
+    |
+214 |             | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
+    |                                                                                     ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |               ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:25
+    |
+215 |             | "E0401" | "E0402" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0409"
+    |               ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |                         ^^^^^^^ no value can reach this
+
+warning: unreachable pattern
+   --> src/cargo_test.rs:231:35
+    |
+215 |             | "E0401" | "E0402" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0409"
+    |                         ------- matches all the relevant values
+...
+231 |             | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
+    |                                   ^^^^^^^ no value can reach this
+
+warning: function `parse_error_line` is never used
+   --> src/cargo_test.rs:571:4
+    |
+571 | fn parse_error_line(line: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^
     |
     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
 
-warning: method `call_count` is never used
-    --> src/strand/explore.rs:1171:12
-     |
-1162 |     impl ExcludedBeadsMockFactory {
-     |     ----------------------------- method in this implementation
-...
-1171 |         fn call_count(&self) -> u32 {
-     |            ^^^^^^^^^^
+warning: function `extract_crate_name` is never used
+   --> src/cargo_test.rs:590:4
+    |
+590 | fn extract_crate_name(line: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^
 
-warning: `needle` (lib test) generated 3 warnings (run `cargo fix --lib -p needle --tests` to apply 1 suggestion)
+warning: function `is_needle_run_process` is never used
+    --> src/cli/mod.rs:1158:4
+     |
+1158 | fn is_needle_run_process(pid: u32) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `find_needle_process_in_tree` is never used
+    --> src/cli/mod.rs:1185:4
+     |
+1185 | fn find_needle_process_in_tree(root_pid: u32) -> Option<u32> {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `WEAVE_AGENT_TIMEOUT_SECS` is never used
+   --> src/strand/weave.rs:527:7
+    |
+527 | const WEAVE_AGENT_TIMEOUT_SECS: u64 = 60;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `needle` (lib) generated 23 warnings (run `cargo fix --lib -p needle` to apply 1 suggestion)
+warning: unused import: `std::path::Path`
+ --> tests/verify_bf_4390q.rs:4:5
+  |
+4 | use std::path::Path;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `needle` (test "verify_bf_4390q") generated 1 warning (run `cargo fix --test "verify_bf_4390q" -p needle` to apply 1 suggestion)
+warning: unused import: `std::thread`
+  --> tests/stop_kills_process_tree.rs:11:5
+   |
+11 | use std::thread;
+   |     ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::time::Duration`
+  --> tests/stop_kills_process_tree.rs:12:5
+   |
+12 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+
 warning: unused doc comment
   --> tests/routing_matcher_baseline.rs:22:5
    |
@@ -1712,31 +1781,121 @@ warning: unused doc comment
     |
     = help: use `//` for a plain comment
 
+warning: `needle` (test "stop_kills_process_tree") generated 2 warnings (run `cargo fix --test "stop_kills_process_tree" -p needle` to apply 2 suggestions)
 warning: `needle` (test "routing_matcher_baseline") generated 7 warnings
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+warning: unused variable: `final_head`
+   --> src/commit_hook.rs:437:13
+    |
+437 |         let final_head = run_git(&repo_path, &["rev-parse", "HEAD"]);
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_final_head`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `is_needle_run_process` is never used
+    --> src/cli/mod.rs:1158:4
+     |
+1158 | fn is_needle_run_process(pid: u32) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `run_git_with_trailer` is never used
+   --> src/commit_hook.rs:299:8
+    |
+299 |     fn run_git_with_trailer(dir: &Path, trailer: &str) {
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: method `call_count` is never used
+    --> src/strand/explore.rs:1174:12
+     |
+1165 |     impl ExcludedBeadsMockFactory {
+     |     ----------------------------- method in this implementation
+...
+1174 |         fn call_count(&self) -> u32 {
+     |            ^^^^^^^^^^
+
+warning: `needle` (lib test) generated 24 warnings (20 duplicates) (run `cargo fix --lib -p needle --tests` to apply 1 suggestion)
+warning: unused variable: `global_routing`
+   --> tests/routing_integration.rs:735:9
+    |
+735 |     let global_routing = RoutingConfig {
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_global_routing`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `global_routing`
+   --> tests/routing_integration.rs:795:9
+    |
+795 |     let global_routing = RoutingConfig {
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_global_routing`
+
+warning: unused variable: `dispatcher`
+    --> tests/routing_integration.rs:1908:9
+     |
+1908 |     let dispatcher = make_test_dispatcher(vec![make_test_adapter(
+     |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dispatcher`
+
+warning: `needle` (test "routing_integration") generated 3 warnings (run `cargo fix --test "routing_integration" -p needle` to apply 3 suggestions)
+warning: unused import: `std::path::Path`
+ --> examples/test_4390q_debug.rs:2:5
+  |
+2 | use std::path::Path;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `needle` (example "test_4390q_debug") generated 1 warning (run `cargo fix --example "test_4390q_debug" -p needle` to apply 1 suggestion)
+warning: unused import: `std::path::PathBuf`
+  --> tests/verify_process_discovery.rs:10:5
+   |
+10 | use std::path::PathBuf;
+   |     ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Command` and `Stdio`
+  --> tests/verify_process_discovery.rs:11:20
+   |
+11 | use std::process::{Command, Stdio};
+   |                    ^^^^^^^  ^^^^^
+
+warning: unused import: `std::time::Duration`
+  --> tests/verify_process_discovery.rs:12:5
+   |
+12 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::thread`
+  --> tests/verify_process_discovery.rs:13:5
+   |
+13 | use std::thread;
+   |     ^^^^^^^^^^^
+
+warning: `needle` (test "verify_process_discovery") generated 4 warnings (run `cargo fix --test "verify_process_discovery" -p needle` to apply 4 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
      Running unittests src/lib.rs (target/debug/deps/needle-13447901d1e3ab52)
 
-running 1261 tests
+running 1399 tests
 test agent_event::tests::agent_message_round_trip ... ok
 test agent_event::tests::deserialize_from_literal_jsonl ... ok
 test agent_event::tests::error_round_trip ... ok
 test agent_event::tests::tokens_round_trip ... ok
-test agent_event::tests::tool_call_round_trip ... ok
 test agent_event::tests::tool_result_round_trip ... ok
+test agent_event::tests::tool_call_round_trip ... ok
 test bead_store::tests::bf_parse_beads_accepts_completed_status ... ok
+test bead_store::tests::bf_parse_beads_skips_one_bad_line_keeps_the_rest ... ok
 test bead_store::tests::corruption_in_longer_message ... ok
 test bead_store::tests::detects_case_insensitive ... ok
-test bead_store::tests::bf_parse_beads_skips_one_bad_line_keeps_the_rest ... ok
 test bead_store::tests::detects_locked_db_error ... ok
 test bead_store::tests::detects_malformed_db_error ... ok
 test bead_store::tests::detects_not_a_database_error ... ok
 test bead_store::tests::filters_default_is_empty ... ok
 test bead_store::tests::non_corruption_error_returns_false ... ok
-test bead_store::tests::parse_beads_empty_string_returns_empty ... ok
 test bead_store::tests::parse_beads_empty_json_array ... ok
+test bead_store::tests::parse_beads_empty_string_returns_empty ... ok
 test bead_store::tests::parse_beads_whitespace_only_returns_empty ... ok
-test bead_store::tests::parse_beads_malformed_json_is_error ... ok
 test bead_store::tests::parse_doctor_output_empty ... ok
+test bead_store::tests::parse_beads_malformed_json_is_error ... ok
 test bead_store::tests::parse_doctor_output_filters_recovery_artifacts ... ok
 test bead_store::tests::parse_doctor_output_filters_sqlite3_not_available ... ok
 test bead_store::tests::parse_doctor_output_multiple_entries ... ok
@@ -1756,32 +1915,97 @@ test canary::tests::discover_test_beads_missing_expected_dir ... ok
 test canary::tests::expected_outcome_default_status ... ok
 test canary::tests::discover_test_beads_reads_yaml_files ... ok
 test canary::tests::failure_with_none_exit_code_does_not_match ... ok
-test canary::tests::expected_outcome_serde_roundtrip ... ok
 test canary::tests::load_expected_outcome_failure_yaml ... ok
-test canary::tests::load_expected_outcome_invalid_yaml ... ok
+test canary::tests::expected_outcome_serde_roundtrip ... ok
 test canary::tests::load_expected_outcome_missing_file ... ok
+test canary::tests::load_expected_outcome_invalid_yaml ... ok
 test canary::tests::mismatch_reason_failure ... ok
 test canary::tests::mismatch_reason_state_machine ... ok
-test canary::tests::load_expected_outcome_success_yaml ... ok
 test canary::tests::mismatch_reason_success ... ok
 test canary::tests::mismatch_reason_timeout ... ok
+test canary::tests::load_expected_outcome_success_yaml ... ok
 test canary::tests::outcomes_match_failure ... ok
 test canary::tests::outcomes_match_state_machine ... ok
-test canary::tests::outcomes_match_timeout ... ok
 test canary::tests::outcomes_match_success ... ok
+test canary::tests::outcomes_match_timeout ... ok
 test canary::tests::promote_first_time_no_existing_stable ... ok
-test canary::tests::promote_no_testing_binary_fails ... ok
 test canary::tests::promote_moves_testing_to_stable ... ok
+test canary::tests::promote_no_testing_binary_fails ... ok
 test canary::tests::reject_no_testing_binary_is_ok ... ok
-test canary::tests::rollback_no_prev_binary_fails ... ok
 test canary::tests::reject_removes_testing_binary ... ok
+test canary::tests::rollback_no_prev_binary_fails ... ok
 test canary::tests::run_missing_testing_binary_fails ... ok
 test canary::tests::rollback_restores_previous_stable ... ok
-test canary::tests::status_empty_needle_home ... ok
 test canary::tests::run_missing_workspace_fails ... ok
+test canary::tests::status_empty_needle_home ... ok
 test canary::tests::success_with_extra_labels_still_matches ... ok
+test cargo_test::tests::cargo_test_new_creates_runner ... ok
 test canary::tests::status_reports_channel_state ... ok
+test cargo_test::tests::cargo_test_spawn_captures_output_streams ... ok
+test cargo_test::tests::cargo_test_spawn_succeeds ... ok
+test cargo_test::tests::cargo_test_with_args_sets_args ... ok
+test cargo_test::tests::cargo_test_with_timeout_sets_timeout ... ok
+test cargo_test::tests::create_combined_output_adds_trailing_newline ... ok
+test cargo_test::tests::create_combined_output_with_both_streams ... ok
+test cargo_test::tests::create_combined_output_with_empty_streams ... ok
+test cargo_test::tests::create_combined_output_with_only_stderr ... ok
+test cargo_test::tests::create_combined_output_with_only_stdout ... ok
+test cargo_test::tests::detect_compilation_errors_aborting_due_to ... ok
+test cargo_test::tests::detect_compilation_errors_could_not_compile ... ok
+test cargo_test::tests::detect_compilation_errors_empty_stderr ... ok
+test cargo_test::tests::detect_compilation_errors_full_output ... ok
+test cargo_test::tests::detect_compilation_errors_multiple_errors ... ok
+test cargo_test::tests::detect_compilation_errors_test_output_only ... ok
+test cargo_test::tests::detect_compilation_errors_with_error_code ... ok
+test cargo_test::tests::extract_crate_name_from_compile_error ... ok
+test cargo_test::tests::extract_crate_name_no_backticks ... ok
+test cargo_test::tests::extract_error_count_from_abort_message ... ok
+test cargo_test::tests::extract_error_count_no_number ... ok
+test cargo_test::tests::parse_error_line_no_message ... ok
+test cargo_test::tests::parse_error_line_not_error ... ok
+test cargo_test::tests::parse_error_line_with_code ... ok
+test cargo_test::tests::cargo_test_spawn_with_timeout_protection ... ok
+test cargo_test::tests::run_with_bead_trace_creates_parent_directory ... ok
+test cargo_test::tests::run_with_bead_trace_handles_empty_output ... ok
+test cargo_test::tests::run_with_bead_trace_creates_trace_directory ... ok
+test cargo_test::tests::run_with_bead_trace_handles_test_output ... ok
+test cargo_test::tests::run_with_bead_trace_metrics_captures_exit_code ... ok
+test cargo_test::tests::run_with_bead_trace_writes_test_metrics ... ok
+test cargo_test::tests::run_with_output_files_creates_combined_structure ... ok
+test cargo_test::tests::run_with_output_files_creates_output_files ... ok
+test cargo_test::tests::test_args_add_cargo_flag ... ok
+test cargo_test::tests::test_args_add_test_flag ... ok
+test cargo_test::tests::test_args_add_test_name ... ok
+test cargo_test::tests::test_args_build_default ... ok
+test cargo_test::tests::test_args_build_full ... ok
+test cargo_test::tests::test_args_build_with_cargo_flags ... ok
+test cargo_test::tests::test_args_build_with_target ... ok
+test cargo_test::tests::test_args_build_with_test_flags ... ok
+test cargo_test::tests::test_args_default_is_empty ... ok
+test cargo_test::tests::test_args_with_filter ... ok
+test cargo_test::tests::test_args_with_target ... ok
+test cargo_test::tests::test_metrics_duration_conversion ... ok
+test cargo_test::tests::test_metrics_from_failed_outcome ... ok
+test cargo_test::tests::test_metrics_from_successful_outcome ... ok
+test cargo_test::tests::test_metrics_from_timeout_outcome ... ok
+test cargo_test::tests::test_metrics_high_precision_timing ... ok
+test cargo_test::tests::test_metrics_serialization ... ok
+test cargo_test::tests::test_metrics_success_returns_false_for_nonzero_exit ... ok
+test cargo_test::tests::test_metrics_success_returns_false_for_timeout ... ok
+test cargo_test::tests::test_metrics_success_returns_true_for_zero_exit ... ok
+test cargo_test::tests::test_outcome_is_compilation_failure ... ok
+test cargo_test::tests::test_outcome_is_test_failure ... ok
+test cargo_test::tests::test_outcome_success_false_with_nonzero_exit ... ok
+test cargo_test::tests::test_outcome_success_false_with_timeout ... ok
+test cargo_test::tests::test_outcome_success_with_zero_exit ... ok
+test cargo_test::tests::test_outcome_summary_compilation_failed ... ok
+test cargo_test::tests::test_outcome_summary_failed ... ok
+test cargo_test::tests::test_outcome_summary_passed ... ok
+test cargo_test::tests::test_outcome_summary_timed_out ... ok
+test cargo_test::tests::test_truncate_output_long ... ok
+test cargo_test::tests::test_truncate_output_short ... ok
 test claim::tests::claim_next_all_excluded_returns_no_candidates ... ok
+test claim::tests::claim_next_all_race_lost_returns_all_race_lost ... ok
 test claim::tests::claim_next_empty_candidates_returns_no_candidates ... ok
 test claim::tests::claim_next_happy_path_returns_claimed ... ok
 test claim::tests::claim_next_not_claimable_skips_to_next ... ok
@@ -1789,7 +2013,7 @@ test claim::tests::claim_next_race_lost_tries_next_candidate ... ok
 test claim::tests::claim_one_happy_path ... ok
 test claim::tests::exclusion_set_prevents_reclaim ... ok
 test claim::tests::flock_acquire_and_release ... ok
-test claim::tests::claim_next_all_race_lost_returns_all_race_lost ... ok
+test claim::tests::max_retries_caps_attempts ... ok
 test claim::tests::workspace_lock_path_differs_for_different_workspaces ... ok
 test claim::tests::workspace_lock_path_is_deterministic ... ok
 test claude_md_placement::tests::detect_cross_workspace_patterns_empty_when_no_match ... ok
@@ -1838,29 +2062,29 @@ test cli::tests::cli_parses_run_full ... ok
 test cli::tests::cli_parses_status_by_worker ... ok
 test cli::tests::cli_parses_status_cost ... ok
 test cli::tests::cli_parses_status_cost_since ... ok
-test cli::tests::cli_parses_status_defaults ... ok
+test cargo_test::tests::run_with_output_files_handles_empty_output ... ok
 test cli::tests::cli_parses_status_json ... ok
+test cli::tests::cli_parses_status_defaults ... ok
 test cli::tests::cli_parses_stop_all ... ok
 test cli::tests::cli_parses_stop_identifier ... ok
 test cli::tests::cli_parses_test_agent ... ok
 test cli::tests::cli_parses_upgrade ... ok
-test cli::tests::cli_parses_upgrade_check ... ok
 test cli::tests::cli_parses_version ... ok
+test cli::tests::cli_parses_upgrade_check ... ok
 test cli::tests::cli_rejects_unknown_subcommand ... ok
-test cli::tests::cli_test_agent_requires_name ... ok
 test cli::tests::config_dump_returns_all_fields ... ok
+test cli::tests::cli_test_agent_requires_name ... ok
 test cli::tests::config_get_key_known_keys ... ok
-test cli::tests::config_get_key_unknown_returns_none ... ok
 test cli::tests::default_worker_identifier_is_alpha ... ok
+test cli::tests::config_get_key_unknown_returns_none ... ok
 test cli::tests::doctor_check_heartbeat_dir_existing_writable ... ok
 test cli::tests::doctor_check_heartbeat_dir_missing_no_repair ... ok
-test cli::tests::doctor_check_heartbeat_dir_missing_with_repair ... ok
 test cli::tests::doctor_check_heartbeats_no_dir ... ok
+test cli::tests::doctor_check_heartbeat_dir_missing_with_repair ... ok
 test cli::tests::doctor_check_heartbeats_no_files ... ok
-test claim::tests::max_retries_caps_attempts ... ok
+test cli::tests::doctor_check_heartbeats_stale_file_warns ... ok
 test cli::tests::doctor_check_heartbeats_stale_file_repair ... ok
 test cli::tests::doctor_check_jsonl_empty_file ... ok
-test cli::tests::doctor_check_heartbeats_stale_file_warns ... ok
 test cli::tests::doctor_check_jsonl_missing_file ... ok
 test cli::tests::doctor_check_jsonl_invalid_lines ... ok
 test cli::tests::doctor_check_jsonl_valid ... ok
@@ -1871,16 +2095,20 @@ test cli::tests::doctor_check_lock_files_stale_warns_without_repair ... ok
 test cli::tests::doctor_check_peers_no_heartbeats ... ok
 test cli::tests::doctor_check_sqlite_no_db ... ok
 test cli::tests::doctor_check_telemetry_logs_no_dir ... ok
-test cli::tests::doctor_check_workspace_missing ... ok
 test cli::tests::doctor_check_telemetry_logs_existing_files ... ok
+test cli::tests::doctor_check_workspace_missing ... ok
 test cli::tests::doctor_check_workspace_no_beads_dir ... ok
+test cli::tests::doctor_check_workspace_valid ... ok
+test cli::tests::find_all_descendants_empty_for_current_process ... ok
+test cli::tests::find_all_descendants_empty_for_nonexistent_pid ... ok
+test cli::tests::find_all_descendants_recursive ... ok
 test cli::tests::first_nato_is_alpha ... ok
 test cli::tests::format_duration_hours ... ok
+test cli::tests::find_all_descendants_handles_cycles ... FAILED
 test cli::tests::format_duration_minutes ... ok
-test cli::tests::doctor_check_workspace_valid ... ok
 test cli::tests::format_duration_seconds ... ok
-test cli::tests::identifier_no_collision ... ok
 test cli::tests::identifier_collision_detected ... ok
+test cli::tests::identifier_no_collision ... ok
 test cli::tests::is_needle_inner_false_by_default ... ok
 test cli::tests::is_needle_inner_false_for_other_values ... ok
 test cli::tests::is_pid_alive_current_process ... ok
@@ -1900,6 +2128,8 @@ test cli::tests::pick_names_no_sessions_running ... ok
 test cli::tests::pick_names_partial_exhaustion_fails ... ok
 test cli::tests::pick_names_skips_non_contiguous_occupied ... ok
 test cli::tests::pick_names_skips_occupied ... ok
+test cli::tests::is_needle_inner_true_when_env_set ... ok
+test cli::tests::scan_needle_processes_discovers_needle_run_processes ... ok
 test cli::tests::session_name_format ... ok
 test cli::tests::shell_escape_plain_string ... ok
 test cli::tests::shell_escape_string_with_quotes ... ok
@@ -1908,18 +2138,21 @@ test cli::tests::single_worker_picks_first_available ... ok
 test cli::tests::stop_requires_all_or_identifier ... ok
 test cli::tests::version_string_format ... ok
 test commit_hook::tests::already_has_trailer_logic ... ok
+test cli::tests::scan_needle_processes_returns_result ... ok
 test commit_hook::tests::empty_head_means_no_op ... ok
+test commit_hook::tests::identity_check_allows_matched_commit ... ok
+test commit_hook::tests::identity_check_skips_mismatched_commit ... ok
 test config::tests::agent_config_with_routing_yaml_roundtrip ... ok
 test config::tests::cli_overrides_apply ... ok
 test config::tests::cli_overrides_beat_env_vars ... ok
 test config::tests::config_error_display_format ... ok
 test config::tests::config_source_display ... ok
-test cli::tests::is_needle_inner_true_when_env_set ... ok
 test config::tests::cpu_load_warn_at_one_passes_validation ... ok
 test config::tests::cpu_load_warn_negative_fails_validation ... ok
-test config::tests::cpu_load_warn_zero_fails_validation ... ok
 test config::tests::cpu_load_warn_over_one_fails_validation ... ok
+test config::tests::cpu_load_warn_zero_fails_validation ... ok
 test config::tests::default_agent_config_values ... ok
+test config::tests::default_config_is_valid ... ok
 test config::tests::default_explore_config_values ... ok
 test config::tests::default_health_config_values ... ok
 test config::tests::default_knot_config_values ... ok
@@ -1946,42 +2179,42 @@ test config::tests::env_override_invalid_bool_ignored ... ok
 test config::tests::env_override_invalid_integer_ignored ... ok
 test config::tests::env_override_self_modification_auto_promote ... ok
 test config::tests::env_override_self_modification_canary_timeout ... ok
-test config::tests::default_config_is_valid ... ok
 test config::tests::env_override_self_modification_enabled ... ok
 test config::tests::env_override_supervisor_heartbeat_path ... ok
 test config::tests::env_override_supervisor_socket_path ... ok
+test config::tests::env_override_worker_idle_timeout ... ok
 test config::tests::env_override_worker_launch_stagger ... ok
 test config::tests::env_override_worker_max_workers ... ok
-test config::tests::env_override_worker_idle_timeout ... ok
 test config::tests::env_var_routing_default_adapter_override ... ok
 test config::tests::env_var_routing_override_beats_workspace ... ok
 test config::tests::heartbeat_ttl_at_3x_interval_passes_validation ... ok
-test config::tests::invalid_regex_in_routing_rule_fails_validation ... ok
 test config::tests::heartbeat_ttl_below_3x_interval_fails_validation ... ok
+test config::tests::invalid_regex_in_routing_rule_fails_validation ... ok
 test config::tests::load_empty_yaml_returns_default ... ok
 test config::tests::load_invalid_yaml_returns_error ... ok
 test config::tests::load_partial_yaml_uses_defaults_for_missing ... ok
+test config::tests::load_resolved_applies_workspace_then_cli ... ok
 test config::tests::load_yaml_with_all_sections ... ok
 test config::tests::load_yaml_with_unknown_fields_is_tolerated ... ok
-test config::tests::load_resolved_applies_workspace_then_cli ... ok
 test config::tests::max_workers_over_50_fails_validation ... ok
 test config::tests::missing_agent_binary_fails_validation ... ok
 test config::tests::missing_file_returns_default ... ok
+test config::tests::multiple_validation_errors_collected ... ok
 test config::tests::multiple_validation_errors_in_routing ... ok
 test config::tests::non_overridable_keys_are_detected ... ok
 test config::tests::reflect_config_default_extraction_agent_is_none ... ok
 test config::tests::routing_config_backward_compatibility ... ok
 test config::tests::routing_config_empty_rules_list_is_valid ... ok
-test config::tests::multiple_validation_errors_collected ... ok
 test config::tests::routing_config_from_global_config_file ... ok
 test config::tests::routing_config_with_rules_parses ... ok
 test config::tests::routing_config_yaml_roundtrip ... ok
 test config::tests::routing_default_anthropic_models_to_claude_print ... ok
 test config::tests::routing_default_fallback_no_match ... ok
-test config::tests::routing_glm_47_defaults_to_claude_code_glm_47 ... ok
 test config::tests::routing_first_match_wins ... ok
+test config::tests::routing_glm_47_defaults_to_claude_code_glm_47 ... ok
 test config::tests::routing_patterns_match_bare_aliases ... ok
 test config::tests::routing_patterns_match_full_model_ids ... ok
+test config::tests::routing_patterns_match_with_wildcards ... ok
 test config::tests::routing_strict_mode_failure ... ok
 test config::tests::routing_workspace_override ... ok
 test config::tests::source_map_tracks_cli_overrides ... ok
@@ -1994,20 +2227,20 @@ test config::tests::supervisor_config_resolved_heartbeat_path_default ... ok
 test config::tests::supervisor_config_with_only_heartbeat_path ... ok
 test config::tests::supervisor_config_with_only_socket_path ... ok
 test config::tests::supervisor_config_yaml_roundtrip ... ok
-test config::tests::routing_patterns_match_with_wildcards ... ok
+test config::tests::valid_regex_in_routing_rule_passes_validation ... ok
 test config::tests::workspace_config_global_used_when_absent ... ok
 test config::tests::workspace_config_missing_returns_none ... ok
 test config::tests::workspace_config_overrides_agent_default ... ok
 test config::tests::workspace_config_overrides_prompt ... ok
 test config::tests::workspace_config_overrides_strands_pulse ... ok
+test commit_hook::tests::concurrent_inject_never_cross_tags ... ok
 test config::tests::workspace_config_overrides_strands_unravel ... ok
 test config::tests::workspace_config_overrides_strands_weave ... ok
 test config::tests::workspace_config_overrides_verification ... ok
 test config::tests::workspace_config_partial_agent_override ... ok
-test config::tests::workspace_config_routing_override ... ok
-test config::tests::valid_regex_in_routing_rule_passes_validation ... ok
 test config::tests::workspace_invalid_yaml_returns_error ... ok
 test config::tests::workspace_labels_default_empty ... ok
+test config::tests::workspace_config_routing_override ... ok
 test config::tests::workspace_labels_not_set_leaves_default ... ok
 test config::tests::workspace_labels_parsed_from_needle_yaml ... ok
 test config::tests::workspace_overrides_deserialize_ignores_non_overridable ... ok
@@ -2017,9 +2250,9 @@ test cost::tests::budget_at_stop_returns_stop ... ok
 test cost::tests::budget_at_warn_returns_warn ... ok
 test cost::tests::budget_below_warn_returns_ok ... ok
 test cost::tests::budget_between_warn_and_stop ... ok
+test config::tests::yaml_roundtrip ... ok
 test cost::tests::budget_disabled_returns_ok ... ok
 test cost::tests::budget_stop_only_no_warn ... ok
-test config::tests::yaml_roundtrip ... ok
 test cost::tests::budget_warn_only_no_stop ... ok
 test cost::tests::default_pricing_has_known_models ... ok
 test cost::tests::default_pricing_rates_are_positive ... ok
@@ -2039,8 +2272,8 @@ test cost::tests::scan_daily_cost_sums_todays_events ... ok
 test decision::tests::adr_lite_format ... ok
 test decision::tests::adr_to_markdown_format ... ok
 test decision::tests::contains_error_indicator ... ok
-test decision::tests::adr_store_write_and_list ... ok
 test decision::tests::decision_id_generation ... ok
+test decision::tests::adr_store_write_and_list ... ok
 test decision::tests::detect_exploration_choice_pattern ... ok
 test decision::tests::detect_failure_recovery_pattern ... ok
 test decision::tests::extract_file_path_from_description ... ok
@@ -2053,21 +2286,21 @@ test dispatch::tests::all_builtin_adapters_load ... ok
 test dispatch::tests::build_sample_json_creates_valid_structure ... ok
 test dispatch::tests::builtin_adapters_are_present ... ok
 test dispatch::tests::builtin_aider_config ... ok
+test dispatch::tests::adapter_yaml_roundtrip ... ok
 test dispatch::tests::builtin_claude_opus_config ... ok
 test dispatch::tests::builtin_codex_config ... ok
-test dispatch::tests::adapter_yaml_roundtrip ... ok
 test dispatch::tests::builtin_opencode_config ... ok
 test dispatch::tests::claude_opus_adapter_has_genai_attributes ... ok
 test dispatch::tests::claude_sonnet_adapter_has_genai_attributes ... ok
 test dispatch::tests::codex_adapter_has_openai_provider ... ok
-test dispatch::tests::dispatch_captures_exit_code ... ok
 test dispatch::tests::dispatch_captures_stderr ... ok
+test dispatch::tests::dispatch_captures_exit_code ... ok
 test dispatch::tests::dispatch_cleans_up_temp_file ... ok
 test dispatch::tests::dispatch_echo_captures_stdout ... ok
-test dispatch::tests::dispatch_missing_binary_returns_127 ... ok
 test dispatch::tests::dispatch_environment_variables ... ok
-test dispatch::tests::dispatch_stdin_redirect_from_prompt_file ... ok
+test dispatch::tests::dispatch_missing_binary_returns_127 ... ok
 test dispatch::tests::dispatch_template_renders_bead_id ... ok
+test dispatch::tests::dispatch_stdin_redirect_from_prompt_file ... ok
 test dispatch::tests::e2e_adapter_with_custom_env_and_base_url ... ok
 test dispatch::tests::e2e_all_template_variables_substituted ... ok
 test dispatch::tests::e2e_exit_code_0_is_success ... ok
@@ -2365,12 +2598,12 @@ test routing::tests::regex_pattern_match ... ok
 test routing::tests::whitespace_in_patterns ... ok
 test sanitize::tests::normalize_regex_posix_classes ... ok
 test sanitize::tests::sanitizer_builds_from_vendored_toml ... ok
-test health::tests::heartbeat_creates_and_refreshes_every_30_seconds ... ok
 test sanitize::tests::sanitizer_handles_low_entropy_placeholder ... ok
+test health::tests::heartbeat_creates_and_refreshes_every_30_seconds ... ok
 test sanitize::tests::sanitizer_multiline_sanitizes_each_line ... ok
 test sanitize::tests::sanitizer_performance ... ok
-test sanitize::tests::sanitizer_preserves_already_redacted ... ok
 test sanitize::tests::sanitizer_performance_100kb_median ... ok
+test sanitize::tests::sanitizer_preserves_already_redacted ... ok
 test sanitize::tests::sanitizer_preserves_bead_ids ... ok
 test sanitize::tests::sanitizer_preserves_short_line ... ok
 test sanitize::tests::sanitizer_redacts_anthropic_api_key ... ok
@@ -2561,6 +2794,13 @@ test strand::pluck::tests::same_queue_state_produces_same_ordering ... ok
 test strand::pluck::tests::split_disabled_when_threshold_is_zero ... ok
 test strand::pluck::tests::split_not_triggered_when_failure_count_below_threshold ... ok
 test strand::pluck::tests::split_triggered_when_failure_count_exceeds_threshold ... ok
+test strand::pluck::tests::starvation_mixed_label_and_assignee_exclusions_emits_telemetry ... ok
+test strand::pluck::tests::starvation_persistent_record_disabled_when_flag_false ... ok
+test strand::pluck::tests::starvation_persistent_record_not_written_to_target_workspace ... ok
+test strand::pluck::tests::starvation_persistent_record_written_to_needle_workspace ... ok
+test strand::pluck::tests::starvation_when_all_beads_excluded_by_labels_emits_telemetry ... ok
+test strand::pluck::tests::starvation_when_all_beads_have_stale_assignees_emits_telemetry ... ok
+test strand::pluck::tests::starvation_when_queue_is_genuinely_empty_emits_telemetry ... ok
 test strand::pluck::tests::store_error_returns_error_not_no_work ... ok
 test strand::pluck::tests::strand_filters_excluded_labels_when_store_does_not ... ok
 test strand::pluck::tests::strand_name_is_pluck ... ok
@@ -2611,6 +2851,9 @@ test strand::reflect::tests::truncate_does_not_panic_on_multibyte_char_boundary 
 test strand::reflect::tests::truncate_exact ... ok
 test strand::reflect::tests::truncate_long ... ok
 test strand::reflect::tests::truncate_short ... ok
+test strand::splice::tests::detect_completion_without_resolution_finds_bf_34xw9_pattern ... ok
+test strand::splice::tests::detect_completion_without_resolution_ignores_resolved_beads ... ok
+test strand::splice::tests::detect_completion_without_resolution_requires_minimum_thresholds ... ok
 test strand::splice::tests::splice_disabled_returns_no_work ... ok
 test strand::splice::tests::splice_no_heartbeats_returns_no_work ... ok
 test strand::splice::tests::splice_state_roundtrip ... ok
@@ -2726,6 +2969,19 @@ test telemetry::otlp::tests::test_tokens_input_records_with_attributes ... ok
 test telemetry::otlp::tests::test_tokens_output_records_with_attributes ... ok
 test telemetry::otlp::tests::test_workers_active_decrements_on_stopped ... ok
 test telemetry::otlp::tests::test_workers_active_increments_on_started ... ok
+test telemetry::test_utils::tests::assert_event_count_panics_on_mismatch - should panic ... ok
+test telemetry::test_utils::tests::assert_event_count_works ... ok
+test telemetry::test_utils::tests::assert_event_emitted_panics_when_missing - should panic ... ok
+test telemetry::test_utils::tests::assert_event_emitted_works ... ok
+test telemetry::test_utils::tests::assert_event_not_emitted_panics_when_present - should panic ... ok
+test telemetry::test_utils::tests::assert_event_not_emitted_works ... ok
+test telemetry::test_utils::tests::clear_works ... ok
+test telemetry::test_utils::tests::event_count_works ... ok
+test telemetry::test_utils::tests::find_event_returns_none_when_missing ... ok
+test telemetry::test_utils::tests::find_event_works ... ok
+test telemetry::test_utils::tests::last_event_works ... ok
+test telemetry::test_utils::tests::test_helper_captures_events ... ok
+test telemetry::test_utils::tests::test_helper_filters_by_bead_id ... ok
 test telemetry::tests::all_event_kinds_produce_valid_events ... ok
 test telemetry::tests::boot_event_written_to_file_on_telemetry_creation ... ok
 test telemetry::tests::broken_sink_does_not_crash_emitter ... ok
@@ -2803,6 +3059,26 @@ test test_output::tests::test_output_read_empty_file ... ok
 test test_output::tests::test_output_writes_combined ... ok
 test test_output::tests::test_output_writes_stderr ... ok
 test test_output::tests::test_output_writes_stdout ... ok
+test test_runner::tests::test_captured_output_empty ... ok
+test test_runner::tests::test_captured_output_new ... ok
+test test_runner::tests::test_persist_all_writes_all_files ... ok
+test test_runner::tests::test_persist_metrics_creates_json ... ok
+test test_runner::tests::test_persist_output_creates_directory ... ok
+test test_runner::tests::test_persist_output_creates_files ... ok
+test test_runner::tests::test_persist_output_empty_streams ... ok
+test test_runner::tests::test_persist_output_large_output ... ok
+test test_runner::tests::test_result_captured_stderr ... ok
+test test_runner::tests::test_result_captured_stdout ... ok
+test test_runner::tests::test_result_status_compilation_failed ... ok
+test test_runner::tests::test_result_status_failed ... ok
+test test_runner::tests::test_result_status_success ... ok
+test test_runner::tests::test_result_status_timed_out ... ok
+test test_runner::tests::test_result_summary ... ok
+test test_runner::tests::test_runner_new ... ok
+test test_runner::tests::test_runner_with_extra_arg ... ok
+test test_runner::tests::test_runner_with_timeout ... ok
+test test_runner::tests::test_test_metrics_from_result ... ok
+test test_runner::tests::test_test_metrics_serialization ... ok
 test trace::tests::detect_trace_format_aider ... ok
 test trace::tests::detect_trace_format_claude ... ok
 test trace::tests::detect_trace_format_generic ... ok
@@ -2813,6 +3089,7 @@ test trace::tests::trace_capture_prune_removes_data_keeps_metadata ... ok
 test trace::tests::trace_capture_writes_metadata ... ok
 test trace::tests::trace_capture_writes_stderr ... ok
 test trace::tests::trace_capture_writes_stdout ... ok
+test trace::tests::trace_capture_writes_test_output ... ok
 test trace::tests::trace_capture_writes_trace_jsonl ... ok
 test trace::tests::trace_cleanup_already_pruned_trace_skipped ... ok
 test trace::tests::trace_cleanup_missing_traces_dir_ok ... ok
@@ -2852,6 +3129,19 @@ test types::tests::bead_status_display ... ok
 test types::tests::bead_status_is_done ... ok
 test types::tests::bead_status_serialization ... ok
 test types::tests::br_dependency_deserialization ... ok
+test types::tests::compilation_error_abort_description ... ok
+test types::tests::compilation_error_all_variants_have_display_impl ... ok
+test types::tests::compilation_error_display_abort ... ok
+test types::tests::compilation_error_display_general ... ok
+test types::tests::compilation_error_display_rust_error ... ok
+test types::tests::compilation_error_general_description ... ok
+test types::tests::compilation_error_location_string ... ok
+test types::tests::compilation_error_location_string_no_file ... ok
+test types::tests::compilation_error_location_string_no_line ... ok
+test types::tests::compilation_error_rust_error_description ... ok
+test types::tests::compilation_error_serde_abort ... ok
+test types::tests::compilation_error_serde_general ... ok
+test types::tests::compilation_error_serde_rust_error ... ok
 test types::tests::exhaustion_diagnosis_display ... ok
 test types::tests::exhaustion_diagnosis_serde_roundtrip ... ok
 test types::tests::identifier_scheme_default_is_hostname_random ... ok
@@ -2868,15 +3158,22 @@ test types::tests::outcome_classify_common_signals ... ok
 test types::tests::outcome_classify_interrupted_flag ... ok
 test types::tests::outcome_classify_key_codes ... ok
 test types::tests::outcome_classify_ranges ... ok
+test types::tests::output_capture_duration_ms ... ok
+test types::tests::output_capture_failed_with_nonzero_exit ... ok
+test types::tests::output_capture_no_exit_code_is_failure ... ok
+test types::tests::output_capture_serde_serialization ... ok
+test types::tests::output_capture_serde_with_none_exit_code ... ok
+test types::tests::output_capture_success_with_zero_exit ... ok
+test types::tests::output_capture_total_output_len ... ok
 test types::tests::strand_error_display ... ok
 test types::tests::strand_error_source ... ok
 test types::tests::worker_state_deserialization_roundtrip ... ok
 test types::tests::worker_state_display_all_variants ... ok
 test types::tests::worker_state_serialization ... ok
 test upgrade::tests::asset_download_url_format ... ok
-test upgrade::tests::check_hot_reload_different_binary_returns_detected ... FAILED
+test upgrade::tests::check_hot_reload_different_binary_returns_detected ... ok
 test upgrade::tests::check_hot_reload_no_stable_binary_returns_skipped ... ok
-test upgrade::tests::check_hot_reload_same_binary_returns_no_change ... FAILED
+test telemetry::tests::shutdown_does_not_hang_when_flush_exceeds_deadline ... ok
 test upgrade::tests::file_hash_different_content_different_hash ... ok
 test upgrade::tests::file_hash_missing_file_returns_error ... ok
 test upgrade::tests::file_hash_produces_hex_string ... ok
@@ -2916,7 +3213,7 @@ test validation::tests::validation_gate_new_returns_none_for_empty_configs ... o
 test validation::tests::validation_gate_run_fails ... ok
 test validation::tests::validation_gate_run_passes ... ok
 test validation::tests::validation_gate_workspace ... ok
-test telemetry::tests::shutdown_does_not_hang_when_flush_exceeds_deadline ... ok
+test upgrade::tests::check_hot_reload_same_binary_returns_no_change ... ok
 test worker::tests::apply_routing_rules_baseline_first_match_stops_evaluation ... ok
 test worker::tests::apply_routing_rules_baseline_invalid_then_valid ... ok
 test worker::tests::apply_routing_rules_baseline_multiple_rules_same_adapter ... ok
@@ -2939,8 +3236,8 @@ test worker::tests::check_budget_warn_does_not_stop ... ok
 test worker::tests::do_build_with_bead_transitions_to_dispatching ... ok
 test worker::tests::do_build_without_bead_is_invariant_error ... ok
 test worker::tests::do_claim_no_current_bead_resets_to_selecting ... ok
-test worker::tests::default_routing_rules_anthropic_subscription_models has been running for over 60 seconds
 test worker::tests::do_claim_not_claimable_increments_consecutive_counter ... ok
+test worker::tests::default_routing_rules_anthropic_subscription_models has been running for over 60 seconds
 test worker::tests::do_claim_not_claimable_transitions_to_retrying ... ok
 test worker::tests::do_claim_race_lost_adds_to_exclusion_and_retries ... ok
 test worker::tests::do_claim_race_lost_increments_consecutive_counter ... ok
@@ -2984,26 +3281,19 @@ test worker::tests::worker_starts_in_booting_state ... ok
 
 failures:
 
----- upgrade::tests::check_hot_reload_different_binary_returns_detected stdout ----
+---- cli::tests::find_all_descendants_handles_cycles stdout ----
 
-thread 'upgrade::tests::check_hot_reload_different_binary_returns_detected' (2758454) panicked at src/upgrade/mod.rs:617:51:
-called `Result::unwrap()` on an `Err` value: failed to read file for hashing: /home/coding/NEEDLE/target/debug/deps/needle-13447901d1e3ab52 (deleted)
-
-Caused by:
-    No such file or directory (os error 2)
+thread 'cli::tests::find_all_descendants_handles_cycles' (3562057) panicked at src/cli/mod.rs:5474:9:
+assertion `left == right` failed
+  left: 2
+ right: 1
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-
----- upgrade::tests::check_hot_reload_same_binary_returns_no_change stdout ----
-
-thread 'upgrade::tests::check_hot_reload_same_binary_returns_no_change' (2758456) panicked at src/upgrade/mod.rs:601:46:
-called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
 
 
 failures:
-    upgrade::tests::check_hot_reload_different_binary_returns_detected
-    upgrade::tests::check_hot_reload_same_binary_returns_no_change
+    cli::tests::find_all_descendants_handles_cycles
 
-test result: FAILED. 1259 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 693.41s
+test result: FAILED. 1398 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 649.25s
 
 NEEDLE worker 'test-worker' stopped unexpectedly: state=Selecting, beads_processed=0, uptime=16s
 This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
@@ -3015,286 +3305,3 @@ NEEDLE worker 'test-worker' stopped unexpectedly: state=Selecting, beads_process
 This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
 Heartbeat file already removed: /home/coding/.needle/state/heartbeats/claude-test-worker.json
 error: test failed, to rerun pass `--lib`
-
-test tests::item_completed_agent_message_empty_content_produces_no_events ... ok
-test tests::item_completed_command_execution_failure ... ok
-test tests::item_completed_command_execution_success ... ok
-test tests::item_completed_error_emits_error ... ok
-test tests::item_completed_file_change ... ok
-test tests::item_completed_mcp_tool_call_error ... ok
-test tests::item_completed_mcp_tool_call_success ... ok
-test tests::item_completed_without_item_field_skipped ... ok
-test tests::item_completed_without_prior_started_uses_type_as_tool ... ok
-test tests::item_started_agent_message_produces_no_events ... ok
-test tests::item_started_command_execution_emits_tool_call ... ok
-test tests::item_started_file_change_emits_tool_call ... ok
-test tests::item_started_mcp_tool_call_emits_tool_call ... ok
-test tests::item_started_without_item_field_skipped ... ok
-test tests::item_updated_produces_no_events ... ok
-test tests::malformed_json_skipped ... ok
-test tests::missing_type_field_skipped ... ok
-test tests::thread_started_produces_no_events ... ok
-test tests::turn_completed_emits_tokens ... ok
-test tests::top_level_error_emits_error ... ok
-test tests::turn_completed_with_no_usage_produces_no_events ... ok
-test tests::turn_failed_emits_error ... ok
-test tests::turn_started_produces_no_events ... ok
-test tests::unknown_type_skipped ... ok
-
-test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-     Running tests/config_cli_tests.rs (target/debug/deps/config_cli_tests-698fa21c6736c75b)
-
-running 10 tests
-test config_help_output_includes_set_flag ... ok
-test config_help_includes_set_flag ... ok
-test config_set_flag_has_proper_metadata ... ok
-test config_set_empty_value_fails_validation ... ok
-test config_set_key_equals_value_format_parses ... ok
-test config_set_key_value_format_parses ... ok
-test config_set_missing_key_fails_validation ... ok
-test config_set_mixed_format_parses ... ok
-test config_set_multiple_key_equals_value_format_parses ... ok
-test config_set_multiple_key_value_format_parses ... ok
-
-test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
-     Running tests/heartbeat_validation.rs (target/debug/deps/heartbeat_validation-f153156cfd1cd059)
-
-running 3 tests
-test heartbeat_file_created_on_startup ... ok
-test heartbeat_contains_required_fields ... ok
-test heartbeat_refreshes_every_30_seconds ... ok
-
-test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.61s
-
-     Running tests/integration_tests.rs (target/debug/deps/integration_tests-2f8418ff6f635c37)
-
-running 27 tests
-test cross_workspace_mend_skips_beads_with_live_assignees ... FAILED
-test cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead ... FAILED
-test dead_worker_cleanup_integration ... FAILED
-test deterministic_ordering_same_beads_same_order ... ok
-test deterministic_ordering_tiebreak_by_id ... ok
-test dispatcher_captures_stdout_and_stderr ... ok
-test cross_workspace_mend_skips_own_worker_beads ... FAILED
-test dispatcher_timeout_kills_process ... ok
-test end_to_end_single_bead_success ... FAILED
-test end_to_end_worker_loops_to_next_bead ... FAILED
-test exhaustion_empty_workspace ... ok
-test exhaustion_with_idle_action_exit ... FAILED
-test exhaustion_with_idle_action_wait_survives_sleep ... FAILED
-test idle_worker_flagging_detects_stuck_workers ... ok
-test mend_removes_stale_dependency_links ... FAILED
-test outcome_classify_covers_all_exit_code_ranges ... ok
-test full_cycle_produces_telemetry_state_transitions ... FAILED
-test outcome_path_agent_not_found_exit_127 ... FAILED
-test outcome_path_crash_exit_137 ... FAILED
-test outcome_path_failure_exit_1 ... FAILED
-test outcome_path_interrupted_via_shutdown_flag ... ok
-test outcome_path_success_exit_0 ... FAILED
-test outcome_path_timeout_exit_124 ... FAILED
-test shutdown_during_selecting_exits_cleanly ... ok
-test shutdown_flag_preempts_execution ... ok
-test worker_boot_rejects_invalid_config ... ok
-test worker_processes_high_priority_beads_first ... FAILED
-
-failures:
-
----- cross_workspace_mend_skips_beads_with_live_assignees stdout ----
-
-thread 'cross_workspace_mend_skips_beads_with_live_assignees' (2759642) panicked at tests/integration_tests.rs:1505:10:
-called `Option::unwrap()` on a `None` value
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-
----- cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead stdout ----
-
-thread 'cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead' (2759641) panicked at tests/integration_tests.rs:1377:10:
-called `Option::unwrap()` on a `None` value
-
----- dead_worker_cleanup_integration stdout ----
-
-thread 'dead_worker_cleanup_integration' (2759647) panicked at tests/integration_tests.rs:2031:5:
-assertion `left == right` failed: both workers should be registered initially
-  left: 1
- right: 2
-
----- cross_workspace_mend_skips_own_worker_beads stdout ----
-
-thread 'cross_workspace_mend_skips_own_worker_beads' (2759645) panicked at tests/integration_tests.rs:1623:10:
-called `Option::unwrap()` on a `None` value
-
----- end_to_end_single_bead_success stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'end_to_end_single_bead_success' (2759658) panicked at tests/integration_tests.rs:272:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- end_to_end_worker_loops_to_next_bead stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'end_to_end_worker_loops_to_next_bead' (2759661) panicked at tests/integration_tests.rs:296:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- exhaustion_with_idle_action_exit stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'exhaustion_with_idle_action_exit' (2760057) panicked at src/transcript/mod.rs:278:31:
-start byte index 2275 is not a char boundary; it is inside '─' (bytes 2273..2276 of string)
-
----- exhaustion_with_idle_action_wait_survives_sleep stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'exhaustion_with_idle_action_wait_survives_sleep' (2760376) panicked at tests/integration_tests.rs:708:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- mend_removes_stale_dependency_links stdout ----
-
-thread 'mend_removes_stale_dependency_links' (2760676) panicked at tests/integration_tests.rs:1724:5:
-br create failed
-
----- full_cycle_produces_telemetry_state_transitions stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'full_cycle_produces_telemetry_state_transitions' (2760398) panicked at tests/integration_tests.rs:989:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- outcome_path_agent_not_found_exit_127 stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'outcome_path_agent_not_found_exit_127' (2760680) panicked at tests/integration_tests.rs:404:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- outcome_path_crash_exit_137 stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'outcome_path_crash_exit_137' (2760749) panicked at tests/integration_tests.rs:427:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- outcome_path_failure_exit_1 stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'outcome_path_failure_exit_1' (2761021) panicked at tests/integration_tests.rs:339:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- outcome_path_success_exit_0 stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'outcome_path_success_exit_0' (2761273) panicked at tests/integration_tests.rs:322:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- outcome_path_timeout_exit_124 stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'outcome_path_timeout_exit_124' (2761298) panicked at tests/integration_tests.rs:370:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
----- worker_processes_high_priority_beads_first stdout ----
-NEEDLE telemetry writer thread: started successfully
-NEEDLE telemetry writer thread: signaling ready to main thread...
-NEEDLE telemetry writer thread: ready, waiting for events...
-NEEDLE telemetry writer thread: first event written: worker.booting
-
-thread 'worker_processes_high_priority_beads_first' (2761920) panicked at tests/integration_tests.rs:1087:37:
-called `Result::unwrap()` on an `Err` value: routed agent adapter 'claude-code-glm-4.7' not found — routing matched model 'unknown' with rule 'routing-default', but the adapter is missing from ~/.config/needle/adapters/claude-code-glm-4.7.yaml
-
-
-failures:
-    cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead
-    cross_workspace_mend_skips_beads_with_live_assignees
-    cross_workspace_mend_skips_own_worker_beads
-    dead_worker_cleanup_integration
-    end_to_end_single_bead_success
-    end_to_end_worker_loops_to_next_bead
-    exhaustion_with_idle_action_exit
-    exhaustion_with_idle_action_wait_survives_sleep
-    full_cycle_produces_telemetry_state_transitions
-    mend_removes_stale_dependency_links
-    outcome_path_agent_not_found_exit_127
-    outcome_path_crash_exit_137
-    outcome_path_failure_exit_1
-    outcome_path_success_exit_0
-    outcome_path_timeout_exit_124
-    worker_processes_high_priority_beads_first
-
-test result: FAILED. 11 passed; 16 failed; 0 ignored; 0 measured; 0 filtered out; finished in 155.68s
-
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-NEEDLE worker 'test-worker' stopped unexpectedly: state=Dispatching, beads_processed=0, uptime=5s
-This indicates the worker was killed by an external process (e.g., SIGKILL, OOM, capacity governor)
-Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
-error: test failed, to rerun pass `--test integration_tests`
-EXIT_CODE: 0
-=== Exit code: 0 ===
-=== Completed at 2026-07-15T03:50:53Z ===

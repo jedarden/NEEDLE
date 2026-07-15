@@ -65,8 +65,14 @@ mod tests {
 
     if test_output_path.exists() {
         let test_output_content = fs::read_to_string(&test_output_path).unwrap();
-        println!("test-output.txt content length: {}", test_output_content.len());
+        println!(
+            "test-output.txt content length: {}",
+            test_output_content.len()
+        );
         println!("test-output.txt first 500 chars:");
-        println!("{}", &test_output_content.chars().take(500).collect::<String>());
+        println!(
+            "{}",
+            &test_output_content.chars().take(500).collect::<String>()
+        );
     }
 }

@@ -9,8 +9,8 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 use std::thread;
+use std::time::Duration;
 
 #[test]
 #[cfg(unix)]
@@ -40,7 +40,10 @@ fn test_process_table_reconciliation() {
                     }
                 }
             } else {
-                eprintln!("✗ needle list failed: {}", String::from_utf8_lossy(&output.stderr));
+                eprintln!(
+                    "✗ needle list failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
         }
         Err(e) => {
@@ -73,13 +76,19 @@ fn test_status_command_reconciliation() {
                     if value.is_object() {
                         eprintln!("✓ needle status output is an object (expected)");
                         // Verify reconciliation fields exist
+                        if value.get("discovered").is_some() {
+                            eprintln!("✓ needle status includes discovered field");
+                        }
                         if value.get("unregistered_workers").is_some() {
                             eprintln!("✓ needle status includes unregistered_workers field");
                         }
                     }
                 }
             } else {
-                eprintln!("✗ needle status failed: {}", String::from_utf8_lossy(&output.stderr));
+                eprintln!(
+                    "✗ needle status failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
         }
         Err(e) => {

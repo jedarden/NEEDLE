@@ -847,7 +847,12 @@ impl SpliceStrand {
                      **Race-lost events (in last {}):** {}\n",
                     bead_id, worker.evidence.events_scanned, count
                 );
-                (title, "claim_churn".to_string(), details, Some(bead_id.clone()))
+                (
+                    title,
+                    "claim_churn".to_string(),
+                    details,
+                    Some(bead_id.clone()),
+                )
             }
             LoopType::StatePingPong {
                 states,
@@ -901,7 +906,12 @@ impl SpliceStrand {
                      **No bead.completed events detected**\n",
                     bead_id, claim_succeeded_count, orphaned_count, agent_completed_count
                 );
-                (title, "completion_without_resolution".to_string(), details, Some(bead_id.clone()))
+                (
+                    title,
+                    "completion_without_resolution".to_string(),
+                    details,
+                    Some(bead_id.clone()),
+                )
             }
         };
 
@@ -978,7 +988,11 @@ impl SpliceStrand {
                 // Instantiate bead store for the original workspace
                 if let Ok(original_store) = BrCliBeadStore::discover(workspace_path.clone()) {
                     // Label the stuck bead as "human" to stop Pluck from redispatching it
-                    if original_store.add_label(&crate::types::BeadId::from(stuck_bead_id.clone()), "human").await.is_ok() {
+                    if original_store
+                        .add_label(&crate::types::BeadId::from(stuck_bead_id.clone()), "human")
+                        .await
+                        .is_ok()
+                    {
                         tracing::info!(
                             stuck_bead_id = %stuck_bead_id,
                             workspace = %original_workspace,
@@ -1310,7 +1324,10 @@ mod tests {
 
         let result = strand.detect_completion_without_resolution(&events);
 
-        assert!(result.is_some(), "Detector should find the completion-without-resolution pattern");
+        assert!(
+            result.is_some(),
+            "Detector should find the completion-without-resolution pattern"
+        );
 
         let info = result.unwrap();
         assert_eq!(info.bead_id, "bf-34xw9");
@@ -1372,7 +1389,10 @@ mod tests {
 
         let result = strand.detect_completion_without_resolution(&events);
 
-        assert!(result.is_none(), "Detector should ignore beads that completed successfully");
+        assert!(
+            result.is_none(),
+            "Detector should ignore beads that completed successfully"
+        );
     }
 
     #[test]

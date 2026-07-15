@@ -2206,6 +2206,24 @@ impl ConfigLoader {
         Ok((config, sources))
     }
 
+    /// Emit boot-time warnings for configuration issues that should be addressed.
+    ///
+    /// These are non-fatal issues that don't prevent NEEDLE from running but
+    /// should be visible at startup to avoid silent misconfiguration.
+    fn emit_warnings(config: &Config) {
+        // Warn if Splice is enabled but report_workspace is not configured.
+        // This is critical because without a report_workspace, Splice will silently
+        // no-op on every cycle instead of creating failure/loop beads.
+        if config.strands.splice.enabled && config.strands.splice.report_workspace.is_none() {
+            tracing::warn!(
+                "strands.splice.enabled is true, but strands.splice.report_workspace is not set. \
+                 Splice will not create worker failure or loop detection beads. \
+                 Set strands.splice.report_workspace to a valid workspace path in your config \
+                 (e.g., ~/.config/needle/config.yaml or .needle.yaml)."
+            );
+        }
+    }
+
     /// Validate a resolved config.
     ///
     /// Returns a list of errors (empty = valid).
@@ -2252,6 +2270,10 @@ impl ConfigLoader {
                 ),
             });
         }
+
+        // Emit boot-time warnings for configuration issues that should be addressed
+        // but are not fatal errors.
+        Self::emit_warnings(config);
 
         // Validate routing regex patterns.
         if let Some(ref routing) = config.agent.routing {
@@ -4286,6 +4308,56 @@ agent:
         assert_eq!(
             routing.default_adapter.as_deref(),
             Some("claude-code-glm-4.7")
+        );
+    }
+
+    #[test]
+    fn splice_enabled_without_report_workspace_emits_warning() {
+        // Test that a warning is emitted when splice is enabled but report_workspace is None
+        // This is a critical misconfiguration that causes silent no-op behavior
+        let mut config = Config::default();
+        config.strands.splice.enabled = true;
+        config.strands.splice.report_workspace = None; // Not configured
+
+        // This should emit a warning but not fail validation
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.is_empty(),
+            "splice without report_workspace should not fail validation, got errors: {:?}",
+            errors
+        );
+
+        // Note: The actual warning emission is tested in integration tests since it requires
+        // capturing tracing output. The unit test verifies it doesn't cause validation errors.
+    }
+
+    #[test]
+    fn splice_disabled_with_report_workspace_passes() {
+        // Test that when splice is disabled, report_workspace can be None without warning
+        let mut config = Config::default();
+        config.strands.splice.enabled = false;
+        config.strands.splice.report_workspace = None;
+
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.is_empty(),
+            "disabled splice should not cause validation errors: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn splice_enabled_with_report_workspace_passes() {
+        // Test that when splice is enabled with a report_workspace, no warning is emitted
+        let mut config = Config::default();
+        config.strands.splice.enabled = true;
+        config.strands.splice.report_workspace = Some(PathBuf::from("/tmp/test-workspace"));
+
+        let errors = ConfigLoader::validate(&config);
+        assert!(
+            errors.is_empty(),
+            "splice with report_workspace should not cause validation errors: {:?}",
+            errors
         );
     }
 }

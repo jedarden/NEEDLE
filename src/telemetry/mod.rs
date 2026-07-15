@@ -411,6 +411,15 @@ pub enum EventKind {
         parent_id: BeadId,
         existing_children: u32,
     },
+    MitosisOutOfScope {
+        bead_id: BeadId,
+    },
+
+    // ── Split (worker BUILDING phase) ──
+    SplitSkipped {
+        bead_id: BeadId,
+        reason: String,
+    },
 
     // ── Validation gates ──
     VerificationFailed {
@@ -735,6 +744,8 @@ impl EventKind {
             EventKind::MitosisEvaluated { .. } => "bead.mitosis.evaluated",
             EventKind::MitosisSplit { .. } => "bead.mitosis.split",
             EventKind::MitosisSkipped { .. } => "bead.mitosis.skipped",
+            EventKind::MitosisOutOfScope { .. } => "bead.mitosis.out_of_scope",
+            EventKind::SplitSkipped { .. } => "bead.split.skipped",
             EventKind::VerificationFailed { .. } => "verification.failed",
             EventKind::VerificationPassed { .. } => "verification.passed",
             EventKind::UnravelAnalyzed { .. } => "bead.unravel.analyzed",
@@ -830,9 +841,11 @@ impl EventKind {
             | EventKind::TransformFailed { bead_id, .. }
             | EventKind::TransformSkipped { bead_id, .. }
             | EventKind::ReflectDecisionExtracted { bead_id, .. }
-            | EventKind::ReflectAdrCreated { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::ReflectAdrCreated { bead_id, .. }
+            | EventKind::SplitSkipped { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
+            EventKind::MitosisOutOfScope { bead_id } => Some(bead_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
             EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
@@ -1349,6 +1362,17 @@ impl EventKind {
                 serde_json::json!({
                     "parent_id": parent_id.as_ref(),
                     "existing_children": existing_children,
+                })
+            }
+            EventKind::MitosisOutOfScope { bead_id } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                })
+            }
+            EventKind::SplitSkipped { bead_id, reason } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "reason": reason,
                 })
             }
             EventKind::VerificationFailed {
@@ -1923,6 +1947,8 @@ impl EventKind {
             | EventKind::MitosisEvaluated { .. }
             | EventKind::MitosisSplit { .. }
             | EventKind::MitosisSkipped { .. }
+            | EventKind::MitosisOutOfScope { .. }
+            | EventKind::SplitSkipped { .. }
             | EventKind::VerificationFailed { .. }
             | EventKind::VerificationPassed { .. }
             | EventKind::UnravelAnalyzed { .. }

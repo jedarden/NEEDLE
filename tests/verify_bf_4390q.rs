@@ -73,7 +73,8 @@ mod tests {
 
     // Should contain at least one section header (stdout or stderr)
     assert!(
-        test_output_content.contains("=== STDOUT ===") || test_output_content.contains("=== STDERR ==="),
+        test_output_content.contains("=== STDOUT ===")
+            || test_output_content.contains("=== STDERR ==="),
         "test-output.txt should contain at least one section header (STDOUT or STDERR)"
     );
 

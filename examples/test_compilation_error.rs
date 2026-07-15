@@ -51,7 +51,10 @@ mod tests {
     println!("Exit code: {:?}", outcome.exit_code);
     println!("Duration: {:?}", outcome.duration);
     println!("Compilation failed: {}", outcome.compilation_failed);
-    println!("Compilation errors count: {}", outcome.compilation_errors.len());
+    println!(
+        "Compilation errors count: {}",
+        outcome.compilation_errors.len()
+    );
 
     // Check what files were created
     let bead_trace_dir = workspace.join(".beads").join("traces").join(bead_id);

@@ -265,9 +265,7 @@ impl super::Strand for UnravelStrand {
             Ok(beads) => beads,
             Err(e) => {
                 tracing::warn!(error = %e, "unravel strand: failed to list beads");
-                return StrandResult::Error(crate::types::StrandError::StoreError(
-                    anyhow::anyhow!(e.to_string()),
-                ));
+                return StrandResult::Error(crate::types::StrandError::StoreError(e.into()));
             }
         };
 

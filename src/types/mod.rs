@@ -272,7 +272,16 @@ pub enum StrandError {
 impl fmt::Display for StrandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StrandError::StoreError(e) => write!(f, "bead store error: {}", e),
+            StrandError::StoreError(e) => {
+                // Show the full error chain, not just the top-level context.
+                // This surfaces the actual stderr/stdout from bf/br commands.
+                write!(f, "bead store error: {}", e)?;
+                // Append any error causes from the chain (the actual bf/br stderr)
+                for cause in e.chain().skip(1) {
+                    write!(f, "\n  caused by: {}", cause)?;
+                }
+                Ok(())
+            }
             StrandError::ConfigError(s) => write!(f, "strand configuration error: {}", s),
         }
     }
