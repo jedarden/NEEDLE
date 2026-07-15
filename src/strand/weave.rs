@@ -319,13 +319,9 @@ fn workspace_hash(workspace: &Path) -> String {
         })
 }
 
-#[async_trait::async_trait]
-impl super::Strand for WeaveStrand {
-    fn name(&self) -> &str {
-        "weave"
-    }
-
-    async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+impl WeaveStrand {
+    /// Internal evaluation logic (wrapped with timeout by evaluate).
+    async fn evaluate_internal(&self, store: &dyn BeadStore) -> StrandResult {
         // Guard: disabled.
         if !self.config.enabled {
             let _ = self.telemetry.emit(EventKind::StrandSkipped {
@@ -392,14 +388,24 @@ impl super::Strand for WeaveStrand {
         }
         let doc_content = Self::format_doc_files(&doc_files, &self.workspace);
 
-        // Query existing beads for dedup context.
-        let existing_beads = match store.list_all().await {
-            Ok(beads) => beads,
-            Err(e) => {
+        // Query existing beads for dedup context with additional safety timeout.
+        // The underlying list_all has its own 30s timeout, but we add an extra layer
+        // of protection here to prevent any single operation from blocking indefinitely.
+        let list_timeout = std::time::Duration::from_secs(45); // Give headroom above the 30s internal timeout
+        let existing_beads = match tokio::time::timeout(list_timeout, store.list_all()).await {
+            Ok(Ok(beads)) => beads,
+            Ok(Err(e)) => {
                 tracing::warn!(error = %e, "weave strand: failed to list existing beads");
                 return StrandResult::Error(crate::types::StrandError::StoreError(
                     anyhow::anyhow!(e.to_string()),
                 ));
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "weave strand: list_all timed out after {}s - returning NoWork to prevent stall",
+                    list_timeout.as_secs()
+                );
+                return StrandResult::NoWork;
             }
         };
         let existing_context = Self::format_existing_beads(&existing_beads);
@@ -521,10 +527,48 @@ impl super::Strand for WeaveStrand {
     }
 }
 
+#[async_trait::async_trait]
+impl super::Strand for WeaveStrand {
+    fn name(&self) -> &str {
+        "weave"
+    }
+
+    async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+        // Apply strand-level timeout to prevent a single weave from stalling
+        // the entire SELECTING cycle for minutes. See: needle-bf-5hlhn
+        let timeout_duration = std::time::Duration::from_secs(WEAVE_STRAND_TIMEOUT_SECS);
+
+        match tokio::time::timeout(timeout_duration, self.evaluate_internal(store)).await {
+            Ok(result) => result,
+            Err(_) => {
+                tracing::warn!(
+                    timeout_secs = WEAVE_STRAND_TIMEOUT_SECS,
+                    "weave strand evaluation timed out after {}s - returning NoWork to prevent SELECTING stall",
+                    WEAVE_STRAND_TIMEOUT_SECS
+                );
+                let _ = self.telemetry.emit(EventKind::StrandSkipped {
+                    strand_name: "weave".to_string(),
+                    reason: format!("timeout after {}s", WEAVE_STRAND_TIMEOUT_SECS),
+                });
+                StrandResult::NoWork
+            }
+        }
+    }
+}
+
 // ─── CLI agent implementation ────────────────────────────────────────────────
 
 /// Default timeout for weave agent calls (60 seconds).
 const WEAVE_AGENT_TIMEOUT_SECS: u64 = 60;
+
+/// Maximum timeout for weave strand evaluation (120 seconds).
+///
+/// This prevents a single weave strand from stalling the entire
+/// SELECTING cycle for minutes. Without this timeout, issues like
+/// bead store problems or filesystem hangs can cause weave to take
+/// 237+ seconds while other strands fail in milliseconds.
+/// See: needle-bf-5hlhn (weave strand stall investigation).
+const WEAVE_STRAND_TIMEOUT_SECS: u64 = 120;
 
 /// Production `WeaveAgent` that shells out to a CLI agent (e.g., `claude`).
 ///
