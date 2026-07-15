@@ -4019,6 +4019,12 @@ stats       ──► telemetry, config, types
 ### 5.4 Observability
 - **Per-cycle scan telemetry** (workspaces visited, candidates, exclusion reasons) and a **starvation alarm**: ready beads exist in scanned stores but this worker claimed nothing for X minutes → WARN event; surface last-scan-per-workspace in `needle status`.
 
+### 5.4b Strand-error reliability (found 2026-07-15 dispatching fresh roaming workers)
+Three further gaps, found live: a worker went `EXHAUSTED` with 0 beads claimed despite `explore` finding a real candidate. Root cause was three compounding issues, not the deadlock/herd problems above:
+- **`weave` stalled 237s before failing** with the same error `mend`/`unravel`/`knot` hit in 0–63ms in the same cycle, against the same store — something in weave's `bf list --json` path differs from the others and needs its own investigation, plus a bounded timeout so no single strand can stall a whole selection cycle for minutes (`bf-5hlhn`).
+- **Home-store-missing and genuine failure both report as `error`.** A pure-roam worker (home = no `.beads/`) will always show `pluck`/`mend`/`weave`/`unravel`/`reflect`/`knot` as `error` every cycle by design — indistinguishable from a real bug without grepping raw stderr. Needs a distinct `no_home_store` (or similar) result (`bf-6c8vp`).
+- **The underlying `bf list`/`bf list --json failed` message recurs historically (07-09, 07-10 stderr logs) against workspaces with genuinely valid stores** (ARMOR, HOOP) — a longer-standing CLI reliability issue independent of the no-home-store case, currently swallowing `bf`/`br`'s real stderr behind a generic wrapper message (`bf-2e4mc`).
+
 ### 5.5 Testing
 - Liveness property test: N workers × M workspaces, every ready bead eventually claimed.
 - Deadlock regression test: candidates in workspace #2 while workspace #1 has only excluded/assigned beads.
