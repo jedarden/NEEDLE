@@ -523,6 +523,9 @@ impl super::Strand for WeaveStrand {
 
 // ─── CLI agent implementation ────────────────────────────────────────────────
 
+/// Default timeout for weave agent calls (60 seconds).
+const WEAVE_AGENT_TIMEOUT_SECS: u64 = 60;
+
 /// Production `WeaveAgent` that shells out to a CLI agent (e.g., `claude`).
 ///
 /// The agent is invoked in `--print` mode so it emits its analysis as plain

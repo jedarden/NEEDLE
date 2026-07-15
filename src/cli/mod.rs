@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -982,7 +982,70 @@ fn launch_in_tmux(
     Ok(())
 }
 
-/// `needle stop` — send SIGTERM to worker processes in tmux sessions.
+/// Kill the entire process tree rooted at the given PID.
+///
+/// This function sends SIGTERM to the process group, waits for processes to exit,
+/// and sends SIGKILL to any remaining processes. Returns true if all processes
+/// were successfully terminated.
+fn kill_process_tree(pid: u32) -> Result<bool> {
+    use std::thread;
+
+    tracing::info!(pid, "sending SIGTERM to process tree");
+
+    // First, try SIGTERM to the process group for graceful shutdown
+    unsafe {
+        if libc::killpg(pid as libc::pid_t, libc::SIGTERM) == -1 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::NotFound {
+                // Process already gone
+                return Ok(true);
+            }
+            tracing::warn!(pid, error = %err, "SIGTERM failed");
+        }
+    }
+
+    // Wait up to 3 seconds for processes to exit gracefully
+    for i in 0..30 {
+        thread::sleep(Duration::from_millis(100));
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        if !alive {
+            tracing::info!(pid, "process tree terminated gracefully after {}ms", (i + 1) * 100);
+            return Ok(true);
+        }
+    }
+
+    // Some processes survived SIGTERM, use SIGKILL
+    tracing::warn!(pid, "process tree survived SIGTERM, sending SIGKILL");
+    unsafe {
+        if libc::killpg(pid as libc::pid_t, libc::SIGKILL) == -1 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::NotFound {
+                return Ok(true);
+            }
+            tracing::error!(pid, error = %err, "SIGKILL failed");
+        }
+    }
+
+    // Wait up to 2 seconds for SIGKILL to take effect
+    for i in 0..20 {
+        thread::sleep(Duration::from_millis(100));
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        if !alive {
+            tracing::info!(pid, "process tree terminated by SIGKILL after {}ms", (i + 1) * 100);
+            return Ok(true);
+        }
+    }
+
+    // Process still alive - this is a failure
+    tracing::error!(pid, "process tree survived SIGKILL - still running");
+    Ok(false)
+}
+
+/// `needle stop` — kill the full process tree for worker processes.
+///
+/// This command kills the parent needle run process, its bash -c prompt wrapper,
+/// and the dispatched claude subprocess (full tree, not just the tmux session).
+/// It verifies the PID is actually gone before printing success.
 fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
     if !all && identifier.is_none() {
         bail!("specify --all or --identifier <NAME>");
@@ -995,14 +1058,15 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    let targets: Vec<&str> = if all {
-        sessions.iter().map(|s| s.name.as_str()).collect()
+    // Find target sessions by name
+    let targets: Vec<TmuxSession> = if all {
+        sessions.clone()
     } else {
         let id = identifier.as_deref().unwrap_or("");
         sessions
             .iter()
             .filter(|s| s.name.contains(id))
-            .map(|s| s.name.as_str())
+            .cloned()
             .collect()
     };
 
@@ -1012,37 +1076,60 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
     }
 
     for session in &targets {
-        tracing::info!(session = %session, "sending SIGTERM to tmux session");
-        // tmux send-keys sends C-c to the foreground process
-        let status = ProcessCommand::new("tmux")
-            .args(["send-keys", "-t", session, "C-c", ""])
-            .status()
-            .with_context(|| format!("failed to send SIGTERM to session '{session}'"))?;
+        tracing::info!(session = %session.name, "stopping worker");
 
-        if status.success() {
-            // Wait up to 5 seconds for the worker to exit gracefully
-            for _ in 0..50 {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                let session_exists = ProcessCommand::new("tmux")
-                    .args(["has-session", "-t", session])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if !session_exists {
-                    break;
-                }
+        // Get the PID from the tmux session
+        let pid = match session.pid {
+            Some(p) => p,
+            None => {
+                println!("Warning: no PID found for session '{}', skipping process tree kill", session.name);
+                // Still kill the session for cleanup
+                let _ = ProcessCommand::new("tmux")
+                    .args(["kill-session", "-t", &session.name])
+                    .status();
+                continue;
             }
-            // Kill the session to clean up (worker may have already exited)
-            let kill_status = ProcessCommand::new("tmux")
-                .args(["kill-session", "-t", session])
-                .status();
-            match kill_status {
-                Ok(s) if s.success() => println!("Stopped: {session}"),
-                Ok(_) => println!("Stopped: {session} (session already gone)"),
-                Err(e) => println!("Warning: stopped {session} but failed to kill session: {e}"),
+        };
+
+        // Kill the entire process tree
+        let killed = match kill_process_tree(pid) {
+            Ok(k) => k,
+            Err(e) => {
+                println!("Warning: failed to kill process tree for session '{}': {}", session.name, e);
+                false
             }
-        } else {
-            println!("Warning: could not stop session '{session}' (status: {status})");
+        };
+
+        // Verify the PID is actually gone
+        let still_alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 };
+        if still_alive {
+            println!("Warning: process {} (session '{}') survived termination", pid, session.name);
+        }
+
+        // Kill the tmux session for cleanup
+        let kill_status = ProcessCommand::new("tmux")
+            .args(["kill-session", "-t", &session.name])
+            .status();
+
+        match (killed, still_alive, kill_status) {
+            (true, false, Ok(s)) if s.success() => {
+                println!("Stopped: {} (pid {})", session.name, pid);
+            }
+            (true, false, Ok(_)) => {
+                println!("Stopped: {} (pid {}, session already gone)", session.name, pid);
+            }
+            (true, false, Err(e)) => {
+                println!("Warning: process {} killed but failed to kill session: {}", pid, e);
+            }
+            (false, true, _) => {
+                println!("Error: failed to stop {} (pid {} still running)", session.name, pid);
+            }
+            (true, true, _) => {
+                println!("Warning: {} (pid {}) reported killed but still running", session.name, pid);
+            }
+            (false, false, _) => {
+                println!("Stopped: {} (pid {} gone)", session.name, pid);
+            }
         }
     }
 
@@ -1111,7 +1198,25 @@ fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
 fn cmd_list(format: ListFormat) -> Result<()> {
     let sessions = list_needle_sessions()?;
 
-    if sessions.is_empty() {
+    // Reconciliation: scan process table for needle processes not in tmux.
+    let discovered = scan_needle_processes().unwrap_or_default();
+    let tmux_pids: HashSet<u32> = sessions.iter()
+        .filter_map(|s| s.pid)
+        .collect();
+    let orphaned: Vec<&DiscoveredProcess> = discovered
+        .iter()
+        .filter(|p| !tmux_pids.contains(&p.pid))
+        .collect();
+
+    if !orphaned.is_empty() {
+        tracing::warn!(
+            count = orphaned.len(),
+            pids = ?orphaned.iter().map(|p| p.pid).collect::<Vec<_>>(),
+            "found needle run processes not in tmux"
+        );
+    }
+
+    if sessions.is_empty() && orphaned.is_empty() {
         match format {
             ListFormat::Table => println!("No needle sessions running."),
             ListFormat::Json => println!("[]"),
@@ -1121,16 +1226,38 @@ fn cmd_list(format: ListFormat) -> Result<()> {
 
     match format {
         ListFormat::Table => {
-            println!("{:<40} {:<20} {:<10}", "SESSION", "CREATED", "STATUS");
-            println!("{}", "-".repeat(70));
-            for s in &sessions {
-                println!("{:<40} {:<20} {:<10}", s.name, s.created, s.status);
+            if !sessions.is_empty() {
+                println!("{:<40} {:<20} {:<10}", "SESSION", "CREATED", "STATUS");
+                println!("{}", "-".repeat(70));
+                for s in &sessions {
+                    println!("{:<40} {:<20} {:<10}", s.name, s.created, s.status);
+                }
+            }
+
+            if !orphaned.is_empty() {
+                println!();
+                println!("Non-tmux Workers:");
+                for proc in orphaned {
+                    let workspace = proc.workspace.as_ref().map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    println!("  PID {} — workspace: {}", proc.pid, workspace);
+                }
             }
         }
         ListFormat::Json => {
-            let json = serde_json::to_string_pretty(&sessions)
-                .context("failed to serialize sessions to JSON")?;
-            println!("{json}");
+            let json = serde_json::json!({
+                "tmux_sessions": sessions,
+                "orphaned": orphaned.iter().map(|p| {
+                    serde_json::json!({
+                        "pid": p.pid,
+                        "workspace": p.workspace,
+                        "agent": p.agent,
+                        "identifier": p.identifier,
+                        "cmdline": p.cmdline,
+                    })
+                }).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&json)?);
         }
     }
 
@@ -1619,6 +1746,22 @@ fn cmd_status(
     let workers = registry.list().unwrap_or_default();
     let sessions = list_needle_sessions().unwrap_or_default();
 
+    // Reconciliation: scan process table for orphaned needle run processes.
+    let discovered = scan_needle_processes().unwrap_or_default();
+    let registered_pids: HashSet<u32> = workers.iter().map(|w| w.pid).collect();
+    let orphaned: Vec<&DiscoveredProcess> = discovered
+        .iter()
+        .filter(|p| !registered_pids.contains(&p.pid))
+        .collect();
+
+    if !orphaned.is_empty() {
+        tracing::warn!(
+            count = orphaned.len(),
+            pids = ?orphaned.iter().map(|p| p.pid).collect::<Vec<_>>(),
+            "found unregistered needle run processes"
+        );
+    }
+
     // Build a fleet summary.
     let active_count = sessions.len();
     let registered_count = workers.len();
@@ -1658,7 +1801,25 @@ fn cmd_status(
             println!("  Active tmux sessions: {active_count}");
             println!("  Registered workers:   {registered_count}");
             println!("  Total beads processed: {total_beads}");
+            if !orphaned.is_empty() {
+                println!("  Unregistered workers: {} (WARN)", orphaned.len());
+            }
             println!();
+
+            // Show unregistered workers if any.
+            if !orphaned.is_empty() {
+                println!("Unregistered Workers (not in registry):");
+                for proc in orphaned {
+                    let workspace = proc.workspace.as_ref().map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    let agent = proc.agent.as_deref().unwrap_or("<unknown>");
+                    println!(
+                        "  PID {} — workspace: {}, agent: {}",
+                        proc.pid, workspace, agent
+                    );
+                }
+                println!();
+            }
 
             if by_worker && !heartbeat_statuses.is_empty() {
                 println!(
@@ -1697,6 +1858,7 @@ fn cmd_status(
                 "active_sessions": active_count,
                 "registered_workers": registered_count,
                 "total_beads_processed": total_beads,
+                "unregistered_workers": orphaned.len(),
                 "workers": heartbeat_statuses.iter().map(|ws| {
                     serde_json::json!({
                         "id": ws.entry.id,
@@ -1708,6 +1870,15 @@ fn cmd_status(
                         "current_bead": ws.current_bead,
                         "pid_alive": ws.pid_alive,
                         "uptime_secs": ws.uptime_secs,
+                    })
+                }).collect::<Vec<_>>(),
+                "orphaned": orphaned.iter().map(|p| {
+                    serde_json::json!({
+                        "pid": p.pid,
+                        "workspace": p.workspace,
+                        "agent": p.agent,
+                        "identifier": p.identifier,
+                        "cmdline": p.cmdline,
                     })
                 }).collect::<Vec<_>>(),
             });
@@ -3435,6 +3606,8 @@ struct TmuxSession {
     name: String,
     created: String,
     status: String,
+    /// PID of the needle run process in this session (if available).
+    pid: Option<u32>,
 }
 
 /// List all tmux sessions whose names start with `needle-`.
@@ -3443,7 +3616,7 @@ fn list_needle_sessions() -> Result<Vec<TmuxSession>> {
         .args([
             "list-sessions",
             "-F",
-            "#{session_name}\t#{session_created}\t#{session_attached}",
+            "#{session_name}\t#{session_created}\t#{session_attached}\t#{pane_pid}",
         ])
         .output();
 
@@ -3468,7 +3641,7 @@ fn list_needle_sessions() -> Result<Vec<TmuxSession>> {
         .lines()
         .filter_map(|line| {
             let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() < 3 {
+            if parts.len() < 4 {
                 return None;
             }
             let name = parts[0];
@@ -3482,10 +3655,13 @@ fn list_needle_sessions() -> Result<Vec<TmuxSession>> {
             } else {
                 "detached".to_string()
             };
+            // Parse PID from pane_pid (tmux returns empty string if no pane)
+            let pid = parts[3].parse::<u32>().ok();
             Some(TmuxSession {
                 name: name.to_string(),
                 created,
                 status,
+                pid,
             })
         })
         .collect();
@@ -3507,6 +3683,136 @@ fn occupied_worker_ids(agent: &str) -> Result<HashSet<String>> {
         .map(|id| id.to_string())
         .collect();
     Ok(ids)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Process table discovery
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A needle process discovered from the process table.
+#[derive(Debug, Clone)]
+struct DiscoveredProcess {
+    pid: u32,
+    workspace: Option<PathBuf>,
+    agent: Option<String>,
+    identifier: Option<String>,
+    /// Full command line for debugging
+    cmdline: String,
+}
+
+/// Scan the process table for all running `needle run` processes.
+///
+/// This discovers workers regardless of how they were started (tmux-wrapped or
+/// bare NEEDLE_INNER=1 invocation). It reads /proc to find processes whose
+/// command line contains "needle run" and extracts workspace, agent, and
+/// identifier from the arguments.
+#[cfg(unix)]
+fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
+    use std::fs;
+
+    let mut discovered = Vec::new();
+
+    // Iterate over all entries in /proc.
+    let proc_dir = Path::new("/proc");
+    let entries = match fs::read_dir(proc_dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Not Linux — no process table available.
+            return Ok(vec![]);
+        }
+        Err(e) => {
+            return Err(e).context("failed to read /proc directory");
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let pid_str = entry.file_name();
+        let pid: u32 = match pid_str.to_string_lossy().parse() {
+            Ok(p) => p,
+            Err(_) => continue, // Not a numeric directory (not a PID)
+        };
+
+        // Read the process's command line.
+        let cmdline_path = entry.path().join("cmdline");
+        let cmdline_bytes = match fs::read(&cmdline_path) {
+            Ok(b) => b,
+            Err(_) => continue, // Process may have exited
+        };
+
+        // cmdline is null-separated; convert to space-separated for parsing.
+        let cmdline: String = cmdline_bytes
+            .split(|&b| b == 0)
+            .map(|args| String::from_utf8_lossy(args))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        // Check if this is a needle run process.
+        // The command line looks like: "/path/to/needle run --workspace /path --count 1 ..."
+        if !cmdline.contains("needle run") {
+            continue;
+        }
+
+        // Parse arguments to extract workspace, agent, identifier.
+        let args: Vec<&str> = cmdline.split_whitespace().collect();
+        let mut workspace = None;
+        let mut agent = None;
+        let mut identifier = None;
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i] {
+                "--workspace" | "-w" => {
+                    if i + 1 < args.len() {
+                        workspace = Some(PathBuf::from(args[i + 1]));
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--agent" | "-a" => {
+                    if i + 1 < args.len() {
+                        agent = Some(args[i + 1].to_string());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                "--identifier" | "-i" => {
+                    if i + 1 < args.len() {
+                        identifier = Some(args[i + 1].to_string());
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        discovered.push(DiscoveredProcess {
+            pid,
+            workspace,
+            agent,
+            identifier,
+            cmdline,
+        });
+    }
+
+    Ok(discovered)
+}
+
+/// Stub for non-Unix platforms (Windows, etc.).
+#[cfg(not(unix))]
+fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
+    // No /proc on these platforms.
+    Ok(vec![])
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

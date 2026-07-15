@@ -920,11 +920,22 @@ impl CargoTest {
                 }
             }
 
+            // Write combined test output (stdout + stderr)
+            let combined = create_combined_output(&outcome.stdout, &outcome.stderr);
+            if let Err(e) = trace.write_test_output(&combined) {
+                tracing::warn!(
+                    bead_id = %bead_id,
+                    error = %e,
+                    "failed to write combined test output to trace file"
+                );
+            }
+
             tracing::info!(
                 bead_id = %bead_id,
                 trace_dir = %trace.trace_dir().display(),
                 stdout_path = %trace.trace_dir().join("stdout.txt").display(),
                 stderr_path = %trace.trace_dir().join("stderr.txt").display(),
+                test_output_path = %trace.trace_dir().join("test-output.txt").display(),
                 metrics_path = %trace.trace_dir().join("test_metrics.json").display(),
                 compilation_errors_path = %trace.trace_dir().join("compilation_errors.json").display(),
                 exit_code = ?outcome.exit_code,

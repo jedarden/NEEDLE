@@ -99,8 +99,11 @@ fn routing_anthropic_sonnet_to_claude_print() {
         "claude-sonnet-4-6",
         "claude-sonnet-4-5-20251001",
         "claude-sonnet-4-7",
+        "claude-sonnet-5",
+        "claude-sonnet-5-20250529",
         "sonnet-4-6", // Without claude- prefix
         "sonnet-4-7",
+        "sonnet-5",
     ];
 
     for model in sonnet_models {
@@ -137,8 +140,10 @@ fn routing_anthropic_opus_to_claude_print() {
     let opus_models = vec![
         "claude-opus-4-6",
         "claude-opus-4-7",
+        "claude-opus-4-8",
         "opus-4-6", // Without claude- prefix
         "opus-4-7",
+        "opus-4-8",
     ];
 
     for model in opus_models {
@@ -250,16 +255,22 @@ fn routing_anthropic_all_claude_models_together() {
         // Sonnet
         "claude-sonnet-4-6",
         "claude-sonnet-4-7",
+        "claude-sonnet-5",
+        "claude-sonnet-5-20250529",
         "sonnet-4-6",
+        "sonnet-5",
         // Opus
         "claude-opus-4-6",
         "claude-opus-4-7",
+        "claude-opus-4-8",
         "opus-4-6",
+        "opus-4-8",
         // Fable
         "claude-fable-5",
         "fable-5",
         // Haiku
         "claude-haiku-4-5",
+        "claude-haiku-4-5-20251001",
         "haiku-4-5",
     ];
 

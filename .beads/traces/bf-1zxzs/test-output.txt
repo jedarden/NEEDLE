@@ -3296,3 +3296,5 @@ This indicates the worker was killed by an external process (e.g., SIGKILL, OOM,
 Heartbeat file already removed: /tmp/.tmpekklk4/state/heartbeats/echo-test-test-worker.json
 error: test failed, to rerun pass `--test integration_tests`
 EXIT_CODE: 0
+=== Exit code: 0 ===
+=== Completed at 2026-07-15T03:50:53Z ===

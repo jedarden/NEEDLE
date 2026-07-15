@@ -210,6 +210,30 @@ impl StrandRunner {
         // Reconstruct heartbeat_dir for Splice (same path used by Mend).
         let splice_heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
         let runner_telemetry = telemetry.clone();
+
+        // VALIDATION: Warn loudly if Splice is enabled but report_workspace is unset.
+        // This is a critical configuration gap - without report_workspace, Splice will
+        // silently fail to create escalation beads, missing the entire point of detection.
+        if config.strands.splice.enabled && config.strands.splice.report_workspace.is_none() {
+            tracing::warn!(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\
+                 \n\
+                 Splice strand is ENABLED but strands.splice.report_workspace is NOT SET!\
+                 \n\
+                 Worker failure and live-loop detection will NOT create escalation beads.\
+                 \n\
+                 To fix, add to your ~/.config/needle/config.yaml:\
+                 \n\
+                   strands:\
+                     splice:\
+                       report_workspace: /path/to/your/workspace\
+                 \n\
+                 Or set NEEDLE_STRANDS__SPLICE__REPORT_WORKSPACE=/path/to/workspace\
+                 \n\
+                 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            );
+        }
+
         let splice = SpliceStrand::new(
             config.strands.splice.clone(),
             splice_heartbeat_dir,

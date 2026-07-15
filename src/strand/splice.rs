@@ -69,6 +69,15 @@ struct LogRunawayInfo {
     sample: Vec<String>,
 }
 
+#[derive(Debug)]
+struct CompletionWithoutResolutionInfo {
+    bead_id: String,
+    claim_succeeded_count: u32,
+    orphaned_count: u32,
+    agent_completed_count: u32,
+    sample: Vec<String>,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // HeartbeatRecord
 // ──────────────────────────────────────────────────────────────────────────────
@@ -104,6 +113,13 @@ enum LoopType {
     StatePingPong {
         states: Vec<String>,
         cycle_count: u32,
+    },
+    /// Completion without resolution: many agent.completed events but bead never closes.
+    CompletionWithoutResolution {
+        bead_id: String,
+        claim_succeeded_count: u32,
+        orphaned_count: u32,
+        agent_completed_count: u32,
     },
 }
 
@@ -371,6 +387,24 @@ impl SpliceStrand {
             }));
         }
 
+        // Pattern 4: Completion without resolution — many agent.completed but bead never closes.
+        if let Some(completion) = self.detect_completion_without_resolution(&events) {
+            return Ok(Some(LiveLoopWorker {
+                heartbeat: record.clone(),
+                loop_type: LoopType::CompletionWithoutResolution {
+                    bead_id: completion.bead_id.clone(),
+                    claim_succeeded_count: completion.claim_succeeded_count,
+                    orphaned_count: completion.orphaned_count,
+                    agent_completed_count: completion.agent_completed_count,
+                },
+                evidence: LoopEvidence {
+                    events_scanned: tail_events.len(),
+                    sample_events: completion.sample,
+                    detected_at,
+                },
+            }));
+        }
+
         Ok(None)
     }
 
@@ -515,6 +549,93 @@ impl SpliceStrand {
         }
 
         Ok(None)
+    }
+
+    /// Detect completion without resolution: many agent.completed events but bead never closes.
+    ///
+    /// This detects the pattern where a bead is claimed, the agent completes successfully,
+    /// but the bead is orphaned (not closed) and then reclaimed—repeating indefinitely.
+    /// The key signal is N agent.completed events for the same bead with 0 bead.completed events.
+    fn detect_completion_without_resolution(
+        &self,
+        events: &[TelemetryEventLike],
+    ) -> Option<CompletionWithoutResolutionInfo> {
+        // Track event counts per bead_id
+        let mut claim_succeeded_counts: HashMap<String, u32> = HashMap::new();
+        let mut orphaned_counts: HashMap<String, u32> = HashMap::new();
+        let mut agent_completed_counts: HashMap<String, u32> = HashMap::new();
+        let mut bead_completed_seen: HashSet<String> = HashSet::new();
+        let mut sample: Vec<String> = Vec::new();
+
+        for ev in events.iter().rev() {
+            let bead_id = match &ev.bead_id {
+                Some(id) => id.clone(),
+                None => continue,
+            };
+
+            // Track relevant events
+            match ev.event_type.as_str() {
+                "bead.claim.succeeded" => {
+                    *claim_succeeded_counts.entry(bead_id.clone()).or_insert(0) += 1;
+                    if sample.len() < 10 {
+                        sample.push(format!("{} claim.succeeded {}", ev.timestamp, bead_id));
+                    }
+                }
+                "bead.orphaned" => {
+                    *orphaned_counts.entry(bead_id.clone()).or_insert(0) += 1;
+                    if sample.len() < 10 {
+                        sample.push(format!("{} orphaned {}", ev.timestamp, bead_id));
+                    }
+                }
+                "agent.completed" => {
+                    *agent_completed_counts.entry(bead_id.clone()).or_insert(0) += 1;
+                    if sample.len() < 10 {
+                        sample.push(format!("{} agent.completed {}", ev.timestamp, bead_id));
+                    }
+                }
+                "bead.completed" => {
+                    bead_completed_seen.insert(bead_id);
+                }
+                _ => {}
+            }
+        }
+
+        // Check for beads with the problematic pattern:
+        // - High claim_succeeded count (indicating repeated claims)
+        // - High orphaned count (indicating the bead is being released without closure)
+        // - High agent_completed count (agents are succeeding)
+        // - NO bead.completed event (the bead never actually closes)
+        //
+        // The bf-34xw9 incident showed: 41 claim.succeeded, 25 orphaned, 42 agent.completed, 1 bead.completed
+        // We need thresholds that catch this pattern. Using claim_churn_threshold (20) as baseline.
+
+        for (bead_id, &agent_completed_count) in &agent_completed_counts {
+            // Skip if bead was completed (not stuck)
+            if bead_completed_seen.contains(bead_id) {
+                continue;
+            }
+
+            let claim_succeeded_count = claim_succeeded_counts.get(bead_id).copied().unwrap_or(0);
+            let orphaned_count = orphaned_counts.get(bead_id).copied().unwrap_or(0);
+
+            // Detect the pattern: high activity but no resolution
+            // Threshold: at least claim_churn_threshold agent.completed events
+            // AND significant claim/orphan activity (at least 5 each to avoid noise)
+            if agent_completed_count >= self.config.claim_churn_threshold
+                && claim_succeeded_count >= 5
+                && orphaned_count >= 5
+            {
+                return Some(CompletionWithoutResolutionInfo {
+                    bead_id: bead_id.clone(),
+                    claim_succeeded_count,
+                    orphaned_count,
+                    agent_completed_count,
+                    sample,
+                });
+            }
+        }
+
+        None
     }
 
     /// Scan for failed workers (stale heartbeat + dead tmux session).
@@ -713,8 +834,8 @@ impl SpliceStrand {
         let store = BrCliBeadStore::discover(report_workspace.clone())
             .context("failed to instantiate bead store for report workspace")?;
 
-        // Build bead title and body based on loop type.
-        let (title, pattern_name, details) = match &worker.loop_type {
+        // Build bead title and body based on loop type, and extract the stuck bead_id.
+        let (title, pattern_name, details, stuck_bead_id) = match &worker.loop_type {
             LoopType::ClaimChurn { bead_id, count } => {
                 let title = format!(
                     "Live loop: {} claim churn on bead {}",
@@ -726,7 +847,7 @@ impl SpliceStrand {
                      **Race-lost events (in last {}):** {}\n",
                     bead_id, worker.evidence.events_scanned, count
                 );
-                (title, "claim_churn".to_string(), details)
+                (title, "claim_churn".to_string(), details, Some(bead_id.clone()))
             }
             LoopType::StatePingPong {
                 states,
@@ -740,7 +861,7 @@ impl SpliceStrand {
                      **Cycles detected:** {}\n",
                     state_list, cycle_count
                 );
-                (title, "state_ping_pong".to_string(), details)
+                (title, "state_ping_pong".to_string(), details, None)
             }
             LoopType::LogRunaway {
                 bytes_growth,
@@ -759,7 +880,28 @@ impl SpliceStrand {
                     bytes_growth / 1024 / 1024,
                     window_secs
                 );
-                (title, "log_runaway".to_string(), details)
+                (title, "log_runaway".to_string(), details, None)
+            }
+            LoopType::CompletionWithoutResolution {
+                bead_id,
+                claim_succeeded_count,
+                orphaned_count,
+                agent_completed_count,
+            } => {
+                let title = format!(
+                    "Live loop: {} completion without resolution on bead {}",
+                    worker.heartbeat.worker_id, bead_id
+                );
+                let details = format!(
+                    "**Pattern:** Completion without resolution\n\
+                     **Bead ID:** {}\n\
+                     **Claim succeeded events:** {}\n\
+                     **Orphaned events:** {}\n\
+                     **Agent completed events:** {}\n\
+                     **No bead.completed events detected**\n",
+                    bead_id, claim_succeeded_count, orphaned_count, agent_completed_count
+                );
+                (title, "completion_without_resolution".to_string(), details, Some(bead_id.clone()))
             }
         };
 
@@ -821,6 +963,49 @@ impl SpliceStrand {
             bead_id = %bead_id,
             "splice: documented live loop"
         );
+
+        // CRITICAL: If this loop is tied to a specific bead, label that bead as "human"
+        // in its original workspace so Pluck stops redispatching it and Unravel can pick it up.
+        // This is the circuit breaker that prevents the retry storm.
+        if let Some(stuck_bead_id) = stuck_bead_id {
+            // Get the original workspace from the worker's heartbeat
+            let original_workspace = &worker.heartbeat.workspace;
+            let workspace_path = PathBuf::from(original_workspace);
+
+            // Verify the workspace exists and has a .beads/ subdirectory
+            let beads_dir = workspace_path.join(".beads");
+            if workspace_path.exists() && beads_dir.exists() {
+                // Instantiate bead store for the original workspace
+                if let Ok(original_store) = BrCliBeadStore::discover(workspace_path.clone()) {
+                    // Label the stuck bead as "human" to stop Pluck from redispatching it
+                    if let Ok(_) = original_store.add_label(&crate::types::BeadId::from(stuck_bead_id.clone()), "human").await {
+                        tracing::info!(
+                            stuck_bead_id = %stuck_bead_id,
+                            workspace = %original_workspace,
+                            "splice: labeled stuck bead as human to stop redispatch"
+                        );
+                    } else {
+                        tracing::warn!(
+                            stuck_bead_id = %stuck_bead_id,
+                            workspace = %original_workspace,
+                            "splice: failed to label stuck bead as human"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        stuck_bead_id = %stuck_bead_id,
+                        workspace = %original_workspace,
+                        "splice: failed to instantiate bead store for original workspace"
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    stuck_bead_id = %stuck_bead_id,
+                    workspace = %original_workspace,
+                    "splice: original workspace does not exist or has no .beads/ directory"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -886,6 +1071,7 @@ impl super::Strand for SpliceStrand {
                 LoopType::ClaimChurn { .. } => "claim_churn",
                 LoopType::StatePingPong { .. } => "state_ping_pong",
                 LoopType::LogRunaway { .. } => "log_runaway",
+                LoopType::CompletionWithoutResolution { .. } => "completion_without_resolution",
             };
             let key = format!(
                 "{}-{}-{}",
