@@ -20,10 +20,16 @@ use crate::types::{Bead, BeadId, ClaimResult};
 /// Known error strings that indicate SQLite database corruption.
 const CORRUPTION_MARKERS: &[&str] = &[
     "database disk image is malformed",
-    "database is locked",
     "database or disk is full",
     "attempt to write a readonly database",
     "file is not a database",
+];
+
+/// Known error strings that indicate SQLite database is locked (transient).
+const LOCK_MARKERS: &[&str] = &[
+    "database is locked",
+    "sqlite error: 5",  // SQLITE_BUSY = database is locked
+    "sqlite error: 6",  // SQLITE_LOCKED = table is locked
 ];
 
 /// Known error strings that indicate br sync conflicts.
@@ -46,6 +52,13 @@ pub fn is_sync_conflict(msg: &str) -> bool {
     SYNC_CONFLICT_MARKERS
         .iter()
         .any(|marker| msg.contains(marker))
+}
+
+/// Check if an error message indicates SQLite database is locked (transient condition).
+///
+/// Returns `true` if the message contains any known lock marker.
+pub fn is_lock_error(msg: &str) -> bool {
+    LOCK_MARKERS.iter().any(|marker| msg.contains(marker))
 }
 
 /// Outcome of a database recovery attempt.
@@ -568,7 +581,9 @@ impl BrCliBeadStore {
 #[async_trait]
 impl BeadStore for BrCliBeadStore {
     async fn list_all(&self) -> Result<Vec<Bead>> {
-        let stdout = self.run_br(&["list", "--json", "--limit", "0"]).await?;
+        // Use a large explicit limit instead of --limit 0, which returns
+        // an empty set on bead-forge 0.2.0 (bug). 999999 effectively means "no limit".
+        let stdout = self.run_br(&["list", "--json", "--limit", "999999"]).await?;
         Self::parse_beads(&stdout, "br list --json")
     }
 
@@ -979,42 +994,103 @@ impl BfCliBeadStore {
     }
 
     async fn run_bf_in(&self, dir: &Path, args: &[&str], timeout_secs: u64) -> Result<String> {
-        let timeout_duration = std::time::Duration::from_secs(timeout_secs);
+        const MAX_RETRIES: u32 = 5;
+        const BASE_DELAY_MS: u64 = 50;
 
-        let mut cmd = tokio::process::Command::new(&self.bf_path);
-        cmd.args(args)
-            .current_dir(dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn bf subprocess: {args:?}"))?;
+        let mut attempt = 0;
+        let mut last_error = None;
 
-        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => {
-                return Err(e).context(format!("bf subprocess failed: {args:?}"));
+        loop {
+            attempt += 1;
+            let timeout_duration = std::time::Duration::from_secs(timeout_secs);
+
+            let mut cmd = tokio::process::Command::new(&self.bf_path);
+            cmd.args(args)
+                .current_dir(dir)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true);
+            let child = cmd
+                .spawn()
+                .with_context(|| format!("failed to spawn bf subprocess: {args:?}"))?;
+
+            let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+                Ok(Ok(output)) => output,
+                Ok(Err(e)) => {
+                    let err = anyhow::anyhow!("bf subprocess failed: {args:?}: {e}");
+                    last_error = Some(err);
+                    // For subprocess spawn errors, don't retry - these are not transient
+                    break;
+                }
+                Err(_) => {
+                    tracing::error!(
+                        args = ?args,
+                        timeout_secs,
+                        attempt,
+                        "bf subprocess timed out, killing process"
+                    );
+                    let err = anyhow::anyhow!("bf subprocess timed out after {timeout_secs}s: {args:?}");
+                    last_error = Some(err);
+                    // Timeouts are not transient lock errors - don't retry
+                    break;
+                }
+            };
+
+            let stdout = String::from_utf8(output.stdout).context("bf stdout was not valid UTF-8")?;
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            if output.status.success() {
+                return Ok(stdout);
             }
-            Err(_) => {
+
+            let code = output.status.code().unwrap_or(-1);
+            let stderr_trimmed = stderr.trim().to_string();
+
+            // Check if this is a transient lock error that should be retried
+            let is_lock_error = is_lock_error(&stderr_trimmed);
+
+            if !is_lock_error || attempt >= MAX_RETRIES {
+                // Either not a lock error, or we've exhausted retries
                 tracing::error!(
                     args = ?args,
-                    timeout_secs,
-                    "bf subprocess timed out, killing process"
+                    exit_code = code,
+                    attempt,
+                    max_retries = MAX_RETRIES,
+                    is_lock_error,
+                    bf_stderr = %stderr_trimmed,
+                    stdout_preview = %stdout.chars().take(200).collect::<String>(),
+                    "bf subprocess failed - stderr captured"
                 );
-                bail!("bf subprocess timed out after {timeout_secs}s: {args:?}");
+
+                let base_error = anyhow::anyhow!("bf {args:?} exited with code {code}");
+                let error_with_stderr = if stderr_trimmed.is_empty() {
+                    base_error
+                } else {
+                    base_error.context(format!("bf stderr: {}", stderr_trimmed))
+                };
+                return Err(error_with_stderr);
             }
-        };
 
-        let stdout = String::from_utf8(output.stdout).context("bf stdout was not valid UTF-8")?;
-        let stderr = String::from_utf8_lossy(&output.stderr);
+            // This is a lock error and we have retries remaining
+            tracing::warn!(
+                args = ?args,
+                attempt,
+                max_retries = MAX_RETRIES,
+                exit_code = code,
+                bf_stderr = %stderr_trimmed,
+                "bf subprocess failed with lock error, retrying with exponential backoff"
+            );
 
-        if !output.status.success() {
-            let code = output.status.code().unwrap_or(-1);
-            bail!("bf {args:?} exited with code {code}\nstderr: {stderr}\nstdout: {stdout}");
+            // Calculate exponential backoff delay: BASE_DELAY_MS * 2^(attempt-1)
+            let delay_ms = BASE_DELAY_MS * (1 << (attempt - 1));
+            let delay = std::time::Duration::from_millis(delay_ms);
+
+            tokio::time::sleep(delay).await;
+            last_error = None; // Clear last_error since we're retrying
         }
 
-        Ok(stdout)
+        // If we broke out of the loop, return the last error
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("bf subprocess failed with unknown error")))
     }
 
     /// Parse a JSON array of beads from bf output.
@@ -1075,12 +1151,16 @@ impl BfCliBeadStore {
 #[async_trait]
 impl BeadStore for BfCliBeadStore {
     async fn list_all(&self) -> Result<Vec<Bead>> {
-        let stdout = self.run_bf(&["list", "--json", "--limit", "0"]).await?;
+        // Use a large explicit limit instead of --limit 0, which returns
+        // an empty set on bead-forge 0.2.0 (bug). 999999 effectively means "no limit".
+        let stdout = self.run_bf(&["list", "--json", "--limit", "999999"]).await?;
         Self::parse_beads(&stdout, "bf list --json")
     }
 
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
-        let mut args = vec!["list", "--json", "--status", "open", "--limit", "0"];
+        // Use a large explicit limit instead of --limit 0, which returns
+        // an empty set on bead-forge 0.2.0 (bug). 999999 effectively means "no limit".
+        let mut args = vec!["list", "--json", "--status", "open", "--limit", "999999"];
 
         // Build filter args — stored so they live long enough for the slice.
         let assignee_arg;
