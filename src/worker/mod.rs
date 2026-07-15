@@ -825,8 +825,14 @@ impl Worker {
             started_at: chrono::Utc::now(),
             beads_processed: 0,
         };
-        if let Err(e) = self.registry.register(entry) {
-            tracing::warn!(error = %e, "failed to register in worker registry");
+        if let Err(e) = self.registry.register(entry.clone()) {
+            // Log to both tracing and stderr for visibility
+            let worker_id = &entry.id;
+            let pid = entry.pid;
+            tracing::error!(error = %e, worker_id = %worker_id, pid, "failed to register in worker registry - worker will run but will be invisible to needle status/list");
+            eprintln!("ERROR: Failed to register worker '{}' (PID {}) in registry: {}", worker_id, pid, e);
+            eprintln!("       The worker will continue running but will not appear in 'needle status' or 'needle list'.");
+            eprintln!("       This indicates a problem with ~/.needle/state/workers.json - check permissions and disk space.");
         }
         self.telemetry.emit(EventKind::InitStepCompleted {
             step: "registry_registration".to_string(),

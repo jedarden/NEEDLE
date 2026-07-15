@@ -259,7 +259,7 @@ async fn already_has_trailer(workspace: &str, bead_id: &BeadId) -> Result<bool> 
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     #[test]
@@ -286,7 +286,7 @@ mod tests {
         assert_eq!(pre, current); // no-op condition
     }
 
-    fn run_git(dir: &PathBuf, args: &[&str]) -> String {
+    fn run_git(dir: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .args(["-C", dir.to_str().unwrap()])
             .args(args)
@@ -296,7 +296,7 @@ mod tests {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
-    fn run_git_with_trailer(dir: &PathBuf, trailer: &str) {
+    fn run_git_with_trailer(dir: &Path, trailer: &str) {
         let output = Command::new("git")
             .args(["-C", dir.to_str().unwrap()])
             .args(["commit", "--amend", "--no-edit", "--trailer", trailer])
@@ -305,7 +305,7 @@ mod tests {
         assert!(output.status.success(), "git commit --amend failed");
     }
 
-    fn get_trailers(dir: &PathBuf) -> String {
+    fn get_trailers(dir: &Path) -> String {
         run_git(
             dir,
             &[

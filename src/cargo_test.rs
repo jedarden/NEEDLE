@@ -1953,9 +1953,8 @@ mod tests {
             "should capture at least one output stream"
         );
 
-        // Verify stdout/stderr strings are not empty (they may contain cargo output)
-        assert!(outcome.stdout.len() >= 0, "stdout should be captured");
-        assert!(outcome.stderr.len() >= 0, "stderr should be captured");
+        // Verify stdout/stderr strings are captured (they may contain cargo output)
+        assert!(!outcome.stdout.is_empty() || !outcome.stderr.is_empty(), "at least one output stream should be captured");
     }
 
     #[test]

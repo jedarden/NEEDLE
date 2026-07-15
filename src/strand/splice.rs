@@ -978,7 +978,7 @@ impl SpliceStrand {
                 // Instantiate bead store for the original workspace
                 if let Ok(original_store) = BrCliBeadStore::discover(workspace_path.clone()) {
                     // Label the stuck bead as "human" to stop Pluck from redispatching it
-                    if let Ok(_) = original_store.add_label(&crate::types::BeadId::from(stuck_bead_id.clone()), "human").await {
+                    if original_store.add_label(&crate::types::BeadId::from(stuck_bead_id.clone()), "human").await.is_ok() {
                         tracing::info!(
                             stuck_bead_id = %stuck_bead_id,
                             workspace = %original_workspace,
@@ -1256,5 +1256,167 @@ mod tests {
 
         let result = strand.evaluate(&NoOpStore).await;
         assert!(matches!(result, StrandResult::NoWork));
+    }
+
+    #[test]
+    fn detect_completion_without_resolution_finds_bf_34xw9_pattern() {
+        // Regression test for the bf-34xw9 incident pattern:
+        // 41 claim.succeeded, 25 orphaned, 42 agent.completed, 0 bead.completed
+        let config = SpliceConfig::default();
+        let tel = Telemetry::new("test".to_string());
+        let strand = SpliceStrand::new(
+            config,
+            PathBuf::from("/tmp/heartbeats"),
+            PathBuf::from("/tmp/state"),
+            tel,
+        );
+
+        let mut events = Vec::new();
+        let base_time = Utc::now();
+
+        // Create 41 bead.claim.succeeded events
+        for i in 0..41 {
+            events.push(TelemetryEventLike {
+                timestamp: base_time + chrono::Duration::seconds(i),
+                event_type: "bead.claim.succeeded".to_string(),
+                bead_id: Some("bf-34xw9".to_string()),
+                data: serde_json::Value::Null,
+            });
+        }
+
+        // Create 25 bead.orphaned events
+        for i in 0..25 {
+            events.push(TelemetryEventLike {
+                timestamp: base_time + chrono::Duration::seconds(41 + i),
+                event_type: "bead.orphaned".to_string(),
+                bead_id: Some("bf-34xw9".to_string()),
+                data: serde_json::Value::Null,
+            });
+        }
+
+        // Create 42 agent.completed events
+        for i in 0..42 {
+            events.push(TelemetryEventLike {
+                timestamp: base_time + chrono::Duration::seconds(66 + i),
+                event_type: "agent.completed".to_string(),
+                bead_id: Some("bf-34xw9".to_string()),
+                data: serde_json::Value::Null,
+            });
+        }
+
+        // No bead.completed event - this is the key signal
+        // The detector should find this pattern since agent_completed_count (42) >= claim_churn_threshold (20)
+        // AND claim_succeeded_count (41) >= 5 AND orphaned_count (25) >= 5
+
+        let result = strand.detect_completion_without_resolution(&events);
+
+        assert!(result.is_some(), "Detector should find the completion-without-resolution pattern");
+
+        let info = result.unwrap();
+        assert_eq!(info.bead_id, "bf-34xw9");
+        assert_eq!(info.claim_succeeded_count, 41);
+        assert_eq!(info.orphaned_count, 25);
+        assert_eq!(info.agent_completed_count, 42);
+    }
+
+    #[test]
+    fn detect_completion_without_resolution_ignores_resolved_beads() {
+        // Beads that complete successfully should not trigger the detector
+        let config = SpliceConfig::default();
+        let tel = Telemetry::new("test".to_string());
+        let strand = SpliceStrand::new(
+            config,
+            PathBuf::from("/tmp/heartbeats"),
+            PathBuf::from("/tmp/state"),
+            tel,
+        );
+
+        let mut events = Vec::new();
+        let base_time = Utc::now();
+
+        // Create events for a bead that DOES complete
+        for i in 0..30 {
+            events.push(TelemetryEventLike {
+                timestamp: base_time + chrono::Duration::seconds(i),
+                event_type: "bead.claim.succeeded".to_string(),
+                bead_id: Some("bf-resolved".to_string()),
+                data: serde_json::Value::Null,
+            });
+        }
+
+        for i in 0..20 {
+            events.push(TelemetryEventLike {
+                timestamp: base_time + chrono::Duration::seconds(30 + i),
+                event_type: "bead.orphaned".to_string(),
+                bead_id: Some("bf-resolved".to_string()),
+                data: serde_json::Value::Null,
+            });
+        }
+
+        for i in 0..25 {
+            events.push(TelemetryEventLike {
+                timestamp: base_time + chrono::Duration::seconds(50 + i),
+                event_type: "agent.completed".to_string(),
+                bead_id: Some("bf-resolved".to_string()),
+                data: serde_json::Value::Null,
+            });
+        }
+
+        // Add a bead.completed event - this should prevent detection
+        events.push(TelemetryEventLike {
+            timestamp: base_time + chrono::Duration::seconds(75),
+            event_type: "bead.completed".to_string(),
+            bead_id: Some("bf-resolved".to_string()),
+            data: serde_json::Value::Null,
+        });
+
+        let result = strand.detect_completion_without_resolution(&events);
+
+        assert!(result.is_none(), "Detector should ignore beads that completed successfully");
+    }
+
+    #[test]
+    fn detect_completion_without_resolution_requires_minimum_thresholds() {
+        // Test that low-count patterns don't trigger (avoid noise)
+        let config = SpliceConfig::default();
+        let tel = Telemetry::new("test".to_string());
+        let strand = SpliceStrand::new(
+            config,
+            PathBuf::from("/tmp/heartbeats"),
+            PathBuf::from("/tmp/state"),
+            tel,
+        );
+
+        let mut events = Vec::new();
+        let base_time = Utc::now();
+
+        // Create only 3 of each event type (below the 5 threshold for claim/orphan)
+        for i in 0..3 {
+            events.push(TelemetryEventLike {
+                timestamp: base_time + chrono::Duration::seconds(i),
+                event_type: "bead.claim.succeeded".to_string(),
+                bead_id: Some("bf-low-count".to_string()),
+                data: serde_json::Value::Null,
+            });
+            events.push(TelemetryEventLike {
+                timestamp: base_time + chrono::Duration::seconds(3 + i),
+                event_type: "bead.orphaned".to_string(),
+                bead_id: Some("bf-low-count".to_string()),
+                data: serde_json::Value::Null,
+            });
+            events.push(TelemetryEventLike {
+                timestamp: base_time + chrono::Duration::seconds(6 + i),
+                event_type: "agent.completed".to_string(),
+                bead_id: Some("bf-low-count".to_string()),
+                data: serde_json::Value::Null,
+            });
+        }
+
+        let result = strand.detect_completion_without_resolution(&events);
+
+        assert!(
+            result.is_none(),
+            "Detector should not trigger on low-count patterns (below thresholds)"
+        );
     }
 }
