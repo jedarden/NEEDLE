@@ -1,0 +1,16 @@
+Extracting p95 values from Criterion benchmark output...
+
+Benchmark: latency_percentiles/p95_100kb
+Samples: 100
+Unit: microseconds (µs)
+
+Statistics:
+  Min:     45032 µs (45.03 ms)
+  Max:     76292 µs (76.29 ms)
+  Avg:     51194 µs (51.19 ms)
+  P95:     62317 µs (62.32 ms) ← p95 value appears in output!
+
+✓ p95 label appears in output
+✓ Values are present for p95 field
+✓ Format matches expected pattern
+✓ p95 successfully extracted from Criterion benchmark output
