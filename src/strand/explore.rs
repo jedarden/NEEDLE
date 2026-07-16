@@ -1042,8 +1042,9 @@ mod tests {
     #[test]
     fn rotation_hash_distribution_is_reasonable() {
         // Test that rotation distributes workers across different start indices
-        let workspaces: Vec<PathBuf> =
-            (0..10).map(|i| PathBuf::from(format!("/ws{}", i))).collect();
+        let workspaces: Vec<PathBuf> = (0..10)
+            .map(|i| PathBuf::from(format!("/ws{}", i)))
+            .collect();
 
         let temp_dir = tempfile::tempdir().unwrap();
         let registry = crate::registry::Registry::new(temp_dir.path());
