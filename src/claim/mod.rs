@@ -526,6 +526,10 @@ mod tests {
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }
+
+        fn has_valid_store(&self) -> bool {
+            true // Mock store always has a valid store
+        }
     }
 
     fn make_claimer(store: Arc<dyn BeadStore>) -> Claimer {

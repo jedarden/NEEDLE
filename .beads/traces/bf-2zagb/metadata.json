@@ -1,0 +1,16 @@
+{
+  "bead_id": "bf-2zagb",
+  "agent": "missing-agent",
+  "provider": null,
+  "model": null,
+  "exit_code": 127,
+  "outcome": "agent_not_found",
+  "duration_ms": 5,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-07-16T09:49:32.200845010Z",
+  "trace_format": "raw_text",
+  "pruned": false,
+  "template_version": null
+}

@@ -741,6 +741,10 @@ mod tests {
         async fn full_rebuild(&self) -> Result<()> {
             Ok(())
         }
+
+        fn has_valid_store(&self) -> bool {
+            true // Mock store always has a valid store
+        }
     }
 
     fn test_bead() -> Bead {

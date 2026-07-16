@@ -85,6 +85,7 @@ pub mod strand_results {
     pub const WORK_CREATED: &str = "work_created";
     pub const NO_WORK: &str = "no_work";
     pub const ERROR: &str = "error";
+    pub const SKIPPED: &str = "skipped";
 }
 
 /// Claim result values for telemetry.
@@ -193,6 +194,7 @@ mod tests {
         assert_eq!(strand_results::WORK_CREATED, "work_created");
         assert_eq!(strand_results::NO_WORK, "no_work");
         assert_eq!(strand_results::ERROR, "error");
+        assert_eq!(strand_results::SKIPPED, "skipped");
 
         assert_eq!(claim_results::SUCCEEDED, "succeeded");
         assert_eq!(claim_results::RACE_LOST, "race_lost");

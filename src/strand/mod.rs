@@ -305,6 +305,9 @@ impl StrandRunner {
                     StrandResult::WorkCreated => (strand_results::WORK_CREATED.to_string(), true),
                     StrandResult::NoWork => (strand_results::NO_WORK.to_string(), true),
                     StrandResult::Error(_) => (strand_results::ERROR.to_string(), true),
+                    StrandResult::Skipped { reason } => {
+                        (format!("skipped({})", reason), true)
+                    }
                     StrandResult::Split(_, _failure_count) => {
                         (format!("{}({})", strand_results::BEAD_FOUND, 1), true)
                     }
@@ -313,6 +316,7 @@ impl StrandRunner {
                 tracing::Span::current().record(attrs::NEEDLE_STRAND_DURATION_MS, elapsed_ms);
 
                 // Set strand span status: Error for strand errors, Ok for all other results
+                // Note: Skipped is not an error - it's expected for roam-only workers
                 if matches!(result, StrandResult::Error(_)) {
                     tracing::Span::current().record("otel.status_code", 2u64);
                     tracing::Span::current().record("otel.status_description", &result_str);
@@ -476,6 +480,29 @@ impl StrandRunner {
                             strand = %strand_name,
                             elapsed_ms,
                             "strand returned no work"
+                        );
+                        continue;
+                    }
+                    StrandResult::Skipped { reason } => {
+                        if let Err(e) =
+                            self.telemetry
+                                .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                    strand_name: strand_name.clone(),
+                                    result: format!("skipped({})", reason),
+                                    duration_ms: elapsed_ms,
+                                })
+                        {
+                            tracing::warn!(
+                                strand = %strand_name,
+                                error = %e,
+                                "failed to emit strand evaluated telemetry"
+                            );
+                        }
+                        tracing::info!(
+                            strand = %strand_name,
+                            reason = %reason,
+                            elapsed_ms,
+                            "strand skipped"
                         );
                         continue;
                     }
@@ -661,6 +688,10 @@ mod tests {
             Ok(crate::types::ClaimResult::NotClaimable {
                 reason: "claim_auto not supported in mock".to_string(),
             })
+        }
+
+        fn has_valid_store(&self) -> bool {
+            true // Mock store always has a valid store
         }
     }
 

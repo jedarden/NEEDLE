@@ -3347,6 +3347,10 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+
+        fn has_valid_store(&self) -> bool {
+            true // Mock store always has a valid store
+        }
     }
 
     fn make_test_bead(id: &str) -> Bead {
@@ -3572,6 +3576,10 @@ mod tests {
         async fn remove_dependency(&self, _a: &BeadId, _b: &BeadId) -> Result<()> {
             Ok(())
         }
+
+        fn has_valid_store(&self) -> bool {
+            true // Mock store always has a valid store
+        }
     }
 
     /// A store that always returns NotClaimable on claim.
@@ -3653,6 +3661,10 @@ mod tests {
             _blocker_id: &BeadId,
         ) -> Result<()> {
             Ok(())
+        }
+
+        fn has_valid_store(&self) -> bool {
+            true // Mock store always has a valid store
         }
     }
 

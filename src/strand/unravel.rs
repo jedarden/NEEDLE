@@ -250,6 +250,19 @@ impl super::Strand for UnravelStrand {
             return StrandResult::NoWork;
         }
 
+        // Check if the home bead store exists. If not, skip this strand.
+        // This distinguishes between "no home store configured" (expected for
+        // roam-only workers) and "home store is broken" (unexpected error).
+        if !store.has_valid_store() {
+            tracing::info!(
+                "Home workspace has no .beads/ directory — skipping Unravel strand \
+                 (expected for roam-only workers)"
+            );
+            return StrandResult::Skipped {
+                reason: "no_home_store".to_string(),
+            };
+        }
+
         // Load persistent state.
         let state_path = self.state_file_path();
         let mut state = match UnravelState::load(&state_path) {
@@ -692,6 +705,10 @@ mod tests {
             Ok(ClaimResult::NotClaimable {
                 reason: "claim_auto not supported in mock".to_string(),
             })
+        }
+
+        fn has_valid_store(&self) -> bool {
+            true
         }
     }
 

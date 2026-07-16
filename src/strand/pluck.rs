@@ -281,6 +281,19 @@ impl super::Strand for PluckStrand {
             "Pluck strand evaluation starting"
         );
 
+        // Check if the home bead store exists. If not, skip this strand.
+        // This distinguishes between "no home store configured" (expected for
+        // roam-only workers) and "home store is broken" (unexpected error).
+        if !store.has_valid_store() {
+            tracing::info!(
+                "Home workspace has no .beads/ directory — skipping Pluck strand \
+                 (expected for roam-only workers)"
+            );
+            return StrandResult::Skipped {
+                reason: "no_home_store".to_string(),
+            };
+        }
+
         // 1. Query bead store for ready, unassigned beads.
         let filters = Filters {
             assignee: None,
@@ -683,6 +696,10 @@ mod tests {
                 reason: "claim_auto not supported in mock".to_string(),
             })
         }
+
+        fn has_valid_store(&self) -> bool {
+            true
+        }
     }
 
     /// A store that returns all beads from `ready()` without any label filtering,
@@ -768,6 +785,10 @@ mod tests {
                 reason: "claim_auto not supported in mock".to_string(),
             })
         }
+
+        fn has_valid_store(&self) -> bool {
+            true
+        }
     }
 
     /// Failing bead store for error-path tests.
@@ -841,6 +862,10 @@ mod tests {
             Ok(ClaimResult::NotClaimable {
                 reason: "claim_auto not supported in mock".to_string(),
             })
+        }
+
+        fn has_valid_store(&self) -> bool {
+            true
         }
     }
 

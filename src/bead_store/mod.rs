@@ -35,6 +35,15 @@ const LOCK_MARKERS: &[&str] = &[
 /// Known error strings that indicate br sync conflicts.
 const SYNC_CONFLICT_MARKERS: &[&str] = &["SYNC_CONFLICT", "JSONL is newer", "sync conflict"];
 
+/// Known error strings that indicate a missing or invalid bead store.
+const MISSING_STORE_MARKERS: &[&str] = &[
+    "no such file or directory",
+    "cannot find",
+    "does not exist",
+    ".beads",
+    "database disk image is malformed",  // Often occurs when .beads/ doesn't exist
+];
+
 /// Check if an error message indicates SQLite database corruption.
 ///
 /// Returns `true` if the message contains any known corruption marker.
@@ -59,6 +68,33 @@ pub fn is_sync_conflict(msg: &str) -> bool {
 /// Returns `true` if the message contains any known lock marker.
 pub fn is_lock_error(msg: &str) -> bool {
     LOCK_MARKERS.iter().any(|marker| msg.contains(marker))
+}
+
+/// Check if a workspace has a valid bead store (i.e., has a `.beads/` directory).
+///
+/// Returns `true` if the workspace contains a `.beads/` directory, `false` otherwise.
+/// This is used by strands to distinguish between "no home store configured" (expected,
+/// benign for roam-only workers) and "home store is broken" (unexpected, problem).
+///
+/// # Arguments
+///
+/// * `workspace` - Path to the workspace directory to check
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::bead_store::has_valid_bead_store;
+/// use std::path::PathBuf;
+///
+/// let workspace = PathBuf::from("/home/coding/myproject");
+/// if has_valid_bead_store(&workspace) {
+///     println!("Workspace has a valid bead store");
+/// } else {
+///     println!("Workspace has no bead store - strand should return Skipped");
+/// }
+/// ```
+pub fn has_valid_bead_store(workspace: &Path) -> bool {
+    workspace.join(".beads").is_dir()
 }
 
 /// Outcome of a database recovery attempt.
@@ -197,6 +233,13 @@ pub trait BeadStore: Send + Sync {
     ///
     /// Returns `Err` if rebuild or verification fails (JSONL itself may be corrupt).
     async fn full_rebuild(&self) -> Result<()>;
+
+    /// Check if this store has a valid bead store (i.e., has a `.beads/` directory).
+    ///
+    /// Returns `true` if the workspace contains a `.beads/` directory, `false` otherwise.
+    /// This is used by strands to distinguish between "no home store configured" (expected,
+    /// benign for roam-only workers) and "home store is broken" (unexpected, problem).
+    fn has_valid_store(&self) -> bool;
 }
 
 // ─── BrCliBeadStore ──────────────────────────────────────────────────────────
@@ -858,6 +901,10 @@ impl BeadStore for BrCliBeadStore {
             }
         }
     }
+
+    fn has_valid_store(&self) -> bool {
+        has_valid_bead_store(&self.workspace)
+    }
 }
 
 impl BrCliBeadStore {
@@ -1378,6 +1425,10 @@ impl BeadStore for BfCliBeadStore {
         tracing::info!("database fully rebuilt from JSONL — verified clean");
         Ok(())
     }
+
+    fn has_valid_store(&self) -> bool {
+        has_valid_bead_store(&self.workspace)
+    }
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────
@@ -1474,7 +1525,9 @@ mod tests {
 
     #[test]
     fn detects_locked_db_error() {
-        assert!(is_corruption_error("database is locked"));
+        assert!(is_lock_error("database is locked"));
+        // Also verify that lock errors are NOT corruption errors (they're transient)
+        assert!(!is_corruption_error("database is locked"));
     }
 
     #[test]
@@ -1580,6 +1633,31 @@ mod tests {
         // SYNC_CONFLICT is an exact marker, case matters
         assert!(!is_sync_conflict("sync_conflict"));
         assert!(is_sync_conflict("SYNC_CONFLICT"));
+    }
+
+    // ── has_valid_bead_store tests ─────────────────────────────────────────
+
+    #[test]
+    fn has_valid_bead_store_returns_false_for_nonexistent_directory() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let workspace = tmp_dir.path();
+        assert!(!has_valid_bead_store(workspace));
+    }
+
+    #[test]
+    fn has_valid_bead_store_returns_true_for_beads_directory() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let workspace = tmp_dir.path();
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+        assert!(has_valid_bead_store(workspace));
+    }
+
+    #[test]
+    fn has_valid_bead_store_returns_false_for_file_instead_of_directory() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let workspace = tmp_dir.path();
+        std::fs::write(workspace.join(".beads"), "not a directory").unwrap();
+        assert!(!has_valid_bead_store(workspace));
     }
 
     // ── parse_beads edge case tests ───────────────────────────────────────

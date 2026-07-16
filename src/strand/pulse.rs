@@ -597,6 +597,10 @@ mod tests {
                 reason: "claim_auto not supported in mock".to_string(),
             })
         }
+
+        fn has_valid_store(&self) -> bool {
+            true
+        }
     }
 
     // ── State tests ─────────────────────────────────────────────────────

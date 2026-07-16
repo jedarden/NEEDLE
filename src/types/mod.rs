@@ -308,6 +308,13 @@ pub enum StrandResult {
     NoWork,
     /// The strand encountered an error during evaluation.
     Error(StrandError),
+    /// The strand was skipped because its prerequisites are not met.
+    ///
+    /// This is distinct from `NoWork` (which means "ran and found nothing")
+    /// and `Error` (which means "ran but failed"). `Skipped` means "did not
+    /// run because the environment doesn't support it" — e.g., a strand that
+    /// requires a home bead store when the worker is configured without one.
+    Skipped { reason: String },
     /// A bead with too many consecutive failures should be split.
     ///
     /// Contains the bead to split and the current failure count.

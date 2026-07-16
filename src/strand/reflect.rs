@@ -1364,6 +1364,19 @@ impl super::Strand for ReflectStrand {
             return StrandResult::NoWork;
         }
 
+        // Check if the home bead store exists. If not, skip this strand.
+        // This distinguishes between "no home store configured" (expected for
+        // roam-only workers) and "home store is broken" (unexpected error).
+        if !_store.has_valid_store() {
+            tracing::info!(
+                "Home workspace has no .beads/ directory — skipping Reflect strand \
+                 (expected for roam-only workers)"
+            );
+            return StrandResult::Skipped {
+                reason: "no_home_store".to_string(),
+            };
+        }
+
         match self.consolidate(false).await {
             Ok(_) => StrandResult::NoWork,
             Err(e) => StrandResult::Error(StrandError::ConfigError(format!(
@@ -1557,6 +1570,10 @@ mod tests {
                 Ok(crate::types::ClaimResult::NotClaimable {
                     reason: "claim_auto not supported in mock".to_string(),
                 })
+            }
+
+            fn has_valid_store(&self) -> bool {
+                true
             }
         }
 

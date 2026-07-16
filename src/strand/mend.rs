@@ -1270,6 +1270,19 @@ impl super::Strand for MendStrand {
         let start = std::time::Instant::now();
         let mut summary = MendSummary::default();
 
+        // Check if the home bead store exists. If not, skip this strand.
+        // This distinguishes between "no home store configured" (expected for
+        // roam-only workers) and "home store is broken" (unexpected error).
+        if !store.has_valid_store() {
+            tracing::info!(
+                "Home workspace has no .beads/ directory — skipping Mend strand \
+                 (expected for roam-only workers)"
+            );
+            return StrandResult::Skipped {
+                reason: "no_home_store".to_string(),
+            };
+        }
+
         // Step 1: Stale claim cleanup via peer monitoring.
         if let Err(e) = self.cleanup_stale_claims(store, &mut summary).await {
             tracing::warn!(error = %e, "mend: stale claim cleanup failed");
@@ -1568,6 +1581,10 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+
+        fn has_valid_store(&self) -> bool {
+            true
+        }
     }
 
     /// Failing bead store for error-path tests.
@@ -1631,6 +1648,10 @@ mod tests {
             _blocker_id: &BeadId,
         ) -> Result<()> {
             anyhow::bail!("store error")
+        }
+
+        fn has_valid_store(&self) -> bool {
+            true
         }
     }
 
@@ -4057,6 +4078,11 @@ mod tests {
         async fn full_rebuild(&self) -> Result<()> {
             Ok(())
         }
+
+        fn has_valid_store(&self) -> bool {
+            true
+        }
+
         async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
             Ok(())
         }

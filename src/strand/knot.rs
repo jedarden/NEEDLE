@@ -167,6 +167,19 @@ impl super::Strand for KnotStrand {
     async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
         let cycle = self.increment_exhaustion();
 
+        // Check if the home bead store exists. If not, skip this strand.
+        // This distinguishes between "no home store configured" (expected for
+        // roam-only workers) and "home store is broken" (unexpected error).
+        if !store.has_valid_store() {
+            tracing::info!(
+                "Home workspace has no .beads/ directory — skipping Knot strand \
+                 (expected for roam-only workers)"
+            );
+            return StrandResult::Skipped {
+                reason: "no_home_store".to_string(),
+            };
+        }
+
         // Enter the strand.knot span for the exhaustion diagnosis.
         let knot_span = tracing::info_span!(
             "strand.knot",
@@ -356,6 +369,10 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+
+        fn has_valid_store(&self) -> bool {
+            true
+        }
     }
 
     /// Failing store for error-path tests.
@@ -419,6 +436,10 @@ mod tests {
             _blocker_id: &BeadId,
         ) -> Result<()> {
             anyhow::bail!("store connection failed")
+        }
+
+        fn has_valid_store(&self) -> bool {
+            true
         }
     }
 
@@ -791,5 +812,90 @@ mod tests {
             }
             other => panic!("expected AllClaimed, got: {other:?}"),
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Regression test: no_home_store detection
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Mock store that simulates a workspace without a .beads/ directory.
+    struct NoHomeStoreMock;
+
+    #[async_trait::async_trait]
+    impl BeadStore for NoHomeStoreMock {
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn flush(&self) -> Result<()> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        fn has_valid_store(&self) -> bool {
+            false // Simulates workspace without .beads/ directory
+        }
+    }
+
+    #[tokio::test]
+    async fn no_home_store_returns_skipped() {
+        // Regression test: verifies that knot returns Skipped with reason "no_home_store"
+        // when the workspace has no .beads/ directory (expected for roam-only workers).
+        let store = NoHomeStoreMock;
+        let knot = make_test_knot(default_knot_config());
+
+        let result = knot.evaluate(&store).await;
+
+        assert!(
+            matches!(result, StrandResult::Skipped { ref reason } if reason == "no_home_store"),
+            "knot should return Skipped {{ reason: \"no_home_store\" }} when no .beads/ directory exists, got: {:?}",
+            result
+        );
     }
 }

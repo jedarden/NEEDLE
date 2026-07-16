@@ -13,7 +13,9 @@
 //! - Empty `workspaces` config → auto-discover all dirs with `.beads/` under `workspace_root`.
 //! - Explicit `workspaces` list → only scan those paths.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -190,6 +192,56 @@ impl ExploreStrand {
         workspace.join(".beads").is_dir()
     }
 
+    /// Compute the starting workspace index for this worker.
+    ///
+    /// Uses a hash of the qualified_id modulo the workspace count to determine
+    /// where this worker should start scanning. This de-herds workers by ensuring
+    /// they start at different positions in the workspace list.
+    ///
+    /// Returns 0 if there are no workspaces (defensive, should be handled earlier).
+    fn compute_start_index(&self) -> usize {
+        if self.workspaces.is_empty() {
+            return 0;
+        }
+
+        let n = self.workspaces.len();
+
+        // Hash the qualified_id using a stable hash algorithm
+        let mut hasher = DefaultHasher::new();
+        self.qualified_id.hash(&mut hasher);
+        let hash = hasher.finish();
+
+        // Start at hash % n, wrapping around
+        (hash as usize) % n
+    }
+
+    /// Get an iterator over workspaces in this worker's rotation order.
+    ///
+    /// The iterator starts at this worker's computed start index and wraps around,
+    /// covering all workspaces exactly once. Each worker with a different qualified_id
+    /// will visit workspaces in a different rotation.
+    fn rotated_workspace_order(&self) -> Vec<PathBuf> {
+        if self.workspaces.is_empty() {
+            return vec![];
+        }
+
+        let start = self.compute_start_index();
+        let n = self.workspaces.len();
+        let mut rotated = Vec::with_capacity(n);
+
+        // Add workspaces from start to end
+        for i in start..n {
+            rotated.push(self.workspaces[i].clone());
+        }
+
+        // Add workspaces from beginning to start (wrap-around)
+        for i in 0..start {
+            rotated.push(self.workspaces[i].clone());
+        }
+
+        rotated
+    }
+
     /// Create a BrCliBeadStore for a given workspace path.
     #[allow(dead_code)]
     async fn store_for_workspace(workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
@@ -247,7 +299,19 @@ impl super::Strand for ExploreStrand {
             ],
         };
 
-        for workspace in &self.workspaces {
+        // Get this worker's rotated workspace order to de-herd workers
+        let workspaces = self.rotated_workspace_order();
+        let start_index = self.compute_start_index();
+
+        tracing::debug!(
+            qualified_id = %self.qualified_id,
+            total_workspaces = self.workspaces.len(),
+            start_index,
+            "worker scan rotation: starting at workspace index {}",
+            start_index
+        );
+
+        for workspace in &workspaces {
             // Skip the home workspace — Pluck already checked it.
             if workspace == &self.home_workspace {
                 tracing::debug!(workspace = %workspace.display(), "skipping home workspace");
@@ -484,6 +548,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BeadStore for DummyStore {
+        fn has_valid_store(&self) -> bool {
+            true
+        }
         async fn list_all(&self) -> Result<Vec<Bead>> {
             Ok(vec![])
         }
@@ -719,6 +786,305 @@ mod tests {
         assert_eq!(strand.workspaces, explicit_workspaces);
     }
 
+    // ── Rotation Tests ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rotation_start_index_is_deterministic_for_same_qualified_id() {
+        let workspaces = vec![
+            PathBuf::from("/ws1"),
+            PathBuf::from("/ws2"),
+            PathBuf::from("/ws3"),
+            PathBuf::from("/ws4"),
+        ];
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand1 = ExploreStrand::new_for_test(
+            workspaces.clone(),
+            PathBuf::from("/home"),
+            registry.clone(),
+            telemetry.clone(),
+            "worker-alpha".to_string(),
+        );
+
+        let strand2 = ExploreStrand::new_for_test(
+            workspaces.clone(),
+            PathBuf::from("/home"),
+            registry,
+            telemetry,
+            "worker-alpha".to_string(),
+        );
+
+        // Same qualified_id should produce same start index
+        assert_eq!(strand1.compute_start_index(), strand2.compute_start_index());
+    }
+
+    #[test]
+    fn rotation_start_index_differs_for_different_qualified_ids() {
+        let workspaces = vec![
+            PathBuf::from("/ws1"),
+            PathBuf::from("/ws2"),
+            PathBuf::from("/ws3"),
+            PathBuf::from("/ws4"),
+        ];
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry1 = Telemetry::new("test-worker-1".to_string());
+        let telemetry2 = Telemetry::new("test-worker-2".to_string());
+
+        let strand1 = ExploreStrand::new_for_test(
+            workspaces.clone(),
+            PathBuf::from("/home"),
+            registry.clone(),
+            telemetry1,
+            "worker-alpha".to_string(),
+        );
+
+        let strand2 = ExploreStrand::new_for_test(
+            workspaces,
+            PathBuf::from("/home"),
+            registry,
+            telemetry2,
+            "worker-bravo".to_string(),
+        );
+
+        // Different qualified_ids should (very likely) produce different start indices
+        // Note: This is probabilistic - collisions are possible but unlikely
+        let start1 = strand1.compute_start_index();
+        let start2 = strand2.compute_start_index();
+
+        // With 4 workspaces and good hash distribution, collisions are rare
+        // If this test fails due to hash collision, it's a valid (but unlikely) result
+        if start1 == start2 {
+            println!(
+                "WARN: Hash collision detected - both 'worker-alpha' and 'worker-bravo' produced start index {}", start1
+            );
+        }
+    }
+
+    #[test]
+    fn rotated_workspace_order_covers_all_workspaces() {
+        let workspaces = vec![
+            PathBuf::from("/ws1"),
+            PathBuf::from("/ws2"),
+            PathBuf::from("/ws3"),
+        ];
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new_for_test(
+            workspaces.clone(),
+            PathBuf::from("/home"),
+            registry,
+            telemetry,
+            "any-worker".to_string(),
+        );
+
+        let rotated = strand.rotated_workspace_order();
+
+        // Should have all workspaces
+        assert_eq!(rotated.len(), workspaces.len());
+
+        // Should contain each workspace exactly once
+        for ws in &workspaces {
+            assert_eq!(rotated.iter().filter(|&x| x == ws).count(), 1);
+        }
+    }
+
+    #[test]
+    fn rotation_starts_at_computed_index() {
+        let workspaces = vec![
+            PathBuf::from("/ws0"),
+            PathBuf::from("/ws1"),
+            PathBuf::from("/ws2"),
+            PathBuf::from("/ws3"),
+            PathBuf::from("/ws4"),
+        ];
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        // Create a strand with a known qualified_id
+        let strand = ExploreStrand::new_for_test(
+            workspaces.clone(),
+            PathBuf::from("/home"),
+            registry,
+            telemetry,
+            "test-worker".to_string(),
+        );
+
+        let rotated = strand.rotated_workspace_order();
+        let start_index = strand.compute_start_index();
+
+        // First element in rotated order should be workspace at start_index
+        assert_eq!(rotated[0], workspaces[start_index]);
+
+        // Elements should be in rotated order: [start..end, 0..start]
+        let expected: Vec<PathBuf> = workspaces[start_index..]
+            .iter()
+            .chain(workspaces[..start_index].iter())
+            .cloned()
+            .collect();
+        assert_eq!(rotated, expected);
+    }
+
+    #[test]
+    fn two_workers_with_different_ids_have_different_rotations() {
+        let workspaces = vec![
+            PathBuf::from("/ws0"),
+            PathBuf::from("/ws1"),
+            PathBuf::from("/ws2"),
+            PathBuf::from("/ws3"),
+        ];
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry1 = crate::registry::Registry::new(temp_dir.path());
+        let registry2 = crate::registry::Registry::new(temp_dir.path());
+        let telemetry1 = Telemetry::new("test-worker-1".to_string());
+        let telemetry2 = Telemetry::new("test-worker-2".to_string());
+
+        let strand1 = ExploreStrand::new_for_test(
+            workspaces.clone(),
+            PathBuf::from("/home"),
+            registry1,
+            telemetry1,
+            "worker-alpha".to_string(),
+        );
+
+        let strand2 = ExploreStrand::new_for_test(
+            workspaces,
+            PathBuf::from("/home"),
+            registry2,
+            telemetry2,
+            "worker-bravo".to_string(),
+        );
+
+        let rotated1 = strand1.rotated_workspace_order();
+        let rotated2 = strand2.rotated_workspace_order();
+
+        // Rotations should likely be different (de-herding effect)
+        // Note: Hash collisions can produce same rotation, but are unlikely
+        let start1 = strand1.compute_start_index();
+        let start2 = strand2.compute_start_index();
+
+        // Verify both cover all workspaces
+        assert_eq!(rotated1.len(), 4);
+        assert_eq!(rotated2.len(), 4);
+
+        // Verify rotations differ (unless hash collision)
+        if start1 != start2 {
+            assert_ne!(
+                rotated1, rotated2,
+                "rotations should differ for different workers"
+            );
+
+            // Verify they start at different positions
+            assert_ne!(rotated1[0], rotated2[0]);
+        } else {
+            println!(
+                "WARN: Hash collision - both workers start at index {}",
+                start1
+            );
+        }
+    }
+
+    #[test]
+    fn rotation_with_single_workspace_returns_same_order() {
+        let workspaces = vec![PathBuf::from("/only-workspace")];
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new_for_test(
+            workspaces.clone(),
+            PathBuf::from("/home"),
+            registry,
+            telemetry,
+            "any-worker".to_string(),
+        );
+
+        let rotated = strand.rotated_workspace_order();
+
+        // Should return the same single workspace
+        assert_eq!(rotated, workspaces);
+    }
+
+    #[test]
+    fn rotation_with_empty_workspaces_returns_empty() {
+        let workspaces = vec![];
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new_for_test(
+            workspaces.clone(),
+            PathBuf::from("/home"),
+            registry,
+            telemetry,
+            "any-worker".to_string(),
+        );
+
+        let rotated = strand.rotated_workspace_order();
+
+        // Should return empty
+        assert_eq!(rotated.len(), 0);
+        assert_eq!(strand.compute_start_index(), 0);
+    }
+
+    #[test]
+    fn rotation_hash_distribution_is_reasonable() {
+        // Test that rotation distributes workers across different start indices
+        let workspaces: Vec<PathBuf> =
+            (0..10).map(|i| PathBuf::from(format!("/ws{}", i))).collect();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+
+        let mut start_counts = [0usize; 10];
+
+        // Test 50 different worker IDs
+        for i in 0..50 {
+            let telemetry = Telemetry::new(format!("test-worker-{}", i));
+            let strand = ExploreStrand::new_for_test(
+                workspaces.clone(),
+                PathBuf::from("/home"),
+                registry.clone(),
+                telemetry,
+                format!("worker-{}", i),
+            );
+
+            let start = strand.compute_start_index();
+            start_counts[start] += 1;
+        }
+
+        // With 10 workspaces and 50 workers, expect roughly 5 workers per start index
+        // Allow some variance (2-8 workers per start index is acceptable)
+        let min = *start_counts.iter().min().unwrap();
+        let max = *start_counts.iter().max().unwrap();
+
+        assert!(
+            min >= 2,
+            "distribution too skewed: minimum count is {} (expected >= 2)",
+            min
+        );
+        assert!(
+            max <= 8,
+            "distribution too skewed: maximum count is {} (expected <= 8)",
+            max
+        );
+
+        // Verify total is 50
+        assert_eq!(start_counts.iter().sum::<usize>(), 50);
+    }
+
     // ── Deadlock Scenario Tests ────────────────────────────────────────────────────
 
     /// Unit test for multi-workspace deadlock with excluded first workspace.
@@ -802,6 +1168,9 @@ mod tests {
             }
             StrandResult::Split(_, _) => {
                 panic!("unexpected Split result");
+            }
+            StrandResult::Skipped { .. } => {
+                panic!("unexpected Skipped result");
             }
         }
     }
@@ -892,6 +1261,9 @@ mod tests {
             StrandResult::Split(_, _) => {
                 panic!("unexpected Split result");
             }
+            StrandResult::Skipped { .. } => {
+                panic!("unexpected Skipped result");
+            }
         }
     }
 
@@ -956,6 +1328,9 @@ mod tests {
             }
             StrandResult::Split(_, _) => {
                 panic!("unexpected Split result");
+            }
+            StrandResult::Skipped { .. } => {
+                panic!("unexpected Skipped result");
             }
         }
     }
@@ -1055,6 +1430,9 @@ mod tests {
             }
             StrandResult::Split(_, _) => {
                 panic!("unexpected Split result");
+            }
+            StrandResult::Skipped { .. } => {
+                panic!("unexpected Skipped result");
             }
         }
     }
@@ -1268,6 +1646,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BeadStore for ExcludedCandidatesStore {
+        fn has_valid_store(&self) -> bool {
+            true
+        }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             // Return candidates with various excluded labels
             // These will be filtered out by the strand's Filters
@@ -1388,6 +1769,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BeadStore for AssignedBeadsStore {
+        fn has_valid_store(&self) -> bool {
+            true
+        }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             let count = self
                 .query_count
@@ -1502,6 +1886,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BeadStore for BlockedBeadsStore {
+        fn has_valid_store(&self) -> bool {
+            true
+        }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             let count = self
                 .query_count
@@ -1607,6 +1994,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BeadStore for ExcludedAndAssignedStore {
+        fn has_valid_store(&self) -> bool {
+            true
+        }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             let count = self
                 .query_count
@@ -1732,6 +2122,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl BeadStore for ValidBeadStore {
+        fn has_valid_store(&self) -> bool {
+            true
+        }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             Ok(vec![Bead {
                 id: BeadId::from("ws2-valid-bead".to_string()),

@@ -214,6 +214,10 @@ impl BeadStore for ConcurrentMockStore {
     async fn remove_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
         Ok(())
     }
+
+    fn has_valid_store(&self) -> bool {
+        true
+    }
 }
 
 fn make_bead(id: &str, priority: u8) -> Bead {
@@ -1356,8 +1360,8 @@ async fn strand_waterfall_pluck_mend_explore_knot() {
 
     assert_eq!(
         runner.strand_names(),
-        vec!["pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "knot"],
-        "waterfall should be pluck → mend → explore → weave → unravel → pulse → reflect → knot"
+        vec!["pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "splice", "knot"],
+        "waterfall should be pluck → mend → explore → weave → unravel → pulse → reflect → splice → knot"
     );
 }
 
@@ -1813,5 +1817,9 @@ impl BeadStore for MitosisDedupeStore {
 
     async fn full_rebuild(&self) -> Result<()> {
         Ok(())
+    }
+
+    fn has_valid_store(&self) -> bool {
+        true
     }
 }

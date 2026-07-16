@@ -1,0 +1,16 @@
+{
+  "bead_id": "bf-3peh4",
+  "agent": "missing-agent",
+  "provider": null,
+  "model": null,
+  "exit_code": 127,
+  "outcome": "agent_not_found",
+  "duration_ms": 23,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-07-16T09:49:21.369710862Z",
+  "trace_format": "raw_text",
+  "pruned": false,
+  "template_version": null
+}

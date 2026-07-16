@@ -513,6 +513,10 @@ impl BeadStore for MockCandidateStore {
         }
         Ok(())
     }
+
+    fn has_valid_store(&self) -> bool {
+        true // Mock store always has a valid store
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────────

@@ -174,6 +174,10 @@ impl BeadStore for IntegrationMockStore {
     async fn full_rebuild(&self) -> Result<()> {
         Ok(())
     }
+
+    fn has_valid_store(&self) -> bool {
+        true // Mock store always has a valid store
+    }
 }
 
 fn make_bead_with_id(id: &str) -> Bead {
@@ -221,6 +225,7 @@ fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
     config.worker.idle_action = IdleAction::Exit;
     config.agent.default = adapter_name.to_string();
     config.agent.timeout = 10;
+    config.agent.routing = None; // Disable routing in tests - use adapter directly
     config.self_modification.hot_reload = false;
     // Match the test bead workspace so the remote-store-switch logic
     // doesn't fire (it would try to create a BrCliBeadStore).
@@ -511,6 +516,7 @@ async fn exhaustion_with_idle_action_exit() {
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Exit;
     config.agent.default = "echo-test".to_string();
+    config.agent.routing = None; // Disable routing in tests - use adapter directly
     config.workspace.home = _home_dir.path().to_path_buf();
 
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
@@ -661,6 +667,10 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         async fn full_rebuild(&self) -> Result<()> {
             Ok(())
         }
+
+        fn has_valid_store(&self) -> bool {
+            true // Mock store always has a valid store
+        }
     }
 
     let bead = Bead {
@@ -690,6 +700,7 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
     config.worker.idle_action = IdleAction::Wait;
     config.worker.idle_timeout = 1; // 1 second for fast test
     config.agent.default = "echo-test".to_string();
+    config.agent.routing = None; // Disable routing in tests - use adapter directly
     config.workspace.home = _home_dir.path().to_path_buf();
     config.self_modification.hot_reload = false;
     config.workspace.default = std::path::PathBuf::from("/tmp");
@@ -1234,6 +1245,10 @@ impl BeadStore for ZombieMockStore {
     async fn full_rebuild(&self) -> Result<()> {
         Ok(())
     }
+
+    fn has_valid_store(&self) -> bool {
+        true // Mock store always has a valid store
+    }
 }
 
 /// Store that delegates to different underlying stores based on workspace path.
@@ -1331,6 +1346,10 @@ impl BeadStore for MultiWorkspaceStore {
     async fn full_rebuild(&self) -> Result<()> {
         self.home_store.full_rebuild().await
     }
+
+    fn has_valid_store(&self) -> bool {
+        self.home_store.has_valid_store()
+    }
 }
 
 #[tokio::test]
@@ -1366,16 +1385,12 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
         create_result
     );
 
-    // Extract the bead ID from the create output (format: "✓ Created <ID>: <title>").
+    // Extract the bead ID from the create output (format is just "<ID>").
     let bead_id = create_result
         .lines()
-        .find(|l| l.contains("Created"))
-        .and_then(|l| {
-            // Parse "✓ Created <ID>: <title>" to extract the ID
-            l.split("Created ").nth(1).and_then(|s| s.split(':').next())
-        })
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.starts_with("Initialized"))
         .unwrap()
-        .trim()
         .to_string();
     let bead_id = BeadId::from(bead_id);
 
@@ -1497,13 +1512,9 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     let create_result = String::from_utf8_lossy(&output.stdout);
     let bead_id = create_result
         .lines()
-        .find(|l| l.contains("Created"))
-        .and_then(|l| {
-            // Parse "✓ Created <ID>: <title>" to extract the ID
-            l.split("Created ").nth(1).and_then(|s| s.split(':').next())
-        })
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.starts_with("Initialized"))
         .unwrap()
-        .trim()
         .to_string();
     let bead_id = BeadId::from(bead_id);
 

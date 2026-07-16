@@ -1,0 +1,71 @@
+sanitize_10kb/throughput_bytes
+                        time:   [1.8853 ms 1.9523 ms 2.0249 ms]
+                        thrpt:  [4.8228 MiB/s 5.0022 MiB/s 5.1799 MiB/s]
+                 change:
+                        time:   [+17.745% +23.443% +29.561%] (p = 0.00 < 0.05)
+                        thrpt:  [-22.816% -18.991% -15.071%]
+                        Performance has regressed.
+Found 6 outliers among 100 measurements (6.00%)
+  6 (6.00%) high mild
+
+sanitize_10kb/throughput_ops
+                        time:   [1.7106 ms 1.8069 ms 1.9092 ms]
+                        thrpt:  [523.78  elem/s 553.43  elem/s 584.58  elem/s]
+                 change:
+                        time:   [+14.725% +20.710% +27.474%] (p = 0.00 < 0.05)
+                        thrpt:  [-21.553% -17.157% -12.835%]
+                        Performance has regressed.
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+
+sanitize_100kb/throughput_bytes
+                        time:   [18.262 ms 18.940 ms 19.658 ms]
+                        thrpt:  [4.9677 MiB/s 5.1562 MiB/s 5.3474 MiB/s]
+                 change:
+                        time:   [+3.1715% +7.8250% +13.001%] (p = 0.00 < 0.05)
+                        thrpt:  [-11.505% -7.2572% -3.0740%]
+                        Performance has regressed.
+Found 20 outliers among 100 measurements (20.00%)
+  8 (8.00%) low mild
+  7 (7.00%) high mild
+  5 (5.00%) high severe
+
+sanitize_100kb/throughput_ops
+                        time:   [20.605 ms 21.327 ms 22.107 ms]
+                        thrpt:  [45.235  elem/s 46.890  elem/s 48.531  elem/s]
+                 change:
+                        time:   [+45.096% +53.887% +62.710%] (p = 0.00 < 0.05)
+                        thrpt:  [-38.541% -35.017% -31.080%]
+                        Performance has regressed.
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+
+sanitize_1mb/throughput_bytes
+                        time:   [190.79 ms 197.81 ms 204.99 ms]
+                        thrpt:  [4.8782 MiB/s 5.0554 MiB/s 5.2414 MiB/s]
+                 change:
+                        time:   [+29.022% +36.142% +43.424%] (p = 0.00 < 0.05)
+                        thrpt:  [-30.277% -26.547% -22.494%]
+                        Performance has regressed.
+Found 13 outliers among 100 measurements (13.00%)
+  8 (8.00%) low mild
+  5 (5.00%) high mild
+
+sanitize_1mb/throughput_ops
+                        time:   [172.49 ms 180.57 ms 188.60 ms]
+                        thrpt:  [5.3023  elem/s 5.5380  elem/s 5.7974  elem/s]
+                 change:
+                        time:   [+12.242% +18.556% +25.472%] (p = 0.00 < 0.05)
+                        thrpt:  [-20.301% -15.652% -10.907%]
+                        Performance has regressed.
+
+latency_percentiles/p95_100kb
+                        time:   [15.929 ms 16.710 ms 17.545 ms]
+                        change: [+3.8848% +10.904% +18.295%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+

@@ -1169,6 +1169,10 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+
+        fn has_valid_store(&self) -> bool {
+            true // Mock store always has a valid store
+        }
     }
 
     struct NopSink;
@@ -1663,6 +1667,10 @@ mod tests {
 
         #[async_trait]
         impl BeadStore for SlowFlushStore {
+            fn has_valid_store(&self) -> bool {
+                true // Mock store always has a valid store
+            }
+
             async fn list_all(&self) -> Result<Vec<Bead>> {
                 self.inner.list_all().await
             }
@@ -1760,6 +1768,10 @@ mod tests {
 
         #[async_trait]
         impl BeadStore for SlowReleaseStore {
+            fn has_valid_store(&self) -> bool {
+                true // Mock store always has a valid store
+            }
+
             async fn list_all(&self) -> Result<Vec<Bead>> {
                 self.inner.list_all().await
             }

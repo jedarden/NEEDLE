@@ -1139,6 +1139,8 @@ fn find_all_descendants(root_pid: u32) -> Vec<u32> {
     // Recursive DFS to find all descendants
     let mut descendants = Vec::new();
     let mut visited = HashSet::new();
+    // Mark the root PID as visited to prevent cycles
+    visited.insert(root_pid);
     find_descendants_recursive(root_pid, &ppid_to_children, &mut descendants, &mut visited);
 
     descendants
@@ -5724,6 +5726,9 @@ mod tests {
         let mut descendants = Vec::new();
         let mut visited = HashSet::new();
 
+        // Mark the root PID as visited to prevent cycles (same as production code)
+        visited.insert(1);
+
         find_descendants_recursive(1, &ppid_to_children, &mut descendants, &mut visited);
 
         // Should find all descendants: 2, 3, 4, 5, 6
@@ -5747,6 +5752,9 @@ mod tests {
 
         let mut descendants = Vec::new();
         let mut visited = HashSet::new();
+
+        // Mark the root PID as visited to prevent cycles (same as production code)
+        visited.insert(1);
 
         // This should not loop infinitely
         find_descendants_recursive(1, &ppid_to_children, &mut descendants, &mut visited);
