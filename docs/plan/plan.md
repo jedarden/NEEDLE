@@ -4086,3 +4086,29 @@ Fix: a short-lived per-workspace advisory lock (e.g. `flock` on `<workspace>/.gi
 - `needle status`/`needle list` output matches `ps aux | grep 'needle run'` 1:1 on a host with workers started via both the tmux and bare-background paths.
 - A bead stuck in a claim→orphan→reclaim cycle for N cycles gets labeled `human` automatically and stops being redispatched, without a human having to notice the retry-storm first.
 - Two workers dispatched concurrently in the same workspace never cross-tag each other's commits with the wrong `Bead-Id` trailer.
+
+# Phase 7: Cleanup Command Orphan-Detection Gap
+
+**Status:** planned (ADR-003).
+
+**Goal:** make `needle cleanup`'s no-flags behavior match its own documentation — remove only sessions with no live process behind them — so an operator (or Claude, acting on an operator's behalf) can run it during incident cleanup without first needing a manual `ps aux` cross-check, the same trust bar §6.2 already set for `needle stop`/`status`/`list`. Driven by a 2026-07-19 incident during lab fleet remediation: bare `needle cleanup` (intended to remove sessions for workers already stopped) instead matched and killed two live sessions — `armor-p6a` (an actively-executing worker, unrelated to the cleanup) and `needle-supervisor` (the fleet's own auto-scaling daemon) — because `cmd_cleanup`'s only actual filter is an identifier-substring match that defaults to matching everything when no identifier is given; despite its help text and doc comment both claiming an "orphaned sessions only" check, no liveness check exists anywhere in the implementation. Full evidence and rationale in [ADR-003](../adr/003-cleanup-orphan-detection-gap.md).
+
+## Changes
+
+### 7.1 Real liveness check as cleanup's default
+- `cmd_cleanup` (`src/cli/mod.rs`), when called with neither `--all` nor `-i`, must only target sessions with no live process behind them — reuse `scan_needle_processes()` (the same reconciliation helper `cmd_list` already calls, and the one §6.2 commits to building out for `needle status`/`needle list`) rather than the current identifier-substring filter, which matches every session when the identifier is empty.
+- `--all` keeps its current fully-destructive meaning; update its help text to say so explicitly ("removes every needle session, including live ones") rather than relying on a separate design doc to convey the danger.
+- `-i <pattern>` keeps its current targeted/deliberate meaning (bypasses the liveness check, same as today) — naming a specific session is itself the operator's explicit choice; only the no-flags path's behavior changes.
+
+### 7.2 Testing
+- Regression test: `needle cleanup` with no flags, given one live session and one session with no backing process, removes only the dead one.
+- Regression test: `needle cleanup` with no flags and zero dead sessions removes nothing and says so, even when live sessions exist.
+- Regression test: `needle cleanup --all` still removes every session regardless of liveness (unchanged behavior, pinned explicitly so it can't regress silently while fixing the no-flags path).
+
+### 7.3 Deployment
+- Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, then staged fleet rollout through the canary channel (`:testing` → `:stable`), per the existing convention (§6.8).
+
+## Exit criteria
+- Bare `needle cleanup` on a host with any mix of live and dead needle sessions removes only the dead ones, verified against `ps aux`, not assumed.
+- `needle cleanup --all`'s own `--help` text states plainly that it removes live sessions too.
+- The 2026-07-19 incident (bare cleanup killing `armor-p6a` and `needle-supervisor`) is reproduced as a regression-test fixture and does not recur.
