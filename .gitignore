@@ -13,3 +13,6 @@ benchmark_*.txt
 # Criterion output
 criterion/
 target/criterion/
+
+# Marathon session logs (large, machine-local)
+.marathon/logs/
