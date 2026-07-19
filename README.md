@@ -2,7 +2,6 @@
 
 # 🧵 NEEDLE
 
-[![CI](https://github.com/jedarden/NEEDLE/actions/workflows/ci.yml/badge.svg)](https://github.com/jedarden/NEEDLE/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](rust-toolchain.toml)
 [![Version](https://img.shields.io/badge/version-0.2.8-green.svg)](Cargo.toml)
