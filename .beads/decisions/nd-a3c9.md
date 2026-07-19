@@ -1,0 +1,24 @@
+# ADR: Use Edit
+
+**Decision ID:** nd-a3c9
+**Date:** 2026-07-16
+
+## Context
+
+Analysis of options during task execution
+
+## Alternatives Considered
+
+1. Considered alternatives
+
+## Decision
+
+Use Edit
+
+## Rationale
+
+I see the error - in the pattern matching, I need to use `ref reason` instead of `reason` to avoid moving the String. Let me fix this.
+
+## Outcome
+
+Decision implemented (success)

@@ -1,0 +1,24 @@
+# ADR: Use Bash
+
+**Decision ID:** nd-b2ca
+**Date:** 2026-07-16
+
+## Context
+
+Analysis of options during task execution
+
+## Alternatives Considered
+
+1. Considered alternatives
+
+## Decision
+
+Use Bash
+
+## Rationale
+
+This is a JSON trace file from a previous run. Let me instead look at the git status to see what files have been modified and try running a simple test first.
+
+## Outcome
+
+Decision implemented (success)

@@ -1,0 +1,24 @@
+# ADR: Respond to user
+
+**Decision ID:** nd-dad8
+**Date:** 2026-07-16
+
+## Context
+
+Analysis of options during task execution
+
+## Alternatives Considered
+
+1. Considered alternatives
+
+## Decision
+
+Respond to user
+
+## Rationale
+
+The files are empty (0 bytes). The background task hasn't written anything to them yet. The process is running but not writing to our output file. Let me try running the tests directly instead.
+
+## Outcome
+
+Decision implemented (success)
