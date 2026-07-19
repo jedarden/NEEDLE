@@ -275,7 +275,17 @@ fn truncate_path(path: &str) -> String {
     if path.len() <= 80 {
         path.to_string()
     } else {
-        format!("...{}", &path[path.len() - 77..])
+        // Find character boundary from the end
+        let cut_from_end = 77;
+        let total_bytes = path.len();
+        let start_byte = path
+            .char_indices()
+            .rev()
+            .map(|(i, _)| i)
+            .take_while(|&i| i >= total_bytes.saturating_sub(cut_from_end))
+            .last()
+            .unwrap_or(0);
+        format!("...{}", &path[start_byte..])
     }
 }
 
