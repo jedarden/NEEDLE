@@ -41,9 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let workspace = workspace.clone();
             let bead_id = test_bead_id.clone();
             let assignee = format!("worker-{}", i);
-            tokio::spawn(async move {
-                run_bf_claim(&bf_path, &workspace, &bead_id, &assignee, i)
-            })
+            tokio::spawn(async move { run_bf_claim(&bf_path, &workspace, &bead_id, &assignee, i) })
         })
         .collect();
 
@@ -55,16 +53,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let success_count = results.iter().filter(|r| r.is_ok()).count();
     let failure_count = results.iter().filter(|r| r.is_err()).count();
-    let lock_error_count = results.iter().filter(|r| {
-        if let Err(e) = r {
-            e.to_string().contains("locked") || e.to_string().contains("database")
-        } else {
-            false
-        }
-    }).count();
+    let lock_error_count = results
+        .iter()
+        .filter(|r| {
+            if let Err(e) = r {
+                e.to_string().contains("locked") || e.to_string().contains("database")
+            } else {
+                false
+            }
+        })
+        .count();
 
-    println!("Results: {} success, {} failure, {} lock/database errors",
-             success_count, failure_count, lock_error_count);
+    println!(
+        "Results: {} success, {} failure, {} lock/database errors",
+        success_count, failure_count, lock_error_count
+    );
 
     // Print details of failures
     for (i, result) in results.iter().enumerate() {
@@ -84,9 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let workspace = workspace.clone();
             let bead_id = test_bead_id.clone();
             let assignee = format!("worker-{}", i);
-            tokio::spawn(async move {
-                run_bf_claim(&bf_path, &workspace, &bead_id, &assignee, i)
-            })
+            tokio::spawn(async move { run_bf_claim(&bf_path, &workspace, &bead_id, &assignee, i) })
         })
         .collect();
 
@@ -98,16 +99,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let success_count = results.iter().filter(|r| r.is_ok()).count();
     let failure_count = results.iter().filter(|r| r.is_err()).count();
-    let lock_error_count = results.iter().filter(|r| {
-        if let Err(e) = r {
-            e.to_string().contains("locked") || e.to_string().contains("database")
-        } else {
-            false
-        }
-    }).count();
+    let lock_error_count = results
+        .iter()
+        .filter(|r| {
+            if let Err(e) = r {
+                e.to_string().contains("locked") || e.to_string().contains("database")
+            } else {
+                false
+            }
+        })
+        .count();
 
-    println!("Results: {} success, {} failure, {} lock/database errors",
-             success_count, failure_count, lock_error_count);
+    println!(
+        "Results: {} success, {} failure, {} lock/database errors",
+        success_count, failure_count, lock_error_count
+    );
 
     // Print details of failures
     for (i, result) in results.iter().enumerate() {
@@ -122,7 +128,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Cleanup: release the bead
     println!("\n=== Cleanup: releasing test bead ===");
     let _ = Command::new(&bf_path)
-        .args(["update", &test_bead_id, "--status", "open", "--assignee", ""])
+        .args([
+            "update",
+            &test_bead_id,
+            "--status",
+            "open",
+            "--assignee",
+            "",
+        ])
         .current_dir(&workspace)
         .output();
 
@@ -155,8 +168,10 @@ fn create_test_bead(bf_path: &PathBuf, workspace: &PathBuf) -> Result<String, an
     let bead_id = stdout.trim().to_string();
 
     if !output.status.success() || bead_id.is_empty() {
-        anyhow::bail!("Failed to create test bead: stderr: {}",
-                      String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!(
+            "Failed to create test bead: stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     Ok(bead_id)

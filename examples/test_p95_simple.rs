@@ -17,8 +17,7 @@ fn main() {
 
     // Test case 2: Real-world latency data (ms)
     let real_latencies = vec![
-        12, 15, 18, 20, 22, 25, 28, 30, 35, 40,
-        45, 50, 55, 60, 70, 80, 90, 100, 120, 150
+        12, 15, 18, 20, 22, 25, 28, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 100, 120, 150,
     ];
     let p95_real = calculate_p95(&real_latencies);
     println!("Test 2 - Real-world latency data (20 samples):");

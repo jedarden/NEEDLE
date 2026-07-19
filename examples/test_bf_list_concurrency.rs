@@ -40,9 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|i| {
             let bf_path = bf_path.clone();
             let workspace = workspace.clone();
-            tokio::spawn(async move {
-                run_bf_list(&bf_path, &workspace, i)
-            })
+            tokio::spawn(async move { run_bf_list(&bf_path, &workspace, i) })
         })
         .collect();
 
@@ -55,7 +53,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let success_count = results.iter().filter(|r| r.is_ok()).count();
     let failure_count = results.iter().filter(|r| r.is_err()).count();
 
-    println!("Results: {} success, {} failure", success_count, failure_count);
+    println!(
+        "Results: {} success, {} failure",
+        success_count, failure_count
+    );
 
     // Print details of failures
     for (i, result) in results.iter().enumerate() {
@@ -70,9 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|i| {
             let bf_path = bf_path.clone();
             let workspace = workspace.clone();
-            tokio::spawn(async move {
-                run_bf_list(&bf_path, &workspace, i)
-            })
+            tokio::spawn(async move { run_bf_list(&bf_path, &workspace, i) })
         })
         .collect();
 
@@ -85,7 +84,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let success_count = results.iter().filter(|r| r.is_ok()).count();
     let failure_count = results.iter().filter(|r| r.is_err()).count();
 
-    println!("Results: {} success, {} failure", success_count, failure_count);
+    println!(
+        "Results: {} success, {} failure",
+        success_count, failure_count
+    );
 
     // Print details of failures
     for (i, result) in results.iter().enumerate() {

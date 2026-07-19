@@ -16,17 +16,19 @@ fn main() {
 
     // Test case 2: Larger dataset (simulating latency measurements)
     let latency_data: Vec<u128> = vec![
-        1200, 1250, 1300, 1350, 1400, 1450, 1500, 1550, 1600, 1650,
-        1700, 1750, 1800, 1850, 1900, 1950, 2000, 2100, 2200, 2300,
-        2400, 2500, 2600, 2700, 2800, 2900, 3000, 3200, 3500, 4000,
-        4500, 5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000,
-        9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000, 13500, 14000,
+        1200, 1250, 1300, 1350, 1400, 1450, 1500, 1550, 1600, 1650, 1700, 1750, 1800, 1850, 1900,
+        1950, 2000, 2100, 2200, 2300, 2400, 2500, 2600, 2700, 2800, 2900, 3000, 3200, 3500, 4000,
+        4500, 5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000,
+        11500, 12000, 12500, 13000, 13500, 14000,
     ];
     let p95_latency = calculate_p95(&latency_data);
     println!("Test 2: Latency dataset (50 elements)");
     println!("  Min: {} µs", latency_data.iter().min().unwrap());
     println!("  Max: {} µs", latency_data.iter().max().unwrap());
-    println!("  Avg: {} µs", latency_data.iter().sum::<u128>() / latency_data.len() as u128);
+    println!(
+        "  Avg: {} µs",
+        latency_data.iter().sum::<u128>() / latency_data.len() as u128
+    );
     println!("  P95: {} µs\n", p95_latency);
 
     // Test case 3: Empty dataset

@@ -6,8 +6,8 @@
 //! - Values show appropriate variance
 
 use needle::stats::calculate_p95;
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
 fn main() {
     println!("P95 Value Validation Report");
@@ -18,8 +18,16 @@ fn main() {
     println!("   ------------------------------------------------");
 
     let test_cases = vec![
-        ("Basic 10 elements", vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100]),
-        ("Real-world latencies", vec![12, 15, 18, 20, 22, 25, 28, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 100, 120, 150]),
+        (
+            "Basic 10 elements",
+            vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        ),
+        (
+            "Real-world latencies",
+            vec![
+                12, 15, 18, 20, 22, 25, 28, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 100, 120, 150,
+            ],
+        ),
         ("Single element", vec![42u128]),
     ];
 
@@ -38,7 +46,10 @@ fn main() {
     let p95_empty = calculate_p95(&empty);
     println!("   ✓ Empty data: p95 = {} (valid for no data)", p95_empty);
 
-    println!("   Result: All p95 values are valid (non-negative) - {}\n", all_positive);
+    println!(
+        "   Result: All p95 values are valid (non-negative) - {}\n",
+        all_positive
+    );
 
     // Test 2: Verify values fall within reasonable bounds
     println!("2. Testing that p95 values fall within reasonable bounds");
@@ -48,22 +59,30 @@ fn main() {
     let basic_data = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100];
     let p95_basic = calculate_p95(&basic_data);
     let basic_in_bounds = p95_basic >= 90 && p95_basic <= 100;
-    println!("   ✓ Basic data: p95 = {} (expected range: 90-100, in bounds: {})",
-             p95_basic, basic_in_bounds);
+    println!(
+        "   ✓ Basic data: p95 = {} (expected range: 90-100, in bounds: {})",
+        p95_basic, basic_in_bounds
+    );
 
     // For real-world latencies [12, 15, ..., 150], p95 should be between 120 and 150
-    let real_data = vec![12, 15, 18, 20, 22, 25, 28, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 100, 120, 150];
+    let real_data = vec![
+        12, 15, 18, 20, 22, 25, 28, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 100, 120, 150,
+    ];
     let p95_real = calculate_p95(&real_data);
     let real_in_bounds = p95_real >= 120 && p95_real <= 150;
-    println!("   ✓ Real-world latencies: p95 = {} (expected range: 120-150, in bounds: {})",
-             p95_real, real_in_bounds);
+    println!(
+        "   ✓ Real-world latencies: p95 = {} (expected range: 120-150, in bounds: {})",
+        p95_real, real_in_bounds
+    );
 
     // For single element, p95 equals that element
     let single_data = vec![42u128];
     let p95_single = calculate_p95(&single_data);
     let single_correct = p95_single == 42;
-    println!("   ✓ Single element: p95 = {} (expected: 42, correct: {})",
-             p95_single, single_correct);
+    println!(
+        "   ✓ Single element: p95 = {} (expected: 42, correct: {})",
+        p95_single, single_correct
+    );
 
     println!("   Result: All p95 values fall within reasonable bounds\n");
 
@@ -86,18 +105,26 @@ fn main() {
 
     // Verify that p95 values scale with the data
     let variance_appropriate = p95_2 > p95_1 && p95_1 > p95_3;
-    println!("   ✓ Variance check: p95 scales correctly ({} > {} > {}): {}",
-             p95_2, p95_1, p95_3, variance_appropriate);
+    println!(
+        "   ✓ Variance check: p95 scales correctly ({} > {} > {}): {}",
+        p95_2, p95_1, p95_3, variance_appropriate
+    );
 
     // Test with duplicate values (low variance)
     let low_variance = vec![50u128; 20];
     let p95_low = calculate_p95(&low_variance);
-    println!("   ✓ Low variance data (all 50s): p95 = {} (expected: 50)", p95_low);
+    println!(
+        "   ✓ Low variance data (all 50s): p95 = {} (expected: 50)",
+        p95_low
+    );
 
     // Test with high variance
     let high_variance = vec![1u128, 1000, 500, 100, 200, 300, 400, 600, 700, 800];
     let p95_high = calculate_p95(&high_variance);
-    println!("   ✓ High variance data: p95 = {} (should be much higher than min)", p95_high);
+    println!(
+        "   ✓ High variance data: p95 = {} (should be much higher than min)",
+        p95_high
+    );
 
     println!("   Result: p95 values show appropriate variance\n");
 
@@ -156,7 +183,10 @@ fn main() {
                 } else {
                     0.0
                 };
-                println!("   ✓ P95 position in range: {:.2} (expected: ~0.95 for 95th percentile)", p95_position);
+                println!(
+                    "   ✓ P95 position in range: {:.2} (expected: ~0.95 for 95th percentile)",
+                    p95_position
+                );
 
                 // P95 should be reasonably close to the 95th percentile position
                 let position_reasonable = p95_position >= 0.85 && p95_position <= 1.0;
@@ -164,7 +194,9 @@ fn main() {
             }
         }
     } else {
-        println!("   (Criterion benchmark data not found - run 'cargo bench --bench sanitize' first)");
+        println!(
+            "   (Criterion benchmark data not found - run 'cargo bench --bench sanitize' first)"
+        );
     }
 
     println!("\n============================");

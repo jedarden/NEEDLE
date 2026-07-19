@@ -89,7 +89,10 @@ fn main() {
     println!("  Min:     {} µs ({:.2} ms)", min, *min as f64 / 1000.0);
     println!("  Max:     {} µs ({:.2} ms)", max, *max as f64 / 1000.0);
     println!("  Avg:     {} µs ({:.2} ms)", avg, avg as f64 / 1000.0);
-    println!("  P95:     {} µs ({:.2} ms) ← p95 value appears in output!", p95_us, p95_ms);
+    println!(
+        "  P95:     {} µs ({:.2} ms) ← p95 value appears in output!",
+        p95_us, p95_ms
+    );
 
     println!("\n✓ p95 label appears in output");
     println!("✓ Values are present for p95 field");

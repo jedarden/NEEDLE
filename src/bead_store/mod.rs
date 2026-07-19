@@ -28,8 +28,8 @@ const CORRUPTION_MARKERS: &[&str] = &[
 /// Known error strings that indicate SQLite database is locked (transient).
 const LOCK_MARKERS: &[&str] = &[
     "database is locked",
-    "sqlite error: 5",  // SQLITE_BUSY = database is locked
-    "sqlite error: 6",  // SQLITE_LOCKED = table is locked
+    "sqlite error: 5", // SQLITE_BUSY = database is locked
+    "sqlite error: 6", // SQLITE_LOCKED = table is locked
 ];
 
 /// Known error strings that indicate br sync conflicts.
@@ -41,7 +41,7 @@ const MISSING_STORE_MARKERS: &[&str] = &[
     "cannot find",
     "does not exist",
     ".beads",
-    "database disk image is malformed",  // Often occurs when .beads/ doesn't exist
+    "database disk image is malformed", // Often occurs when .beads/ doesn't exist
 ];
 
 /// Check if an error message indicates SQLite database corruption.
@@ -626,7 +626,9 @@ impl BeadStore for BrCliBeadStore {
     async fn list_all(&self) -> Result<Vec<Bead>> {
         // Use a large explicit limit instead of --limit 0, which returns
         // an empty set on bead-forge 0.2.0 (bug). 999999 effectively means "no limit".
-        let stdout = self.run_br(&["list", "--json", "--limit", "999999"]).await?;
+        let stdout = self
+            .run_br(&["list", "--json", "--limit", "999999"])
+            .await?;
         Self::parse_beads(&stdout, "br list --json")
     }
 
@@ -1061,7 +1063,9 @@ impl BfCliBeadStore {
                 .spawn()
                 .with_context(|| format!("failed to spawn bf subprocess: {args:?}"))?;
 
-            let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            let output = match tokio::time::timeout(timeout_duration, child.wait_with_output())
+                .await
+            {
                 Ok(Ok(output)) => output,
                 Ok(Err(e)) => {
                     let err = anyhow::anyhow!("bf subprocess failed: {args:?}: {e}");
@@ -1076,14 +1080,16 @@ impl BfCliBeadStore {
                         attempt,
                         "bf subprocess timed out, killing process"
                     );
-                    let err = anyhow::anyhow!("bf subprocess timed out after {timeout_secs}s: {args:?}");
+                    let err =
+                        anyhow::anyhow!("bf subprocess timed out after {timeout_secs}s: {args:?}");
                     last_error = Some(err);
                     // Timeouts are not transient lock errors - don't retry
                     break;
                 }
             };
 
-            let stdout = String::from_utf8(output.stdout).context("bf stdout was not valid UTF-8")?;
+            let stdout =
+                String::from_utf8(output.stdout).context("bf stdout was not valid UTF-8")?;
             let stderr = String::from_utf8_lossy(&output.stderr);
 
             if output.status.success() {
@@ -1137,7 +1143,8 @@ impl BfCliBeadStore {
         }
 
         // If we broke out of the loop, return the last error
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("bf subprocess failed with unknown error")))
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("bf subprocess failed with unknown error")))
     }
 
     /// Parse a JSON array of beads from bf output.
@@ -1200,7 +1207,9 @@ impl BeadStore for BfCliBeadStore {
     async fn list_all(&self) -> Result<Vec<Bead>> {
         // Use a large explicit limit instead of --limit 0, which returns
         // an empty set on bead-forge 0.2.0 (bug). 999999 effectively means "no limit".
-        let stdout = self.run_bf(&["list", "--json", "--limit", "999999"]).await?;
+        let stdout = self
+            .run_bf(&["list", "--json", "--limit", "999999"])
+            .await?;
         Self::parse_beads(&stdout, "bf list --json")
     }
 

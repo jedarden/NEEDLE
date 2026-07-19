@@ -305,9 +305,7 @@ impl StrandRunner {
                     StrandResult::WorkCreated => (strand_results::WORK_CREATED.to_string(), true),
                     StrandResult::NoWork => (strand_results::NO_WORK.to_string(), true),
                     StrandResult::Error(_) => (strand_results::ERROR.to_string(), true),
-                    StrandResult::Skipped { reason } => {
-                        (format!("skipped({})", reason), true)
-                    }
+                    StrandResult::Skipped { reason } => (format!("skipped({})", reason), true),
                     StrandResult::Split(_, _failure_count) => {
                         (format!("{}({})", strand_results::BEAD_FOUND, 1), true)
                     }
