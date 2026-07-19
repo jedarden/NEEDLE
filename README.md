@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](rust-toolchain.toml)
-[![Version](https://img.shields.io/badge/version-0.2.8-green.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.2.11-green.svg)](Cargo.toml)
 
 **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
