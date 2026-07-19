@@ -1394,11 +1394,13 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
         .to_string();
     let bead_id = BeadId::from(bead_id);
 
-    // Claim the bead to a dead worker.
+    // Claim the bead to a dead worker with the correct qualified_id format.
+    // The ExploreStrand's qualified_id is "claude-test-worker", so we use a different
+    // adapter prefix to ensure it doesn't match.
     let claim_output = std::process::Command::new("/home/coding/.local/bin/br")
         .arg("update")
         .arg(bead_id.as_ref())
-        .arg("--assignee=dead-worker-12345")
+        .arg("--assignee=codesearch-dead-worker-12345")
         .arg("--status=in_progress")
         .current_dir(&remote_workspace)
         .output()
@@ -1626,13 +1628,9 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     let create_result = String::from_utf8_lossy(&output.stdout);
     let bead_id = create_result
         .lines()
-        .find(|l| l.contains("Created"))
-        .and_then(|l| {
-            // Parse "✓ Created <ID>: <title>" to extract the ID
-            l.split("Created ").nth(1).and_then(|s| s.split(':').next())
-        })
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.starts_with("Initialized"))
         .unwrap()
-        .trim()
         .to_string();
     let bead_id = BeadId::from(bead_id);
 
@@ -1726,7 +1724,7 @@ async fn mend_removes_stale_dependency_links() {
     let blocker_output = std::process::Command::new("/home/coding/.local/bin/br")
         .args([
             "create",
-            "Blocker bead",
+            "--title=Blocker bead",
             "--description=This is the blocker",
         ])
         .current_dir(workspace)
@@ -1736,17 +1734,16 @@ async fn mend_removes_stale_dependency_links() {
 
     let blocker_id = String::from_utf8_lossy(&blocker_output.stdout)
         .lines()
-        .find(|l| l.contains("Created"))
-        .and_then(|l| l.split("Created ").nth(1).and_then(|s| s.split(':').next()))
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.starts_with("Initialized"))
         .unwrap()
-        .trim()
         .to_string();
 
     // Create blocked bead.
     let blocked_output = std::process::Command::new("/home/coding/.local/bin/br")
         .args([
             "create",
-            "Blocked bead",
+            "--title=Blocked bead",
             "--description=This bead depends on the blocker",
         ])
         .current_dir(workspace)
@@ -1756,15 +1753,14 @@ async fn mend_removes_stale_dependency_links() {
 
     let blocked_id = String::from_utf8_lossy(&blocked_output.stdout)
         .lines()
-        .find(|l| l.contains("Created"))
-        .and_then(|l| l.split("Created ").nth(1).and_then(|s| s.split(':').next()))
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !l.starts_with("Initialized"))
         .unwrap()
-        .trim()
         .to_string();
 
     // Add dependency: blocked depends on blocker.
     let dep_output = std::process::Command::new("/home/coding/.local/bin/br")
-        .args(["dep", "add", &blocked_id, &blocker_id, "--type", "blocks"])
+        .args(["dep", "add", &blocker_id, "--blocks", &blocked_id])
         .current_dir(workspace)
         .output()
         .expect("br dep add failed");
@@ -2038,21 +2034,14 @@ async fn dead_worker_cleanup_integration() {
     registry.register(dead_entry).unwrap();
 
     // Verify both workers are in the registry file.
-    let workers_before = registry.list().unwrap();
-    assert_eq!(
-        workers_before.len(),
-        2,
-        "both workers should be registered initially"
-    );
-
-    // Read the registry file directly to verify the dead worker is on disk.
+    // Note: registry.list() filters out dead PIDs, so we check the file directly.
     let reg_path = registry.path();
     let raw_content = std::fs::read_to_string(reg_path).unwrap();
     let raw_reg: needle::registry::RegistryFile = serde_json::from_str(&raw_content).unwrap();
     assert_eq!(
         raw_reg.workers.len(),
         2,
-        "both workers should be in the file"
+        "both workers should be in the file initially"
     );
 
     // Run the needle worker with a single mend cycle.
