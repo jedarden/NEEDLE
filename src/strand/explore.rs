@@ -2241,4 +2241,566 @@ mod tests {
             Ok(())
         }
     }
+
+    // ── Regression Tests: 2026-07-19/20 Incident (plan.md Phase 8.4) ─────────
+
+    /// Regression Test 1: Empty workspaces config triggers full discovery.
+    ///
+    /// Test: ExploreStrand::new() with an empty `config.workspaces` and a
+    /// `workspace_root` containing several `.beads/`-having directories produces
+    /// a worker that scans all of them, not a hardcoded subset.
+    ///
+    /// This is the DEFAULT behavior and should be the normal case for the fleet.
+    /// When `workspaces` is empty, the strand MUST run recursive discovery under
+    /// `workspace_root` and find every directory containing a `.beads/` subdirectory.
+    #[test]
+    fn regression_empty_workspaces_config_triggers_full_discovery() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create multiple workspaces with .beads/ directories
+        let workspace1 = root.path().join("workspace1");
+        let workspace2 = root.path().join("workspace2");
+        let workspace3 = root.path().join("workspace3");
+        let workspace4 = root.path().join("workspace4");
+
+        for ws in &[&workspace1, &workspace2, &workspace3, &workspace4] {
+            fs::create_dir(ws).unwrap();
+            fs::create_dir(ws.join(".beads")).unwrap();
+        }
+
+        // Create a non-workspace directory (no .beads/)
+        let not_a_workspace = root.path().join("not-a-workspace");
+        fs::create_dir(&not_a_workspace).unwrap();
+
+        // Empty workspaces config with a valid root
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should trigger discovery
+            workspace_root: root.path().to_path_buf(),
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // The strand MUST have discovered all 4 workspaces with .beads/
+        assert_eq!(
+            strand.workspaces.len(),
+            4,
+            "empty workspaces config must discover all .beads/ directories under workspace_root"
+        );
+
+        // All workspaces should be present
+        assert!(
+            strand.workspaces.contains(&workspace1),
+            "workspace1 should be discovered"
+        );
+        assert!(
+            strand.workspaces.contains(&workspace2),
+            "workspace2 should be discovered"
+        );
+        assert!(
+            strand.workspaces.contains(&workspace3),
+            "workspace3 should be discovered"
+        );
+        assert!(
+            strand.workspaces.contains(&workspace4),
+            "workspace4 should be discovered"
+        );
+
+        // Non-workspace should NOT be present
+        assert!(
+            !strand.workspaces.contains(&not_a_workspace),
+            "directory without .beads/ should not be discovered"
+        );
+    }
+
+    /// Regression Test 2: Non-empty workspaces config is a pin, never falls back to discovery.
+    ///
+    /// Test: ExploreStrand::new() with a non-empty `config.workspaces` (simulating
+    /// a deliberate pin) scans exactly that list, never falling back to discovery.
+    ///
+    /// This preserves the exception mechanism. When `workspaces` is explicitly
+    /// set, auto-discovery MUST be disabled and the strand MUST use only the
+    /// explicitly listed paths. This is the PINNED mode and should emit a WARN log.
+    #[test]
+    fn regression_non_empty_workspaces_config_is_pinned_never_discovers() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create the directories that ARE in the explicit list
+        let pinned1 = root.path().join("pinned-workspace1");
+        let pinned2 = root.path().join("pinned-workspace2");
+
+        for ws in &[&pinned1, &pinned2] {
+            fs::create_dir(ws).unwrap();
+            fs::create_dir(ws.join(".beads")).unwrap();
+        }
+
+        // Create additional workspaces that are NOT in the explicit list
+        let unpinned1 = root.path().join("unpinned-workspace1");
+        let unpinned2 = root.path().join("unpinned-workspace2");
+
+        for ws in &[&unpinned1, &unpinned2] {
+            fs::create_dir(ws).unwrap();
+            fs::create_dir(ws.join(".beads")).unwrap();
+        }
+
+        // Non-empty workspaces config — explicit pin list
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![pinned1.clone(), pinned2.clone()], // PINNED — should NOT discover
+            workspace_root: root.path().to_path_buf(),
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // The strand MUST have ONLY the 2 pinned workspaces
+        assert_eq!(
+            strand.workspaces.len(),
+            2,
+            "non-empty workspaces config must use only the explicit list, not discover additional workspaces"
+        );
+
+        // Pinned workspaces should be present
+        assert!(
+            strand.workspaces.contains(&pinned1),
+            "pinned workspace 1 should be in the list"
+        );
+        assert!(
+            strand.workspaces.contains(&pinned2),
+            "pinned workspace 2 should be in the list"
+        );
+
+        // Unpinned workspaces must NOT be present — even though they have .beads/
+        assert!(
+            !strand.workspaces.contains(&unpinned1),
+            "unpinned workspace 1 should NOT be discovered when workspaces list is non-empty"
+        );
+        assert!(
+            !strand.workspaces.contains(&unpinned2),
+            "unpinned workspace 2 should NOT be discovered when workspaces list is non-empty"
+        );
+    }
+
+    /// Regression Test 3: Fixture reproducing the exact 2026-07-19/20 incident.
+    ///
+    /// Test: A `workspace_root` containing `commitgraph` and `twitterapi-proxy`
+    /// (both with `.beads/`) alongside other known repos — with an empty `workspaces`
+    /// config, all are discovered, not just a previously hand-listed subset.
+    ///
+    /// This reproduces the EXACT incident scenario. At the time of the incident,
+    /// the fleet config had a static 24-entry list that didn't include the two
+    /// newly-added repos. This test proves that with empty config (the intended
+    /// default), discovery finds everything without manual list maintenance.
+    #[test]
+    fn regression_fixture_2026_07_19_incident_all_workspaces_discovered() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create the 24 "known repos" from the original static list
+        let known_repos = [
+            "NEEDLE",
+            "bead-forge",
+            "CLASP",
+            "SIGIL",
+            "ARMOR",
+            "spaxel",
+            "mta-my-way",
+            "kalshi-tape",
+            "kalshi-weather",
+            "duck-e",
+            "vista",
+            "botburrow-agents",
+            "news-trader",
+            "domain-check",
+            "AgentScribe",
+            "telegram-claude-bridge",
+            "forge",
+            "declarative-config",
+            "nixos-asterisk",
+            "perles-orchestration-control-plane",
+            "junk-drawer",
+            "private-dotfiles",
+            "hoop",
+            "FABRIC",
+        ];
+
+        for repo_name in &known_repos {
+            let ws = root.path().join(repo_name);
+            fs::create_dir(&ws).unwrap();
+            fs::create_dir(ws.join(".beads")).unwrap();
+        }
+
+        // Create the two newly-added repos that were missing from the static list
+        let commitgraph = root.path().join("commitgraph");
+        let twitterapi_proxy = root.path().join("twitterapi-proxy");
+
+        fs::create_dir(&commitgraph).unwrap();
+        fs::create_dir(commitgraph.join(".beads")).unwrap();
+        fs::create_dir(&twitterapi_proxy).unwrap();
+        fs::create_dir(twitterapi_proxy.join(".beads")).unwrap();
+
+        // Empty workspaces config — the INTENDED default
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should discover ALL repos including the new ones
+            workspace_root: root.path().to_path_buf(),
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // The strand MUST have discovered ALL 26 repos (24 original + 2 new)
+        assert_eq!(
+            strand.workspaces.len(),
+            26,
+            "with empty workspaces config, all repos including newly-added ones must be discovered"
+        );
+
+        // The two previously-missing repos MUST be present
+        assert!(
+            strand.workspaces.contains(&commitgraph),
+            "commitgraph must be discovered (was missing from static list in incident)"
+        );
+        assert!(
+            strand.workspaces.contains(&twitterapi_proxy),
+            "twitterapi-proxy must be discovered (was missing from static list in incident)"
+        );
+
+        // All original repos should still be present
+        for repo_name in &known_repos {
+            let ws = root.path().join(repo_name);
+            assert!(
+                strand.workspaces.contains(&ws),
+                "{} should still be discovered",
+                repo_name
+            );
+        }
+    }
+
+    /// Regression Test 4: Discovery handles non-existent workspace_root gracefully.
+    ///
+    /// Test: ExploreStrand::new() with empty `config.workspaces` and a
+    /// `workspace_root` that doesn't exist returns an empty workspace list
+    /// (not an error).
+    ///
+    /// This is a defensive test — discovery should fail gracefully when the
+    /// configured root doesn't exist, not panic or error. Workers in this state
+    /// will simply have no workspaces to explore (which is valid).
+    #[test]
+    fn regression_discovery_with_nonexistent_root_returns_empty() {
+        let nonexistent_root = PathBuf::from("/this/path/definitely/does/not/exist/xyz123");
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should attempt discovery
+            workspace_root: nonexistent_root,
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // Should return empty list, not panic or error
+        assert_eq!(
+            strand.workspaces.len(),
+            0,
+            "non-existent workspace_root should result in empty workspace list"
+        );
+    }
+
+    /// Regression Test 5: Discovery filters correctly, only finding .beads/ directories.
+    ///
+    /// Test: ExploreStrand::new() with empty `config.workspaces` and a
+    /// `workspace_root` containing a mix of `.beads/`-having directories,
+    /// non-workspace directories, and files — discovers ONLY the directories
+    /// that actually contain `.beads/`.
+    ///
+    /// This proves that discovery is selective, not indiscriminate. It should
+    /// only find valid workspace directories, not every directory under the root.
+    #[test]
+    fn regression_discovery_filters_only_beads_directories() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create valid workspaces (have .beads/)
+        let valid1 = root.path().join("valid-workspace1");
+        let valid2 = root.path().join("valid-workspace2");
+        fs::create_dir(&valid1).unwrap();
+        fs::create_dir(valid1.join(".beads")).unwrap();
+        fs::create_dir(&valid2).unwrap();
+        fs::create_dir(valid2.join(".beads")).unwrap();
+
+        // Create directories without .beads/
+        let no_beads1 = root.path().join("no-beads-dir1");
+        let no_beads2 = root.path().join("no-beads-dir2");
+        fs::create_dir(&no_beads1).unwrap();
+        fs::create_dir(&no_beads2).unwrap();
+
+        // Create a file (not a directory) — should be ignored
+        let a_file = root.path().join("not-a-directory.txt");
+        fs::write(&a_file, b"some content").unwrap();
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should trigger discovery
+            workspace_root: root.path().to_path_buf(),
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // Should discover only the 2 valid workspaces
+        assert_eq!(
+            strand.workspaces.len(),
+            2,
+            "discovery should find only directories with .beads/"
+        );
+
+        assert!(
+            strand.workspaces.contains(&valid1),
+            "valid workspace 1 should be discovered"
+        );
+        assert!(
+            strand.workspaces.contains(&valid2),
+            "valid workspace 2 should be discovered"
+        );
+
+        // Directories without .beads/ should NOT be present
+        assert!(
+            !strand.workspaces.contains(&no_beads1),
+            "directory without .beads/ should not be discovered"
+        );
+        assert!(
+            !strand.workspaces.contains(&no_beads2),
+            "directory without .beads/ should not be discovered"
+        );
+    }
+
+    /// Regression Test 6: Pinned mode with directories that don't exist.
+    ///
+    /// Test: ExploreStrand::new() with a non-empty `config.workspaces` that
+    /// includes paths that don't exist — the strand includes them in the list
+    /// anyway (validation happens later during strand evaluation).
+    ///
+    /// This is a defensive test proving that the pinned mode doesn't validate
+    /// existence at construction time. The strand faithfully uses whatever
+    /// list it's given — failures during evaluation are handled gracefully.
+    #[test]
+    fn regression_pinned_mode_includes_nonexistent_paths_in_list() {
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![
+                PathBuf::from("/nonexistent/path/1"),
+                PathBuf::from("/nonexistent/path/2"),
+                PathBuf::from("/another/fake/path"),
+            ],
+            workspace_root: PathBuf::from("/tmp/irrelevant"),
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // The strand should include the nonexistent paths in its list
+        // (validation happens during strand evaluation, not construction)
+        assert_eq!(
+            strand.workspaces.len(),
+            3,
+            "pinned mode should include all configured paths regardless of existence"
+        );
+    }
+
+    /// Regression Test 7: Empty workspace_root with empty config.
+    ///
+    /// Test: ExploreStrand::new() with empty `config.workspaces` and a
+    /// `workspace_root` that exists but is empty returns an empty workspace list.
+    ///
+    /// This is an edge case — the root directory exists but has no subdirectories.
+    /// Discovery should return empty (no error), not panic.
+    #[test]
+    fn regression_empty_workspace_root_returns_empty_discovery() {
+        let root = tempfile::tempdir().unwrap(); // Root exists but is empty
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should trigger discovery
+            workspace_root: root.path().to_path_buf(),
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // Should return empty list (root has no subdirectories)
+        assert_eq!(
+            strand.workspaces.len(),
+            0,
+            "empty workspace_root should result in empty discovery list"
+        );
+    }
+
+    /// Regression Test 8: Discovery order is deterministic.
+    ///
+    /// Test: ExploreStrand::new() with empty `config.workspaces` and multiple
+    /// workspaces — the discovered list is in a deterministic order (filesystem
+    /// order, which is stable for a given set of directory names).
+    ///
+    /// This test verifies that discovery produces consistent results across
+    /// multiple runs given the same filesystem state. Determinism is a core
+    /// NEEDLE principle.
+    #[test]
+    fn regression_discovery_order_is_deterministic() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create workspaces in alphabetical order
+        let workspace_names = vec!["alpha", "bravo", "charlie", "delta", "echo"];
+        let mut workspaces = Vec::new();
+
+        for name in &workspace_names {
+            let ws = root.path().join(name);
+            fs::create_dir(&ws).unwrap();
+            fs::create_dir(ws.join(".beads")).unwrap();
+            workspaces.push(ws);
+        }
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should trigger discovery
+            workspace_root: root.path().to_path_buf(),
+        };
+
+        let home = PathBuf::from("/home/test");
+
+        // Create two strands with the same config
+        let temp_dir1 = tempfile::tempdir().unwrap();
+        let registry1 = crate::registry::Registry::new(temp_dir1.path());
+        let telemetry1 = Telemetry::new("test-worker-1".to_string());
+
+        let strand1 = ExploreStrand::new(
+            config.clone(),
+            home.clone(),
+            registry1,
+            telemetry1,
+            "test-worker-1".to_string(),
+        );
+
+        let temp_dir2 = tempfile::tempdir().unwrap();
+        let registry2 = crate::registry::Registry::new(temp_dir2.path());
+        let telemetry2 = Telemetry::new("test-worker-2".to_string());
+
+        let strand2 = ExploreStrand::new(
+            config,
+            home,
+            registry2,
+            telemetry2,
+            "test-worker-2".to_string(),
+        );
+
+        // Both strands should have the same workspace list
+        assert_eq!(
+            strand1.workspaces.len(),
+            strand2.workspaces.len(),
+            "both strands should discover the same number of workspaces"
+        );
+
+        // Order should be the same (filesystem order is deterministic)
+        assert_eq!(
+            strand1.workspaces, strand2.workspaces,
+            "discovery order should be deterministic across multiple strand constructions"
+        );
+    }
+
+    /// Regression Test 9: Discovery handles nested .beads/ directories correctly.
+    ///
+    /// Test: ExploreStrand::new() with empty `config.workspaces` only discovers
+    /// IMMEDIATE children of workspace_root, not nested grandchildren.
+    ///
+    /// This is a critical test — discovery should be shallow (one level deep)
+    /// to avoid unbounded filesystem traversal. A .beads/ directory in a
+    /// subdirectory of a subdirectory should NOT be discovered.
+    #[test]
+    fn regression_discovery_is_shallow_single_level_only() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create a valid workspace at the top level
+        let top_level = root.path().join("top-level-workspace");
+        fs::create_dir(&top_level).unwrap();
+        fs::create_dir(top_level.join(".beads")).unwrap();
+
+        // Create a nested subdirectory WITH .beads/ (should NOT be discovered)
+        let parent_dir = root.path().join("parent-dir");
+        fs::create_dir(&parent_dir).unwrap();
+        let nested_dir = parent_dir.join("nested-workspace");
+        fs::create_dir(&nested_dir).unwrap();
+        fs::create_dir(nested_dir.join(".beads")).unwrap();
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should trigger discovery
+            workspace_root: root.path().to_path_buf(),
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // Should discover ONLY the top-level workspace
+        assert_eq!(
+            strand.workspaces.len(),
+            1,
+            "discovery should be shallow — only immediate children of workspace_root"
+        );
+
+        assert!(
+            strand.workspaces.contains(&top_level),
+            "top-level workspace should be discovered"
+        );
+
+        // Nested workspace should NOT be discovered
+        assert!(
+            !strand.workspaces.contains(&nested_dir),
+            "nested workspace (grandchild of root) should NOT be discovered"
+        );
+
+        // Parent directory without .beads/ should not be discovered
+        assert!(
+            !strand.workspaces.contains(&parent_dir),
+            "parent directory without .beads/ should NOT be discovered"
+        );
+    }
 }
