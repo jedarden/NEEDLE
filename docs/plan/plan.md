@@ -4112,3 +4112,35 @@ Fix: a short-lived per-workspace advisory lock (e.g. `flock` on `<workspace>/.gi
 - Bare `needle cleanup` on a host with any mix of live and dead needle sessions removes only the dead ones, verified against `ps aux`, not assumed.
 - `needle cleanup --all`'s own `--help` text states plainly that it removes live sessions too.
 - The 2026-07-19 incident (bare cleanup killing `armor-p6a` and `needle-supervisor`) is reproduced as a regression-test fixture and does not recur.
+
+# Phase 8: Recursive Workspace Discovery as Explore's Default, Static List as Pinning Exception Only
+
+**Status:** planned (ADR-004).
+
+**Goal:** restore the originally-intended design — `ExploreStrand` recursively discovers every workspace under `workspace_root` (`/home/coding`) by default, and the `explore.workspaces` config list exists only as a deliberate, exceptional override for pinning a specific worker to a fixed set of repos, never as the normal way to populate the fleet's scan scope. Driven by a 2026-07-19/20 finding during lab fleet remediation: `explore.workspaces` in the live config had been populated with a static, 24-entry enumeration of "all known repos at the time," which — per `ExploreStrand::new()`'s own doc comment ("If `workspaces` is empty, auto-discovers all dirs with `.beads/` under the configured `workspace_root`") — completely bypasses the real, working `discover_workspaces()` recursive-scan code, since that path only runs when the list is empty. The static list is now stale: `commitgraph` and `twitterapi-proxy` both have real `.beads/` directories but are absent from it, making them permanently invisible to every roaming worker regardless of any other fix. This compounds the already-filed `bf-4df1e` (Explore stops scanning at the first workspace with any candidates) — even once that's fixed, a stale static list still hides whole repos from the scan entirely. Full evidence and rationale in [ADR-004](../adr/004-recursive-workspace-discovery-default.md).
+
+## Changes
+
+### 8.1 Recursive discovery is the unconditional default
+- `ExploreStrand::new()` (`src/strand/explore.rs`) must call `discover_workspaces(&config.workspace_root)` as the baseline workspace list whenever `config.workspaces` is not being used for a deliberate pin — not merely "when the list happens to be empty" as an incidental side effect of current config state, but as the designed default behavior an operator has to deliberately opt out of, not accidentally fall into.
+- `config.workspaces`, when explicitly set by an operator, is a **pin/exception list** — scoping a specific worker to a fixed, restricted set of repos for a deliberate operational reason (e.g. a dedicated worker that must never touch anything outside 2-3 sensitive repos). It must remain fully configurable, but must never be treated as required or default fleet-wide configuration, and its presence should not silently disable discovery for every worker that doesn't need pinning.
+
+### 8.2 Immediate operational fix (config, not code)
+- Clear the live lab config's `explore.workspaces` list back to empty. None of its current 24 entries represent a genuine pinning exception — they were simply an enumeration of known repos, which is exactly what `discover_workspaces()` already produces, minus the two it's missing (`commitgraph`, `twitterapi-proxy`).
+- This can ship independent of the 8.1 code change, since the current code already does the right thing when the list is empty — the bug is entirely that the list was populated with something that should never have been treated as exhaustive, ongoing configuration.
+
+### 8.3 Open question: discovery staleness within a worker's lifetime
+`ExploreStrand::new()`'s own doc comment: "The workspace list is captured at construction time and never re-read." Even with 8.1 fixed, a long-lived worker won't see a brand-new repo created after it started without a restart. Not solved by this phase — flagged for a follow-up decision (e.g. periodic re-discovery on an interval, or accept restart-to-pick-up-new-repos as adequate given workers already cycle relatively often).
+
+### 8.4 Testing
+- Regression test: `ExploreStrand::new()` with an empty `config.workspaces` and a `workspace_root` containing several `.beads/`-having directories produces a worker that scans all of them, not a hardcoded subset.
+- Regression test: `ExploreStrand::new()` with a non-empty `config.workspaces` (simulating a deliberate pin) scans exactly that list, never falling back to discovery — preserves the exception mechanism's own correctness while fixing the default.
+- Fixture test reproducing the exact 2026-07-19/20 finding: a `workspace_root` containing `commitgraph` and `twitterapi-proxy` (both with `.beads/`) alongside the other 24 known repos — with an empty `workspaces` config, all 26 are discovered, not just the 24 that happened to be hand-listed.
+
+### 8.5 Deployment
+- Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, then staged fleet rollout through the canary channel (`:testing` → `:stable`), per the existing convention (§6.8/§7.3).
+
+## Exit criteria
+- A fresh worker with `explore.workspaces` unset (or emptied) discovers every `.beads/`-having directory under `workspace_root`, including `commitgraph` and `twitterapi-proxy`, without any manual list maintenance.
+- Setting `explore.workspaces` explicitly still restricts a worker to exactly that list — the pin/exception mechanism keeps working for whoever deliberately wants it.
+- The live lab config no longer carries a stale, exhaustive-looking static list where an empty (discovery-driven) one was intended.
