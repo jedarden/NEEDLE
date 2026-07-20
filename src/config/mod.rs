@@ -367,20 +367,56 @@ pub struct SupervisorDetectionConfig {
 }
 
 /// Explore strand configuration (multi-workspace discovery).
+///
+/// ## Workspace Discovery Modes
+///
+/// **Default mode (recommended):** Leave `workspaces` empty.
+/// - All directories under `workspace_root` containing a `.beads/` subdirectory
+///   are automatically discovered and scanned for beads.
+/// - This is the intended default for the fleet as a whole — new workspaces are
+///   picked up automatically without configuration changes.
+///
+/// **Pinned mode (exception):** Set `workspaces` to an explicit list of paths.
+/// - Only the specified workspaces are scanned; auto-discovery is disabled.
+/// - Use this to restrict a specific worker to a fixed repo set (e.g., a dedicated
+///   worker for a high-priority workspace that should not process other work).
+/// - This is an exception mechanism — the fleet should normally run with `workspaces`
+///   empty to avoid missing beads in newly-added workspaces.
+///
+/// ## Rationale
+///
+/// The 2026-07-19 fleet incident occurred because `explore.workspaces` was populated
+/// with 24 hardcoded paths. This permanently disabled discovery fleet-wide, and the
+/// list had already drifted stale (missing valid repos like commitgraph and
+/// twitterapi-proxy). Recursive discovery is now the documented intended default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExploreConfig {
     /// Whether the Explore strand is enabled.
     #[serde(default = "ExploreConfig::default_enabled")]
     pub enabled: bool,
 
-    /// Explicit workspace paths to search for beads.
-    /// When empty, workspaces are auto-discovered under `workspace_root`.
+    /// **Pin/exception list** for restricting a worker to specific workspaces.
+    ///
+    /// When **empty** (the default), enables recursive discovery under `workspace_root`:
+    /// all directories containing a `.beads/` subdirectory are automatically scanned.
+    /// This is the intended default for the fleet — new workspaces are picked up
+    /// without configuration changes.
+    ///
+    /// When **non-empty**, disables auto-discovery and scans only these paths.
+    /// Use this to restrict a specific worker to a fixed repo set (e.g., a dedicated
+    /// worker for a high-priority workspace). This is an exception mechanism — most
+    /// workers should leave this empty to avoid missing beads in newly-added workspaces.
+    ///
+    /// **WARNING:** When non-empty, a WARN log is emitted at startup naming the
+    /// pinned repos, so operators can immediately see when a worker is running in
+    /// restricted/exception mode rather than discovering this only via missing beads.
     #[serde(default)]
     pub workspaces: Vec<PathBuf>,
 
     /// Root path for workspace auto-discovery (when `workspaces` is empty).
+    ///
     /// All directories under this path containing a `.beads/` subdirectory
-    /// are treated as workspaces.
+    /// are treated as workspaces. Defaults to the user's home directory.
     #[serde(default = "ExploreConfig::default_workspace_root")]
     pub workspace_root: PathBuf,
 }

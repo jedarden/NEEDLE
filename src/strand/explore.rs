@@ -4,14 +4,40 @@
 //! maintenance is clean (Mend returned NoWork), Explore searches
 //! configured workspaces for claimable beads.
 //!
-//! Design constraints (from v1 lessons):
+//! ## Workspace Discovery (Intended Default)
+//!
+//! **DEFAULT MODE (RECOMMENDED):** Empty `workspaces` config.
+//!
+//! When `config.workspaces` is empty (the default), Explore runs recursive
+//! workspace discovery under `config.workspace_root`. All directories containing
+//! a `.beads/` subdirectory are automatically scanned for beads.
+//!
+//! This is the **intended default for the fleet as a whole** — new workspaces
+//! are picked up automatically without configuration changes. Operators should
+//! leave `workspaces` empty unless there's a specific reason to pin a worker to
+//! a fixed repo set.
+//!
+//! **PINNED MODE (EXCEPTION):** Explicit `workspaces` list.
+//!
+//! When `config.workspaces` is non-empty, auto-discovery is disabled and only
+//! the specified paths are scanned. Use this to restrict a specific worker to
+//! a fixed repo set (e.g., a dedicated worker for a high-priority workspace).
+//!
+//! This is an **exception mechanism**. The fleet should normally run with
+//! `workspaces` empty. A WARN log is emitted at startup when `workspaces` is
+//! non-empty, naming the pinned repos, so operators can immediately see when
+//! a worker is running in restricted mode.
+//!
+//! ## Design Constraints (from v1 lessons)
 //! - **No upward traversal.** Only configured paths are checked.
 //! - **Static workspace list.** Read from config at boot, not re-evaluated.
 //! - **No permanent relocation.** Workers process one bead then return home.
 //!
-//! Workspace discovery:
-//! - Empty `workspaces` config → auto-discover all dirs with `.beads/` under `workspace_root`.
-//! - Explicit `workspaces` list → only scan those paths.
+//! ## Implementation
+//!
+//! ExploreStrand::new() implements the discovery contract:
+//! - If `config.workspaces` is empty → calls `discover_workspaces(&config.workspace_root)`
+//! - If `config.workspaces` is non-empty → uses the explicit list directly
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -81,6 +107,25 @@ impl ExploreStrand {
         } else {
             config.workspaces
         };
+
+        // Emit WARN if running in pinned mode (non-empty workspaces).
+        if !workspaces.is_empty() {
+            let repo_names: Vec<String> = workspaces
+                .iter()
+                .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+                .map(|s| s.to_string())
+                .collect();
+            tracing::warn!(
+                worker = %qualified_id,
+                mode = "pinned",
+                workspaces_count = workspaces.len(),
+                pinned_repos = ?repo_names,
+                "Explore running in PINNED mode (non-empty workspaces list). \
+                 Auto-discovery is disabled; only the listed workspaces will be scanned. \
+                 This is an exception mechanism — the fleet default is empty workspaces \
+                 (recursive discovery under workspace_root). Verify this is intentional."
+            );
+        }
 
         ExploreStrand {
             enabled: config.enabled,
