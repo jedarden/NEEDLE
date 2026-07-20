@@ -802,8 +802,7 @@ impl Dispatcher {
                             Ok(())
                         })
                         .spawn()
-                }
-                {
+                } {
                     Ok(mut transform_child) => {
                         match transform_child.stdin.take() {
                             Some(transform_stdin) => {

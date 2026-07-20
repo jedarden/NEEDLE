@@ -1437,6 +1437,7 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
 ///
 /// Finds and removes needle tmux sessions that no longer have active workers.
 /// With --all, removes all needle sessions regardless of worker status.
+/// With -i, filters sessions by name/identifier substring (bypasses liveness check).
 fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
     let sessions = list_needle_sessions()?;
 
@@ -1446,12 +1447,28 @@ fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
     }
 
     let targets: Vec<&str> = if all {
+        // --all: remove all sessions regardless of liveness
         sessions.iter().map(|s| s.name.as_str()).collect()
-    } else {
-        let id = identifier.as_deref().unwrap_or("");
+    } else if let Some(id) = &identifier {
+        // -i flag: filter by identifier substring (no liveness check)
         sessions
             .iter()
-            .filter(|s| id.is_empty() || s.name.contains(id))
+            .filter(|s| s.name.contains(id))
+            .map(|s| s.name.as_str())
+            .collect()
+    } else {
+        // Default: only orphaned sessions (no live backing process)
+        let discovered = scan_needle_processes().unwrap_or_default();
+        let live_pids: std::collections::HashSet<u32> = discovered.iter().map(|p| p.pid).collect();
+
+        sessions
+            .iter()
+            .filter(|s| {
+                // Session is orphaned if:
+                // - It has no PID at all, OR
+                // - Its PID is not in the live process set
+                s.pid.map_or(true, |pid| !live_pids.contains(&pid))
+            })
             .map(|s| s.name.as_str())
             .collect()
     };
