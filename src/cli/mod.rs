@@ -24,6 +24,7 @@ use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
 use crate::registry::{Registry, WorkerEntry};
 use crate::telemetry::{self, EventKind, Telemetry};
+use crate::types::IdleAction;
 use crate::worker::Worker;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2720,6 +2721,16 @@ fn apply_config_set(config: &mut Config, key: &str, value: &str) -> Result<()> {
                 .parse()
                 .with_context(|| format!("invalid idle_timeout value: {}", value))?;
         }
+        ["worker", "idle_action"] => {
+            config.worker.idle_action = match value {
+                "wait" => IdleAction::Wait,
+                "exit" => IdleAction::Exit,
+                other => bail!(
+                    "invalid idle_action value: '{}' (expected 'wait' or 'exit')",
+                    other
+                ),
+            };
+        }
         ["worker", "max_claim_retries"] => {
             config.worker.max_claim_retries = value
                 .parse()
@@ -2752,7 +2763,7 @@ fn apply_config_set(config: &mut Config, key: &str, value: &str) -> Result<()> {
         }
         _ => {
             bail!(
-                "unknown or non-writable config key: '{}'\nSupported keys:\n  agent.default\n  agent.timeout\n  worker.max_workers\n  worker.launch_stagger_seconds\n  worker.idle_timeout\n  worker.max_claim_retries\n  worker.cpu_load_warn\n  worker.memory_free_warn_mb\n  worker.building_timeout\n  health.heartbeat_interval_secs\n  health.heartbeat_ttl_secs",
+                "unknown or non-writable config key: '{}'\nSupported keys:\n  agent.default\n  agent.timeout\n  worker.max_workers\n  worker.launch_stagger_seconds\n  worker.idle_timeout\n  worker.idle_action\n  worker.max_claim_retries\n  worker.cpu_load_warn\n  worker.memory_free_warn_mb\n  worker.building_timeout\n  health.heartbeat_interval_secs\n  health.heartbeat_ttl_secs",
                 key
             );
         }
@@ -2778,6 +2789,13 @@ fn config_get_key(config: &Config, key: &str) -> Option<String> {
         "worker.max_workers" => Some(config.worker.max_workers.to_string()),
         "worker.launch_stagger_seconds" => Some(config.worker.launch_stagger_seconds.to_string()),
         "worker.idle_timeout" => Some(config.worker.idle_timeout.to_string()),
+        "worker.idle_action" => Some(
+            match config.worker.idle_action {
+                IdleAction::Wait => "wait",
+                IdleAction::Exit => "exit",
+            }
+            .to_string(),
+        ),
         "worker.max_claim_retries" => Some(config.worker.max_claim_retries.to_string()),
         "worker.cpu_load_warn" => Some(config.worker.cpu_load_warn.to_string()),
         "worker.memory_free_warn_mb" => Some(config.worker.memory_free_warn_mb.to_string()),
@@ -2809,6 +2827,13 @@ fn config_dump(config: &Config) -> Vec<String> {
             config.worker.launch_stagger_seconds
         ),
         format!("worker.idle_timeout: {}", config.worker.idle_timeout),
+        format!(
+            "worker.idle_action: {}",
+            match config.worker.idle_action {
+                IdleAction::Wait => "wait",
+                IdleAction::Exit => "exit",
+            }
+        ),
         format!(
             "worker.max_claim_retries: {}",
             config.worker.max_claim_retries
@@ -5058,6 +5083,8 @@ mod tests {
         assert!(config_get_key(&config, "agent.default").is_some());
         assert!(config_get_key(&config, "agent.timeout").is_some());
         assert!(config_get_key(&config, "worker.max_workers").is_some());
+        assert!(config_get_key(&config, "worker.idle_timeout").is_some());
+        assert!(config_get_key(&config, "worker.idle_action").is_some());
         assert!(config_get_key(&config, "health.heartbeat_interval_secs").is_some());
         assert!(config_get_key(&config, "workspace.default").is_some());
         assert!(config_get_key(&config, "workspace.home").is_some());
@@ -5076,9 +5103,46 @@ mod tests {
         assert!(lines.len() >= 10, "should have at least 10 config lines");
         assert!(lines.iter().any(|l| l.starts_with("agent.default:")));
         assert!(lines.iter().any(|l| l.starts_with("worker.max_workers:")));
+        assert!(lines.iter().any(|l| l.starts_with("worker.idle_action:")));
         assert!(lines
             .iter()
             .any(|l| l.starts_with("health.heartbeat_ttl_secs:")));
+    }
+
+    #[test]
+    fn apply_config_set_and_get_idle_action_roundtrip() {
+        let mut config = Config::default();
+
+        // Default is "wait".
+        assert_eq!(
+            config_get_key(&config, "worker.idle_action"),
+            Some("wait".to_string())
+        );
+
+        apply_config_set(&mut config, "worker.idle_action", "exit").unwrap();
+        assert_eq!(config.worker.idle_action, IdleAction::Exit);
+        assert_eq!(
+            config_get_key(&config, "worker.idle_action"),
+            Some("exit".to_string())
+        );
+
+        apply_config_set(&mut config, "worker.idle_action", "wait").unwrap();
+        assert_eq!(config.worker.idle_action, IdleAction::Wait);
+        assert_eq!(
+            config_get_key(&config, "worker.idle_action"),
+            Some("wait".to_string())
+        );
+    }
+
+    #[test]
+    fn apply_config_set_idle_action_rejects_invalid_value() {
+        let mut config = Config::default();
+        let result = apply_config_set(&mut config, "worker.idle_action", "bogus");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid idle_action value"));
     }
 
     #[test]
