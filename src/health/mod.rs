@@ -486,7 +486,10 @@ impl HealthMonitor {
         }
         // ESRCH means no such process. EPERM means the process exists but we
         // lack permission to send signals to it (process is alive).
+        #[cfg(target_os = "linux")]
         let errno = unsafe { *libc::__errno_location() };
+        #[cfg(target_os = "macos")]
+        let errno = unsafe { *libc::__error() };
         errno == libc::EPERM
     }
 
