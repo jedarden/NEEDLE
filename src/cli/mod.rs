@@ -101,9 +101,15 @@ pub enum CliCommand {
         identifier: Option<String>,
     },
 
-    /// Remove orphaned tmux sessions (sessions without active workers).
+    /// Remove needle tmux sessions.
+    ///
+    /// Without flags, only removes sessions without active workers (liveness-checked).
+    /// With --all, removes every session including live ones with active workers.
     Cleanup {
-        /// Remove all needle sessions (even if workers are active).
+        /// Remove every needle session, including live sessions with active workers.
+        ///
+        /// This is destructive — active workers will be killed along with their sessions.
+        /// Use without this flag for safe, liveness-checked cleanup of orphaned sessions only.
         #[arg(long)]
         all: bool,
 
