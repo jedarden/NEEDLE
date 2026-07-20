@@ -324,15 +324,17 @@ fn builtin_opencode() -> AgentAdapter {
 fn builtin_codex() -> AgentAdapter {
     AgentAdapter {
         name: "codex".to_string(),
-        description: Some("OpenAI Codex CLI with full-auto approval".to_string()),
+        description: Some(
+            "OpenAI Codex CLI, non-interactive exec with a workspace-write sandbox".to_string(),
+        ),
         agent_cli: "codex".to_string(),
         version_command: Some("codex --version".to_string()),
         input_method: InputMethod::Args {
             flag: "--".to_string(),
         },
         invoke_template: concat!(
-            "cd {workspace} && codex --model {model}",
-            " --approval-mode full-auto \"$(cat {prompt_file})\"",
+            "cd {workspace} && codex exec --model {model}",
+            " --sandbox workspace-write --json \"$(cat {prompt_file})\"",
         )
         .to_string(),
         environment: HashMap::new(),
@@ -1774,9 +1776,11 @@ output_transform: "needle-transform-custom"
         assert_eq!(adapter.name, "codex");
         assert_eq!(adapter.agent_cli, "codex");
         assert!(matches!(adapter.input_method, InputMethod::Args { .. }));
+        assert!(adapter.invoke_template.contains("codex exec"));
         assert!(adapter
             .invoke_template
-            .contains("--approval-mode full-auto"));
+            .contains("--sandbox workspace-write"));
+        assert!(adapter.invoke_template.contains("--json"));
         assert_eq!(adapter.model, Some("gpt-4".to_string()));
         assert_eq!(adapter.provider, Some("openai".to_string()));
         assert_eq!(
