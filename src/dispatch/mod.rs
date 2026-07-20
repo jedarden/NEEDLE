@@ -340,7 +340,7 @@ fn builtin_codex() -> AgentAdapter {
         environment: HashMap::new(),
         timeout_secs: 3600,
         provider: Some("openai".to_string()),
-        model: Some("gpt-4".to_string()),
+        model: Some("gpt-5.6-terra".to_string()),
         token_extraction: TokenExtraction::None,
         output_transform: Some("needle-transform-codex".to_string()),
     }
@@ -1781,7 +1781,7 @@ output_transform: "needle-transform-custom"
             .invoke_template
             .contains("--sandbox workspace-write"));
         assert!(adapter.invoke_template.contains("--json"));
-        assert_eq!(adapter.model, Some("gpt-4".to_string()));
+        assert_eq!(adapter.model, Some("gpt-5.6-terra".to_string()));
         assert_eq!(adapter.provider, Some("openai".to_string()));
         assert_eq!(
             adapter.output_transform,
@@ -2728,7 +2728,7 @@ output_transform: "needle-transform-custom"
     fn codex_adapter_has_openai_provider() {
         let adapter = builtin_codex();
         assert_eq!(adapter.provider, Some("openai".to_string()));
-        assert_eq!(adapter.model, Some("gpt-4".to_string()));
+        assert_eq!(adapter.model, Some("gpt-5.6-terra".to_string()));
     }
 
     #[test]
