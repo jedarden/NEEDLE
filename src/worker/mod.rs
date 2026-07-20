@@ -118,9 +118,13 @@ unsafe fn install_unix_signal_handlers() {
             tracing::debug!(signal = sig, "installed synchronous signal handler");
         } else {
             // Log the error but don't fail - the async handlers provide a fallback.
+            #[cfg(target_os = "linux")]
+            let errno = *libc::__errno_location();
+            #[cfg(target_os = "macos")]
+            let errno = *libc::__error();
             tracing::warn!(
                 signal = sig,
-                errno = *libc::__errno_location(),
+                errno = errno,
                 "failed to install synchronous signal handler"
             );
         }

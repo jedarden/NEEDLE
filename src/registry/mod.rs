@@ -38,7 +38,10 @@ pub fn is_pid_alive(pid: u32) -> bool {
             }
             // kill failed: check errno to distinguish EPERM from ESRCH.
             // We must read errno immediately after kill, before any other syscalls.
+            #[cfg(target_os = "linux")]
             let errno = *libc::__errno_location();
+            #[cfg(target_os = "macos")]
+            let errno = *libc::__error();
             match errno {
                 libc::ESRCH => {
                     // No such process: PID is dead.
