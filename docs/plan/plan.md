@@ -4144,3 +4144,66 @@ Fix: a short-lived per-workspace advisory lock (e.g. `flock` on `<workspace>/.gi
 - A fresh worker with `explore.workspaces` unset (or emptied) discovers every `.beads/`-having directory under `workspace_root`, including `commitgraph` and `twitterapi-proxy`, without any manual list maintenance.
 - Setting `explore.workspaces` explicitly still restricts a worker to exactly that list — the pin/exception mechanism keeps working for whoever deliberately wants it.
 - The live lab config no longer carries a stale, exhaustive-looking static list where an empty (discovery-driven) one was intended.
+
+# Phase 9: Unify GitHub-Release Upgrade with the Canary-Gated Hot-Reload Channel
+
+**Status:** planned (ADR-005).
+
+**Goal:** make a new GitHub release reach every live worker on every fleet host automatically, canary-validated, without a human having to remember to SSH into each host and run `needle upgrade`. Driven by a 2026-07-20 finding during the fleet-wide deployed-artifact improvement review: this repo already ships two binary-update mechanisms — the manual, canary-free `needle upgrade` CLI command, and a fully automatic, already-tested, canary-gated hot-reload pipeline that runs inside every worker's own loop every cycle — but the two are structurally disconnected. The automatic pipeline only ever reacts to a `needle-testing` binary written by the (currently disabled) self-modification pipeline; nothing writes a `needle-testing` binary from a GitHub release. Confirmed live on the ex44 host during this review: the installed `needle` binary reported version `0.2.11` while GitHub's latest published release was `v0.2.12`, published the same day — a real, present instance of the gap, not a hypothetical. Full evidence and rationale in [ADR-005](../adr/005-unify-release-upgrade-with-canary-hot-reload.md).
+
+## Changes
+
+### 9.1 Release-to-`:testing` download step
+- Add a function alongside `check_for_update()` (`src/upgrade/mod.rs`) that, on finding a newer GitHub release, downloads it to `~/.needle/bin/needle-testing` (the same path the self-modification pipeline already targets) instead of `perform_upgrade()`'s current direct-overwrite-of-`env::current_exe()` behavior. `perform_upgrade()` / `needle upgrade` itself is unchanged — this is an additional path, not a replacement.
+- Skip the write (and log why) if a `:testing` binary is already present and unpromoted, so a supervisor-driven release check can never clobber an in-flight self-modification candidate mid-canary.
+
+### 9.2 Supervisor-driven periodic check
+- `needle supervise` (`src/supervisor/mod.rs`) gains a poll loop calling the 9.1 function on an interval, new config `supervisor.update_check_interval_secs` (default 21600 / 6h).
+- Gated behind new config `supervisor.auto_upgrade_check: bool` (default `false`) — independent of `self_modification.enabled`, since a tagged/published release is a different trust level than an agent's own self-edit. Promotion-automatic-vs-manual still reuses the existing `self_modification.auto_promote` flag; no second flag for the same decision.
+
+### 9.3 No changes required to propagation
+- `check_auto_canary()` and `check_hot_reload()` (`src/worker/mod.rs`) already implement canary-gating, promotion, and safe-boundary hot-reload (never mid-dispatch) — confirmed by direct read and existing unit tests (`promote_moves_testing_to_stable`, etc. in `src/canary/mod.rs`). They pick up a release-sourced `:testing` binary with zero modification once 9.1/9.2 land.
+
+### 9.4 Testing
+- Regression test: 9.1's download function, given a mocked newer-release response, writes to `needle-testing` and does not touch the currently-running binary.
+- Regression test: 9.1's download function, given an already-present unpromoted `needle-testing`, skips the write and logs the skip reason.
+- Regression test: with `supervisor.auto_upgrade_check: true` and a mocked release, a full poll cycle results in a promoted `:stable` and a subsequent worker-loop hot-reload — exercised against the existing canary-workspace fixtures.
+- Validation item (not a standard regression test): confirm the existing canary-workspace fixtures (`~/.needle/canary/`) give adequate coverage for a full release-level binary swap, not just source-level self-modification deltas — a real release diff may change more surface (new CLI flags, new default adapters) than the fixtures were built against.
+
+### 9.5 Deployment
+- Ships `auto_upgrade_check: false` by default — prove on one host (ex44) for a full release cycle before flipping the fleet default, per the same "opt-in, prove on one host first" discipline already applied to weave/unravel/pulse. Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, staged rollout through the canary channel (`:testing` → `:stable`), per the existing convention (§6.8/§7.3/§8.5) — this phase's own change set gets promoted through the very mechanism it's building.
+
+## Exit criteria
+- A fresh GitHub release, published while a supervisor daemon is running with `auto_upgrade_check: true`, results in every live worker on that host running the new version within one `update_check_interval_secs` + one canary cycle, with no human action required.
+- A failing canary against a release-sourced `:testing` binary leaves `:stable` untouched and the fleet running the previous version — a bad release cannot silently propagate.
+- `needle upgrade` (manual path) continues to work unchanged for fresh installs and single-host immediate upgrades.
+
+## ADR-005: 2026-07-20 — Unify the GitHub-Release Upgrade Path with the Canary-Gated Hot-Reload Channel
+
+### Context
+
+NEEDLE ships two binary-update mechanisms that share vocabulary (`:testing` / `:stable`, "canary", "hot-reload") but are structurally disconnected — confirmed by direct code read during this review, not assumption:
+
+1. **Manual GitHub-release upgrade** — `needle upgrade` (`perform_upgrade()`, `src/upgrade/mod.rs`). Downloads the latest GitHub release and `fs::rename`s it directly over `env::current_exe()` — in place, on whatever host and path the operator happens to be running it from. No canary validation. No fleet propagation: a human must run this on every host individually, and nothing does so automatically.
+2. **Self-modification canary/hot-reload channel** — `src/canary/mod.rs` plus `check_auto_canary()` / `check_hot_reload()` in `src/worker/mod.rs`. A real, implemented, unit-tested automatic pipeline: every worker's own loop, every cycle, between LOGGING and SELECTING, detects a `~/.needle/bin/needle-testing` binary, canary-validates it against `~/.needle/canary/`, promotes to `needle-stable` on an all-pass (backing up the previous stable to `needle-stable.prev` for rollback), and every live worker on that host `exec()`s into the new binary with `--resume` at its next safe loop boundary — never mid-dispatch. This works today, but is gated behind `self_modification.enabled && self_modification.auto_promote` (both `false` in the live `.needle.yaml`), and — separately from that gate — **nothing anywhere in the codebase ever writes a `needle-testing` binary from a GitHub release.** The only producer of that path today is the self-modification pipeline itself (an agent editing NEEDLE's own source and building it locally).
+
+Live evidence gathered during this audit, ex44 host, 2026-07-20: `needle --version` reported `needle 0.2.11`; GitHub's `releases/latest` API reported `v0.2.12`, `published_at: 2026-07-20T12:49:30Z` — published the same day, and never picked up by either existing path. The fleet runs up to `worker.max_workers: 10` per host across at least two hosts (ex44, lab), each worker an independent, long-lived tmux-session loop, deliberately without a central orchestrator (README: "coordination happens through the shared bead queue"). Any fix has to preserve that property rather than introduce a controller that pushes commands to hosts.
+
+### Decision
+
+Route GitHub releases through the *existing* `:testing` slot instead of building a second, weaker auto-update path: add a download step (reusing `check_for_update()`'s version check) that writes a newer release to `~/.needle/bin/needle-testing`, triggered periodically from `needle supervise` (the fleet daemon that already runs continuously per host, independent of dispatch, and already owns fleet-wide operational decisions like auto-scaling) via a new `supervisor.auto_upgrade_check` flag (default `false`) and `supervisor.update_check_interval_secs` (default 6h). `check_auto_canary()` and `check_hot_reload()` — already running in every worker's loop — pick up a release-sourced `:testing` binary with zero code changes, since they only ever look at file paths and hashes, not provenance. Promotion-automatic-vs-manual continues to be governed by the existing `self_modification.auto_promote` flag rather than a new one. `needle upgrade` / `perform_upgrade()` remains available unchanged for the manual/immediate/fresh-install case. Full detail, alternatives, and evidence: [ADR-005](../adr/005-unify-release-upgrade-with-canary-hot-reload.md).
+
+### Alternatives Considered
+
+1. **Canary-validate inside `perform_upgrade()`, keep it manual-only.** Rejected as the primary fix — still requires a human to remember to run it per host, exactly the condition that produced the observed drift. Worth doing as a small independent hardening regardless (today the manual path installs with zero validation); filed as a separate, smaller bead.
+2. **Central push** (a control host SSHes into every fleet host and runs `needle upgrade`). Rejected — reintroduces the single controller NEEDLE's design explicitly avoids, and no host-inventory/SSH-fanout tooling exists for the fleet today.
+3. **Check on every worker-loop iteration instead of via the supervisor.** Rejected — couples a GitHub API call and download to bead-dispatch latency, and roaming/short-lived Explore-strand workers don't have a reliable idle moment for it; the supervisor daemon exists specifically as the per-host, dispatch-independent decision-maker.
+4. **Do nothing automatic — just print a "N releases behind" warning in `needle status`.** Rejected as a complete fix (still needs a human to notice and act, per host, per release), but cheap enough to ship immediately as a stopgap; filed separately.
+
+### Consequences
+
+- **Positive:** closes the exact drift class observed live during this audit by reusing machinery that already exists, is already unit-tested, and already has a rollback story (`needle rollback`) — not by inventing a new, weaker "just overwrite it" mechanism.
+- **Positive:** preserves the no-central-orchestrator principle — every host polls and validates independently; no host depends on another host or a controller.
+- **Risk:** the canary suite's existing fixtures were tuned for agent-authored source-level self-modification deltas; not yet confirmed they give adequate coverage for a full official-release binary swap (potentially larger surface change per hop). Needs its own validation pass before `auto_upgrade_check` becomes the fleet default.
+- **Risk:** two producers can now write `needle-testing` (self-modification and the new supervisor check) — needs the mutual-exclusion rule described in §9.1 so they can't clobber each other mid-validation.
+- **Deferred:** automatic rollback triggered by post-promotion outcome-rate anomalies, using the existing `needle rollback` primitive — reasonable future hardening, not required for v1.
