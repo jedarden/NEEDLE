@@ -16,11 +16,11 @@ fn main() {
     // Test 2: Simulated latency data
     println!("Test 2: Simulated benchmark latency data");
     let latencies = vec![
-        850, 920, 880, 950, 900,  // 5 samples around 900µs
-        1100, 1050, 1150, 1080, 1120,  // 5 samples around 1100µs
-        1250, 1200, 1300, 1220, 1280,  // 5 samples around 1250µs
-        1450, 1400, 1500, 1420, 1480,  // 5 samples around 1450µs
-        1800, 1750, 1850, 1780, 1820,  // 5 samples around 1800µs
+        850, 920, 880, 950, 900, // 5 samples around 900µs
+        1100, 1050, 1150, 1080, 1120, // 5 samples around 1100µs
+        1250, 1200, 1300, 1220, 1280, // 5 samples around 1250µs
+        1450, 1400, 1500, 1420, 1480, // 5 samples around 1450µs
+        1800, 1750, 1850, 1780, 1820, // 5 samples around 1800µs
     ]; // 25 samples total
     let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
