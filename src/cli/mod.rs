@@ -1439,6 +1439,50 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// Filter sessions for cleanup based on liveness and flags.
+///
+/// This is the core filtering logic for the cleanup command, extracted to be
+/// testable. Returns the session names that should be cleaned up.
+///
+/// # Arguments
+/// * `sessions` - All discovered tmux sessions
+/// * `live_pids` - Set of PIDs that have live needle processes
+/// * `all` - If true, include all sessions regardless of liveness
+/// * `identifier` - If set, filter by identifier substring (bypasses liveness check)
+///
+/// # Returns
+/// Vector of session names to clean up
+fn filter_sessions_for_cleanup(
+    sessions: &[TmuxSession],
+    live_pids: &std::collections::HashSet<u32>,
+    all: bool,
+    identifier: &Option<String>,
+) -> Vec<String> {
+    if all {
+        // --all: remove all sessions regardless of liveness
+        sessions.iter().map(|s| s.name.clone()).collect()
+    } else if let Some(id) = identifier {
+        // -i flag: filter by identifier substring (no liveness check)
+        sessions
+            .iter()
+            .filter(|s| s.name.contains(id))
+            .map(|s| s.name.clone())
+            .collect()
+    } else {
+        // Default: only orphaned sessions (no live backing process)
+        sessions
+            .iter()
+            .filter(|s| {
+                // Session is orphaned if:
+                // - It has no PID at all, OR
+                // - Its PID is not in the live process set
+                s.pid.map_or(true, |pid| !live_pids.contains(&pid))
+            })
+            .map(|s| s.name.clone())
+            .collect()
+    }
+}
+
 /// `needle cleanup` — remove orphaned tmux sessions.
 ///
 /// Finds and removes needle tmux sessions that no longer have active workers.
@@ -1452,32 +1496,11 @@ fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    let targets: Vec<&str> = if all {
-        // --all: remove all sessions regardless of liveness
-        sessions.iter().map(|s| s.name.as_str()).collect()
-    } else if let Some(id) = &identifier {
-        // -i flag: filter by identifier substring (no liveness check)
-        sessions
-            .iter()
-            .filter(|s| s.name.contains(id))
-            .map(|s| s.name.as_str())
-            .collect()
-    } else {
-        // Default: only orphaned sessions (no live backing process)
-        let discovered = scan_needle_processes().unwrap_or_default();
-        let live_pids: std::collections::HashSet<u32> = discovered.iter().map(|p| p.pid).collect();
+    // Scan for live processes
+    let discovered = scan_needle_processes().unwrap_or_default();
+    let live_pids: std::collections::HashSet<u32> = discovered.iter().map(|p| p.pid).collect();
 
-        sessions
-            .iter()
-            .filter(|s| {
-                // Session is orphaned if:
-                // - It has no PID at all, OR
-                // - Its PID is not in the live process set
-                s.pid.map_or(true, |pid| !live_pids.contains(&pid))
-            })
-            .map(|s| s.name.as_str())
-            .collect()
-    };
+    let targets = filter_sessions_for_cleanup(&sessions, &live_pids, all, &identifier);
 
     if targets.is_empty() {
         println!("No matching sessions found.");
@@ -5903,5 +5926,215 @@ mod tests {
         // Test with a PID that doesn't exist
         let result = find_needle_process_in_tree(9999999);
         assert!(result.is_none(), "non-existent PID should return None");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Cleanup liveness regression tests (ADR-003, plan.md Phase 7.2)
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn cleanup_no_flags_filters_orphaned_sessions() {
+        // Regression Test 1: cleanup with no flags removes only dead sessions.
+        //
+        // Test: Given one live session (PID in live_pids) and one dead session
+        // (PID not in live_pids), the default cleanup (no flags) should only
+        // remove the dead session.
+        //
+        // This is the core safety fix: the no-flags path must check process
+        // liveness before killing sessions.
+
+        let sessions = vec![
+            TmuxSession {
+                name: "needle-claude-alpha".to_string(),
+                created: "20240101T120000".to_string(),
+                status: "detached".to_string(),
+                pid: Some(1001), // Live session
+            },
+            TmuxSession {
+                name: "needle-claude-bravo".to_string(),
+                created: "20240101T120001".to_string(),
+                status: "detached".to_string(),
+                pid: Some(9999), // Dead session (PID not in live_pids)
+            },
+        ];
+
+        let mut live_pids = std::collections::HashSet::new();
+        live_pids.insert(1001); // Only alpha is live
+
+        let targets = filter_sessions_for_cleanup(&sessions, &live_pids, false, &None);
+
+        // Should only remove bravo (dead session), not alpha (live)
+        assert_eq!(targets.len(), 1, "should remove exactly one session");
+        assert_eq!(targets[0], "needle-claude-bravo", "should remove the dead session");
+    }
+
+    #[test]
+    fn cleanup_no_flags_with_zero_dead_removes_nothing() {
+        // Regression Test 2: cleanup with no flags and zero dead sessions removes nothing.
+        //
+        // Test: Given only live sessions (all PIDs in live_pids), the default cleanup
+        // should remove nothing and report that.
+        //
+        // This is the exact scenario that killed armor-p6a and needle-supervisor on
+        // 2026-07-19: a fleet with only live workers should have zero sessions removed
+        // by bare cleanup.
+
+        let sessions = vec![
+            TmuxSession {
+                name: "needle-claude-alpha".to_string(),
+                created: "20240101T120000".to_string(),
+                status: "detached".to_string(),
+                pid: Some(1001), // Live session
+            },
+            TmuxSession {
+                name: "needle-claude-bravo".to_string(),
+                created: "20240101T120001".to_string(),
+                status: "detached".to_string(),
+                pid: Some(1002), // Live session
+            },
+            TmuxSession {
+                name: "needle-claude-charlie".to_string(),
+                created: "20240101T120002".to_string(),
+                status: "detached".to_string(),
+                pid: Some(1003), // Live session
+            },
+        ];
+
+        let mut live_pids = std::collections::HashSet::new();
+        live_pids.insert(1001);
+        live_pids.insert(1002);
+        live_pids.insert(1003); // All sessions are live
+
+        let targets = filter_sessions_for_cleanup(&sessions, &live_pids, false, &None);
+
+        // Should remove nothing when all sessions are live
+        assert_eq!(targets.len(), 0, "should remove zero sessions when all are live");
+    }
+
+    #[test]
+    fn cleanup_all_removes_every_session_regardless_of_liveness() {
+        // Regression Test 3: cleanup --all removes every session regardless of liveness.
+        //
+        // Test: Given a mix of live and dead sessions, --all should remove all of them.
+        //
+        // This pins the --all behavior explicitly so it cannot regress while fixing
+        // the no-flags path. The --all flag is the deliberate, fully-destructive mode.
+
+        let sessions = vec![
+            TmuxSession {
+                name: "needle-claude-alpha".to_string(),
+                created: "20240101T120000".to_string(),
+                status: "detached".to_string(),
+                pid: Some(1001), // Live session
+            },
+            TmuxSession {
+                name: "needle-claude-bravo".to_string(),
+                created: "20240101T120001".to_string(),
+                status: "detached".to_string(),
+                pid: Some(1002), // Live session
+            },
+            TmuxSession {
+                name: "needle-claude-charlie".to_string(),
+                created: "20240101T120002".to_string(),
+                status: "detached".to_string(),
+                pid: Some(9999), // Dead session
+            },
+            TmuxSession {
+                name: "needle-claude-dead-one".to_string(),
+                created: "20240101T120003".to_string(),
+                status: "detached".to_string(),
+                pid: None, // Dead session (no PID)
+            },
+        ];
+
+        let mut live_pids = std::collections::HashSet::new();
+        live_pids.insert(1001);
+        live_pids.insert(1002); // Only alpha and bravo are live
+
+        let targets = filter_sessions_for_cleanup(&sessions, &live_pids, true, &None);
+
+        // Should remove ALL sessions with --all flag
+        assert_eq!(targets.len(), 4, "--all should remove all sessions regardless of liveness");
+        assert!(targets.contains(&"needle-claude-alpha".to_string()), "should include alpha");
+        assert!(targets.contains(&"needle-claude-bravo".to_string()), "should include bravo");
+        assert!(targets.contains(&"needle-claude-charlie".to_string()), "should include charlie");
+        assert!(targets.contains(&"needle-claude-dead-one".to_string()), "should include dead-one");
+    }
+
+    #[test]
+    fn cleanup_with_identifier_filters_by_name_bypassing_liveness() {
+        // Additional test: -i flag filters by name substring, bypassing liveness check.
+        //
+        // This verifies that the -i flag path works correctly and doesn't
+        // accidentally apply liveness filtering.
+
+        let sessions = vec![
+            TmuxSession {
+                name: "needle-claude-alpha".to_string(),
+                created: "20240101T120000".to_string(),
+                status: "detached".to_string(),
+                pid: Some(1001), // Live session
+            },
+            TmuxSession {
+                name: "needle-claude-bravo".to_string(),
+                created: "20240101T120001".to_string(),
+                status: "detached".to_string(),
+                pid: Some(1002), // Live session
+            },
+            TmuxSession {
+                name: "needle-claude-charlie".to_string(),
+                created: "20240101T120002".to_string(),
+                status: "detached".to_string(),
+                pid: Some(1003), // Live session
+            },
+        ];
+
+        let mut live_pids = std::collections::HashSet::new();
+        live_pids.insert(1001);
+        live_pids.insert(1002);
+        live_pids.insert(1003); // All sessions are live
+
+        let targets = filter_sessions_for_cleanup(
+            &sessions,
+            &live_pids,
+            false,
+            &Some("alpha".to_string()),
+        );
+
+        // Should remove alpha even though it's live (bypasses liveness check)
+        assert_eq!(targets.len(), 1, "should remove exactly one session matching identifier");
+        assert_eq!(targets[0], "needle-claude-alpha", "should remove the matching session");
+    }
+
+    #[test]
+    fn cleanup_sessions_with_no_pid_are_considered_orphaned() {
+        // Additional test: sessions with no PID are always considered orphaned.
+        //
+        // This edge case can occur when tmux sessions are created manually
+        // or when PID discovery fails.
+
+        let sessions = vec![
+            TmuxSession {
+                name: "needle-claude-alpha".to_string(),
+                created: "20240101T120000".to_string(),
+                status: "detached".to_string(),
+                pid: Some(1001), // Live session
+            },
+            TmuxSession {
+                name: "needle-claude-orphan".to_string(),
+                created: "20240101T120001".to_string(),
+                status: "detached".to_string(),
+                pid: None, // No PID = orphaned
+            },
+        ];
+
+        let mut live_pids = std::collections::HashSet::new();
+        live_pids.insert(1001);
+
+        let targets = filter_sessions_for_cleanup(&sessions, &live_pids, false, &None);
+
+        // Should remove the orphan with no PID
+        assert_eq!(targets.len(), 1, "should remove sessions with no PID");
+        assert_eq!(targets[0], "needle-claude-orphan", "should remove the orphaned session");
     }
 }
