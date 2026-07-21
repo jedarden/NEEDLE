@@ -881,7 +881,8 @@ mod tests {
             .await
             .unwrap();
 
-        // First claim error should continue (not return AllRaceLost)
+        // Single claim error with no other candidates should return AllRaceLost
+        // (not Suspect yet - need consecutive errors across calls)
         assert!(matches!(result, ClaimOutcome::AllRaceLost));
     }
 
@@ -893,7 +894,7 @@ mod tests {
             reason: "br update exited with code 1".to_string(),
         };
 
-        // Set up store to always return ClaimError
+        // Set up store to always return ClaimError (empty queue → default behavior)
         let store = Arc::new(
             MockBeadStore::new(vec![bead.clone()]).with_claim_results(vec![
                 error_result.clone(),
@@ -901,15 +902,45 @@ mod tests {
                 error_result.clone(),
             ]),
         );
-        let claimer = make_claimer(store);
+        let claimer = make_claimer(store.clone());
 
-        let result = claimer
-            .claim_next(&[bead], "worker-1", &HashSet::new(), "test-strand")
+        // First call: first error
+        let result1 = claimer
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result1, ClaimOutcome::AllRaceLost));
+
+        // Second call: second error
+        let result2 = claimer
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result2, ClaimOutcome::AllRaceLost));
+
+        // Third call: third error triggers Suspect
+        let result3 = claimer
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
             .await
             .unwrap();
 
         // After 3 errors (CLAIM_ERROR_THRESHOLD), should return Suspect
-        match result {
+        match result3 {
             ClaimOutcome::Suspect {
                 bead_id,
                 consecutive_errors,
@@ -919,7 +950,7 @@ mod tests {
                 assert_eq!(consecutive_errors, 3);
                 assert!(last_error.contains("br update exited with code 1"));
             }
-            other => panic!("expected Suspect outcome, got {:?}", other),
+            other => panic!("expected Suspect outcome on third call, got {:?}", other),
         }
     }
 
@@ -933,13 +964,13 @@ mod tests {
 
         let store = Arc::new(
             MockBeadStore::new(vec![bead.clone()]).with_claim_results(vec![
-                // First attempt: error
+                // First call: error
                 error_result.clone(),
-                // Second attempt: success (default MockBeadStore behavior)
             ]),
         );
-        let claimer = make_claimer(store);
+        let claimer = make_claimer(store.clone());
 
+        // First call: record an error
         let result1 = claimer
             .claim_next(
                 std::slice::from_ref(&bead),
@@ -949,33 +980,202 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(matches!(result1, ClaimOutcome::AllRaceLost));
 
-        // First error should continue to next candidate
-        assert!(matches!(result1, ClaimOutcome::Claimed(_)));
+        // Second call: successful claim (empty results queue → default MockBeadStore behavior)
+        let result2 = claimer
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result2, ClaimOutcome::Claimed(_)));
 
         // Error counter should be cleared after successful claim
-        // Verify by checking that subsequent errors restart counting from 1
-        // (This is implicit - the key is that a successful claim doesn't leave
-        // the bead in a suspect state)
+        // Verify by calling again with error - should NOT trigger Suspect (counter reset)
+        let store3 = Arc::new(
+            MockBeadStore::new(vec![bead.clone()]).with_claim_results(vec![
+                error_result.clone(),
+                error_result.clone(),
+                error_result.clone(),
+            ]),
+        );
+        let claimer3 = Claimer::new(
+            store3,
+            std::env::temp_dir(),
+            5,
+            10,
+            Telemetry::new("test-worker".to_string()),
+        );
+
+        // Need 3 errors to trigger Suspect again (counter was reset to 0)
+        let _ = claimer3
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
+        let _ = claimer3
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
+        let result3 = claimer3
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
+
+        // Should trigger Suspect on the 3rd error (counter started from 0 after success)
+        match result3 {
+            ClaimOutcome::Suspect {
+                consecutive_errors, ..
+            } => {
+                assert_eq!(consecutive_errors, 3);
+            }
+            other => panic!("expected Suspect after 3 errors, got {:?}", other),
+        }
     }
 
     #[tokio::test]
     async fn store_error_returns_store_error_outcome() {
         // When the store itself returns an Err (not ClaimResult), should get StoreError
         let bead = make_bead("needle-abc", "/tmp/ws");
-        let mock_store = MockBeadStore::new(vec![bead.clone()]);
-        // Make show() return an error
-        mock_store.beads.lock().unwrap().clear();
-        let store = Arc::new(mock_store);
 
+        // Create a custom MockBeadStore that returns errors from show()
+        struct FailingShowStore {
+            beads: Mutex<Vec<Bead>>,
+        }
+
+        impl FailingShowStore {
+            fn new(beads: Vec<Bead>) -> Self {
+                FailingShowStore {
+                    beads: Mutex::new(beads),
+                }
+            }
+        }
+
+        #[async_trait]
+        impl BeadStore for FailingShowStore {
+            async fn list_all(&self) -> Result<Vec<Bead>> {
+                Ok(self.beads.lock().unwrap().clone())
+            }
+            async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+                Ok(self.beads.lock().unwrap().clone())
+            }
+
+            async fn show(&self, _id: &BeadId) -> Result<Bead> {
+                Err(anyhow!("store error: show failed"))
+            }
+
+            async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+                Ok(ClaimResult::ClaimError {
+                    reason: "show failed".to_string(),
+                })
+            }
+
+            async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+                Ok(ClaimResult::NotClaimable {
+                    reason: "no beads available".to_string(),
+                })
+            }
+
+            async fn release(&self, _id: &BeadId) -> Result<()> {
+                Ok(())
+            }
+
+            async fn flush(&self) -> Result<()> {
+                Ok(())
+            }
+
+            async fn remove_dependency(
+                &self,
+                _blocked_id: &BeadId,
+                _blocker_id: &BeadId,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            async fn reopen(&self, _id: &BeadId) -> Result<()> {
+                Ok(())
+            }
+
+            async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+
+            async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+                Ok(())
+            }
+
+            async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+                Ok(())
+            }
+
+            async fn create_bead(
+                &self,
+                _title: &str,
+                _body: &str,
+                _labels: &[&str],
+            ) -> Result<BeadId> {
+                Ok(BeadId::from("new-bead".to_string()))
+            }
+
+            async fn doctor_repair(&self) -> Result<RepairReport> {
+                Ok(RepairReport::default())
+            }
+            async fn doctor_check(&self) -> Result<RepairReport> {
+                Ok(RepairReport::default())
+            }
+            async fn full_rebuild(&self) -> Result<()> {
+                Ok(())
+            }
+            async fn add_dependency(
+                &self,
+                _blocker_id: &BeadId,
+                _blocked_id: &BeadId,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+                Ok(())
+            }
+
+            fn has_valid_store(&self) -> bool {
+                true
+            }
+        }
+
+        let store = Arc::new(FailingShowStore::new(vec![bead.clone()]));
         let claimer = make_claimer(store);
 
         let result = claimer
             .claim_next(&[bead], "worker-1", &HashSet::new(), "test-strand")
-            .await;
+            .await
+            .unwrap();
 
-        assert!(result.is_err());
-        let _ = result.unwrap_err().root_cause().to_string().as_str();
+        // StoreError is wrapped in Ok(), not Err()
+        match result {
+            ClaimOutcome::StoreError(e) => {
+                assert!(e.to_string().contains("store error"));
+            }
+            other => panic!("expected StoreError outcome, got {:?}", other),
+        }
     }
 
     #[tokio::test]
@@ -991,13 +1191,36 @@ mod tests {
                 error_result.clone(),
                 error_result.clone(),
                 error_result.clone(),
-                error_result.clone(),
             ]),
         );
         let claimer = make_claimer(store);
 
+        // Make 3 separate claim_next calls to accumulate errors
+        let _ = claimer
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
+        let _ = claimer
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
         let result = claimer
-            .claim_next(&[bead], "worker-1", &HashSet::new(), "test-strand")
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
             .await
             .unwrap();
 
@@ -1005,8 +1228,8 @@ mod tests {
             ClaimOutcome::Suspect {
                 consecutive_errors, ..
             } => {
-                // Should be 4 (we hit it 4 times before threshold check)
-                assert_eq!(consecutive_errors, 3); // Threshold is 3
+                // Should be 3 (threshold is 3)
+                assert_eq!(consecutive_errors, 3);
             }
             other => panic!("expected Suspect, got {:?}", other),
         }
@@ -1029,13 +1252,18 @@ mod tests {
         );
         let claimer = make_claimer(store);
 
+        // Make 3 separate calls to accumulate errors
+        let bead_id = BeadId::from("needle-suspect");
+        let _ = claimer
+            .claim_one(&bead_id, "worker-1", &HashSet::new(), Some("test-strand"))
+            .await
+            .unwrap();
+        let _ = claimer
+            .claim_one(&bead_id, "worker-1", &HashSet::new(), Some("test-strand"))
+            .await
+            .unwrap();
         let result = claimer
-            .claim_one(
-                &BeadId::from("needle-suspect"),
-                "worker-1",
-                &HashSet::new(),
-                Some("test-strand"),
-            )
+            .claim_one(&bead_id, "worker-1", &HashSet::new(), Some("test-strand"))
             .await
             .unwrap();
 
