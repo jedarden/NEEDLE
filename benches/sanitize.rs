@@ -25,7 +25,7 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use needle::sanitize::Sanitizer;
-use needle::stats::{calculate_p95, calculate_p99, calculate_median};
+use needle::stats::{calculate_median, calculate_p95, calculate_p99};
 
 /// Configure Criterion for p95 and p99 latency reporting.
 ///
