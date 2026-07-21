@@ -214,10 +214,12 @@ fn bench_sanitize_10kb(c: &mut Criterion) {
 
     let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
+    let p99_us = calculate_p99(&latencies);
+    let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "10KB trace p95 latency: {:.2} ms ({} samples)",
-        p95_ms, ASSERTION_SAMPLE_COUNT
+        "10KB trace p95 latency: {:.2} ms, p99: {:.2} ms ({} samples)",
+        p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
     );
 
     let mut group = c.benchmark_group("sanitize_10kb");
@@ -267,10 +269,12 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
 
     let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
+    let p99_us = calculate_p99(&latencies);
+    let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "100KB trace p95 latency: {:.2} ms ({} samples)",
-        p95_ms, ASSERTION_SAMPLE_COUNT
+        "100KB trace p95 latency: {:.2} ms, p99: {:.2} ms ({} samples)",
+        p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
     );
 
     let mut group = c.benchmark_group("sanitize_100kb");
@@ -320,10 +324,12 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
 
     let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
+    let p99_us = calculate_p99(&latencies);
+    let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "1MB trace p95 latency: {:.2} ms ({} samples)",
-        p95_ms, ASSERTION_SAMPLE_COUNT
+        "1MB trace p95 latency: {:.2} ms, p99: {:.2} ms ({} samples)",
+        p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
     );
 
     let mut group = c.benchmark_group("sanitize_1mb");
@@ -421,6 +427,7 @@ fn assertion_test() {
     let max = *latencies.last().unwrap();
     let avg = latencies.iter().sum::<u128>() / latencies.len() as u128;
     let p95 = calculate_p95(&latencies);
+    let p99 = calculate_p99(&latencies);
 
     eprintln!(
         "Sanitizer latency assertion test (100KB trace, {} iterations):",
@@ -430,6 +437,7 @@ fn assertion_test() {
     eprintln!("  Median:  {} ms", median);
     eprintln!("  Avg:     {} ms", avg);
     eprintln!("  P95:     {} ms", p95);
+    eprintln!("  P99:     {} ms", p99);
     eprintln!("  Max:     {} ms", max);
     eprintln!("  Threshold: {} ms", threshold);
 
