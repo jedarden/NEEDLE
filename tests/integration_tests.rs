@@ -165,6 +165,10 @@ impl BeadStore for IntegrationMockStore {
         Ok(())
     }
 
+    async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
     async fn doctor_repair(&self) -> Result<RepairReport> {
         Ok(RepairReport::default())
     }
@@ -653,6 +657,10 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
             _blocked_id: &BeadId,
             _blocker_id: &BeadId,
         ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
 
@@ -1234,6 +1242,10 @@ impl BeadStore for ZombieMockStore {
         Ok(())
     }
 
+    async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
     async fn doctor_repair(&self) -> Result<RepairReport> {
         Ok(RepairReport::default())
     }
@@ -1333,6 +1345,10 @@ impl BeadStore for MultiWorkspaceStore {
         self.home_store
             .remove_dependency(blocked_id, blocker_id)
             .await
+    }
+
+    async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+        self.home_store.clear_assignee(id).await
     }
 
     async fn doctor_repair(&self) -> Result<RepairReport> {
@@ -1440,6 +1456,8 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
         enabled: true,
         workspaces: vec![remote_workspace.clone()],
         workspace_root: PathBuf::from("/tmp"),
+        rediscovery_cycles: 60,
+        starvation_threshold_minutes: 15,
     };
 
     let explore = ExploreStrand::new(
@@ -1563,6 +1581,8 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
         enabled: true,
         workspaces: vec![remote_workspace.clone()],
         workspace_root: PathBuf::from("/tmp"),
+        rediscovery_cycles: 60,
+        starvation_threshold_minutes: 15,
     };
 
     let explore = ExploreStrand::new(
@@ -1666,6 +1686,8 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
         enabled: true,
         workspaces: vec![remote_workspace.clone()],
         workspace_root: PathBuf::from("/tmp"),
+        rediscovery_cycles: 60,
+        starvation_threshold_minutes: 15,
     };
 
     let explore = ExploreStrand::new(
@@ -2100,3 +2122,8 @@ async fn dead_worker_cleanup_integration() {
         "the live worker should be in the file"
     );
 }
+
+// NOTE: The suspect_escalation feature is tested in worker/mod.rs unit tests
+// which can access private fields. The integration test layer cannot properly
+// test this feature through the public API since the internal state (exclusion_set,
+// consecutive_race_lost) is not observable externally.

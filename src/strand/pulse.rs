@@ -583,6 +583,9 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn doctor_repair(&self) -> Result<RepairReport> {
             Ok(RepairReport::default())
         }

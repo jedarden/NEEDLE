@@ -369,6 +369,9 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
 
         fn has_valid_store(&self) -> bool {
             true
@@ -435,6 +438,9 @@ mod tests {
             _blocked_id: &BeadId,
             _blocker_id: &BeadId,
         ) -> Result<()> {
+            anyhow::bail!("store connection failed")
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store connection failed")
         }
 
@@ -876,6 +882,9 @@ mod tests {
             _blocked_id: &BeadId,
             _blocker_id: &BeadId,
         ) -> Result<()> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("no .beads/ directory")
         }
         fn has_valid_store(&self) -> bool {

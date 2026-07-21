@@ -1,0 +1,24 @@
+# ADR: Use Read
+
+**Decision ID:** nd-ed3d
+**Date:** 2026-07-21
+
+## Context
+
+Analysis of options during task execution
+
+## Alternatives Considered
+
+1. Considered alternatives
+
+## Decision
+
+Use Read
+
+## Rationale
+
+Great! Now I need to also update the part where we iterate over targets since we're now using Vec<String> instead of Vec<&str>. Let me check that part.
+
+## Outcome
+
+Decision implemented (success)

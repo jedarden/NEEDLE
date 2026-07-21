@@ -1,0 +1,16 @@
+{
+  "bead_id": "bf-4j9pr",
+  "agent": "fail-agent",
+  "provider": null,
+  "model": null,
+  "exit_code": 1,
+  "outcome": "failure",
+  "duration_ms": 1,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-07-21T16:29:12.735206243Z",
+  "trace_format": "raw_text",
+  "pruned": false,
+  "template_version": null
+}

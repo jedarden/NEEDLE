@@ -742,6 +742,10 @@ mod tests {
             Ok(())
         }
 
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
         fn has_valid_store(&self) -> bool {
             true // Mock store always has a valid store
         }

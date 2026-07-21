@@ -1,0 +1,24 @@
+# ADR: Respond to user
+
+**Decision ID:** nd-adaa
+**Date:** 2026-07-21
+
+## Context
+
+Analysis of options during task execution
+
+## Alternatives Considered
+
+1. Considered alternatives
+
+## Decision
+
+Respond to user
+
+## Rationale
+
+I see - the assertion test is being run as part of the benchmark binary, which doesn't support `--nocapture`. Let me run the test directly instead using cargo test with the correct binary name. Actual
+
+## Outcome
+
+Decision implemented (success)

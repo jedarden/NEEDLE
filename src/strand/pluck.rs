@@ -691,6 +691,9 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
             Ok(ClaimResult::NotClaimable {
                 reason: "claim_auto not supported in mock".to_string(),
@@ -780,6 +783,9 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
             Ok(ClaimResult::NotClaimable {
                 reason: "claim_auto not supported in mock".to_string(),
@@ -856,6 +862,9 @@ mod tests {
             _blocked_id: &BeadId,
             _blocker_id: &BeadId,
         ) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
         async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {

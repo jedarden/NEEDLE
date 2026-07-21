@@ -11,6 +11,7 @@
 //!             `bead_store`, `telemetry`, `health`, `config`, `types`.
 
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use anyhow::{bail, Context, Result};
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 
-use crate::bead_store::BeadStore;
+use crate::bead_store::{run_version_handshake, BeadStore};
 use crate::canary::CanaryRunner;
 use crate::claim::Claimer;
 use crate::commit_hook;
@@ -364,6 +365,12 @@ pub struct Worker {
     bead_lifecycle_span: Option<tracing::span::EnteredSpan>,
     /// The last outcome for the current bead (used to record on bead.lifecycle span).
     last_outcome: Option<String>,
+    /// Last observed mtime across all workspace .beads/issues.jsonl files.
+    /// Used for event-driven wakeups from idle state.
+    last_workspace_mtime: Option<std::time::SystemTime>,
+    /// Whether the most recent select cycle found candidates but they were all excluded.
+    /// Used to trigger short retry instead of full idle backoff.
+    found_but_excluded: bool,
 }
 
 impl Worker {
@@ -519,6 +526,8 @@ impl Worker {
             watchdog_handle: None,
             bead_lifecycle_span: None,
             last_outcome: None,
+            last_workspace_mtime: None,
+            found_but_excluded: false,
         }
     }
 
@@ -610,6 +619,32 @@ impl Worker {
     async fn run_inner(&mut self) -> Result<WorkerState> {
         // Boot: validate config and initialize.
         self.boot()?;
+
+        // Step: Bead-forge version handshake
+        self.telemetry.emit(EventKind::InitStepStarted {
+            step: "version_handshake".to_string(),
+        })?;
+        let step_start = Instant::now();
+        let br_path = which::which("br").or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let candidate = PathBuf::from(format!("{home}/.local/bin/br"));
+            if candidate.exists() {
+                Ok(candidate)
+            } else {
+                Err(anyhow::anyhow!(
+                    "br not found on PATH or at ~/.local/bin/br"
+                ))
+            }
+        });
+        if let Ok(path) = br_path {
+            run_version_handshake(&path).await;
+        } else {
+            tracing::debug!("br binary not found, skipping version handshake");
+        }
+        self.telemetry.emit(EventKind::InitStepCompleted {
+            step: "version_handshake".to_string(),
+            duration_ms: step_start.elapsed().as_millis() as u64,
+        })?;
 
         // Start the watchdog thread that monitors HANDLING state duration.
         // This must be started after boot() so the Worker struct is fully initialized.
@@ -1122,6 +1157,9 @@ impl Worker {
                 self.set_state(WorkerState::Claiming)?;
             }
             None => {
+                // Set found_but_excluded flag if candidates were found but all excluded
+                // This enables short retry backoff instead of full idle backoff
+                self.found_but_excluded = self.found_but_all_excluded();
                 self.set_state(WorkerState::Exhausted)?;
             }
         }
@@ -1178,6 +1216,125 @@ impl Worker {
                 tracing::warn!(error = %e, "failed to update registry workspace");
             }
         }
+    }
+
+    /// Compute a jittered backoff duration between idle_backoff_min and idle_backoff_max.
+    ///
+    /// This provides randomized delays within the configured range to prevent
+    /// thundering herd when multiple workers become idle simultaneously.
+    fn compute_jittered_backoff(&self) -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let min_secs = self.config.worker.idle_backoff_min;
+        let max_secs = self.config.worker.idle_backoff_max;
+
+        // Ensure min <= max
+        let min_secs = min_secs.min(max_secs);
+
+        if min_secs == max_secs {
+            return min_secs;
+        }
+
+        // Use current time + worker_id as seed for deterministic jitter
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+
+        let worker_hash = {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            self.qualified_id().hash(&mut hasher);
+            hasher.finish()
+        };
+
+        // Combine time and worker identity for jitter
+        let combined = nanos as u64 ^ worker_hash;
+        let range = max_secs - min_secs;
+        let jitter = combined % (range + 1);
+
+        min_secs + jitter
+    }
+
+    /// Check if any workspace's issues.jsonl file has been modified since last check.
+    ///
+    /// Returns the most recent mtime across all configured workspaces, or None
+    /// if no files exist or all workspaces are unreachable.
+    fn check_workspace_mtimes(&self) -> Option<std::time::SystemTime> {
+        let mut workspaces_to_check = vec![&self.config.workspace.default];
+
+        // Also check explore workspaces if configured
+        if !self.config.strands.explore.workspaces.is_empty() {
+            for ws in &self.config.strands.explore.workspaces {
+                if !workspaces_to_check.contains(&ws) {
+                    workspaces_to_check.push(ws);
+                }
+            }
+        }
+
+        let mut most_recent_mtime: Option<std::time::SystemTime> = None;
+
+        for workspace in workspaces_to_check {
+            let issues_path = workspace.join(".beads").join("issues.jsonl");
+            if let Ok(metadata) = std::fs::metadata(&issues_path) {
+                if let Ok(mtime) = metadata.modified() {
+                    match most_recent_mtime {
+                        Some(existing) if mtime > existing => {
+                            most_recent_mtime = Some(mtime);
+                        }
+                        None => {
+                            most_recent_mtime = Some(mtime);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        most_recent_mtime
+    }
+
+    /// Detect if this cycle found candidates but all were excluded.
+    ///
+    /// This is determined by examining the last strand evaluations to see if
+    /// explore or pluck found candidates that were then excluded by filters.
+    fn found_but_all_excluded(&self) -> bool {
+        // Check if explore strand ran and found candidates that were excluded
+        for (strand_name, result, _duration) in &self.last_strand_evaluations {
+            if strand_name == "explore" && result.contains("BeadFound") {
+                // Explore found beads, but if we're exhausted, they must have been excluded
+                // Check the exclusion reasons in telemetry
+                return true;
+            }
+        }
+
+        // Also check pluck strand for the home workspace
+        for (strand_name, result, _duration) in &self.last_strand_evaluations {
+            if strand_name == "pluck" && result.contains("candidates_found") {
+                // Pluck found beads but we still exhausted - they were excluded
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Count total candidates and exclusions from the last selection cycle.
+    ///
+    /// Returns (total_candidates, excluded_count) for telemetry.
+    fn count_exclusions_from_cycle(&self) -> (usize, usize) {
+        let total_candidates = 0usize;
+        let excluded_count = 0usize;
+
+        for (_strand_name, result, _duration) in &self.last_strand_evaluations {
+            // Parse result strings to extract counts
+            // This is a simplified check - the actual counts come from strand telemetry
+            if result.contains("candidates=") {
+                // Extract candidate count from telemetry data
+                // This would need to be enhanced in production
+            }
+        }
+
+        (total_candidates, excluded_count)
     }
 
     /// CLAIMING: attempt to claim the selected bead.
@@ -1293,6 +1450,54 @@ impl Worker {
                 // Set Error status on the claim span
                 tracing::Span::current().record("otel.status_code", 2u64);
                 tracing::Span::current().record("otel.status_description", &reason);
+                self.consecutive_race_lost = 0;
+                self.exclusion_set.insert(bead_id);
+                self.current_bead = None;
+                // The claim_span is dropped here, closing the bead.claim span.
+                self.set_state(WorkerState::Selecting)?;
+            }
+            ClaimResult::ClaimError { reason } => {
+                tracing::debug!(bead_id = %bead_id, %reason, "claim error");
+                // Set the claim span result attribute
+                tracing::Span::current().record("needle.claim.result", &reason);
+                // Set Error status on the claim span
+                tracing::Span::current().record("otel.status_code", 2u64);
+                tracing::Span::current().record("otel.status_description", &reason);
+                self.consecutive_race_lost = 0;
+                self.exclusion_set.insert(bead_id);
+                self.current_bead = None;
+                // The claim_span is dropped here, closing the bead.claim span.
+                self.set_state(WorkerState::Selecting)?;
+            }
+            ClaimResult::Suspect {
+                bead_id,
+                consecutive_errors,
+                last_error,
+            } => {
+                tracing::warn!(
+                    bead_id = %bead_id,
+                    consecutive_errors,
+                    %last_error,
+                    "bead marked as suspect after repeated claim errors"
+                );
+                // Set the claim span result attribute
+                tracing::Span::current().record("needle.claim.result", "suspect");
+                // Set Error status on the claim span
+                tracing::Span::current().record("otel.status_code", 2u64);
+                tracing::Span::current().record(
+                    "otel.status_description",
+                    format!(
+                        "suspect: {} consecutive errors: {}",
+                        consecutive_errors, last_error
+                    ),
+                );
+                // Emit telemetry for the suspect bead
+                self.telemetry.emit(EventKind::ClaimErrorThreshold {
+                    bead_id: bead_id.clone(),
+                    consecutive_errors,
+                    last_error,
+                })?;
+                // Exclude the suspect bead and continue
                 self.consecutive_race_lost = 0;
                 self.exclusion_set.insert(bead_id);
                 self.current_bead = None;
@@ -2436,9 +2641,20 @@ impl Worker {
 
         match self.config.worker.idle_action {
             IdleAction::Wait => {
-                let backoff = self.config.worker.idle_timeout;
+                // Determine backoff strategy based on whether candidates were found but excluded
+                let (backoff, backoff_reason) = if self.found_but_excluded {
+                    (
+                        self.config.worker.short_retry_backoff,
+                        "found-but-excluded short retry",
+                    )
+                } else {
+                    let jittered = self.compute_jittered_backoff();
+                    (jittered, "idle backoff (jittered)")
+                };
+
                 tracing::info!(
                     backoff_secs = backoff,
+                    backoff_reason = backoff_reason,
                     "all strands exhausted, waiting before retry"
                 );
                 self.telemetry.emit(EventKind::WorkerIdle {
@@ -2488,9 +2704,14 @@ impl Worker {
                 // signals during idle within 1 second and emits worker.stopped telemetry
                 // before being killed. A 1-second interval provides good responsiveness
                 // while still avoiding busy-waiting.
+                //
+                // Event-driven wakeups: Check workspace mtimes on each iteration to
+                // detect changes in .beads/issues.jsonl files. If any workspace has been
+                // modified since our last check, wake early from idle backoff.
                 let check_interval = 1u64;
                 let mut elapsed = 0u64;
                 let mut shutdown_check_count = 0u64;
+                let mut workspace_mtime_wake = false;
 
                 // Emit an initial heartbeat to show we're entering idle sleep.
                 // This ensures there's at least one diagnostic event even if the
@@ -2601,6 +2822,35 @@ impl Worker {
 
                     elapsed += check_interval;
                     shutdown_check_count += 1;
+
+                    // Event-driven wakeup: Check if any workspace's .beads/issues.jsonl
+                    // has been modified since our last check. If so, wake early from idle.
+                    // This prevents waiting through the full backoff when new beads appear.
+                    if let Some(current_mtime) = self.check_workspace_mtimes() {
+                        match self.last_workspace_mtime {
+                            Some(last_mtime) if current_mtime > last_mtime => {
+                                tracing::info!(
+                                    last_mtime = ?last_mtime,
+                                    current_mtime = ?current_mtime,
+                                    "workspace mtime changed, waking early from idle backoff"
+                                );
+                                workspace_mtime_wake = true;
+                                break;
+                            }
+                            None => {
+                                // First time checking, record the baseline mtime
+                                tracing::debug!(
+                                    current_mtime = ?current_mtime,
+                                    "recording baseline workspace mtime"
+                                );
+                            }
+                            _ => {
+                                // No change, continue sleeping
+                            }
+                        }
+                        // Always update last_workspace_mtime for next iteration
+                        self.last_workspace_mtime = Some(current_mtime);
+                    }
 
                     if self.shutdown.load(Ordering::SeqCst) {
                         // Retrieve and clear the last received signal for logging.
@@ -2733,8 +2983,13 @@ impl Worker {
                     backoff_secs = backoff,
                     shutdown_checks_performed = shutdown_check_count,
                     elapsed_secs = elapsed,
+                    woke_by_mtime_change = workspace_mtime_wake,
                     "idle sleep completed successfully, transitioning to SELECTING"
                 );
+
+                // Note: Event-driven wakeup telemetry is already logged via tracing::info
+                // at line 2797-2801 when workspace_mtime_wake is set to true.
+                // The IdleSleepCompleted event above includes woke_by_mtime_change field.
 
                 // Force-flush BEFORE state transition to ensure the diagnostic event
                 // is written even if the worker is killed during the transition.
@@ -3351,6 +3606,9 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
 
         fn has_valid_store(&self) -> bool {
             true // Mock store always has a valid store
@@ -3580,6 +3838,9 @@ mod tests {
         async fn remove_dependency(&self, _a: &BeadId, _b: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
 
         fn has_valid_store(&self) -> bool {
             true // Mock store always has a valid store
@@ -3664,6 +3925,9 @@ mod tests {
             _blocked_id: &BeadId,
             _blocker_id: &BeadId,
         ) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
 

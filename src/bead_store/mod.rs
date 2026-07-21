@@ -109,10 +109,14 @@ pub async fn check_bead_forge_version(br_path: &Path) -> VersionCheck {
         };
     }
 
+    // Extract version number by taking the second word if present
+    // This handles formats like "bf 0.2.0" or "br 0.2.0-github"
+    let version_number = version.split_whitespace().nth(1).unwrap_or(&version);
+
     // Check against known-bad version prefixes
     let mut issues = Vec::new();
     for &(bad_prefix, issue) in KNOWN_BAD_VERSIONS {
-        if version.starts_with(bad_prefix) {
+        if version_number.starts_with(bad_prefix) {
             issues.push(issue.to_string());
         }
     }
@@ -310,6 +314,11 @@ pub trait BeadStore: Send + Sync {
 
     /// Release a claimed bead back to open (e.g., after agent failure).
     async fn release(&self, id: &BeadId) -> Result<()>;
+
+    /// Clear the assignee on a bead without changing its status.
+    ///
+    /// Used by mend to heal open beads with stale assignees (e.g., after reopen).
+    async fn clear_assignee(&self, id: &BeadId) -> Result<()>;
 
     /// Flush local bead changes to JSONL before release.
     ///
@@ -832,7 +841,7 @@ impl BeadStore for BrCliBeadStore {
                     .unwrap_or_else(|| "(unknown)".to_string());
                 Ok(ClaimResult::RaceLost { claimed_by })
             }
-            _ => Ok(ClaimResult::NotClaimable {
+            _ => Ok(ClaimResult::ClaimError {
                 reason: format!("br update exited with code {code}"),
             }),
         }
@@ -843,6 +852,14 @@ impl BeadStore for BrCliBeadStore {
         self.run_br(&["update", id_str, "--status", "open", "--assignee", ""])
             .await
             .with_context(|| format!("br release {id_str} failed"))?;
+        Ok(())
+    }
+
+    async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_br(&["update", id_str, "--assignee", ""])
+            .await
+            .with_context(|| format!("br clear_assignee {id_str} failed"))?;
         Ok(())
     }
 
@@ -1179,7 +1196,6 @@ impl BfCliBeadStore {
         const BASE_DELAY_MS: u64 = 50;
 
         let mut attempt = 0;
-        let mut last_error = None;
 
         loop {
             attempt += 1;
@@ -1195,30 +1211,30 @@ impl BfCliBeadStore {
                 .spawn()
                 .with_context(|| format!("failed to spawn bf subprocess: {args:?}"))?;
 
-            let output = match tokio::time::timeout(timeout_duration, child.wait_with_output())
-                .await
-            {
-                Ok(Ok(output)) => output,
-                Ok(Err(e)) => {
-                    let err = anyhow::anyhow!("bf subprocess failed: {args:?}: {e}");
-                    last_error = Some(err);
-                    // For subprocess spawn errors, don't retry - these are not transient
-                    break;
-                }
-                Err(_) => {
-                    tracing::error!(
-                        args = ?args,
-                        timeout_secs,
-                        attempt,
-                        "bf subprocess timed out, killing process"
-                    );
-                    let err =
-                        anyhow::anyhow!("bf subprocess timed out after {timeout_secs}s: {args:?}");
-                    last_error = Some(err);
-                    // Timeouts are not transient lock errors - don't retry
-                    break;
-                }
-            };
+            let output =
+                match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(e)) => {
+                        // For subprocess spawn errors, don't retry - these are not transient
+                        tracing::error!(
+                            args = ?args,
+                            attempt,
+                            error = %e,
+                            "bf subprocess spawn failed, not retrying"
+                        );
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeouts are not transient lock errors - don't retry
+                        tracing::error!(
+                            args = ?args,
+                            timeout_secs,
+                            attempt,
+                            "bf subprocess timed out, not retrying"
+                        );
+                        break;
+                    }
+                };
 
             let stdout =
                 String::from_utf8(output.stdout).context("bf stdout was not valid UTF-8")?;
@@ -1271,12 +1287,13 @@ impl BfCliBeadStore {
             let delay = std::time::Duration::from_millis(delay_ms);
 
             tokio::time::sleep(delay).await;
-            last_error = None; // Clear last_error since we're retrying
         }
 
-        // If we broke out of the loop, return the last error
-        Err(last_error
-            .unwrap_or_else(|| anyhow::anyhow!("bf subprocess failed with unknown error")))
+        // If we broke out of the loop, return an appropriate error
+        Err(anyhow::anyhow!(
+            "bf subprocess failed after {} attempts",
+            attempt
+        ))
     }
 
     /// Parse a JSON array of beads from bf output.
@@ -1438,6 +1455,14 @@ impl BeadStore for BfCliBeadStore {
         self.run_bf(&["update", id_str, "--status", "open", "--assignee", ""])
             .await
             .with_context(|| format!("bf release {id_str} failed"))?;
+        Ok(())
+    }
+
+    async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_bf(&["update", id_str, "--assignee", ""])
+            .await
+            .with_context(|| format!("bf clear_assignee {id_str} failed"))?;
         Ok(())
     }
 

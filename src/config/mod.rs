@@ -174,6 +174,18 @@ pub struct WorkerConfig {
     /// BUILDING state timeout in seconds (0 = unlimited).
     #[serde(default = "WorkerConfig::default_building_timeout")]
     pub building_timeout: u64,
+
+    /// Minimum idle backoff in seconds (event-driven polling floor).
+    #[serde(default = "WorkerConfig::default_idle_backoff_min")]
+    pub idle_backoff_min: u64,
+
+    /// Maximum idle backoff in seconds (for jittered random selection).
+    #[serde(default = "WorkerConfig::default_idle_backoff_max")]
+    pub idle_backoff_max: u64,
+
+    /// Short retry backoff in seconds (for found-but-excluded case).
+    #[serde(default = "WorkerConfig::default_short_retry_backoff")]
+    pub short_retry_backoff: u64,
 }
 
 impl Default for WorkerConfig {
@@ -189,6 +201,9 @@ impl Default for WorkerConfig {
             cpu_load_warn: Self::default_cpu_load_warn(),
             memory_free_warn_mb: Self::default_memory_free_warn_mb(),
             building_timeout: Self::default_building_timeout(),
+            idle_backoff_min: Self::default_idle_backoff_min(),
+            idle_backoff_max: Self::default_idle_backoff_max(),
+            short_retry_backoff: Self::default_short_retry_backoff(),
         }
     }
 }
@@ -217,6 +232,15 @@ impl WorkerConfig {
     }
     fn default_building_timeout() -> u64 {
         600
+    }
+    fn default_idle_backoff_min() -> u64 {
+        60
+    }
+    fn default_idle_backoff_max() -> u64 {
+        120
+    }
+    fn default_short_retry_backoff() -> u64 {
+        5
     }
 }
 
@@ -419,6 +443,29 @@ pub struct ExploreConfig {
     /// are treated as workspaces. Defaults to the user's home directory.
     #[serde(default = "ExploreConfig::default_workspace_root")]
     pub workspace_root: PathBuf,
+
+    /// Re-run workspace discovery every N cycles (0 = disabled).
+    ///
+    /// When set (default: 60), the workspace list is refreshed periodically
+    /// so new stores are picked up without requiring worker restarts.
+    /// Re-discovery preserves the "no upward traversal" constraint (only scanning
+    /// workspace_root's immediate children) and the "explicit workspaces override"
+    /// (when workspaces is non-empty, re-discovery is skipped).
+    ///
+    /// A modest default (60 cycles ≈ 1 hour at typical worker cadence) balances
+    /// freshness with filesystem churn. Set to 0 to disable periodic re-discovery.
+    #[serde(default = "ExploreConfig::default_rediscovery_cycles")]
+    pub rediscovery_cycles: u32,
+
+    /// Starvation alarm threshold in minutes (0 = disabled).
+    ///
+    /// When set (default: 15), emits a WARN telemetry event when ready beads
+    /// exist in scanned workspaces but this worker has not successfully claimed
+    /// any bead for the specified number of minutes. This helps detect cases
+    /// where workers are stuck in exclusion loops or competing for the same
+    /// beads without making progress.
+    #[serde(default = "ExploreConfig::default_starvation_threshold_minutes")]
+    pub starvation_threshold_minutes: u64,
 }
 
 impl Default for ExploreConfig {
@@ -427,6 +474,8 @@ impl Default for ExploreConfig {
             enabled: Self::default_enabled(),
             workspaces: Vec::new(),
             workspace_root: Self::default_workspace_root(),
+            rediscovery_cycles: Self::default_rediscovery_cycles(),
+            starvation_threshold_minutes: Self::default_starvation_threshold_minutes(),
         }
     }
 }
@@ -436,8 +485,16 @@ impl ExploreConfig {
         true
     }
 
+    fn default_starvation_threshold_minutes() -> u64 {
+        15
+    }
+
     fn default_workspace_root() -> PathBuf {
         dirs_or_home("")
+    }
+
+    fn default_rediscovery_cycles() -> u32 {
+        60
     }
 }
 

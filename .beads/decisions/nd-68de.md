@@ -1,0 +1,24 @@
+# ADR: Respond to user
+
+**Decision ID:** nd-68de
+**Date:** 2026-07-21
+
+## Context
+
+Analysis of options during task execution
+
+## Alternatives Considered
+
+1. Considered alternatives
+
+## Decision
+
+Respond to user
+
+## Rationale
+
+This is a very long file. Let me focus on the failing test. The issue is that the test `cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead` is getting `NoWork` instead of `BeadFound` a
+
+## Outcome
+
+Decision implemented (success)

@@ -1,3 +1,3 @@
-Running as unit: run-p858252-i76331712.scope; invocation ID: 7324c856170d4607b045e623b719b0a9
+Running as unit: run-p1643136-i211257342.scope; invocation ID: fc88d5a1f67e41d5b82a836f968ea4b7
 Ignoring 23 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["/home/coding/NEEDLE"].hasTrustDialogAccepted: true in /home/coding/.claude.json.
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors

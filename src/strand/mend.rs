@@ -145,6 +145,7 @@ struct MendSummary {
     rate_limits_cleaned: u32,
     rate_limit_providers_removed: u32,
     rate_limit_providers_reset: u32,
+    assignees_cleared: u32,
 }
 
 impl MendSummary {
@@ -158,6 +159,7 @@ impl MendSummary {
     /// Operations that return `WorkCreated`:
     /// - `beads_released > 0`: Orphaned beads were released back to Open status.
     /// - `deps_cleaned > 0`: Stale dependency links were removed (beads become claimable).
+    /// - `assignees_cleared > 0`: Stale assignees were cleared (beads become claimable).
     ///
     /// Operations that return `NoWork` (maintenance, not work creation):
     /// - `locks_removed > 0`: Lock file cleanup (doesn't add beads to queue).
@@ -168,10 +170,10 @@ impl MendSummary {
     /// A `WorkCreated` return must be paired with a telemetry event identifying
     /// the created bead(s) so operators can see what the restart is chasing.
     fn did_work(&self) -> bool {
-        // Bead release and dependency removal add claimable items to the queue.
+        // Bead release, dependency removal, and assignee clearing add claimable items to the queue.
         // Lock removal, DB repair, and DB rebuild are maintenance operations
         // that don't create new work and must not trigger a waterfall restart.
-        self.beads_released > 0 || self.deps_cleaned > 0
+        self.beads_released > 0 || self.deps_cleaned > 0 || self.assignees_cleared > 0
     }
 }
 
@@ -300,6 +302,88 @@ impl MendStrand {
         )
         .await?;
         summary.beads_released += released;
+        Ok(())
+    }
+
+    // ── Step 1.6: Stale assignee cleanup on open beads ─────────────────────────
+
+    /// Scan all open beads and clear assignees whose workers have no live heartbeat.
+    ///
+    /// This heals beads that became permanently unclaimable after a reopen
+    /// (bead-forge's reopen does not clear assignee). An open bead with a stale
+    /// assignee is invisible to all workers because ready() filters out assigned
+    /// beads. Clearing the assignee makes it claimable again.
+    async fn cleanup_stale_assignees_on_open_beads(
+        &self,
+        store: &dyn BeadStore,
+        summary: &mut MendSummary,
+    ) -> Result<()> {
+        let all_beads = store.list_all().await?;
+        let workers = self.registry.list()?;
+
+        // Build a set of fully-qualified worker IDs for registered, alive workers.
+        let live_worker_ids: std::collections::HashSet<String> = workers
+            .iter()
+            .filter(|w| HealthMonitor::check_pid_alive(w.pid))
+            .map(|w| w.id.clone())
+            .collect();
+
+        for bead in &all_beads {
+            // Only check open beads with an assignee.
+            if bead.status != BeadStatus::Open {
+                continue;
+            }
+
+            let assignee = match &bead.assignee {
+                Some(a) if !a.is_empty() => a,
+                _ => continue,
+            };
+
+            // Skip if the assignee matches our own qualified identity (we're running).
+            if assignee == &self.qualified_id {
+                continue;
+            }
+
+            // Skip if the assignee matches a registered, alive worker.
+            // Workers register with fully-qualified IDs ({adapter}-{worker_id}),
+            // so this comparison prevents collisions when workers from different
+            // adapter pools share a NATO name.
+            if live_worker_ids.contains(assignee.as_str()) {
+                continue;
+            }
+
+            // Stale assignee: clear it so the bead becomes claimable again.
+            tracing::info!(
+                bead_id = %bead.id,
+                assignee = %assignee,
+                workspace = %bead.workspace.display(),
+                "clearing stale assignee from open bead (assignee has no live worker)"
+            );
+
+            match store.clear_assignee(&bead.id).await {
+                Ok(()) => {
+                    let _ = self.telemetry.emit(EventKind::MendStaleAssigneeCleared {
+                        bead_id: bead.id.clone(),
+                        assignee: assignee.clone(),
+                    });
+                    summary.assignees_cleared += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        assignee = %assignee,
+                        error = %e,
+                        "failed to clear stale assignee from open bead"
+                    );
+                    let _ = self.telemetry.emit(EventKind::MendAssigneeClearFailed {
+                        bead_id: bead.id.to_string(),
+                        assignee: assignee.clone(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1303,6 +1387,15 @@ impl super::Strand for MendStrand {
             // Non-fatal — continue with remaining steps.
         }
 
+        // Step 2.3: Stale assignee cleanup on open beads.
+        if let Err(e) = self
+            .cleanup_stale_assignees_on_open_beads(store, &mut summary)
+            .await
+        {
+            tracing::warn!(error = %e, "mend: stale assignee cleanup failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
         // Step 2.5: Orphaned heartbeat file removal.
         if let Err(e) = self.cleanup_orphaned_heartbeats(&mut summary) {
             tracing::warn!(error = %e, "mend: orphaned heartbeat cleanup failed");
@@ -1371,6 +1464,7 @@ impl super::Strand for MendStrand {
             workers_deregistered: summary.workers_deregistered,
             idle_workers_flagged: summary.idle_workers_flagged,
             rate_limits_cleaned: summary.rate_limits_cleaned,
+            assignees_cleared: summary.assignees_cleared,
         });
 
         let result = if summary.did_work() {
@@ -1450,6 +1544,7 @@ mod tests {
     struct MockBeadStore {
         all_beads: Mutex<Vec<Bead>>,
         release_count: Arc<AtomicU32>,
+        clear_assignee_count: Arc<AtomicU32>,
         /// Warnings returned by doctor_check (probe-only).
         check_warnings: Vec<String>,
         /// If Some, doctor_repair succeeds with this report. If None, it fails.
@@ -1459,17 +1554,20 @@ mod tests {
     }
 
     impl MockBeadStore {
-        fn new(beads: Vec<Bead>) -> (Self, Arc<AtomicU32>) {
+        fn new(beads: Vec<Bead>) -> (Self, Arc<AtomicU32>, Arc<AtomicU32>) {
             let release_count = Arc::new(AtomicU32::new(0));
+            let clear_assignee_count = Arc::new(AtomicU32::new(0));
             (
                 MockBeadStore {
                     all_beads: Mutex::new(beads),
                     release_count: release_count.clone(),
+                    clear_assignee_count: clear_assignee_count.clone(),
                     check_warnings: vec![],
                     repair_report: Some(RepairReport::default()),
                     rebuild_fails: false,
                 },
                 release_count,
+                clear_assignee_count,
             )
         }
 
@@ -1581,6 +1679,17 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+            // Find and update the bead's assignee, simulating real bead store behavior.
+            let mut beads = self.all_beads.lock().unwrap();
+            if let Some(bead) = beads.iter_mut().find(|b| &b.id == id) {
+                bead.assignee = None;
+                self.clear_assignee_count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            } else {
+                anyhow::bail!("bead not found: {}", id)
+            }
+        }
 
         fn has_valid_store(&self) -> bool {
             true
@@ -1647,6 +1756,9 @@ mod tests {
             _blocked_id: &BeadId,
             _blocker_id: &BeadId,
         ) -> Result<()> {
+            anyhow::bail!("store error")
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store error")
         }
 
@@ -1738,6 +1850,24 @@ mod tests {
         }
     }
 
+    fn make_open_bead_with_assignee(id: &str, assignee: &str) -> Bead {
+        let dt = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        Bead {
+            id: BeadId::from(id),
+            title: format!("Bead {id}"),
+            body: None,
+            priority: 1,
+            status: BeadStatus::Open,
+            assignee: Some(assignee.to_string()),
+            labels: vec![],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            dependents: vec![],
+            created_at: dt,
+            updated_at: dt,
+        }
+    }
+
     fn write_heartbeat(dir: &Path, data: &HeartbeatData) {
         let name = if data.qualified_id.is_empty() {
             &data.worker_id
@@ -1787,7 +1917,7 @@ mod tests {
 
         // Create an in-progress bead assigned to the dead worker.
         let bead = make_in_progress_bead("nd-orphan", "dead-worker");
-        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -1804,7 +1934,7 @@ mod tests {
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -1825,7 +1955,7 @@ mod tests {
         // An in-progress bead assigned to a worker that doesn't exist.
         let bead = make_in_progress_bead("nd-orphan", "dead-worker");
 
-        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -1860,7 +1990,7 @@ mod tests {
             })
             .unwrap();
 
-        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -1897,7 +2027,7 @@ mod tests {
         // An in-progress bead assigned to ourselves (using qualified_id).
         let bead = make_in_progress_bead("nd-mine", "claude-test-worker");
 
-        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -1932,7 +2062,7 @@ mod tests {
             })
             .unwrap();
 
-        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -1958,6 +2088,191 @@ mod tests {
             "expected WorkCreated after releasing bead from dead registered worker, got: {result:?}"
         );
         assert_eq!(release_count.load(Ordering::Relaxed), 1);
+    }
+
+    // ── Stale assignee on open bead tests ────────────────────────────────────
+
+    /// Open bead with stale assignee → assignee cleared, bead becomes claimable.
+    #[tokio::test]
+    async fn open_bead_with_stale_assignee_assignee_cleared() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An open bead assigned to a worker that doesn't exist.
+        let bead = make_open_bead_with_assignee("nd-stale-open", "dead-worker");
+
+        let (store, _release_count, clear_count) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after clearing stale assignee from open bead, got: {result:?}"
+        );
+        assert_eq!(clear_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// Open bead with live worker assignee → assignee NOT touched.
+    #[tokio::test]
+    async fn open_bead_with_live_worker_assignee_not_cleared() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An open bead assigned to a worker that is registered and alive.
+        let bead = make_open_bead_with_assignee("nd-live-open", "alive-worker");
+
+        // Register the worker with our own PID (which is alive).
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "alive-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 5,
+            })
+            .unwrap();
+
+        let (store, _release_count, clear_count) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when assignee is a live worker, got: {result:?}"
+        );
+        assert_eq!(clear_count.load(Ordering::Relaxed), 0);
+    }
+
+    /// Open bead with our own assignee → assignee NOT touched.
+    #[tokio::test]
+    async fn open_bead_with_own_assignee_not_cleared() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An open bead assigned to ourselves (using qualified_id).
+        let bead = make_open_bead_with_assignee("nd-own-open", "claude-test-worker");
+
+        let (store, _release_count, clear_count) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when bead is assigned to ourselves, got: {result:?}"
+        );
+        assert_eq!(clear_count.load(Ordering::Relaxed), 0);
+    }
+
+    /// Open bead with dead registered worker → assignee cleared.
+    #[tokio::test]
+    async fn open_bead_with_dead_registered_worker_assignee_cleared() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An open bead assigned to a worker that is registered but dead.
+        let bead = make_open_bead_with_assignee("nd-dead-reg-open", "dead-registered");
+
+        // Register the worker with a dead PID.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "dead-registered".to_string(),
+                pid: 99_999_999,
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 10,
+            })
+            .unwrap();
+
+        let (store, _release_count, clear_count) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after clearing assignee from dead registered worker, got: {result:?}"
+        );
+        assert_eq!(clear_count.load(Ordering::Relaxed), 1);
+    }
+
+    /// Open bead with no assignee → no action.
+    #[tokio::test]
+    async fn open_bead_with_no_assignee_no_action() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // An open bead with no assignee.
+        let dt = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let bead = Bead {
+            id: BeadId::from("nd-unassigned"),
+            title: "Bead nd-unassigned".to_string(),
+            body: None,
+            priority: 1,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec![],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            dependents: vec![],
+            created_at: dt,
+            updated_at: dt,
+        };
+
+        let (store, _release_count, clear_count) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let result = mend.evaluate(&store).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when bead has no assignee, got: {result:?}"
+        );
+        assert_eq!(clear_count.load(Ordering::Relaxed), 0);
     }
 
     // ── Qualified ID collision tests ────────────────────────────────────────
@@ -2007,7 +2322,7 @@ mod tests {
             .unwrap();
 
         // Run mend as glm-4_7-foxtrot.
-        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -2082,7 +2397,7 @@ mod tests {
             .unwrap();
 
         // Run mend as glm-4_7-foxtrot.
-        let (store, release_count) = MockBeadStore::new(vec![bead]);
+        let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -2128,7 +2443,7 @@ mod tests {
         let lock_path = lock_dir.path().join("needle-claim-abc123.lock");
         std::fs::write(&lock_path, "").unwrap();
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -2171,7 +2486,7 @@ mod tests {
         let path = lock_dir.path().join("other-app.lock");
         std::fs::write(&path, "").unwrap();
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -2211,7 +2526,7 @@ mod tests {
             vec![make_dep("closed-blocker", "closed", "blocks")],
         );
 
-        let (store, _) = MockBeadStore::new(vec![bead]);
+        let (store, _, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -2235,7 +2550,7 @@ mod tests {
             vec![make_dep("open-blocker", "open", "blocks")],
         );
 
-        let (store, _) = MockBeadStore::new(vec![bead]);
+        let (store, _, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -2258,7 +2573,7 @@ mod tests {
             vec![make_dep("closed-blocker", "closed", "blocks")],
         );
 
-        let (store, _) = MockBeadStore::new(vec![bead]);
+        let (store, _, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -2277,7 +2592,7 @@ mod tests {
             warnings: vec!["index corruption".to_string()],
             fixed: vec!["rebuilt index".to_string()],
         };
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let store = store.with_doctor_report(report);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
@@ -2294,7 +2609,7 @@ mod tests {
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -2356,7 +2671,7 @@ mod tests {
             vec![make_dep("done-blocker", "closed", "blocks")],
         );
 
-        let (store, release_count) = MockBeadStore::new(vec![orphan_bead, blocked_bead]);
+        let (store, release_count, _) = MockBeadStore::new(vec![orphan_bead, blocked_bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -2419,7 +2734,7 @@ mod tests {
             warnings: vec!["index corruption".to_string()],
             fixed: vec!["rebuilt index".to_string()],
         };
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let store = store.with_doctor_report(report);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
@@ -2439,7 +2754,7 @@ mod tests {
         let reg_dir = tempfile::tempdir().unwrap();
 
         // doctor_check warns, doctor_repair fails, full_rebuild succeeds.
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let store = store.with_repair_failure();
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
@@ -2459,7 +2774,7 @@ mod tests {
         let reg_dir = tempfile::tempdir().unwrap();
 
         // Everything fails — doctor_check warns, repair fails, rebuild fails.
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let store = store.with_all_recovery_failure();
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
@@ -2478,7 +2793,7 @@ mod tests {
         let reg_dir = tempfile::tempdir().unwrap();
 
         // doctor_check returns no warnings — no repair needed.
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -2553,7 +2868,7 @@ mod tests {
         std::fs::write(&log_path, b"{}").unwrap();
         set_mtime_days_ago(&log_path, 2);
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand_with_logs(
             hb_dir.path(),
             lock_dir.path(),
@@ -2600,7 +2915,7 @@ mod tests {
         std::fs::write(&log_path, b"{}").unwrap();
         // No mtime change — file is brand-new.
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand_with_logs_and_registry(
             hb_dir.path(),
             lock_dir.path(),
@@ -2634,7 +2949,7 @@ mod tests {
         set_mtime_days_ago(&log_path, 5);
 
         let bead = make_in_progress_bead(active_bead_id, "some-worker");
-        let (store, _) = MockBeadStore::new(vec![bead]);
+        let (store, _, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand_with_logs(
             hb_dir.path(),
             lock_dir.path(),
@@ -2665,7 +2980,7 @@ mod tests {
         std::fs::write(&log_path, b"{}").unwrap();
         set_mtime_days_ago(&log_path, 60);
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand_with_logs(
             hb_dir.path(),
             lock_dir.path(),
@@ -2697,7 +3012,7 @@ mod tests {
         std::fs::write(&unrelated, b"{}").unwrap();
         set_mtime_days_ago(&unrelated, 5);
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand_with_logs(
             hb_dir.path(),
             lock_dir.path(),
@@ -2746,7 +3061,7 @@ mod tests {
         std::fs::write(&log_path, b"{}").unwrap();
         // No mtime change — file is brand-new (would normally be kept).
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand_with_logs(
             hb_dir.path(),
             lock_dir.path(),
@@ -2795,7 +3110,7 @@ mod tests {
         std::fs::write(&log_path, b"{}").unwrap();
         // No mtime change — file is brand-new.
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand_with_logs_and_registry(
             hb_dir.path(),
             lock_dir.path(),
@@ -2828,7 +3143,7 @@ mod tests {
         std::fs::write(&log_path, b"{}").unwrap();
         // No mtime change — file is brand-new.
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand_with_logs(
             hb_dir.path(),
             lock_dir.path(),
@@ -2862,7 +3177,7 @@ mod tests {
             &make_stale_heartbeat("ghost-worker", 99_999_999, Some("nd-ghost")),
         );
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -2911,7 +3226,7 @@ mod tests {
             ),
         );
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -2967,7 +3282,7 @@ mod tests {
         };
         write_heartbeat(hb_dir.path(), &fresh_hb);
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -3001,7 +3316,7 @@ mod tests {
             &make_stale_heartbeat("ghost-3", 99_999_996, Some("nd-g3")),
         );
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -3038,7 +3353,7 @@ mod tests {
         };
         write_heartbeat(hb_dir.path(), &hb);
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -3064,7 +3379,7 @@ mod tests {
             &make_stale_heartbeat("test-worker", 99_999_999, Some("nd-own")),
         );
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         // Run as claude-test-worker (matches heartbeat qualified_id).
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
@@ -3103,7 +3418,7 @@ mod tests {
             })
             .unwrap();
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -3160,7 +3475,7 @@ mod tests {
             })
             .unwrap();
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -3211,7 +3526,7 @@ mod tests {
             })
             .unwrap();
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -3278,7 +3593,7 @@ mod tests {
             })
             .unwrap();
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = MendStrand::new(
             MendConfig::default(),
             hb_dir.path().to_path_buf(),
@@ -3315,7 +3630,7 @@ mod tests {
 
         // Don't create any registry file.
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -3333,7 +3648,7 @@ mod tests {
         let reg_path = reg_dir.path().join("workers.json");
         std::fs::write(&reg_path, "not valid json").unwrap();
 
-        let (store, _) = MockBeadStore::new(vec![]);
+        let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
         let result = mend.evaluate(&store).await;
@@ -4094,6 +4409,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((blocked_id.clone(), blocker_id.clone()));
+            Ok(())
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
     }

@@ -327,7 +327,7 @@ pub enum StrandResult {
 
 /// Result of a single claim attempt for one bead.
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ClaimResult {
     /// This worker successfully claimed the bead.
     Claimed(Bead),
@@ -340,6 +340,24 @@ pub enum ClaimResult {
     NotClaimable {
         /// Human-readable reason.
         reason: String,
+    },
+    /// Claim CLI failed with a store/CLI error (distinct from race-lost).
+    ClaimError {
+        /// Human-readable error message.
+        reason: String,
+    },
+    /// A claim error threshold was reached — bead/store is suspect.
+    ///
+    /// This variant is emitted when a bead has failed claim attempts N times
+    /// with errors (not race-lost conditions). The bead should be skipped and
+    /// marked as suspect rather than silently cycling.
+    Suspect {
+        /// The bead ID that hit the error threshold.
+        bead_id: BeadId,
+        /// The number of consecutive claim errors.
+        consecutive_errors: u32,
+        /// The most recent error message.
+        last_error: String,
     },
 }
 
@@ -356,6 +374,19 @@ pub enum ClaimOutcome {
     NoCandidates,
     /// The bead store returned an error.
     StoreError(anyhow::Error),
+    /// A claim error threshold was reached — bead/store is suspect.
+    ///
+    /// This variant is emitted when a bead has failed claim attempts N times
+    /// with errors (not race-lost conditions). The bead should be skipped and
+    /// marked as suspect rather than silently cycling.
+    Suspect {
+        /// The bead ID that hit the error threshold.
+        bead_id: BeadId,
+        /// The number of consecutive claim errors.
+        consecutive_errors: u32,
+        /// The most recent error message.
+        last_error: String,
+    },
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

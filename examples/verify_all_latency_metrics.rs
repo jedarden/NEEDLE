@@ -119,7 +119,10 @@ fn format_bytes_per_sec(bps: f64) -> String {
 }
 
 fn print_benchmark_result(result: &BenchmarkResult) {
-    println!("\n=== {} Trace ({}) ===", result.size_label, result.size_bytes);
+    println!(
+        "\n=== {} Trace ({}) ===",
+        result.size_label, result.size_bytes
+    );
     println!("Latency Metrics ({} samples):", result.sample_count);
     println!(
         "  Median: {} µs ({:.2} ms)",
@@ -143,24 +146,15 @@ fn print_benchmark_result(result: &BenchmarkResult) {
         format_bytes_per_sec(result.throughput_bytes_per_sec),
         result.throughput_bytes_per_sec
     );
-    println!(
-        "  Ops rate: {:.2} ops/sec",
-        result.throughput_ops_per_sec
-    );
+    println!("  Ops rate: {:.2} ops/sec", result.throughput_ops_per_sec);
 
     println!("\nKeyword Pre-filter Skip Rate:");
-    println!(
-        "  Total rule checks: {}",
-        result.skip_stats.total_checks
-    );
+    println!("  Total rule checks: {}", result.skip_stats.total_checks);
     println!(
         "  Skipped by keywords: {}",
         result.skip_stats.skipped_by_keywords
     );
-    println!(
-        "  Skip rate: {:.1}%",
-        result.skip_stats.skip_rate * 100.0
-    );
+    println!("  Skip rate: {:.1}%", result.skip_stats.skip_rate * 100.0);
 }
 
 fn verify_benchmark_result(result: &BenchmarkResult) {

@@ -1,0 +1,24 @@
+# ADR: Use Edit
+
+**Decision ID:** nd-2d6f
+**Date:** 2026-07-21
+
+## Context
+
+Analysis of options during task execution
+
+## Alternatives Considered
+
+1. Considered alternatives
+
+## Decision
+
+Use Edit
+
+## Rationale
+
+Now let me update the sanitize.rs benchmark to use the calculate_p99 function instead of the simplified calculation that's currently there (lines 484-485).
+
+## Outcome
+
+Decision implemented (success)
