@@ -287,6 +287,64 @@ impl StatsAggregator {
 // Percentile helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Calculate the median (50th percentile) from a slice of values.
+///
+/// The median is the value separating the higher half from the lower half of a data sample.
+/// For an odd number of elements, it's the middle value. For an even number, it's the
+/// average of the two middle values.
+///
+/// # Edge Cases
+///
+/// This function handles all edge cases gracefully:
+///
+/// - **Empty slice**: Returns `0` (no data available)
+/// - **Single element**: Returns that element (the only value available)
+/// - **Even number of elements**: Returns the average of the two middle values
+///
+/// # Examples
+///
+/// ## Basic usage
+///
+/// ```
+/// use needle::stats::calculate_median;
+///
+/// let latencies = vec![10u128, 20, 30, 40, 50];
+/// let median = calculate_median(&latencies);
+/// assert_eq!(median, 30); // Middle value
+/// ```
+///
+/// ## Even number of elements
+///
+/// ```
+/// use needle::stats::calculate_median;
+///
+/// let latencies = vec![10u128, 20, 30, 40];
+/// let median = calculate_median(&latencies);
+/// assert_eq!(median, 25); // Average of 20 and 30
+/// ```
+pub fn calculate_median(latencies: &[u128]) -> u128 {
+    if latencies.is_empty() {
+        return 0;
+    }
+
+    let n = latencies.len();
+    if n == 1 {
+        return latencies[0];
+    }
+
+    let mut sorted = Vec::from(latencies);
+    sorted.sort();
+
+    let mid = n / 2;
+    if n % 2 == 1 {
+        // Odd number of elements: return middle value
+        sorted[mid]
+    } else {
+        // Even number of elements: return average of two middle values
+        (sorted[mid - 1] + sorted[mid]) / 2
+    }
+}
+
 /// Calculate the 95th percentile from a slice of values.
 ///
 /// The 95th percentile (p95) is the value below which 95% of observations
@@ -1460,6 +1518,238 @@ mod tests {
         let samples = collector.samples();
         assert_eq!(samples.len(), 3);
         assert_eq!(samples, &[10, 20, 30]);
+    }
+
+    // ── Median aggregation utilities ─────────────────────────────────────────────────────────
+
+    /// Collector for aggregating samples across multiple benchmark iterations.
+    ///
+    /// This struct provides a statistically sound way to aggregate latency measurements
+    /// across multiple iterations and calculate a single median value.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use needle::stats::MedianCollector;
+    /// use std::time::Instant;
+    ///
+    /// let mut collector = MedianCollector::new();
+    ///
+    /// // Run benchmark for 50 iterations
+    /// for _ in 0..50 {
+    ///     let start = Instant::now();
+    ///     // ... perform work ...
+    ///     collector.record(start.elapsed().as_micros());
+    /// }
+    ///
+    /// // Calculate median across all iterations
+    /// let median_us = collector.median();
+    /// println!("Median latency: {} μs", median_us);
+    /// ```
+    #[derive(Debug, Clone, Default)]
+    pub struct MedianCollector {
+        /// All recorded latency samples in microseconds.
+        samples: Vec<u128>,
+    }
+
+    impl MedianCollector {
+        /// Create a new empty collector.
+        pub fn new() -> Self {
+            Self {
+                samples: Vec::new(),
+            }
+        }
+
+        /// Create a new collector with pre-allocated capacity.
+        ///
+        /// Use this when you know how many samples you'll collect to avoid
+        /// reallocations during benchmarking.
+        pub fn with_capacity(capacity: usize) -> Self {
+            Self {
+                samples: Vec::with_capacity(capacity),
+            }
+        }
+
+        /// Record a single latency sample in microseconds.
+        pub fn record(&mut self, latency_us: u128) {
+            self.samples.push(latency_us);
+        }
+
+        /// Record multiple latency samples at once.
+        pub fn record_all(&mut self, latencies: impl IntoIterator<Item = u128>) {
+            self.samples.extend(latencies);
+        }
+
+        /// Calculate the median across all recorded samples.
+        ///
+        /// Returns `0` if no samples have been recorded.
+        pub fn median(&self) -> u128 {
+            calculate_median(&self.samples)
+        }
+
+        /// Return the number of samples collected.
+        pub fn count(&self) -> usize {
+            self.samples.len()
+        }
+
+        /// Clear all recorded samples.
+        pub fn clear(&mut self) {
+            self.samples.clear();
+        }
+
+        /// Get a reference to the underlying samples.
+        pub fn samples(&self) -> &[u128] {
+            &self.samples
+        }
+
+        /// Calculate additional statistics on the collected samples.
+        ///
+        /// Returns `(min, max, avg)` in microseconds, or `None` if no samples.
+        pub fn stats(&self) -> Option<(u128, u128, f64)> {
+            if self.samples.is_empty() {
+                return None;
+            }
+            let min = *self.samples.iter().min().unwrap();
+            let max = *self.samples.iter().max().unwrap();
+            let sum: u128 = self.samples.iter().sum();
+            let avg = sum as f64 / self.samples.len() as f64;
+            Some((min, max, avg))
+        }
+    }
+
+    // ── MedianCollector tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn median_collector_empty() {
+        let collector = MedianCollector::new();
+        assert_eq!(collector.median(), 0);
+        assert_eq!(collector.count(), 0);
+        assert!(collector.stats().is_none());
+    }
+
+    #[test]
+    fn median_collector_single_sample() {
+        let mut collector = MedianCollector::new();
+        collector.record(42);
+        assert_eq!(collector.median(), 42);
+        assert_eq!(collector.count(), 1);
+        let stats = collector.stats().unwrap();
+        assert_eq!(stats.0, 42); // min
+        assert_eq!(stats.1, 42); // max
+        assert_eq!(stats.2, 42.0); // avg
+    }
+
+    #[test]
+    fn median_collector_odd_count() {
+        let mut collector = MedianCollector::new();
+        for i in 1..=5 {
+            collector.record(i * 10);
+        }
+        assert_eq!(collector.count(), 5);
+        // [10, 20, 30, 40, 50] → median is 30
+        assert_eq!(collector.median(), 30);
+    }
+
+    #[test]
+    fn median_collector_even_count() {
+        let mut collector = MedianCollector::new();
+        for i in 1..=4 {
+            collector.record(i * 10);
+        }
+        assert_eq!(collector.count(), 4);
+        // [10, 20, 30, 40] → median is (20 + 30) / 2 = 25
+        assert_eq!(collector.median(), 25);
+    }
+
+    #[test]
+    fn median_collector_with_capacity() {
+        let mut collector = MedianCollector::with_capacity(100);
+        assert_eq!(collector.count(), 0);
+        // Should not reallocate
+        for i in 0..100 {
+            collector.record(i);
+        }
+        assert_eq!(collector.count(), 100);
+    }
+
+    #[test]
+    fn median_collector_record_all() {
+        let mut collector = MedianCollector::new();
+        let samples = vec![10u128, 20, 30, 40, 50];
+        collector.record_all(samples.iter().copied());
+        assert_eq!(collector.count(), 5);
+        assert_eq!(collector.median(), calculate_median(&samples));
+    }
+
+    #[test]
+    fn median_collector_stats() {
+        let mut collector = MedianCollector::new();
+        collector.record(10);
+        collector.record(20);
+        collector.record(30);
+
+        let stats = collector.stats().unwrap();
+        assert_eq!(stats.0, 10); // min
+        assert_eq!(stats.1, 30); // max
+        assert_eq!(stats.2, 20.0); // avg = (10+20+30)/3
+    }
+
+    #[test]
+    fn median_collector_clear() {
+        let mut collector = MedianCollector::new();
+        collector.record(100);
+        collector.record(200);
+        assert_eq!(collector.count(), 2);
+
+        collector.clear();
+        assert_eq!(collector.count(), 0);
+        assert_eq!(collector.median(), 0);
+        assert!(collector.stats().is_none());
+    }
+
+    #[test]
+    fn median_collector_samples_ref() {
+        let mut collector = MedianCollector::new();
+        collector.record(10);
+        collector.record(20);
+        collector.record(30);
+
+        let samples = collector.samples();
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples, &[10, 20, 30]);
+    }
+
+    // ── calculate_median tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn calculate_median_empty() {
+        let empty: Vec<u128> = vec![];
+        assert_eq!(calculate_median(&empty), 0);
+    }
+
+    #[test]
+    fn calculate_median_single_element() {
+        let data = vec![42u128];
+        assert_eq!(calculate_median(&data), 42);
+    }
+
+    #[test]
+    fn calculate_median_odd_count() {
+        let data = vec![10u128, 20, 30, 40, 50];
+        assert_eq!(calculate_median(&data), 30); // Middle value
+    }
+
+    #[test]
+    fn calculate_median_even_count() {
+        let data = vec![10u128, 20, 30, 40];
+        assert_eq!(calculate_median(&data), 25); // Average of 20 and 30
+    }
+
+    #[test]
+    fn calculate_median_unsorted() {
+        let data = vec![50u128, 10, 30, 20, 40];
+        // Same as odd_count test after internal sorting
+        assert_eq!(calculate_median(&data), 30);
     }
 
     // ── P99 aggregation utilities ─────────────────────────────────────────────────────────
