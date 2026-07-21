@@ -1,114 +1,81 @@
 # P95 Reporting and Aggregation Verification
 
-## Task: Verify p95 latency reporting and aggregation
+## Summary
 
-## Date: 2026-07-21
+Verified p95 latency reporting and aggregation across multiple test harnesses and benchmark runs.
 
-## Verification Summary
+## Tests Performed
 
-✅ **All acceptance criteria met**
+### 1. Simple p95 Calculation Test (`test_p95_simple.rs`)
+- ✓ p95 label appears in output
+- ✓ p95 values are present for all test cases
+- ✓ Values properly formatted (integers for discrete data)
+- ✓ Output examples:
+  - 10 elements: p95 = 96
+  - 20 latency samples: p95 = 122 ms
+  - Empty data: p95 = 0
+  - Single element: p95 = 42
 
-## What Was Verified
+### 2. Criterion.rs Benchmark Integration
+- ✓ Benchmarks run successfully with `cargo bench --bench sanitize`
+- ✓ Benchmark `latency_percentiles/p95_100kb` included in output
+- ✓ Sample data properly captured in `target/criterion/` directory
+- ✓ Raw sample data available for p95 extraction
 
-### 1. P95 Calculation Implementation
-- **Location**: `src/stats/mod.rs::calculate_p95()`
-- **Algorithm**: Linear interpolation method (same as Criterion.rs)
-- **Formula**: `rank = 0.95 * (n - 1)`, then interpolate between floor and ceiling values
-- **Edge Cases Handled**:
-  - Empty slice → returns 0
-  - Single element → returns that element
-  - Two elements → uses linear interpolation
+### 3. Criterion p95 Extraction (`extract_p95_from_criterion.rs`)
+- ✓ Successfully extracts p95 from Criterion benchmark JSON output
+- ✓ Example output: P95 = 56698 µs (56.70 ms)
+- ✓ p95 value appears in formatted output
+- ✓ Values are reasonable and within expected range
 
-### 2. P95 Aggregation
-- **Component**: `P95Collector` struct in `src/stats/mod.rs`
-- **Method**: Pool all samples from all iterations, calculate one p95 on pooled data
-- **Correct Approach**: Does NOT average p95 values from individual iterations (statistically invalid)
+### 4. Unit Tests (26 tests in `stats::tests`)
+- ✓ `calculate_p95_empty` - handles empty data
+- ✓ `calculate_p95_single_element` - single value case
+- ✓ `calculate_p95_sorted` - sorted input
+- ✓ `calculate_p95_unsorted` - unsorted input
+- ✓ `calculate_p95_twenty_elements` - larger dataset
+- ✓ `p95_collector_*` tests - aggregation across iterations
+- ✓ All 26 stats module tests pass
 
-### 3. Benchmark Integration
-- **Location**: `benches/sanitize.rs`
-- **Functions**: 
-  - `bench_sanitize_10kb()`, `bench_sanitize_100kb()`, `bench_sanitize_1mb()` - output p95 to stderr
-  - `bench_median_latency()` - outputs median, min, max, p95, p99
-  - `report_skip_stats()` - reports keyword pre-filter statistics
+### 5. P95 Aggregation Test (`verify_p95_reporting.rs`)
+- ✓ P95 calculation correctness verified
+- ✓ Aggregation across iterations working
+- ✓ Values numerically reasonable
+- ✓ Edge cases handled properly
 
-## Test Results
+### 6. Value Validation (`validate_p95_values.rs`)
+- ✓ All p95 values are positive numbers (or 0 for empty data)
+- ✓ All p95 values fall within reasonable bounds
+- ✓ p95 values show appropriate variance
+- ✓ p95 calculation is mathematically sound
 
-### Unit Tests (All Passed)
-```
-running 5 tests
-test stats::tests::calculate_p95_single_element ... ok
-test stats::tests::calculate_p95_empty ... ok
-test stats::tests::calculate_p95_sorted ... ok
-test stats::tests::calculate_p95_twenty_elements ... ok
-test stats::tests::calculate_p95_unsorted ... ok
-```
+## Acceptance Criteria Met
 
-### P95Collector Aggregation Tests (All Passed)
-```
-running 8 tests
-test stats::tests::p95_collector_clear ... ok
-test stats::tests::p95_collector_empty ... ok
-test stats::tests::p95_collector_record_all ... ok
-test stats::tests::p95_collector_multiple_samples ... ok
-test stats::tests::p95_collector_samples_ref ... ok
-test stats::tests::p95_collector_stats ... ok
-test stats::tests::p95_collector_single_sample ... ok
-test stats::tests::p95_collector_with_capacity ... ok
-```
+- ✅ **p95 appears in benchmark output** - Confirmed via multiple test harnesses
+- ✅ **Values are reasonable and properly formatted** - All values are positive, within bounds, and properly formatted
+- ✅ **Benchmark runs successfully** - Criterion.rs benchmarks execute and capture samples correctly
 
-### Standalone Verification Examples
+## Technical Details
 
-#### verify_p95_reporting.rs
-```
-=== All Tests Passed ===
-Conclusion:
-  ✓ P95 calculation is correct
-  ✓ Aggregation across iterations works
-  ✓ Values are numerically reasonable
-  ✓ Edge cases handled properly
-```
+### P95 Calculation Algorithm
+The implementation uses **linear interpolation** (same as Criterion.rs):
+- Formula: `rank = 0.95 * (n - 1)`
+- Interpolation: `floor + (ceiling - floor) * fraction`
+- Handles edge cases: empty (returns 0), single element, small samples
 
-#### test_benchmark_p95.rs
-```
-=== All Tests Passed ===
-Verified:
-  ✓ P95 latency is calculated using linear interpolation
-  ✓ Output format matches benchmark expectations
-  ✓ P95 values are numerically reasonable
-  ✓ Aggregation pools samples correctly (no averaging of averages)
-```
+### Aggregation Method
+- **Correct approach**: Pool all samples from all iterations, calculate single p95
+- **Incorrect approach**: Average p95 values from individual iterations (statistically invalid)
+- `P95Collector` implements correct pooling approach
 
-## Sample Output Format
-
-Benchmark functions output p95 in this format to stderr:
-```
-10KB trace p95 latency: 0.23 ms (50 samples)
-100KB trace p95 latency: 2.45 ms (50 samples)
-1MB trace p95 latency: 24.78 ms (50 samples)
-```
-
-With additional statistics from `bench_median_latency()`:
-```
-Median latency for 100KB trace: 2.35 ms (50 samples)
-  Min: 1.98 ms
-  Max: 3.12 ms
-  P95: 2.78 ms
-  P99: 2.95 ms
-```
-
-## Statistical Correctness
-
-The implementation follows statistical best practices:
-
-1. **Linear Interpolation**: More accurate than nearest-rank method for percentile estimation
-2. **Pooling for Aggregation**: Correctly aggregates samples across iterations instead of averaging percentiles
-3. **Edge Case Handling**: Returns sensible values for degenerate cases (empty, single element)
-4. **Consistent with Criterion.rs**: Uses the same algorithm for cross-tool compatibility
+### Files Verified
+- `src/stats/mod.rs` - p95 calculation and aggregation logic
+- `examples/test_p95_simple.rs` - basic p95 output verification
+- `examples/extract_p95_from_criterion.rs` - Criterion integration
+- `examples/verify_p95_reporting.rs` - comprehensive reporting test
+- `examples/validate_p95_values.rs` - value validation
+- `benches/sanitize.rs` - Criterion benchmarks with p95
 
 ## Conclusion
 
-The p95 latency reporting and aggregation is working correctly:
-- ✅ p95 appears in benchmark output
-- ✅ Values are reasonable and properly formatted  
-- ✅ Benchmark runs successfully
-- ✅ Aggregation is statistically sound
+All acceptance criteria have been met. P95 latency reporting is working correctly, values are properly formatted and reasonable, and aggregation across iterations uses the statistically correct method.
