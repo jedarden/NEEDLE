@@ -854,13 +854,21 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
     // Use BfCliBeadStore for atomic server-selected bead claiming.
     let store: Arc<dyn crate::bead_store::BeadStore> =
         Arc::new(init_step("bead_store_discover", &telemetry, || {
-            crate::bead_store::BfCliBeadStore::discover(
+            let bf_store = crate::bead_store::BfCliBeadStore::discover(
                 config.workspace.default.clone(),
                 None,                       // model: do not filter by model — beads are untagged
                 Some("needle".to_string()), // harness
                 Some(env!("CARGO_PKG_VERSION").to_string()), // harness_version
             )
-            .context("failed to locate bf CLI for bead store")
+            .context("failed to locate bf CLI for bead store")?;
+
+            // Run bead-forge version handshake to detect known-bad versions.
+            let bf_path = &bf_store.bf_path;
+            let rt = tokio::runtime::Runtime::new()
+                .context("failed to create runtime for version check")?;
+            rt.block_on(crate::bead_store::run_version_handshake(bf_path));
+
+            Ok::<_, anyhow::Error>(bf_store)
         })?);
 
     // Phase 2: worker construction (heavy — prompt loading, adapter discovery, etc.).
@@ -5965,7 +5973,10 @@ mod tests {
 
         // Should only remove bravo (dead session), not alpha (live)
         assert_eq!(targets.len(), 1, "should remove exactly one session");
-        assert_eq!(targets[0], "needle-claude-bravo", "should remove the dead session");
+        assert_eq!(
+            targets[0], "needle-claude-bravo",
+            "should remove the dead session"
+        );
     }
 
     #[test]
@@ -6008,7 +6019,11 @@ mod tests {
         let targets = filter_sessions_for_cleanup(&sessions, &live_pids, false, &None);
 
         // Should remove nothing when all sessions are live
-        assert_eq!(targets.len(), 0, "should remove zero sessions when all are live");
+        assert_eq!(
+            targets.len(),
+            0,
+            "should remove zero sessions when all are live"
+        );
     }
 
     #[test]
@@ -6054,11 +6069,27 @@ mod tests {
         let targets = filter_sessions_for_cleanup(&sessions, &live_pids, true, &None);
 
         // Should remove ALL sessions with --all flag
-        assert_eq!(targets.len(), 4, "--all should remove all sessions regardless of liveness");
-        assert!(targets.contains(&"needle-claude-alpha".to_string()), "should include alpha");
-        assert!(targets.contains(&"needle-claude-bravo".to_string()), "should include bravo");
-        assert!(targets.contains(&"needle-claude-charlie".to_string()), "should include charlie");
-        assert!(targets.contains(&"needle-claude-dead-one".to_string()), "should include dead-one");
+        assert_eq!(
+            targets.len(),
+            4,
+            "--all should remove all sessions regardless of liveness"
+        );
+        assert!(
+            targets.contains(&"needle-claude-alpha".to_string()),
+            "should include alpha"
+        );
+        assert!(
+            targets.contains(&"needle-claude-bravo".to_string()),
+            "should include bravo"
+        );
+        assert!(
+            targets.contains(&"needle-claude-charlie".to_string()),
+            "should include charlie"
+        );
+        assert!(
+            targets.contains(&"needle-claude-dead-one".to_string()),
+            "should include dead-one"
+        );
     }
 
     #[test]
@@ -6094,16 +6125,19 @@ mod tests {
         live_pids.insert(1002);
         live_pids.insert(1003); // All sessions are live
 
-        let targets = filter_sessions_for_cleanup(
-            &sessions,
-            &live_pids,
-            false,
-            &Some("alpha".to_string()),
-        );
+        let targets =
+            filter_sessions_for_cleanup(&sessions, &live_pids, false, &Some("alpha".to_string()));
 
         // Should remove alpha even though it's live (bypasses liveness check)
-        assert_eq!(targets.len(), 1, "should remove exactly one session matching identifier");
-        assert_eq!(targets[0], "needle-claude-alpha", "should remove the matching session");
+        assert_eq!(
+            targets.len(),
+            1,
+            "should remove exactly one session matching identifier"
+        );
+        assert_eq!(
+            targets[0], "needle-claude-alpha",
+            "should remove the matching session"
+        );
     }
 
     #[test]
@@ -6135,6 +6169,9 @@ mod tests {
 
         // Should remove the orphan with no PID
         assert_eq!(targets.len(), 1, "should remove sessions with no PID");
-        assert_eq!(targets[0], "needle-claude-orphan", "should remove the orphaned session");
+        assert_eq!(
+            targets[0], "needle-claude-orphan",
+            "should remove the orphaned session"
+        );
     }
 }
