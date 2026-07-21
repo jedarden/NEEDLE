@@ -467,6 +467,186 @@ pub fn calculate_p95(latencies: &[u128]) -> u128 {
     (interpolated + epsilon).round() as u128
 }
 
+/// Calculate the 99th percentile from a slice of values.
+///
+/// The 99th percentile (p99) is the value below which 99% of observations
+/// fall. It is commonly used to understand the extreme tail of a distribution
+/// — for example, in latency metrics, p99 tells you that 99% of requests
+/// completed within this time, while the slowest 1% took longer.
+///
+/// # Edge Cases
+///
+/// This function handles all edge cases gracefully:
+///
+/// - **Empty slice**: Returns `0` (no data available)
+/// - **Single element**: Returns that element (the only value available)
+/// - **Two elements**: Uses linear interpolation to estimate p99 between the two values
+/// - **Small samples (2-3 elements)**: Linear interpolation provides a reasonable estimate
+///
+/// All edge cases return sensible results without panicking.
+///
+/// # Algorithm
+///
+/// This function uses **linear interpolation**, which is the same method
+/// used by Criterion.rs and is more accurate than the nearest-rank method:
+///
+/// 1. If the slice is empty, return 0 (no data case)
+/// 2. If the slice has one element, return that element
+/// 3. Sort the values in ascending order
+/// 4. Calculate the rank: `rank = 0.99 * (n - 1)` where `n` is the number of elements
+/// 5. Split the rank into integer and fractional parts
+/// 6. Return the linear interpolation: `floor_value + (ceiling_value - floor_value) * fraction`
+/// 7. Round to the nearest integer for the final result
+///
+/// This method was chosen because:
+/// - **Accurate**: Uses linear interpolation like Criterion.rs for smooth percentile estimates
+/// - **Standard**: Matches the behavior of common benchmarking libraries
+/// - **Well-documented**: The algorithm is described in statistical literature
+/// - **Deterministic**: Always produces the same result for the same input
+/// - **Handles all sample sizes**: Works correctly from 0 to very large datasets
+///
+/// Note: This uses linear interpolation, not nearest-rank. For example, with 10 elements
+/// `[10, 20, ..., 100]`, the 99th percentile is approximately `99.1` (rounded to `99`),
+/// not the maximum value `100`.
+///
+/// # Examples
+///
+/// ## Basic usage with sorted data
+///
+/// ```
+/// use needle::stats::calculate_p99;
+///
+/// let latencies = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+/// let p99 = calculate_p99(&latencies);
+/// // rank = 0.99 * 9 = 8.91, floor_index = 8, fraction = 0.91
+/// // floor_value = 90, ceiling_value = 100
+/// // interpolated = 90 + 10 * 0.91 = 99.1 → 99
+/// assert_eq!(p99, 99);
+/// ```
+///
+/// ## Works with unsorted input (sorts internally)
+///
+/// ```
+/// use needle::stats::calculate_p99;
+///
+/// let unsorted = vec![100u128, 10, 50, 30, 70, 40, 60, 20, 80, 90];
+/// let p99 = calculate_p99(&unsorted);
+/// assert_eq!(p99, 99); // Function sorts internally → same result
+/// ```
+///
+/// ## Larger dataset
+///
+/// ```
+/// use needle::stats::calculate_p99;
+///
+/// // 20 elements: rank = 0.99 * 19 = 18.81, floor_index = 18, fraction = 0.81
+/// let data = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100,
+///                  110, 120, 130, 140, 150, 160, 170, 180, 190, 200];
+/// let p99 = calculate_p99(&data);
+/// // floor_value = 190, ceiling_value = 200
+/// // interpolated = 190 + 10 * 0.81 = 198.1 → 198
+/// assert_eq!(p99, 198);
+/// ```
+///
+/// ## Single element (degenerate case)
+///
+/// ```
+/// use needle::stats::calculate_p99;
+///
+/// let single = vec![42u128];
+/// let p99 = calculate_p99(&single);
+/// assert_eq!(p99, 42); // Only value available
+/// ```
+///
+/// ## Empty input
+///
+/// ```
+/// use needle::stats::calculate_p99;
+///
+/// let empty: Vec<u128> = vec![];
+/// let p99 = calculate_p99(&empty);
+/// assert_eq!(p99, 0); // No data → returns 0
+/// ```
+///
+/// ## Two elements (small sample)
+///
+/// ```
+/// use needle::stats::calculate_p99;
+///
+/// let two = vec![10u128, 20];
+/// let p99 = calculate_p99(&two);
+/// // rank = 0.99 * 1 = 0.99, floor_index = 0, fraction = 0.99
+/// // floor_value = 10, ceiling_value = 20
+/// // interpolated = 10 + 10 * 0.99 = 19.9 → 20
+/// assert_eq!(p99, 20); // Linear interpolation estimates p99
+/// ```
+///
+/// ## Three elements (small sample)
+///
+/// ```
+/// use needle::stats::calculate_p99;
+///
+/// let three = vec![10u128, 20, 30];
+/// let p99 = calculate_p99(&three);
+/// // rank = 0.99 * 2 = 1.98, floor_index = 1, fraction = 0.98
+/// // floor_value = 20, ceiling_value = 30
+/// // interpolated = 20 + 10 * 0.98 = 29.8 → 30
+/// assert_eq!(p99, 30); // Linear interpolation estimates p99
+/// ```
+///
+/// ## Real-world latency example
+///
+/// ```
+/// use needle::stats::calculate_p99;
+///
+/// // Simulated latency data in milliseconds
+/// let latencies = vec![
+///     12, 15, 18, 20, 22, 25, 28, 30, 35, 40,
+///     45, 50, 55, 60, 70, 80, 90, 100, 120, 150
+/// ];
+/// let p99 = calculate_p99(&latencies);
+/// // rank = 0.99 * 19 = 18.81, floor_index = 18, fraction = 0.81
+/// // floor_value = 120, ceiling_value = 150
+/// // interpolated = 120 + 30 * 0.81 = 144.3 → 144
+/// assert_eq!(p99, 144);
+/// ```
+///
+/// # See Also
+///
+/// - [`calculate_p95`](fn@calculate_p95) — Calculate the 95th percentile
+pub fn calculate_p99(latencies: &[u128]) -> u128 {
+    if latencies.is_empty() {
+        return 0;
+    }
+
+    let n = latencies.len();
+    if n == 1 {
+        return latencies[0];
+    }
+
+    let mut sorted = Vec::from(latencies);
+    sorted.sort();
+
+    // Linear interpolation method (like Criterion.rs)
+    // Formula: rank = (p / 100) * (n - 1)
+    // For p99: rank = 0.99 * (n - 1)
+    let rank = 0.99 * (n - 1) as f64;
+    let floor_index = rank.floor() as usize;
+    let fraction = rank - floor_index as f64;
+
+    let floor_value = sorted[floor_index];
+    let ceiling_value = sorted[floor_index + 1];
+
+    // Linear interpolation: floor + (ceiling - floor) * fraction
+    let interpolated = floor_value as f64 + (ceiling_value - floor_value) as f64 * fraction;
+
+    // Round to nearest integer.
+    // Add a small epsilon to handle floating point precision issues (e.g., 99.5 → 99.4999... → 99).
+    // Standard rounding: 99.0-99.499... → 99, 99.5-100.499... → 100
+    let epsilon = 1e-9;
+    (interpolated + epsilon).round() as u128
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // P95 aggregation utilities
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1280,5 +1460,244 @@ mod tests {
         let samples = collector.samples();
         assert_eq!(samples.len(), 3);
         assert_eq!(samples, &[10, 20, 30]);
+    }
+
+    // ── P99 aggregation utilities ─────────────────────────────────────────────────────────
+
+    /// Collector for aggregating samples across multiple benchmark iterations.
+    ///
+    /// This struct provides a statistically sound way to aggregate latency measurements
+    /// across multiple iterations and calculate a single p99 percentile.
+    ///
+    /// # Statistical Approach
+    ///
+    /// The correct way to aggregate percentiles across multiple iterations is to:
+    /// 1. **Pool all samples** from all iterations into a single dataset
+    /// 2. **Calculate one p99** on the pooled data
+    ///
+    /// **Do NOT average p99 values** from individual iterations — this is statistically
+    /// invalid because percentiles are non-linear statistics. Averaging them produces
+    /// misleading results.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use needle::stats::P99Collector;
+    /// use std::time::Instant;
+    ///
+    /// let mut collector = P99Collector::new();
+    ///
+    /// // Run benchmark for 50 iterations
+    /// for _ in 0..50 {
+    ///     let start = Instant::now();
+    ///     // ... perform work ...
+    ///     collector.record(start.elapsed().as_micros());
+    /// }
+    ///
+    /// // Calculate p99 across all iterations
+    /// let p99_us = collector.p99();
+    /// println!("p99 latency: {} μs", p99_us);
+    /// ```
+    #[derive(Debug, Clone, Default)]
+    pub struct P99Collector {
+        /// All recorded latency samples in microseconds.
+        samples: Vec<u128>,
+    }
+
+    impl P99Collector {
+        /// Create a new empty collector.
+        pub fn new() -> Self {
+            Self {
+                samples: Vec::new(),
+            }
+        }
+
+        /// Create a new collector with pre-allocated capacity.
+        ///
+        /// Use this when you know how many samples you'll collect to avoid
+        /// reallocations during benchmarking.
+        pub fn with_capacity(capacity: usize) -> Self {
+            Self {
+                samples: Vec::with_capacity(capacity),
+            }
+        }
+
+        /// Record a single latency sample in microseconds.
+        pub fn record(&mut self, latency_us: u128) {
+            self.samples.push(latency_us);
+        }
+
+        /// Record multiple latency samples at once.
+        pub fn record_all(&mut self, latencies: impl IntoIterator<Item = u128>) {
+            self.samples.extend(latencies);
+        }
+
+        /// Calculate the p99 percentile across all recorded samples.
+        ///
+        /// Returns `0` if no samples have been recorded.
+        pub fn p99(&self) -> u128 {
+            calculate_p99(&self.samples)
+        }
+
+        /// Return the number of samples collected.
+        pub fn count(&self) -> usize {
+            self.samples.len()
+        }
+
+        /// Clear all recorded samples.
+        pub fn clear(&mut self) {
+            self.samples.clear();
+        }
+
+        /// Get a reference to the underlying samples.
+        pub fn samples(&self) -> &[u128] {
+            &self.samples
+        }
+
+        /// Calculate additional statistics on the collected samples.
+        ///
+        /// Returns `(min, max, avg)` in microseconds, or `None` if no samples.
+        pub fn stats(&self) -> Option<(u128, u128, f64)> {
+            if self.samples.is_empty() {
+                return None;
+            }
+            let min = *self.samples.iter().min().unwrap();
+            let max = *self.samples.iter().max().unwrap();
+            let sum: u128 = self.samples.iter().sum();
+            let avg = sum as f64 / self.samples.len() as f64;
+            Some((min, max, avg))
+        }
+    }
+
+    // ── P99Collector tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn p99_collector_empty() {
+        let collector = P99Collector::new();
+        assert_eq!(collector.p99(), 0);
+        assert_eq!(collector.count(), 0);
+        assert!(collector.stats().is_none());
+    }
+
+    #[test]
+    fn p99_collector_single_sample() {
+        let mut collector = P99Collector::new();
+        collector.record(42);
+        assert_eq!(collector.p99(), 42);
+        assert_eq!(collector.count(), 1);
+        let stats = collector.stats().unwrap();
+        assert_eq!(stats.0, 42); // min
+        assert_eq!(stats.1, 42); // max
+        assert_eq!(stats.2, 42.0); // avg
+    }
+
+    #[test]
+    fn p99_collector_multiple_samples() {
+        let mut collector = P99Collector::new();
+        for i in 1..=10 {
+            collector.record(i * 10);
+        }
+        assert_eq!(collector.count(), 10);
+        // Should match calculate_p99 on the same data
+        let data: Vec<u128> = (1..=10).map(|i| i * 10).collect();
+        assert_eq!(collector.p99(), calculate_p99(&data));
+    }
+
+    #[test]
+    fn p99_collector_with_capacity() {
+        let mut collector = P99Collector::with_capacity(100);
+        assert_eq!(collector.count(), 0);
+        // Should not reallocate
+        for i in 0..100 {
+            collector.record(i);
+        }
+        assert_eq!(collector.count(), 100);
+    }
+
+    #[test]
+    fn p99_collector_record_all() {
+        let mut collector = P99Collector::new();
+        let samples = vec![10u128, 20, 30, 40, 50];
+        collector.record_all(samples.iter().copied());
+        assert_eq!(collector.count(), 5);
+        assert_eq!(collector.p99(), calculate_p99(&samples));
+    }
+
+    #[test]
+    fn p99_collector_stats() {
+        let mut collector = P99Collector::new();
+        collector.record(10);
+        collector.record(20);
+        collector.record(30);
+
+        let stats = collector.stats().unwrap();
+        assert_eq!(stats.0, 10); // min
+        assert_eq!(stats.1, 30); // max
+        assert_eq!(stats.2, 20.0); // avg = (10+20+30)/3
+    }
+
+    #[test]
+    fn p99_collector_clear() {
+        let mut collector = P99Collector::new();
+        collector.record(100);
+        collector.record(200);
+        assert_eq!(collector.count(), 2);
+
+        collector.clear();
+        assert_eq!(collector.count(), 0);
+        assert_eq!(collector.p99(), 0);
+        assert!(collector.stats().is_none());
+    }
+
+    #[test]
+    fn p99_collector_samples_ref() {
+        let mut collector = P99Collector::new();
+        collector.record(10);
+        collector.record(20);
+        collector.record(30);
+
+        let samples = collector.samples();
+        assert_eq!(samples.len(), 3);
+        assert_eq!(samples, &[10, 20, 30]);
+    }
+
+    // ── calculate_p99 tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn calculate_p99_empty() {
+        let empty: Vec<u128> = vec![];
+        assert_eq!(calculate_p99(&empty), 0);
+    }
+
+    #[test]
+    fn calculate_p99_single_element() {
+        let data = vec![42u128];
+        assert_eq!(calculate_p99(&data), 42);
+    }
+
+    #[test]
+    fn calculate_p99_sorted() {
+        let data = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        // Linear interpolation: rank = 0.99 * 9 = 8.91, floor=8, frac=0.91
+        // 90 + (100-90) * 0.91 = 99.1 → 99
+        assert_eq!(calculate_p99(&data), 99);
+    }
+
+    #[test]
+    fn calculate_p99_unsorted() {
+        let data = vec![100u128, 10, 50, 30, 70, 40, 60, 20, 80, 90];
+        // Same as sorted test after internal sorting
+        assert_eq!(calculate_p99(&data), 99);
+    }
+
+    #[test]
+    fn calculate_p99_twenty_elements() {
+        let data = vec![
+            10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160, 170,
+            180, 190, 200,
+        ];
+        // Linear interpolation: rank = 0.99 * 19 = 18.81, floor=18, frac=0.81
+        // 190 + (200-190) * 0.81 = 198.1 → 198
+        assert_eq!(calculate_p99(&data), 198);
     }
 }

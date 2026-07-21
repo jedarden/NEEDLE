@@ -25,20 +25,21 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use needle::sanitize::Sanitizer;
-use needle::stats::calculate_p95;
+use needle::stats::{calculate_p95, calculate_p99};
 
-/// Configure Criterion for p95 latency reporting.
+/// Configure Criterion for p95 and p99 latency reporting.
 ///
-/// Creates a Criterion instance configured to capture accurate p95 percentiles:
+/// Creates a Criterion instance configured to capture accurate p95 and p99 percentiles:
 /// - Confidence level: 0.95 (95% confidence interval for reported statistics)
 /// - Sample size: 100 measurements (more accurate percentiles via bootstrap)
 /// - Warm-up time: 3 seconds (allows CPU cache/JIT warm-up)
 /// - Measurement time: 5 seconds (sufficient samples for stable percentiles)
 /// - Noise threshold: 0.02 (2% noise filtering for stable measurements)
 ///
-/// P95 calculation is done using `needle::stats::calculate_p95()` which implements
-/// linear interpolation for accurate percentile estimation. Criterion.rs also
-/// calculates p95 automatically via bootstrap analysis (see criterion.toml).
+/// P95 calculation is done using `needle::stats::calculate_p95()` and p99 using
+/// `needle::stats::calculate_p99()`, which implement linear interpolation for accurate
+/// percentile estimation. Criterion.rs also calculates percentiles automatically via
+/// bootstrap analysis (see criterion.toml).
 ///
 /// The confidence_level affects the confidence interval around the mean,
 /// not the percentile calculation itself. Percentiles use bootstrap analysis.
@@ -465,6 +466,8 @@ fn bench_median_latency(c: &mut Criterion) {
     let median_ms = median_us as f64 / 1000.0;
     let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
+    let p99_us = calculate_p99(&latencies);
+    let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
         "Median latency for 100KB trace: {:.2} ms ({} samples)",
@@ -479,10 +482,7 @@ fn bench_median_latency(c: &mut Criterion) {
         *latencies.last().unwrap() as f64 / 1000.0
     );
     eprintln!("  P95: {:.2} ms", p95_ms);
-    eprintln!(
-        "  P99: {:.2} ms",
-        latencies[(latencies.len() * 99) / 100] as f64 / 1000.0
-    );
+    eprintln!("  P99: {:.2} ms", p99_ms);
 
     // Report to criterion for plotting with proper p95 measurement configuration.
     let mut group = c.benchmark_group("latency_percentiles");
