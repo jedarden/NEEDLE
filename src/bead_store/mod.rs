@@ -168,15 +168,6 @@ const LOCK_MARKERS: &[&str] = &[
 /// Known error strings that indicate br sync conflicts.
 const SYNC_CONFLICT_MARKERS: &[&str] = &["SYNC_CONFLICT", "JSONL is newer", "sync conflict"];
 
-/// Known error strings that indicate a missing or invalid bead store.
-const MISSING_STORE_MARKERS: &[&str] = &[
-    "no such file or directory",
-    "cannot find",
-    "does not exist",
-    ".beads",
-    "database disk image is malformed", // Often occurs when .beads/ doesn't exist
-];
-
 /// Check if an error message indicates SQLite database corruption.
 ///
 /// Returns `true` if the message contains any known corruption marker.
@@ -1996,14 +1987,20 @@ echo "bf 0.2.0-github"
         let workspace = tmp_dir.path();
         std::fs::create_dir_all(workspace.join(".beads")).unwrap();
 
+        // Use test-specific args file in temp dir to avoid race conditions
+        let args_file = tmp_dir.path().join("br-ready-args.txt");
+
         // Create a fake br that logs its arguments
         let fake_br = tmp_dir.path().join("fake-br-ready-limit");
         std::fs::write(
             &fake_br,
-            r#"#!/bin/sh
-echo "$@" > /tmp/br-ready-args.txt
+            format!(
+                r#"#!/bin/sh
+echo "$@" > {}
 echo '[]'
 "#,
+                args_file.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(
@@ -2018,12 +2015,11 @@ echo '[]'
         let _ = store.ready(&filters).await;
 
         // Read back the arguments that were passed
-        let args = std::fs::read_to_string("/tmp/br-ready-args.txt").unwrap();
+        let args = std::fs::read_to_string(&args_file).unwrap();
         assert!(args.contains("--limit"), "ready() must pass --limit flag");
         assert!(args.contains("10000"), "ready() must pass limit of 10000");
 
-        // Cleanup
-        let _ = std::fs::remove_file("/tmp/br-ready-args.txt");
+        // Cleanup handled by tmp_dir drop
     }
 
     #[tokio::test]
@@ -2033,14 +2029,20 @@ echo '[]'
         let workspace = tmp_dir.path();
         std::fs::create_dir_all(workspace.join(".beads")).unwrap();
 
+        // Use test-specific args file in temp dir to avoid race conditions
+        let args_file = tmp_dir.path().join("br-list-args.txt");
+
         // Create a fake br that logs its arguments
         let fake_br = tmp_dir.path().join("fake-br-list-limit");
         std::fs::write(
             &fake_br,
-            r#"#!/bin/sh
-echo "$@" > /tmp/br-list-args.txt
+            format!(
+                r#"#!/bin/sh
+echo "$@" > {}
 echo '[]'
 "#,
+                args_file.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(
@@ -2054,7 +2056,7 @@ echo '[]'
         let _ = store.list_all().await;
 
         // Read back the arguments that were passed
-        let args = std::fs::read_to_string("/tmp/br-list-args.txt").unwrap();
+        let args = std::fs::read_to_string(&args_file).unwrap();
         assert!(
             args.contains("--limit"),
             "list_all() must pass --limit flag"
@@ -2068,8 +2070,7 @@ echo '[]'
             "list_all() must NOT pass limit of 0"
         );
 
-        // Cleanup
-        let _ = std::fs::remove_file("/tmp/br-list-args.txt");
+        // Cleanup handled by tmp_dir drop
     }
 
     #[tokio::test]
@@ -2079,14 +2080,20 @@ echo '[]'
         let workspace = tmp_dir.path();
         std::fs::create_dir_all(workspace.join(".beads")).unwrap();
 
+        // Use test-specific args file in temp dir to avoid race conditions
+        let args_file = tmp_dir.path().join("bf-ready-args.txt");
+
         // Create a fake bf that logs its arguments
         let fake_bf = tmp_dir.path().join("fake-bf-ready-limit");
         std::fs::write(
             &fake_bf,
-            r#"#!/bin/sh
-echo "$@" > /tmp/bf-ready-args.txt
+            format!(
+                r#"#!/bin/sh
+echo "$@" > {}
 echo '[]'
 "#,
+                args_file.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(
@@ -2102,7 +2109,7 @@ echo '[]'
         let _ = store.ready(&filters).await;
 
         // Read back the arguments that were passed
-        let args = std::fs::read_to_string("/tmp/bf-ready-args.txt").unwrap();
+        let args = std::fs::read_to_string(&args_file).unwrap();
         assert!(
             args.contains("--limit"),
             "bf ready() must pass --limit flag"
@@ -2112,8 +2119,7 @@ echo '[]'
             "bf ready() must pass limit of 999999"
         );
 
-        // Cleanup
-        let _ = std::fs::remove_file("/tmp/bf-ready-args.txt");
+        // Cleanup handled by tmp_dir drop
     }
 
     #[tokio::test]
@@ -2123,14 +2129,20 @@ echo '[]'
         let workspace = tmp_dir.path();
         std::fs::create_dir_all(workspace.join(".beads")).unwrap();
 
+        // Use test-specific args file in temp dir to avoid race conditions
+        let args_file = tmp_dir.path().join("bf-list-args.txt");
+
         // Create a fake bf that logs its arguments
         let fake_bf = tmp_dir.path().join("fake-bf-list-limit");
         std::fs::write(
             &fake_bf,
-            r#"#!/bin/sh
-echo "$@" > /tmp/bf-list-args.txt
+            format!(
+                r#"#!/bin/sh
+echo "$@" > {}
 echo '[]'
 "#,
+                args_file.display()
+            ),
         )
         .unwrap();
         std::fs::set_permissions(
@@ -2145,7 +2157,7 @@ echo '[]'
         let _ = store.list_all().await;
 
         // Read back the arguments that were passed
-        let args = std::fs::read_to_string("/tmp/bf-list-args.txt").unwrap();
+        let args = std::fs::read_to_string(&args_file).unwrap();
         assert!(
             args.contains("--limit"),
             "bf list_all() must pass --limit flag"
@@ -2159,7 +2171,6 @@ echo '[]'
             "bf list_all() must NOT pass limit of 0"
         );
 
-        // Cleanup
-        let _ = std::fs::remove_file("/tmp/bf-list-args.txt");
+        // Cleanup handled by tmp_dir drop
     }
 }
