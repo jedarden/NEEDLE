@@ -625,21 +625,21 @@ impl Worker {
             step: "version_handshake".to_string(),
         })?;
         let step_start = Instant::now();
-        let br_path = which::which("br").or_else(|_| {
+        let bf_path = which::which("bf").or_else(|_| {
             let home = std::env::var("HOME").unwrap_or_default();
-            let candidate = PathBuf::from(format!("{home}/.local/bin/br"));
+            let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
             if candidate.exists() {
                 Ok(candidate)
             } else {
                 Err(anyhow::anyhow!(
-                    "br not found on PATH or at ~/.local/bin/br"
+                    "bf not found on PATH or at ~/.local/bin/bf"
                 ))
             }
         });
-        if let Ok(path) = br_path {
+        if let Ok(path) = bf_path {
             run_version_handshake(&path).await;
         } else {
-            tracing::debug!("br binary not found, skipping version handshake");
+            tracing::debug!("bf binary not found, skipping version handshake");
         }
         self.telemetry.emit(EventKind::InitStepCompleted {
             step: "version_handshake".to_string(),

@@ -1217,13 +1217,9 @@ fn find_needle_process_in_tree(root_pid: u32) -> Option<u32> {
 
     // Search descendants for needle run processes
     let descendants = find_all_descendants(root_pid);
-    for pid in descendants {
-        if is_needle_run_process(pid) {
-            return Some(pid);
-        }
-    }
-
-    None
+    descendants
+        .into_iter()
+        .find(|&pid| is_needle_run_process(pid))
 }
 
 /// Check if any needle processes are still running after a kill attempt.
@@ -1560,7 +1556,7 @@ fn cmd_list(format: ListFormat) -> Result<()> {
     let _ = reconcile_process_registry(&discovered, &registry);
 
     // Separate discovered processes into tmux and non-tmux groups
-    let tmux_procs: Vec<&DiscoveredProcess> = discovered
+    let _tmux_procs: Vec<&DiscoveredProcess> = discovered
         .iter()
         .filter(|p| tmux_pids.contains(&p.pid))
         .collect();
@@ -2135,10 +2131,10 @@ fn cmd_status(
     // This ensures we discover workers regardless of registry registration status.
     let discovered = scan_needle_processes().unwrap_or_default();
     let registered_pids: HashSet<u32> = workers.iter().map(|w| w.pid).collect();
-    let tmux_pids: HashSet<u32> = sessions.iter().filter_map(|s| s.pid).collect();
+    let _tmux_pids: HashSet<u32> = sessions.iter().filter_map(|s| s.pid).collect();
 
     // Separate discovered processes into registered and unregistered groups
-    let registered_procs: Vec<&DiscoveredProcess> = discovered
+    let _registered_procs: Vec<&DiscoveredProcess> = discovered
         .iter()
         .filter(|p| registered_pids.contains(&p.pid))
         .collect();
