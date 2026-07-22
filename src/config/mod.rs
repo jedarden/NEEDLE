@@ -171,6 +171,14 @@ pub struct WorkerConfig {
     #[serde(default = "WorkerConfig::default_memory_free_warn_mb")]
     pub memory_free_warn_mb: u64,
 
+    /// Maximum additional wait (seconds) for load-adaptive stagger when load is high.
+    #[serde(default = "WorkerConfig::default_adaptive_stagger_max_wait_secs")]
+    pub adaptive_stagger_max_wait_secs: u64,
+
+    /// How often (seconds) to recheck load during load-adaptive stagger extended wait.
+    #[serde(default = "WorkerConfig::default_adaptive_stagger_check_interval_secs")]
+    pub adaptive_stagger_check_interval_secs: u64,
+
     /// BUILDING state timeout in seconds (0 = unlimited).
     #[serde(default = "WorkerConfig::default_building_timeout")]
     pub building_timeout: u64,
@@ -200,6 +208,8 @@ impl Default for WorkerConfig {
             identifier_scheme: IdentifierScheme::default(),
             cpu_load_warn: Self::default_cpu_load_warn(),
             memory_free_warn_mb: Self::default_memory_free_warn_mb(),
+            adaptive_stagger_max_wait_secs: Self::default_adaptive_stagger_max_wait_secs(),
+            adaptive_stagger_check_interval_secs: Self::default_adaptive_stagger_check_interval_secs(),
             building_timeout: Self::default_building_timeout(),
             idle_backoff_min: Self::default_idle_backoff_min(),
             idle_backoff_max: Self::default_idle_backoff_max(),
@@ -240,6 +250,12 @@ impl WorkerConfig {
         120
     }
     fn default_short_retry_backoff() -> u64 {
+        5
+    }
+    fn default_adaptive_stagger_max_wait_secs() -> u64 {
+        300
+    }
+    fn default_adaptive_stagger_check_interval_secs() -> u64 {
         5
     }
 }
@@ -1917,6 +1933,7 @@ pub struct CliOverrides {
     pub worker_name: Option<String>,
     pub agent_binary: Option<String>,
     pub max_workers: Option<u32>,
+    pub explore_workspace_root: Option<PathBuf>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2248,6 +2265,10 @@ impl ConfigLoader {
         if let Some(n) = overrides.max_workers {
             config.worker.max_workers = n;
             sources.insert("worker.max_workers".to_string(), ConfigSource::CliOverride);
+        }
+        if let Some(explore_root) = overrides.explore_workspace_root {
+            config.strands.explore.workspace_root = explore_root;
+            sources.insert("explore.workspace_root".to_string(), ConfigSource::CliOverride);
         }
         // worker_name is handled at the Worker level, not stored in Config
     }
