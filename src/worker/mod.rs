@@ -2616,6 +2616,50 @@ impl Worker {
                 tracing::debug!(reason = %reason, "hot-reload check skipped");
                 Ok(())
             }
+            Ok(HotReloadCheck::CurrentBinaryDeleted {
+                stable_hash,
+                stable_path,
+            }) => {
+                // Current binary has been deleted/unlinked (e.g., mv-replaced while running).
+                // This is an unconditional signal to re-exec into :stable immediately.
+                // A worker running on a deleted inode has no legitimate reason to continue.
+                tracing::error!(
+                    stable_hash = %&stable_hash[..12],
+                    stable_path = %stable_path.display(),
+                    "current binary has been deleted/unlinked — forcing hot-reload into :stable"
+                );
+
+                self.telemetry.emit(EventKind::UpgradeDetected {
+                    old_hash: "<deleted>".to_string(),
+                    new_hash: stable_hash.clone(),
+                })?;
+
+                // Attempt re-exec. This call does not return on success.
+                let workspace = Some(self.config.workspace.default.as_path());
+                let agent = Some(self.config.agent.default.as_str());
+                let timeout = Some(self.config.agent.timeout);
+
+                match upgrade::re_exec_stable(
+                    &stable_path,
+                    &self.worker_name,
+                    workspace,
+                    agent,
+                    timeout,
+                ) {
+                    Ok(()) => {
+                        // Unreachable on Unix — exec replaces the process.
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // Re-exec failed — we have no choice but to continue on the deleted binary.
+                        tracing::error!(
+                            error = %e,
+                            "hot-reload re-exec failed while on deleted binary — continuing on deleted inode (this should not happen)"
+                        );
+                        Ok(())
+                    }
+                }
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "hot-reload check failed, continuing");
                 Ok(())
