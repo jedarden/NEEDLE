@@ -1474,13 +1474,27 @@ fn filter_sessions_for_cleanup(
             .collect()
     } else {
         // Default: only orphaned sessions (no live backing process)
+        //
+        // IMPORTANT: tmux pane_pid returns the shell PID, not the needle binary.
+        // We must walk the process tree to find the actual needle run process
+        // before checking liveness. This matches what cmd_stop already does.
         sessions
             .iter()
             .filter(|s| {
                 // Session is orphaned if:
                 // - It has no PID at all, OR
-                // - Its PID is not in the live process set
-                s.pid.map_or(true, |pid| !live_pids.contains(&pid))
+                // - Walking from its PID finds no live needle run process
+                s.pid.map_or(true, |pane_pid| {
+                    // Try to find the actual needle run process in the tree
+                    match find_needle_process_in_tree(pane_pid) {
+                        Some(needle_pid) => !live_pids.contains(&needle_pid),
+                        None => {
+                            // No needle run found in tree — treat as orphaned
+                            // (pane_pid itself might be a dead shell wrapper)
+                            true
+                        }
+                    }
+                })
             })
             .map(|s| s.name.clone())
             .collect()
