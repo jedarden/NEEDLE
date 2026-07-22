@@ -933,6 +933,8 @@ Bead-Id: nd-a3f8
 
 ## Binary Structure
 
+**Do not cp/mv onto spawn-path binaries while workers run.** Replacing `~/.local/bin/needle` or `~/.needle/bin/needle-stable` in-place while any worker is running is unsupported. This produces two failure modes: session disruption (active worker crashes) or permanent hot-reload stall (new binary never loads, fixed by P11.1). Use `needle upgrade` for atomic updates instead.
+
 NEEDLE is a single binary with subcommands:
 
 ```

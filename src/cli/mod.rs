@@ -242,6 +242,9 @@ pub enum CliCommand {
     },
 
     /// Check for and install updates from GitHub releases.
+    ///
+    /// Do not cp/mv onto ~/.local/bin/needle or ~/.needle/bin/needle-stable while any worker is running.
+    /// This causes session disruption or permanent hot-reload stall. Use `needle upgrade` instead.
     Upgrade {
         /// Check only — show available update without installing.
         #[arg(long)]
@@ -871,7 +874,69 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
             Ok::<_, anyhow::Error>(bf_store)
         })?);
 
-    // Phase 2: worker construction (heavy — prompt loading, adapter discovery, etc.).
+    // Phase 2: resource check before worker construction.
+    // Check system resources (CPU and memory) before entering the slow
+    // (~5s) worker_construction step. If saturated, retry with bounded
+    // backoff rather than proceeding into a step that may be killed by
+    // the OS due to resource pressure.
+    const MAX_RESOURCE_WAIT_SECS: u64 = 120; // Maximum total wait time
+    const RESOURCE_RETRY_DELAY_SECS: u64 = 5; // Initial retry delay
+    let mut resource_wait_total = 0u64;
+    let mut resource_retry_delay = RESOURCE_RETRY_DELAY_SECS;
+
+    loop {
+        match crate::rate_limit::RateLimiter::check_system_resources_for_launch(
+            config.worker.cpu_load_warn,
+            config.worker.memory_free_warn_mb,
+            &telemetry,
+        ) {
+            Ok(()) => {
+                // Resources are acceptable, proceed to worker_construction
+                break;
+            }
+            Err(e) => {
+                if resource_wait_total >= MAX_RESOURCE_WAIT_SECS {
+                    // Still saturated after max wait, fail the launch explicitly
+                    telemetry.emit(EventKind::WorkerLaunchDeferred {
+                        deferred_count: resource_wait_total / resource_retry_delay,
+                        total_wait_secs: resource_wait_total,
+                        reason: format!(
+                            "system still saturated after {}s wait: {}",
+                            MAX_RESOURCE_WAIT_SECS, e
+                        ),
+                    })?;
+                    bail!(
+                        "worker launch deferred {} times ({}s total wait), system still saturated: {}. Launch aborted — retry when load drops",
+                        resource_wait_total / resource_retry_delay,
+                        resource_wait_total,
+                        e
+                    );
+                }
+
+                // Resources are saturated, wait and retry
+                tracing::warn!(
+                    error = %e,
+                    wait_secs = resource_retry_delay,
+                    total_waited_secs = resource_wait_total,
+                    "system resources saturated, deferring worker construction"
+                );
+
+                telemetry.emit(EventKind::WorkerLaunchDeferred {
+                    deferred_count: resource_wait_total / resource_retry_delay + 1,
+                    total_wait_secs: resource_wait_total + resource_retry_delay,
+                    reason: format!("system saturated: {}", e),
+                })?;
+
+                std::thread::sleep(std::time::Duration::from_secs(resource_retry_delay));
+                resource_wait_total += resource_retry_delay;
+
+                // Exponential backoff with cap at 30 seconds
+                resource_retry_delay = std::cmp::min(resource_retry_delay * 2, 30);
+            }
+        }
+    }
+
+    // Phase 3: worker construction (heavy — prompt loading, adapter discovery, etc.).
     let mut worker = init_step("worker_construction", &telemetry, || {
         Ok(Worker::new_with_telemetry(
             config,
