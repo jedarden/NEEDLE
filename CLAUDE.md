@@ -47,6 +47,24 @@ Leaf modules (no internal deps): `types`, `config`, `telemetry`, `bead_store`, `
 - Do not use `tokio_test::block_on` — use `#[tokio::test]`.
 - Test the public interface, not internals.
 
+### Test Isolation Policy
+
+**CRITICAL:** Any integration test that spawns the compiled `needle` binary as a real subprocess via `Command::new(CARGO_BIN_EXE_needle)` MUST isolate both `$HOME` and the Explore strand's scan root.
+
+The Explore strand (enabled by default via `ExploreConfig::default_enabled()`) scans `workspace_root` (defaulting to `$HOME`) for bead workspaces. Without isolation, a test's spawned binary will leak into the real user environment and scan real repos, contaminating both the test and production bead stores.
+
+**Required isolation for subprocess tests:**
+
+```rust
+// Always set HOME to the test's tempdir
+cmd.env("HOME", temp_dir.path())
+
+// Optionally, disable Explore entirely via config if the test doesn't need it
+// (prefer HOME isolation — it's more realistic and catches more bugs)
+```
+
+**Rationale:** This policy exists due to the 2026-07-20 contamination incident, where a non-isolated test created ~284 phantom beads across ~22 repos under fixture worker identifiers. See ADR-006 for full postmortem.
+
 **Do not run `cargo test` locally.** Tests run on iad-ci automatically when you push to `main`. A GitHub webhook triggers the `needle-ci` WorkflowTemplate on iad-ci.
 
 After pushing, poll for the triggered workflow and wait for it to complete:

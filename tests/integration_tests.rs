@@ -2109,6 +2109,9 @@ async fn dead_worker_cleanup_integration() {
     );
 
     // Run the needle worker with a single mend cycle.
+    // IMPORTANT: Isolate HOME to prevent Explore strand from scanning the real user workspace.
+    // Without this, the spawned needle binary would leak into the real $HOME and scan real repos,
+    // contaminating the test environment (see ADR-006 and the 2026-07-20 contamination incident).
     let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
     let mut cmd = Command::new(&bin_path);
     cmd.arg("worker")
@@ -2119,6 +2122,7 @@ async fn dead_worker_cleanup_integration() {
         .arg(&workspace)
         .arg("--registry")
         .arg(&reg_dir)
+        .env("HOME", temp_dir.path())  // Isolate Explore's workspace_root to test tempdir
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
