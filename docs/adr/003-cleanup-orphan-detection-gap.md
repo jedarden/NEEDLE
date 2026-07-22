@@ -55,3 +55,33 @@ Net effect: `needle cleanup` is a hidden `--all` with extra steps whenever a cal
 - 2026-07-19 lab incident: `needle stop -i alpha` and `needle stop -i delta` both reported `Stopped:` while `ps aux` continued to show `needle run --workspace /home/coding/commitgraph --identifier alpha` (PID 2244216) and the equivalent `delta` process (PID 2248754) alive, post-stop.
 - 2026-07-19 lab incident: bare `needle cleanup` output — `Cleaned up: needle-claude-code-glm-5-armor-p6a` and `Cleaned up: needle-supervisor`, immediately followed by `tmux list-sessions` → `no server running on /tmp/tmux-1001/default`. `armor-p6a`'s underlying process (PID 1421255, 170+ accumulated CPU-hours) survived independently of its tmux session and continued executing; `needle-supervisor`'s process did not survive and required manual relaunch.
 - Related, already-tracked defect reproduced (not newly discovered) in the same incident: plan.md §6.2 / ADR-002 "Bug 2" (`needle stop` not killing the full process tree) — this ADR's Context is fresh, concrete evidence for that still-open item, not a separate finding.
+
+## Addendum (2026-07-21): the shipped fix (bf-1ep0s / commit b5ada58) is itself broken
+
+Found during a plan.md maturity review, before this ADR's Decision had been re-verified against the merged code. `cmd_cleanup`'s new no-flags path (`src/cli/mod.rs`, the `else` branch added in b5ada58) does:
+
+```rust
+let discovered = scan_needle_processes().unwrap_or_default();
+let live_pids: std::collections::HashSet<u32> = discovered.iter().map(|p| p.pid).collect();
+sessions
+    .iter()
+    .filter(|s| s.pid.map_or(true, |pid| !live_pids.contains(&pid)))
+```
+
+`s.pid` comes from `TmuxSession.pid`, populated from tmux's `#{pane_pid}` (`list_needle_sessions`, `src/cli/mod.rs:4046,4086`) — the PID of the pane's shell, not the needle binary. `scan_needle_processes()` (`src/cli/mod.rs:4137-4261`) *deliberately excludes* that same shell PID: its own inline comment reads "IMPORTANT: Exclude shell wrapper processes ... We only want to discover the actual needle worker process, not the shell wrapper" (lines 4186-4188, 4196-4205), and it returns only the PID of the exec'd `needle run` process itself.
+
+Whether these two PIDs actually differ depends on whether tmux/bash exec-replaces the shell with the needle binary or forks a child for it — this was verified empirically rather than assumed, by reproducing NEEDLE's exact launch invocation:
+
+```
+$ tmux new-session -d -s needle-pidtest "NEEDLE_INNER=1 sleep 30 2>> /tmp/needle-pidtest.log"
+$ tmux list-panes -t needle-pidtest -F '#{pane_pid}'
+3322398
+$ pstree -p 3322398
+bash(3322398)---sleep(3322399)
+```
+
+`pane_pid` is the `bash -c "NEEDLE_INNER=1 ... 2>> logfile"` wrapper (the output redirection defeats bash's last-command exec optimization); the actual worker process is a **child** with a different PID. This exactly mirrors `launch_in_tmux()`'s real invocation shape (`src/cli/mod.rs:955-971`: `NEEDLE_INNER=1 {self_exe} {args} 2>> {stderr_log}`).
+
+**Consequence:** `s.pid` (always the shell wrapper's PID) can never appear in `live_pids` (which structurally excludes shell wrappers) for *any* tmux-launched session — the liveness check's `!live_pids.contains(&pid)` is `true` unconditionally. Bare `needle cleanup` still classifies every live tmux-backed session as orphaned; the fix does not reduce the 2026-07-19 incident's blast radius, it just changes which line of code produces the same result. `cmd_stop` already solves exactly this shell-vs-child ambiguity via `find_needle_process_in_tree()` (`src/cli/mod.rs:1198-1213`, walks the descendant tree from `pane_pid` looking for the actual `needle run` process) — `cmd_cleanup`'s liveness check does not call it, or any equivalent tree-walk, at all.
+
+No test caught this because the existing/planned regression tests (ADR-003 Decision #4, plan.md §7.2) test `scan_needle_processes()`'s filtering logic and `cmd_cleanup`'s selection logic against constructed fixtures, not against a real tmux session — the exact indirection that hides the bug. See plan.md Phase 7 §7.1a for the fix and an updated test requirement (an actual tmux-session-based regression test, not a unit-level one).

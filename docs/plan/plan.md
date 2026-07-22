@@ -4080,6 +4080,15 @@ Fix: a short-lived per-workspace advisory lock (e.g. `flock` on `<workspace>/.gi
 ### 6.8 Deployment
 - Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, then staged fleet rollout through the canary channel (`:testing` → `:stable`).
 
+### 6.9 Open question: worktree isolation covers only the commit race, not the shared working directory itself
+§6.6's fix (a `flock` around `inject_bead_id_trailer`'s read-HEAD→verify→amend sequence) closes the specific commit-mislabeling race, but the broader condition that makes it possible is untouched: NEEDLE gives every worker assigned to a repo the *same* working directory (`bead.workspace` is passed straight through as a raw path into `run_process()`, `src/dispatch/mod.rs:709`, and rendered verbatim as `{workspace}` — no per-worker suffix, clone, or `git worktree` derivation anywhere in `src/`). The per-workspace claim `flock` (§6.1/plan.md line 219) guards only the CLAIMING step's `br update --claim` call, not the EXECUTING phase — so once two workers are each dispatched into the same repo, their agents can run concurrent `git add`/`commit`/`reset --hard`/`checkout` in that one shared tree for the full duration of both dispatches, with nothing serializing them beyond whatever the agents themselves happen to do. §6.6's lock only protects NEEDLE's own post-hoc trailer amend, not the agent's own work — one agent's `git reset --hard` or `checkout` can still discard another's uncommitted changes while both are mid-execution.
+
+Not solved by this phase. Two directions, not yet decided between:
+- **Full worktree isolation:** `git worktree add <workspace>/.needle-worktrees/<worker-id> <branch>` per worker, dispatching the agent into the isolated worktree instead of the shared root, then merging/rebasing back on successful completion. Closes the problem structurally but is a bigger change — needs a decision on merge-back strategy (rebase vs. fast-forward vs. explicit merge commit), what happens to `commit_hook`'s trailer injection once commits land on a worktree branch instead of directly on the shared branch, and whether beads that expect to see other in-flight workers' commits (rare, but possible for coordination-dependent beads) still function correctly.
+- **Accept it as a known constraint and steer around it operationally:** document plainly (this section, plus a `needle run --help` / docs callout) that more than one worker in the same repo is unsafe unless the repo's own beads are structured to avoid overlapping file/branch state — i.e., push the mitigation to bead authoring and fleet-dispatch discipline (as already practiced: pin one worker per repo for anything Rust/build-heavy) rather than to NEEDLE itself.
+
+Whichever direction is chosen should be captured as its own ADR before implementation — this is a bigger design decision than the rest of Phase 6's incident-driven fixes, and deserves the same explicit Context/Decision/Alternatives/Consequences treatment.
+
 ## Exit criteria
 - A workspace with beads Pluck cannot claim produces zero new beads in that workspace and one telemetry event in NEEDLE's own stream.
 - `needle stop -i <session>` leaves zero matching `needle run`/dispatched-agent processes in `ps aux`, verified, not assumed.
@@ -4089,7 +4098,7 @@ Fix: a short-lived per-workspace advisory lock (e.g. `flock` on `<workspace>/.gi
 
 # Phase 7: Cleanup Command Orphan-Detection Gap
 
-**Status:** planned (ADR-003).
+**Status:** partially implemented, with a verified regression (ADR-003 + addendum). `7.1` shipped in commit `b5ada58` (bead bf-1ep0s) but does not achieve its own exit criteria — see `7.1a`. `7.2`/`7.3` not done: no test caught the regression, and it has not shipped through the canary channel.
 
 **Goal:** make `needle cleanup`'s no-flags behavior match its own documentation — remove only sessions with no live process behind them — so an operator (or Claude, acting on an operator's behalf) can run it during incident cleanup without first needing a manual `ps aux` cross-check, the same trust bar §6.2 already set for `needle stop`/`status`/`list`. Driven by a 2026-07-19 incident during lab fleet remediation: bare `needle cleanup` (intended to remove sessions for workers already stopped) instead matched and killed two live sessions — `armor-p6a` (an actively-executing worker, unrelated to the cleanup) and `needle-supervisor` (the fleet's own auto-scaling daemon) — because `cmd_cleanup`'s only actual filter is an identifier-substring match that defaults to matching everything when no identifier is given; despite its help text and doc comment both claiming an "orphaned sessions only" check, no liveness check exists anywhere in the implementation. Full evidence and rationale in [ADR-003](../adr/003-cleanup-orphan-detection-gap.md).
 
@@ -4100,18 +4109,36 @@ Fix: a short-lived per-workspace advisory lock (e.g. `flock` on `<workspace>/.gi
 - `--all` keeps its current fully-destructive meaning; update its help text to say so explicitly ("removes every needle session, including live ones") rather than relying on a separate design doc to convey the danger.
 - `-i <pattern>` keeps its current targeted/deliberate meaning (bypasses the liveness check, same as today) — naming a specific session is itself the operator's explicit choice; only the no-flags path's behavior changes.
 
+### 7.1a Regression (found 2026-07-21): the shipped check compares the wrong PID and matches nothing
+
+`b5ada58` implemented 7.1's filter as `s.pid.map_or(true, |pid| !live_pids.contains(&pid))`, where `s.pid` is `TmuxSession.pid` sourced from tmux's `#{pane_pid}` (`src/cli/mod.rs:4046,4086`) and `live_pids` is `scan_needle_processes()`'s output, which *deliberately excludes* shell-wrapper PIDs by design (`src/cli/mod.rs:4186-4205`, its own comment: "Exclude shell wrapper processes ... We only want to discover the actual needle worker process, not the shell wrapper").
+
+Verified empirically by reproducing NEEDLE's exact launch shape (`launch_in_tmux()`, `src/cli/mod.rs:955-971`: `tmux new-session -d -s <name> "NEEDLE_INNER=1 <exe> <args> 2>> <log>"`):
+
+```
+$ tmux new-session -d -s needle-pidtest "NEEDLE_INNER=1 sleep 30 2>> /tmp/needle-pidtest.log"
+$ tmux list-panes -t needle-pidtest -F '#{pane_pid}'
+3322398
+$ pstree -p 3322398
+bash(3322398)---sleep(3322399)
+```
+
+`pane_pid` is the `bash -c` wrapper; the actual worker is a child with a *different* PID (the output redirection defeats bash's exec-optimization for a bare last command). So `s.pid` is always the wrapper's PID, which `scan_needle_processes()` structurally never returns — the containment check is `false` for every genuinely live tmux-launched session, every time. **7.1 as shipped does not reduce the 2026-07-19 incident's risk at all; it still classifies every live session as orphaned.** `cmd_stop` already has the correct primitive for this — `find_needle_process_in_tree()` (`src/cli/mod.rs:1198-1213`), which walks the descendant tree from `pane_pid` to find the actual `needle run` process — `cmd_cleanup`'s liveness check must call it (or fold it into `scan_needle_processes()` as a tree-walking variant) instead of comparing `pane_pid` directly. Full writeup: [ADR-003 Addendum](../adr/003-cleanup-orphan-detection-gap.md#addendum-2026-07-21-the-shipped-fix-bf-1ep0s--commit-b5ada58-is-itself-broken).
+
 ### 7.2 Testing
 - Regression test: `needle cleanup` with no flags, given one live session and one session with no backing process, removes only the dead one.
 - Regression test: `needle cleanup` with no flags and zero dead sessions removes nothing and says so, even when live sessions exist.
 - Regression test: `needle cleanup --all` still removes every session regardless of liveness (unchanged behavior, pinned explicitly so it can't regress silently while fixing the no-flags path).
+- **New, required by 7.1a:** the above tests must exercise a real `tmux new-session -d -s <name> "NEEDLE_INNER=1 <cmd> ... 2>> <log>"` invocation (or an equivalent fixture that reproduces the shell-wrapper-vs-child PID split), not a `TmuxSession`/`DiscoveredProcess` struct constructed directly in the test — that shortcut is exactly what let 7.1a ship undetected, since it bypasses the real indirection the bug lives in.
 
 ### 7.3 Deployment
 - Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, then staged fleet rollout through the canary channel (`:testing` → `:stable`), per the existing convention (§6.8).
+- Until 7.1a is fixed and this ships, bare `needle cleanup` should be treated as equivalent to `--all` operationally — the documented safety property does not currently exist, regardless of which commit is deployed.
 
 ## Exit criteria
-- Bare `needle cleanup` on a host with any mix of live and dead needle sessions removes only the dead ones, verified against `ps aux`, not assumed.
+- Bare `needle cleanup` on a host with any mix of live and dead needle sessions removes only the dead ones, verified against `ps aux`, not assumed — using the process's actual PID (walked from `pane_pid` through the tree), not the pane's shell PID.
 - `needle cleanup --all`'s own `--help` text states plainly that it removes live sessions too.
-- The 2026-07-19 incident (bare cleanup killing `armor-p6a` and `needle-supervisor`) is reproduced as a regression-test fixture and does not recur.
+- The 2026-07-19 incident (bare cleanup killing `armor-p6a` and `needle-supervisor`) is reproduced as a **tmux-backed** regression-test fixture (per 7.2) and does not recur.
 
 # Phase 8: Recursive Workspace Discovery as Explore's Default, Static List as Pinning Exception Only
 
@@ -4207,3 +4234,110 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 - **Risk:** the canary suite's existing fixtures were tuned for agent-authored source-level self-modification deltas; not yet confirmed they give adequate coverage for a full official-release binary swap (potentially larger surface change per hop). Needs its own validation pass before `auto_upgrade_check` becomes the fleet default.
 - **Risk:** two producers can now write `needle-testing` (self-modification and the new supervisor check) — needs the mutual-exclusion rule described in §9.1 so they can't clobber each other mid-validation.
 - **Deferred:** automatic rollback triggered by post-promotion outcome-rate anomalies, using the existing `needle rollback` primitive — reasonable future hardening, not required for v1.
+
+# Phase 10: Bead Lifecycle Reliability — Test Isolation, Failure Quarantine, and Liveness-Independent Reclamation
+
+**Status:** planned (ADR-006).
+
+**Goal:** stop beads from getting stuck in states NEEDLE has no mechanism to recover from, and stop NEEDLE's own test suite from being the thing that puts them there. Driven by a 2026-07-21 lab fleet audit that found the fleet wasn't resource-starved (load 3.0/12 cores, 42G RAM free) but *data-quality-starved*: ~284 phantom `in_progress`/stale-assigned beads across ~22 real repos, six roaming workers permanently `EXHAUSTED` behind stale-assignee-only candidate pools despite real ready work existing elsewhere, and — reviewed in the same pass — a long-standing, still-open gap where a bead too large for one turn can fail hundreds of times with no automatic stop (a prior incident: 310 failures/24h on one bead, ~$500). All three root causes trace back to the same weakness: nothing in NEEDLE notices and corrects a bead stuck in a state it shouldn't be able to stay in indefinitely. Full evidence and rationale in [ADR-006](../adr/006-bead-lifecycle-reliability.md).
+
+## Changes
+
+### 10.1 Test-suite fixture isolation
+- `dead_worker_cleanup_integration` (`tests/integration_tests.rs`) spawns the real compiled `needle` binary without overriding `HOME` or disabling Explore — `explore.enabled` defaults `true` and `explore.workspace_root` defaults to the real `$HOME` inherited from the test process. Fix: override `HOME` to a tempdir for this test, and either disable Explore in its config or add an `explore_workspace_root` override to `CliOverrides` so the test's subprocess never scans real filesystem paths.
+- Audit the rest of the real-binary-spawning test suite (any `Command::new(CARGO_BIN_EXE_needle)` call) for the same gap — this is the second time this exact mechanism has produced real contamination (the first, 2026-07-20, left ~284 phantom beads under fixture worker identifiers across ~22 repos).
+- Document the policy explicitly in this repo's CLAUDE.md Testing section: any test spawning the compiled binary as a real subprocess must isolate `$HOME` and Explore's scan root.
+
+### 10.2 Failure circuit-breaker
+- After K consecutive failures on a bead (new config `outcome.quarantine_after_failures`, default 5 — above Pluck's existing `split_after_failures` default of 3, so mitosis gets first crack at splitting), `handle_failure` (`src/outcome/mod.rs`) sets `status: blocked`, adds a `cycling` label, and emits a `bead.quarantined` telemetry event so the `auto`/Pluck strand stops re-claiming it.
+- Mitosis's `NotSplittable` verdict (`src/worker/mod.rs:2097-2100`, currently a silent fallthrough) must count toward the same failure ceiling instead of being invisible to it.
+- Quarantine, not auto-split — this is the safe MVP. Auto-splitting on threshold via mitosis is a larger, separately-decidable follow-on.
+- `needle status`/`needle logs` should make `cycling`-labeled beads easy to find (a filter or summary count) — otherwise quarantine just becomes a second, quieter kind of stuck state instead of a visible one.
+
+### 10.3 Mend releases stale assignees on Open beads
+- This is Phase 5.2's original promise ("Mend releases stale assignees on open beads"), never implemented — `cleanup_orphaned_in_progress` (`src/strand/mend.rs`) only handles `status == InProgress`. Add a sibling function (or extend it) that releases the assignee on any `Open` bead whose assignee has no live heartbeat/registry entry, using the same staleness definition already applied to `in_progress` claims.
+- **Before implementing:** re-verify `bf update <id> --status open --assignee ""` (or equivalent clear-assignee call) against the currently-deployed `bf`/`br` version — it was rejected as of bf 0.3.0 with no `bf release` subcommand available. This is an external dependency outside this repo; if still broken upstream, this sub-item blocks on that fix (or a documented workaround) rather than reaching for a `.beads/` direct-edit shortcut, which this repo's own conventions already prohibit.
+
+### 10.4 Decouple reclamation from worker liveness
+- `needle supervise`'s `tick()` (`src/supervisor/mod.rs`) currently only spawns a worker when `ready_beads` is non-empty — but stale claims are exactly what suppress the ready queue, so a fully idle fleet holding only stale claims can never trigger a spawn, which means Mend (only reachable from inside a worker's own loop) never runs, which means the stale claims never clear. Fix: `tick()` calls a mend-equivalent reclamation pass **unconditionally, every tick**, before its `ready_beads` check — not gated by it.
+- Add the same reclamation (stale in-progress + stale-assignee-on-Open, per 10.3) to `needle doctor --repair` as a second, independent path, so a host not running `needle supervise` still has a standalone command for it (cron-friendly, no worker or supervisor required to be alive).
+- Preserve the supervisor's existing tick interval/backoff — only the *order* of operations within one tick changes (reclaim before checking readiness), not how often ticks happen.
+
+### 10.5 Testing
+- Regression test: the isolated `dead_worker_cleanup_integration` (10.1) makes zero writes outside its tempdir fixture, verified by fixture-path assertion, not just "doesn't error."
+- Regression test: a bead that fails 5 consecutive times (mocked agent, deterministic failure) ends up `status: blocked`, labeled `cycling`, and is no longer returned by Pluck's candidate query.
+- Regression test: a mitosis `NotSplittable` verdict on a bead already at 4 prior failures results in quarantine on the 5th, not a 6th dispatch attempt.
+- Regression test: an `Open` bead with a dead-heartbeat assignee gets its assignee cleared by the new Mend function and becomes claimable again.
+- Regression test: `needle supervise`'s `tick()`, given zero ready beads and one stale in-progress claim, reclaims the claim within one tick without requiring any worker process to be running.
+
+### 10.6 Deployment
+- Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, then staged fleet rollout through the canary channel (`:testing` → `:stable`), per the existing convention.
+
+## Exit criteria
+- No test in this repo's suite can write to a real, non-fixture `.beads/` directory under a developer or CI `$HOME`.
+- A bead that fails K consecutive times stops being redispatched automatically — no manual split-and-block intervention required to halt the loop.
+- An `Open` bead with a stale assignee is reclaimed and becomes claimable again without any worker restart or manual `bf`/`br` intervention.
+- A fully idle fleet (zero live workers, only stale claims) recovers to a claimable ready queue via `needle supervise` alone, with no worker needing to be manually launched first to "kick" reclamation.
+
+# Phase 11: Deploy-Path Hardening — Hot-Reload Self-Healing and Spawn-Path Guardrails
+
+**Status:** planned (ADR-007).
+
+**Goal:** make NEEDLE's own binary-replacement paths recover from the two ways they've actually failed in production, rather than relying on an operator remembering the sanctioned procedure every time. Driven by two incidents: 2026-04-30 (`cp`-ing a new binary onto the live spawn path forced an unwanted hash-mismatch re-exec, disrupting 20 sessions) and 2026-07-20 (`mv`-replacing the spawn path instead left running workers hashing a deleted inode — `file_hash` errors every cycle, `check_hot_reload()` logs a warning and continues, and those workers can never hot-reload again). Both share a root cause: NEEDLE's sanctioned deploy path (upgrade → canary → promote → hot-reload) works, but nothing prevents writing directly to the spawn-path binary instead, and the hot-reload check has no recovery behavior for the specific failure a direct `mv` produces. Separately, `needle upgrade` itself still overwrites `env::current_exe()` directly with zero canary validation — the same unvalidated-overwrite shape, just invoked deliberately instead of by accident. Full evidence and rationale in [ADR-007](../adr/007-deploy-path-hardening.md).
+
+## Changes
+
+### 11.1 Self-heal the deleted-inode hot-reload failure
+- When `get_current_binary_path()`'s resolved path indicates a deleted/unlinked exe (`/proc/self/exe` reading `"... (deleted)"`, or the equivalent `fs::read()` `NotFound` case), `check_hot_reload()` (`src/upgrade/mod.rs`) must treat this as an unconditional signal to re-exec against `needle-stable` immediately, rather than logging a warning and returning `Ok(())`. A worker running on a deleted inode has no legitimate reason to keep doing so — reload, don't stall.
+
+### 11.2 Canary-gate `needle upgrade`
+- `perform_upgrade()` (`src/upgrade/mod.rs`) should write the downloaded release to `~/.needle/bin/needle-testing` and go through the existing canary validation before promotion, instead of `fs::rename`-ing directly over `env::current_exe()`. This is ADR-005's explicitly deferred item ("filed as a separate, smaller bead" — no such bead exists), now in scope. `needle upgrade`'s UX is unchanged; it stops bypassing validation just because it was invoked manually. Share implementation with Phase 9 §9.1 if that phase lands first — same target path, same validation pipeline.
+
+### 11.3 Visibility for unsanctioned spawn-path writes
+- Add a check (in `needle doctor`, and/or each worker's BOOTING step) that detects "this process's own binary file has changed since the process started" (compare a hash or inode+mtime recorded at boot against the current state of the same path) and distinguish it from a legitimate hot-reload (which re-execs into a new process). Emit a `spawn_path.modified_in_place` telemetry event and a `needle doctor` warning naming affected workers. This cannot prevent a `cp` — it makes the resulting confusion visible instead of silent, which both historical incidents lacked.
+
+### 11.4 Documentation at the point of use
+- `needle upgrade --help` and `docs/plan/plan.md`'s Binary Structure section state plainly, at the call site (not only in an ADR an operator has to already know exists) that `cp`/`mv` onto `~/.local/bin/needle` or `~/.needle/bin/needle-stable` while any worker is running is unsupported, and name the two concrete failure modes (session disruption vs. permanent hot-reload stall) it produces.
+
+### 11.5 Testing
+- Regression test: a worker whose spawn-path binary is `mv`-replaced mid-run self-heals (re-execs into `:stable`) within one loop cycle, instead of logging `hot-reload check failed, continuing` indefinitely.
+- Regression test: `needle upgrade` against a mocked bad release (fails canary) leaves the running binary and `:stable` untouched — mirrors Phase 9 §9.4's equivalent test for the supervisor-driven path.
+- Regression test: `cp`-overwriting the spawn-path binary's content in place (no re-exec) is detected by the 11.3 check and produces a `spawn_path.modified_in_place` event.
+
+### 11.6 Deployment
+- Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, staged canary rollout (`:testing` → `:stable`). 11.1 specifically should be validated with its own canary fixture (simulate a spawn-path `mv` mid-canary-run) before promotion, since it patches part of the hot-reload machinery it depends on.
+
+## Exit criteria
+- A worker whose spawn-path binary is replaced via `mv` while it's running recovers on its own within one loop cycle, with no permanent stall and no operator intervention.
+- `needle upgrade` never installs an unvalidated release — a failing canary against a manually-triggered upgrade leaves the previous version running, same guarantee Phase 9 provides for the automatic path.
+- An operator who runs `cp`/`mv` directly against a spawn-path binary sees an explicit warning (via `needle doctor` or telemetry) rather than silent, delayed, hard-to-diagnose session disruption.
+
+# Phase 12: Fleet Resource Safety — Enforced CPU/RAM Gating on Worker Launch
+
+**Status:** planned (ADR-008).
+
+**Goal:** stop freshly-launched workers from being silently killed by CPU saturation during `worker_construction`, and stop batch launches from causing the saturation that kills them. Driven by a previously-diagnosed operational incident (2026-07-19, lab): an identical `needle run` invocation died twice at load ~2.5 with no panic or backtrace (stderr ending mid-`worker_construction`), then succeeded 90 minutes later at load ~0.74 — load was the only variable that changed. Plan.md already states the design intent ("NEEDLE monitors [CPU/RAM] and warns when saturated," `docs/plan/plan.md:115`); reviewing the implementation against that intent found the only resource check in the codebase (`check_system_resources`) is called exclusively from an already-running worker's dispatch loop, immediately before executing an already-claimed bead — never during `worker_construction` itself, and never during a `--count=N` batch launch, where the fixed (non-adaptive) launch stagger is the only thing standing between a batch launch and the saturation that kills its own later members. Full evidence and rationale in [ADR-008](../adr/008-fleet-resource-safety.md).
+
+## Changes
+
+### 12.1 Gate `worker_construction` on system resources
+- Before entering `worker_construction` (`src/cli/mod.rs`), call `check_system_resources()` (generalized beyond its current rate-limit-specific naming, since it's now used at launch time too). If saturated, retry with bounded backoff rather than proceeding into a step known to be slow (~5s) and vulnerable to being killed mid-step; if still saturated after the max wait, fail the launch with an explicit, actionable error instead of letting it vanish silently.
+
+### 12.2 Load-adaptive launch staggering
+- Replace the fixed `launch_stagger_seconds` sleep in the `--count=N` sequential-launch path (`src/cli/mod.rs`) with a load-aware delay: use the existing short default when load is comfortable, extend (bounded, capped) when it isn't, so a batch launch doesn't blindly push itself past the saturation threshold its own later members will then be killed by.
+
+### 12.3 Apply the same gate to `needle supervise`'s auto-scale path
+- `needle supervise` (`src/supervisor/mod.rs`) is the other place new workers get spawned (queue-depth-driven auto-scaling) — it should not spawn into saturation any more than a manual `--count=N` invocation should. Reuse 12.1's gate rather than a separate implementation.
+
+### 12.4 Testing
+- Regression test: `worker_construction` launched under a simulated saturated-load condition defers/retries instead of proceeding, and eventually fails with a named reason if saturation doesn't clear within the bound.
+- Regression test: a `--count=5` batch launch under simulated rising load produces increasing inter-launch delays, not a flat interval.
+- Regression test: `needle supervise`'s auto-scale spawn path respects the same gate as the CLI launch path (shared implementation, not divergent behavior).
+
+### 12.5 Deployment
+- Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, staged canary rollout (`:testing` → `:stable`).
+
+## Exit criteria
+- No worker launch is silently killed mid-`worker_construction` under CPU saturation — the outcome is either a successful (possibly delayed) launch or an explicit, logged failure with a reason.
+- A `--count=N` batch launch on an already-loaded host does not itself push load high enough to kill its own later-launched members.
+- `needle supervise`'s auto-scaler and the CLI's manual launch path share one resource-gating implementation, not two that can drift apart.
