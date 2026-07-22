@@ -539,7 +539,10 @@ async fn regression_real_tmux_session_not_removed_by_bare_cleanup() {
     // TmuxSession::spawn() creates sessions with the exact production command shape:
     // `NEEDLE_INNER=1 sleep 3600 2>> <log>`
     // This produces the pane_pid-vs-child-PID split that the P7.1a bug exploits.
-    let session = tmux_fixture::TmuxSession::spawn("test-cleanup-regression")
+    //
+    // CRITICAL: Use a session name starting with "needle-" to match the cleanup filter.
+    // The cleanup command only processes sessions whose names start with "needle-".
+    let session = tmux_fixture::TmuxSession::spawn("needle-test-cleanup-regression")
         .await
         .expect("Failed to spawn tmux session for regression test");
 
@@ -753,8 +756,8 @@ fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup(
         }
     }
 
-    // Give the session a moment to stabilize
-    thread::sleep(Duration::from_millis(200));
+    // Give the session more time to stabilize - race condition on slow systems
+    thread::sleep(Duration::from_millis(500));
 
     // Get the pane_pid from tmux (this is the shell wrapper PID, not the sleep PID)
     let pane_pid_output = Command::new("tmux")
