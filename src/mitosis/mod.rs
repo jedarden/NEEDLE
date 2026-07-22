@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::bead_store::BeadStore;
+use crate::bead_store::{BeadStore, NewChild};
 use crate::claim::acquire_flock;
 use crate::config::MitosisConfig;
 use crate::dispatch::Dispatcher;
@@ -290,9 +290,16 @@ impl MitosisEvaluator {
         let existing = self.get_existing_children(store, &parent.id).await?;
         let existing_titles: Vec<String> = existing.iter().map(|t| t.to_lowercase()).collect();
 
-        let mut created_ids = Vec::new();
-        let mut skipped = 0u32;
+        // Child beads carry parent-tracking labels for reliable dedup. Labels
+        // are stored on the bead itself and survive FrankenSQLite index
+        // corruption, unlike dependency relationships. All children in this
+        // split share the same label set.
+        let parent_label = format!("parent-{}", parent.id);
+        let labels: Vec<&str> = vec!["mitosis-child", "mitosis-depth:1", &parent_label];
 
+        // Dedup first, then build the list of children to create.
+        let mut to_create: Vec<NewChild> = Vec::new();
+        let mut skipped = 0u32;
         for child in proposed {
             // Dedup: does an existing child cover this task?
             if existing_titles
@@ -308,35 +315,34 @@ impl MitosisEvaluator {
                 continue;
             }
 
-            // Create child bead with parent-tracking labels for reliable dedup.
-            // Labels are stored on the bead itself and survive FrankenSQLite
-            // index corruption, unlike dependency relationships.
-            let parent_label = format!("parent-{}", parent.id);
-            let labels: Vec<&str> = vec!["mitosis-child", "mitosis-depth:1", &parent_label];
-            let child_id = store
-                .create_bead(&child.title, &child.body, &labels)
-                .await
-                .with_context(|| format!("failed to create child bead: {}", child.title))?;
+            to_create.push(NewChild {
+                title: &child.title,
+                body: &child.body,
+                labels: &labels,
+            });
+        }
 
-            // Link child as blocking parent.
+        // Create all children and link each as a blocker of the parent in a
+        // single atomic operation. A crash mid-split (SIGKILL/OOM/eviction)
+        // rolls the whole thing back rather than leaving an orphaned child with
+        // no dependency link (plan.md Phase 5.3, Race 3). Backends without an
+        // atomic batch degrade to the historical sequential path.
+        let created_ids = if to_create.is_empty() {
+            Vec::new()
+        } else {
             store
-                .add_dependency(&child_id, &parent.id)
+                .split_bead(&parent.id, &to_create)
                 .await
-                .with_context(|| {
-                    format!(
-                        "failed to add dependency: {} blocks {}",
-                        child_id, parent.id
-                    )
-                })?;
+                .with_context(|| format!("failed to split bead {}", parent.id))?
+        };
 
+        for (child_id, child) in created_ids.iter().zip(to_create.iter()) {
             tracing::info!(
                 parent_id = %parent.id,
                 child_id = %child_id,
                 child_title = %child.title,
                 "created mitosis child"
             );
-
-            created_ids.push(child_id);
         }
 
         if created_ids.is_empty() {

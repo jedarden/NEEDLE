@@ -263,6 +263,18 @@ pub struct RepairReport {
     pub fixed: Vec<String>,
 }
 
+// ─── NewChild ─────────────────────────────────────────────────────────────────
+
+/// A child bead to create during an atomic split (see [`BeadStore::split_bead`]).
+///
+/// Borrowed views only — the caller owns the backing strings/labels.
+#[derive(Debug, Clone, Copy)]
+pub struct NewChild<'a> {
+    pub title: &'a str,
+    pub body: &'a str,
+    pub labels: &'a [&'a str],
+}
+
 // ─── BeadStore trait ─────────────────────────────────────────────────────────
 
 /// Abstract interface to the bead backend.
@@ -340,6 +352,43 @@ pub trait BeadStore: Send + Sync {
     ///
     /// Uses `br dep add <blocker_id> --blocks <blocked_id>`.
     async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()>;
+
+    /// Atomically create `children` and link each as a blocker of `parent_id`.
+    ///
+    /// This is the "mitosis" / bead-splitting primitive. N child creations plus
+    /// N dependency links must commit together: otherwise a crash between the
+    /// `create` and the `dep add` (SIGKILL, OOM, pod eviction) leaves an orphaned
+    /// child with no dependency link, and the parent never unblocks — plan.md
+    /// Phase 5.3, Race 3.
+    ///
+    /// The parent is deliberately **not** closed: NEEDLE keeps a split parent
+    /// open/blocked while its children are worked.
+    ///
+    /// The default implementation performs the historical non-atomic sequence
+    /// (`create_bead` + `add_dependency`, one child at a time). Mock stores rely
+    /// on it, and bf-backed stores fall back to it when the atomic path is
+    /// unavailable. Backends that can run a transactional batch (bf) override
+    /// this to make the whole split crash-safe.
+    async fn split_bead(
+        &self,
+        parent_id: &BeadId,
+        children: &[NewChild<'_>],
+    ) -> Result<Vec<BeadId>> {
+        let mut created = Vec::with_capacity(children.len());
+        for child in children {
+            let child_id = self
+                .create_bead(child.title, child.body, child.labels)
+                .await
+                .with_context(|| format!("failed to create child bead: {}", child.title))?;
+            self.add_dependency(&child_id, parent_id)
+                .await
+                .with_context(|| {
+                    format!("failed to add dependency: {child_id} blocks {parent_id}")
+                })?;
+            created.push(child_id);
+        }
+        Ok(created)
+    }
 
     /// Remove a dependency link: `blocker_id` blocks `blocked_id`.
     ///
@@ -731,11 +780,10 @@ impl BrCliBeadStore {
     /// to the model/harness combo that closes each issue_type fastest. The
     /// flags are emitted before `--assignee`/`--json`; any that are `None` are
     /// omitted, and `bf claim` falls back to the population-wide average.
-    async fn run_bf_claim(&self, actor: &str) -> Result<String> {
-        let timeout_duration = std::time::Duration::from_secs(30);
-
-        // Try to find bf on PATH or at the default install location
-        let bf_path = which::which("bf").or_else(|_| {
+    /// Locate the `bf` binary on PATH, falling back to the default install
+    /// location (`~/.local/bin/bf`).
+    fn resolve_bf(&self) -> Result<PathBuf> {
+        which::which("bf").or_else(|_| {
             let home = std::env::var("HOME").unwrap_or_default();
             let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
             if candidate.exists() {
@@ -743,9 +791,56 @@ impl BrCliBeadStore {
             } else {
                 Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
             }
-        });
+        })
+    }
 
-        let bf_path = match bf_path {
+    /// Run `bf batch --json <ops>` and return stdout.
+    ///
+    /// The entire op array executes inside a single SQLite `BEGIN IMMEDIATE`
+    /// transaction (bf `execute_batch`), so a crash or a failing op rolls the
+    /// whole batch back. Used by [`BeadStore::split_bead`] for crash-safe mitosis.
+    async fn run_bf_batch(&self, ops_json: &str) -> Result<String> {
+        let timeout_duration = std::time::Duration::from_secs(30);
+        let bf_path = self
+            .resolve_bf()
+            .map_err(|e| e.context("bf CLI not found; cannot run atomic batch"))?;
+
+        let args = ["batch", "--json", ops_json];
+        let mut cmd = tokio::process::Command::new(&bf_path);
+        cmd.args(args)
+            .current_dir(&self.workspace)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        let child = cmd.spawn().context("failed to spawn bf batch subprocess")?;
+
+        let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+            Ok(Ok(output)) => output,
+            Ok(Err(e)) => return Err(e).context("bf batch subprocess failed"),
+            Err(_) => {
+                tracing::error!("bf batch subprocess timed out, killing process");
+                bail!("bf batch subprocess timed out after 30s");
+            }
+        };
+
+        let stdout =
+            String::from_utf8(output.stdout).context("bf batch stdout was not valid UTF-8")?;
+
+        if !output.status.success() {
+            let code = output.status.code().unwrap_or(-1);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("bf batch exited with code {code}\nstderr: {stderr}");
+        }
+
+        Ok(stdout)
+    }
+
+    async fn run_bf_claim(&self, actor: &str) -> Result<String> {
+        let timeout_duration = std::time::Duration::from_secs(30);
+
+        // Try to find bf on PATH or at the default install location
+        let bf_path = match self.resolve_bf() {
             Ok(p) => p,
             Err(e) => {
                 return Err(e.context("bf CLI not found; falling back to br-style claim"));
@@ -812,6 +907,58 @@ impl BrCliBeadStore {
 
         Ok(stdout)
     }
+}
+
+/// Build the `bf batch` op array for an atomic split: create every child, then
+/// link each freshly-created child as a blocker of `parent_id`.
+///
+/// Creates come first so the `dep_add_blocker` ops can reference the new
+/// children by positional placeholder (`@0`, `@1`, …), which bf resolves to the
+/// created IDs in creation order. `dep_add_blocker.id` is the *blocked* bead
+/// (the parent) and `.blocker` is the child — matching NEEDLE's
+/// `add_dependency(child, parent)` semantics (child blocks parent). No `close`
+/// op is emitted: a split parent stays open/blocked.
+fn build_split_batch_ops(parent_id: &BeadId, children: &[NewChild<'_>]) -> Vec<serde_json::Value> {
+    let mut ops = Vec::with_capacity(children.len() * 2);
+    for child in children {
+        ops.push(serde_json::json!({
+            "op": "create",
+            "title": child.title,
+            "description": child.body,
+            "labels": child.labels,
+        }));
+    }
+    let parent = parent_id.as_ref();
+    for idx in 0..children.len() {
+        ops.push(serde_json::json!({
+            "op": "dep_add_blocker",
+            "id": parent,
+            "blocker": format!("@{idx}"),
+        }));
+    }
+    ops
+}
+
+/// Parse the child IDs created by `bf batch` from its stdout.
+///
+/// `bf batch` prints one line per op: `"[op N] ok: <id>"` for `create` ops and
+/// `"[op N] ok"` (no id) for `dep_add_blocker`/`close`. Only creates carry an
+/// id, so the ids returned here — in op order — are exactly the new children.
+fn parse_batch_created_ids(stdout: &str) -> Vec<BeadId> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let rest = line.strip_prefix("[op ")?;
+            let (_n, tail) = rest.split_once(']')?;
+            let id = tail.trim().strip_prefix("ok:")?.trim();
+            if id.is_empty() {
+                None
+            } else {
+                Some(BeadId::from(id))
+            }
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -987,6 +1134,83 @@ impl BeadStore for BrCliBeadStore {
             .await
             .with_context(|| format!("br dep add {blocked} {blocker} --type blocks failed"))?;
         Ok(())
+    }
+
+    /// Crash-safe bead split via a single `bf batch` transaction.
+    ///
+    /// Creates every child, then links each as a blocker of `parent_id`, all
+    /// inside one `BEGIN IMMEDIATE` transaction. A kill/OOM/eviction mid-split
+    /// rolls the whole batch back — no orphaned children (plan.md Phase 5.3,
+    /// Race 3). If `bf` is missing or the batch fails, we log and fall back to
+    /// the historical non-atomic sequence, mirroring `run_bf_claim`'s degrade-
+    /// gracefully behavior so this never becomes a hard dependency.
+    async fn split_bead(
+        &self,
+        parent_id: &BeadId,
+        children: &[NewChild<'_>],
+    ) -> Result<Vec<BeadId>> {
+        if children.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Build one atomic batch: N creates, then N dep_add_blocker ops linking
+        // each freshly-created child (@0..@N-1) as a blocker of the parent. No
+        // `close` op — a split parent stays open/blocked.
+        let ops = build_split_batch_ops(parent_id, children);
+        match serde_json::to_string(&ops) {
+            Ok(ops_json) => match self.run_bf_batch(&ops_json).await {
+                Ok(stdout) => {
+                    // The batch committed atomically (bf exited 0). Trust it and
+                    // return — we must NOT fall back here, or a parse hiccup
+                    // would double-create the children that already exist.
+                    let ids = parse_batch_created_ids(&stdout);
+                    if ids.len() != children.len() {
+                        tracing::warn!(
+                            parent_id = %parent_id,
+                            expected = children.len(),
+                            parsed = ids.len(),
+                            stdout = %stdout,
+                            "bf batch mitosis committed but the child-id parse \
+                             count mismatched; returning parsed ids as-is"
+                        );
+                    }
+                    return Ok(ids);
+                }
+                Err(e) => {
+                    // A non-zero exit / timeout / spawn failure means the batch
+                    // rolled back (nothing was created), so retrying the
+                    // sequential path is safe.
+                    tracing::warn!(
+                        parent_id = %parent_id,
+                        error = %e,
+                        "bf batch mitosis failed; falling back to sequential create+dep"
+                    );
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    parent_id = %parent_id,
+                    error = %e,
+                    "failed to serialize bf batch ops; falling back to sequential create+dep"
+                );
+            }
+        }
+
+        // Fallback: historical non-atomic sequence (same as the trait default).
+        let mut created = Vec::with_capacity(children.len());
+        for child in children {
+            let child_id = self
+                .create_bead(child.title, child.body, child.labels)
+                .await
+                .with_context(|| format!("failed to create child bead: {}", child.title))?;
+            self.add_dependency(&child_id, parent_id)
+                .await
+                .with_context(|| {
+                    format!("failed to add dependency: {child_id} blocks {parent_id}")
+                })?;
+            created.push(child_id);
+        }
+        Ok(created)
     }
 
     async fn remove_dependency(&self, blocked_id: &BeadId, blocker_id: &BeadId) -> Result<()> {
@@ -2076,10 +2300,11 @@ echo '[]'
         let store = BrCliBeadStore::new(
             fake_br.clone(),
             workspace.to_path_buf(),
-            None,  // model
-            None,  // harness
-            None,  // harness_version
-        ).unwrap();
+            None, // model
+            None, // harness
+            None, // harness_version
+        )
+        .unwrap();
         let filters = Filters::default();
 
         let _ = store.ready(&filters).await;
@@ -2124,10 +2349,11 @@ echo '[]'
         let store = BrCliBeadStore::new(
             fake_br.clone(),
             workspace.to_path_buf(),
-            None,  // model
-            None,  // harness
-            None,  // harness_version
-        ).unwrap();
+            None, // model
+            None, // harness
+            None, // harness_version
+        )
+        .unwrap();
 
         let _ = store.list_all().await;
 

@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use tempfile::TempDir;
 
-use needle::bead_store::{BeadStore, BrCliBeadStore, Filters};
+use needle::bead_store::{BeadStore, BrCliBeadStore, Filters, NewChild};
 use needle::claim::Claimer;
 use needle::config::{ExploreConfig, MendConfig, MitosisConfig};
 use needle::mitosis::{MitosisEvaluator, MitosisResult};
@@ -1628,4 +1628,147 @@ fn create_test_dispatcher() -> needle::dispatch::Dispatcher {
     let adapters: HashMap<String, needle::dispatch::AgentAdapter> = HashMap::new();
     let telemetry = Telemetry::new("test".to_string());
     needle::dispatch::Dispatcher::with_adapters(adapters, telemetry, 60)
+}
+
+/// Path to the `bf` binary (discovered via PATH or ~/.local/bin/bf).
+fn bf_path() -> PathBuf {
+    which::which("bf").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        PathBuf::from(format!("{home}/.local/bin/bf"))
+    })
+}
+
+/// Count the beads currently in a workspace via `bf list --json` (JSONL: one
+/// object per line).
+fn bf_bead_count(workspace: &Path) -> usize {
+    let output = std::process::Command::new(bf_path())
+        .args(["list", "--json", "--limit", "999999"])
+        .current_dir(workspace)
+        .output()
+        .expect("failed to run bf list");
+    assert!(
+        output.status.success(),
+        "bf list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .count()
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Race 3 — atomic mitosis / bead-splitting (plan.md Phase 5.3)
+//
+// `BeadStore::split_bead` must create N children and link each as a blocker of
+// the parent atomically, so a crash/kill mid-split cannot leave an orphaned
+// child with no dependency link (and a parent that never unblocks).
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// The atomic split creates every child, links each as a blocker of the parent,
+/// and leaves the parent open (blocked) — mirroring NEEDLE's mitosis semantics.
+#[tokio::test]
+async fn split_bead_creates_children_and_links_them_atomically() {
+    let workspace = create_test_workspace("split-atomic").unwrap();
+    let store = store_for_workspace(workspace.path()).unwrap();
+
+    let parent = create_bead(workspace.path(), "parent-to-split", 1).unwrap();
+
+    let parent_label = format!("parent-{}", parent.as_ref());
+    let labels: Vec<&str> = vec!["mitosis-child", &parent_label];
+    let children = vec![
+        NewChild {
+            title: "child one",
+            body: "body one",
+            labels: &labels,
+        },
+        NewChild {
+            title: "child two",
+            body: "body two",
+            labels: &labels,
+        },
+    ];
+
+    let child_ids = store.split_bead(&parent, &children).await.unwrap();
+    assert_eq!(
+        child_ids.len(),
+        2,
+        "split should create exactly two children"
+    );
+
+    // Both children exist, carry the parent-tracking label, and the parent is
+    // still present.
+    let all = store.list_all().await.unwrap();
+    assert_eq!(all.len(), 3, "workspace should hold parent + 2 children");
+    for child_id in &child_ids {
+        let child = all
+            .iter()
+            .find(|b| &b.id == child_id)
+            .unwrap_or_else(|| panic!("child {child_id} missing from list"));
+        assert!(
+            child.labels.iter().any(|l| l == &parent_label),
+            "child {child_id} should carry the {parent_label} label"
+        );
+    }
+
+    // Dependency direction: each child blocks the parent, so the parent is NOT
+    // ready (blocked) while the children ARE ready (unblocked).
+    let ready = store.ready(&Filters::default()).await.unwrap();
+    let ready_ids: HashSet<String> = ready.iter().map(|b| b.id.as_ref().to_string()).collect();
+    assert!(
+        !ready_ids.contains(parent.as_ref()),
+        "parent should be blocked by its new children, not ready"
+    );
+    for child_id in &child_ids {
+        assert!(
+            ready_ids.contains(child_id.as_ref()),
+            "child {child_id} should be ready (unblocked)"
+        );
+    }
+}
+
+/// Crash-safety: if a multi-op mitosis fails partway (here: a dependency op that
+/// references a non-existent parent), the whole batch rolls back and NO orphaned
+/// child bead survives. Mirrors the verification in
+/// `docs/needle-mitosis-migration.md`, driving the same `bf batch` transaction
+/// that `split_bead` relies on.
+#[tokio::test]
+async fn failed_mitosis_batch_leaves_no_orphaned_children() {
+    let workspace = create_test_workspace("split-rollback").unwrap();
+    let parent = create_bead(workspace.path(), "parent-rollback", 1).unwrap();
+
+    let before = bf_bead_count(workspace.path());
+    assert_eq!(before, 1, "only the parent should exist before the split");
+
+    // Two child creates followed by a dependency op that references a bead that
+    // does not exist. bf executes the whole array inside one BEGIN IMMEDIATE
+    // transaction and fails fast on the bad op, rolling everything back.
+    let ops = format!(
+        r#"[
+            {{"op":"create","title":"orphan candidate 1","description":"b1"}},
+            {{"op":"create","title":"orphan candidate 2","description":"b2"}},
+            {{"op":"dep_add_blocker","id":"bf-doesnotexist","blocker":"@0"}},
+            {{"op":"dep_add_blocker","id":"{parent}","blocker":"@1"}}
+        ]"#,
+        parent = parent.as_ref(),
+    );
+
+    let output = std::process::Command::new(bf_path())
+        .args(["batch", "--json", &ops])
+        .current_dir(workspace.path())
+        .output()
+        .expect("failed to run bf batch");
+
+    assert!(
+        !output.status.success(),
+        "batch with a bad dependency op should fail, got success: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // The whole transaction rolled back: no orphaned children were created.
+    let after = bf_bead_count(workspace.path());
+    assert_eq!(
+        after, before,
+        "failed mitosis must leave no orphaned children (before={before}, after={after})"
+    );
 }

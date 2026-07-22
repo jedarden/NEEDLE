@@ -22,7 +22,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::bead_store::BeadStore;
+use crate::bead_store::{BeadStore, NewChild};
 use crate::config::UnravelConfig;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{Bead, BeadId, StrandResult};
@@ -381,16 +381,18 @@ impl super::Strand for UnravelStrand {
                 continue;
             }
 
-            // Create child beads as alternatives.
-            let mut created_for_this_bead = 0u32;
+            // Build child specs, honoring the per-bead and per-run slot guards.
+            // Titles/bodies are owned here so the borrowed `NewChild` views below
+            // stay valid for the atomic split call.
+            let mut child_specs: Vec<(String, String)> = Vec::new();
             for alternative in &proposed {
                 // Guard: remaining slots for this bead.
-                if created_for_this_bead >= remaining_slots {
+                if child_specs.len() as u32 >= remaining_slots {
                     break;
                 }
 
                 // Guard: max total created per run.
-                if total_created >= self.config.max_beads_per_run {
+                if total_created + child_specs.len() as u32 >= self.config.max_beads_per_run {
                     break;
                 }
 
@@ -407,19 +409,30 @@ impl super::Strand for UnravelStrand {
                     id = bead.id,
                     alt_body = alternative.body,
                 );
-                let labels: Vec<&str> = vec!["unravel-proposal"];
+                child_specs.push((child_title, child_body));
+            }
 
-                match store.create_bead(&child_title, &child_body, &labels).await {
-                    Ok(child_id) => {
-                        // Link child as blocking parent (child blocks original).
-                        if let Err(e) = store.add_dependency(&child_id, &bead.id).await {
-                            tracing::warn!(
-                                bead_id = %bead.id,
-                                child_id = %child_id,
-                                error = %e,
-                                "unravel strand: failed to add dependency"
-                            );
-                        } else {
+            // Create all alternatives and link each as a blocker of the original
+            // bead in a single atomic operation. A crash mid-split rolls the
+            // whole thing back rather than orphaning a child with no dependency
+            // link (plan.md Phase 5.3, Race 3). This strand is best-effort: on
+            // failure we log and move on rather than aborting the run.
+            let mut created_for_this_bead = 0u32;
+            if !child_specs.is_empty() {
+                let labels: Vec<&str> = vec!["unravel-proposal"];
+                let new_children: Vec<NewChild> = child_specs
+                    .iter()
+                    .map(|(title, body)| NewChild {
+                        title,
+                        body,
+                        labels: &labels,
+                    })
+                    .collect();
+
+                match store.split_bead(&bead.id, &new_children).await {
+                    Ok(child_ids) => {
+                        for (child_id, (child_title, _)) in child_ids.iter().zip(child_specs.iter())
+                        {
                             tracing::info!(
                                 parent_id = %bead.id,
                                 child_id = %child_id,
@@ -427,16 +440,14 @@ impl super::Strand for UnravelStrand {
                                 "unravel strand: created alternative child bead"
                             );
                         }
-
-                        created_for_this_bead += 1;
-                        total_created += 1;
+                        created_for_this_bead = child_ids.len() as u32;
+                        total_created += created_for_this_bead;
                     }
                     Err(e) => {
                         tracing::warn!(
                             bead_id = %bead.id,
                             error = %e,
-                            title = %alternative.title,
-                            "unravel strand: failed to create child bead"
+                            "unravel strand: failed to create alternative children"
                         );
                     }
                 }
