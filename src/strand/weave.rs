@@ -409,7 +409,7 @@ impl WeaveStrand {
             Ok(Ok(beads)) => beads,
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "weave strand: failed to list existing beads");
-                return StrandResult::Error(crate::types::StrandError::StoreError(e.into()));
+                return StrandResult::Error(crate::types::StrandError::StoreError(e));
             }
             Err(_) => {
                 tracing::warn!(
@@ -427,7 +427,7 @@ impl WeaveStrand {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "weave strand: agent dispatch failed");
-                return StrandResult::Error(crate::types::StrandError::StoreError(e.into()));
+                return StrandResult::Error(crate::types::StrandError::StoreError(e));
             }
         };
 
@@ -568,6 +568,7 @@ impl super::Strand for WeaveStrand {
 // ─── CLI agent implementation ────────────────────────────────────────────────
 
 /// Default timeout for weave agent calls (60 seconds).
+#[allow(dead_code)]
 const WEAVE_AGENT_TIMEOUT_SECS: u64 = 60;
 
 /// Maximum timeout for weave strand evaluation (120 seconds).
@@ -760,6 +761,9 @@ mod tests {
             _blocked_id: &BeadId,
             _blocker_id: &BeadId,
         ) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
         async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {

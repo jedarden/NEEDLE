@@ -309,6 +309,7 @@ impl StrandRunner {
                     StrandResult::Split(_, _failure_count) => {
                         (format!("{}({})", strand_results::BEAD_FOUND, 1), true)
                     }
+                    StrandResult::FoundButExcluded => ("found_but_excluded".to_string(), true),
                 };
                 tracing::Span::current().record(attrs::NEEDLE_STRAND_RESULT, &result_str);
                 tracing::Span::current().record(attrs::NEEDLE_STRAND_DURATION_MS, elapsed_ms);
@@ -504,6 +505,28 @@ impl StrandRunner {
                         );
                         continue;
                     }
+                    StrandResult::FoundButExcluded => {
+                        if let Err(e) =
+                            self.telemetry
+                                .emit(crate::telemetry::EventKind::StrandEvaluated {
+                                    strand_name: strand_name.clone(),
+                                    result: "found_but_excluded".to_string(),
+                                    duration_ms: elapsed_ms,
+                                })
+                        {
+                            tracing::warn!(
+                                strand = %strand_name,
+                                error = %e,
+                                "failed to emit strand evaluated telemetry"
+                            );
+                        }
+                        tracing::info!(
+                            strand = %strand_name,
+                            elapsed_ms,
+                            "strand found candidates but all were excluded/assigned, triggering short retry"
+                        );
+                        continue;
+                    }
                     StrandResult::Error(e) => {
                         if let Err(te) =
                             self.telemetry
@@ -680,6 +703,9 @@ mod tests {
             _blocked_id: &BeadId,
             _blocker_id: &BeadId,
         ) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
         async fn claim_auto(&self, _actor: &str) -> Result<crate::types::ClaimResult> {

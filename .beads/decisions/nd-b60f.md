@@ -1,0 +1,24 @@
+# ADR: Use Bash
+
+**Decision ID:** nd-b60f
+**Date:** 2026-07-21
+
+## Context
+
+Analysis of options during task execution
+
+## Alternatives Considered
+
+1. Considered alternatives
+
+## Decision
+
+Use Bash
+
+## Rationale
+
+Now I understand. Let me check if the issue is that when a bead has a dependency, its status might be "blocked" instead of "open". Let me check what `br show --json` returns for a bead with dependenci
+
+## Outcome
+
+Decision implemented (success)

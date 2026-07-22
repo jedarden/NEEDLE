@@ -1170,6 +1170,10 @@ mod tests {
             Ok(())
         }
 
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
         fn has_valid_store(&self) -> bool {
             true // Mock store always has a valid store
         }
@@ -1735,6 +1739,10 @@ mod tests {
             ) -> Result<()> {
                 self.inner.remove_dependency(blocked_id, blocker_id).await
             }
+
+            async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+                self.inner.clear_assignee(id).await
+            }
         }
 
         let handler = test_handler();
@@ -1835,6 +1843,10 @@ mod tests {
                 blocker_id: &BeadId,
             ) -> Result<()> {
                 self.inner.remove_dependency(blocked_id, blocker_id).await
+            }
+
+            async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+                self.inner.clear_assignee(id).await
             }
         }
 

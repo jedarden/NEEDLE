@@ -43,6 +43,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use crate::bead_store::{BeadStore, BrCliBeadStore, Filters};
@@ -75,7 +76,8 @@ pub struct ExploreStrand {
     /// Whether this strand is enabled.
     enabled: bool,
     /// Static list of workspace paths to search (in order).
-    workspaces: Vec<PathBuf>,
+    /// Wrapped in Mutex for interior mutability during re-discovery.
+    workspaces: std::sync::Mutex<Vec<PathBuf>>,
     /// Home workspace path — excluded from exploration.
     home_workspace: PathBuf,
     /// Worker registry for orphan detection.
@@ -86,12 +88,37 @@ pub struct ExploreStrand {
     qualified_id: String,
     /// Store factory for creating workspace stores.
     store_factory: Arc<dyn StoreFactory>,
+    /// Cycles since last workspace re-discovery (for periodic refresh).
+    cycles_since_rediscovery: std::sync::atomic::AtomicU32,
+    /// Re-discovery interval (0 = disabled, from config.rediscovery_cycles).
+    rediscovery_cycles: u32,
+    /// Workspace root for re-discovery (from config.workspace_root).
+    workspace_root: PathBuf,
+    /// Whether the original config had an empty workspaces list (auto-discovery mode).
+    ///
+    /// When false (pinned mode), re-discovery is skipped even if cycles elapse.
+    auto_discovery_mode: bool,
+    /// Starvation threshold in minutes (0 = disabled).
+    #[allow(dead_code)]
+    starvation_threshold_minutes: u64,
+    /// Timestamp of the last successful claim (Unix timestamp, seconds).
+    /// Used for starvation detection.
+    #[allow(dead_code)]
+    last_successful_claim_seconds: AtomicU64,
+    /// Flag indicating whether ready beads were detected in the last scan.
+    #[allow(dead_code)]
+    ready_beads_detected: AtomicU64, // 0 = no, 1 = yes
+    /// Last scan timestamp per workspace (workspace path -> Unix timestamp).
+    /// Tracks when each workspace was last scanned for status reporting.
+    #[allow(dead_code)]
+    last_scan_per_workspace: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl ExploreStrand {
     /// Create a new ExploreStrand from config.
     ///
-    /// The workspace list is captured at construction time and never re-read.
+    /// The workspace list is captured at construction time and re-discovered periodically
+    /// (if `config.rediscovery_cycles` > 0 and `config.workspaces` is empty).
     /// If `workspaces` is empty, auto-discovers all dirs with `.beads/` under
     /// the configured `workspace_root`.
     pub fn new(
@@ -101,15 +128,18 @@ impl ExploreStrand {
         telemetry: Telemetry,
         qualified_id: String,
     ) -> Self {
+        // Determine if we're in auto-discovery mode (empty workspaces = discover)
+        let auto_discovery_mode = config.workspaces.is_empty();
+
         // If workspaces is empty, auto-discover under workspace_root.
-        let workspaces = if config.workspaces.is_empty() {
+        let workspaces = if auto_discovery_mode {
             Self::discover_workspaces(&config.workspace_root)
         } else {
             config.workspaces
         };
 
         // Emit WARN if running in pinned mode (non-empty workspaces).
-        if !workspaces.is_empty() {
+        if !workspaces.is_empty() && !auto_discovery_mode {
             let repo_names: Vec<String> = workspaces
                 .iter()
                 .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
@@ -127,14 +157,32 @@ impl ExploreStrand {
             );
         }
 
+        // Log periodic re-discovery setting (only in auto-discovery mode).
+        if auto_discovery_mode && config.rediscovery_cycles > 0 {
+            tracing::info!(
+                worker = %qualified_id,
+                rediscovery_cycles = config.rediscovery_cycles,
+                "Explore will re-discover workspaces every {} cycles",
+                config.rediscovery_cycles
+            );
+        }
+
         ExploreStrand {
             enabled: config.enabled,
-            workspaces,
+            workspaces: std::sync::Mutex::new(workspaces),
             home_workspace,
             registry,
             telemetry,
             qualified_id,
             store_factory: Arc::new(DefaultStoreFactory),
+            cycles_since_rediscovery: std::sync::atomic::AtomicU32::new(0),
+            rediscovery_cycles: config.rediscovery_cycles,
+            workspace_root: config.workspace_root,
+            auto_discovery_mode,
+            starvation_threshold_minutes: config.starvation_threshold_minutes,
+            last_successful_claim_seconds: AtomicU64::new(0),
+            ready_beads_detected: AtomicU64::new(0),
+            last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -153,12 +201,20 @@ impl ExploreStrand {
     ) -> Self {
         ExploreStrand {
             enabled: true,
-            workspaces,
+            workspaces: std::sync::Mutex::new(workspaces),
             home_workspace,
             registry,
             telemetry,
             qualified_id,
             store_factory: Arc::new(DefaultStoreFactory),
+            cycles_since_rediscovery: std::sync::atomic::AtomicU32::new(0),
+            rediscovery_cycles: 0,
+            workspace_root: PathBuf::from("/tmp/needle-test-root"),
+            auto_discovery_mode: false,
+            starvation_threshold_minutes: 0,
+            last_successful_claim_seconds: AtomicU64::new(0),
+            ready_beads_detected: AtomicU64::new(0),
+            last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -178,12 +234,20 @@ impl ExploreStrand {
     ) -> Self {
         ExploreStrand {
             enabled: true,
-            workspaces,
+            workspaces: std::sync::Mutex::new(workspaces),
             home_workspace,
             registry,
             telemetry,
             qualified_id,
             store_factory,
+            cycles_since_rediscovery: std::sync::atomic::AtomicU32::new(0),
+            rediscovery_cycles: 0,
+            workspace_root: PathBuf::from("/tmp/needle-test-root"),
+            auto_discovery_mode: false,
+            starvation_threshold_minutes: 0,
+            last_successful_claim_seconds: AtomicU64::new(0),
+            ready_beads_detected: AtomicU64::new(0),
+            last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -237,6 +301,70 @@ impl ExploreStrand {
         workspace.join(".beads").is_dir()
     }
 
+    /// Re-discover workspaces (refresh the workspace list).
+    ///
+    /// This is called periodically when `rediscovery_cycles` > 0 and we're in
+    /// auto-discovery mode (empty workspaces config). It re-runs discovery under
+    /// `workspace_root` and updates the workspace list, preserving:
+    /// - **No upward traversal:** Only scans immediate children of workspace_root
+    /// - **Explicit workspaces override:** Only runs when auto_discovery_mode is true
+    ///
+    /// Returns the number of new workspaces discovered (if any).
+    fn rediscover_workspaces(&self) -> usize {
+        // Skip re-discovery if we're in pinned mode (explicit workspaces list).
+        if !self.auto_discovery_mode {
+            tracing::debug!(
+                worker = %self.qualified_id,
+                "skipping workspace re-discovery: running in pinned mode (explicit workspaces list)"
+            );
+            return 0;
+        }
+
+        // Skip re-discovery if disabled (rediscovery_cycles == 0).
+        if self.rediscovery_cycles == 0 {
+            tracing::debug!(
+                worker = %self.qualified_id,
+                "skipping workspace re-discovery: disabled (rediscovery_cycles = 0)"
+            );
+            return 0;
+        }
+
+        let previous_count = {
+            let workspaces = self.workspaces.lock().unwrap();
+            workspaces.len()
+        };
+
+        let new_workspaces = Self::discover_workspaces(&self.workspace_root);
+        let new_count = new_workspaces.len();
+
+        // Update the workspace list.
+        {
+            let mut workspaces = self.workspaces.lock().unwrap();
+            *workspaces = new_workspaces;
+        }
+
+        let added_count = new_count.saturating_sub(previous_count);
+
+        if added_count > 0 {
+            tracing::info!(
+                worker = %self.qualified_id,
+                previous_count,
+                new_count,
+                added_count,
+                "workspace re-discovery found new workspaces"
+            );
+        } else {
+            tracing::debug!(
+                worker = %self.qualified_id,
+                previous_count,
+                "workspace re-discovery: no change (still {} workspaces)",
+                previous_count
+            );
+        }
+
+        added_count
+    }
+
     /// Compute the starting workspace index for this worker.
     ///
     /// Uses a hash of the qualified_id modulo the workspace count to determine
@@ -245,11 +373,12 @@ impl ExploreStrand {
     ///
     /// Returns 0 if there are no workspaces (defensive, should be handled earlier).
     fn compute_start_index(&self) -> usize {
-        if self.workspaces.is_empty() {
+        let workspaces = self.workspaces.lock().unwrap();
+        if workspaces.is_empty() {
             return 0;
         }
 
-        let n = self.workspaces.len();
+        let n = workspaces.len();
 
         // Hash the qualified_id using a stable hash algorithm
         let mut hasher = DefaultHasher::new();
@@ -266,22 +395,23 @@ impl ExploreStrand {
     /// covering all workspaces exactly once. Each worker with a different qualified_id
     /// will visit workspaces in a different rotation.
     fn rotated_workspace_order(&self) -> Vec<PathBuf> {
-        if self.workspaces.is_empty() {
+        let workspaces = self.workspaces.lock().unwrap();
+        if workspaces.is_empty() {
             return vec![];
         }
 
         let start = self.compute_start_index();
-        let n = self.workspaces.len();
+        let n = workspaces.len();
         let mut rotated = Vec::with_capacity(n);
 
         // Add workspaces from start to end
         for i in start..n {
-            rotated.push(self.workspaces[i].clone());
+            rotated.push(workspaces[i].clone());
         }
 
         // Add workspaces from beginning to start (wrap-around)
         for i in 0..start {
-            rotated.push(self.workspaces[i].clone());
+            rotated.push(workspaces[i].clone());
         }
 
         rotated
@@ -313,6 +443,9 @@ impl super::Strand for ExploreStrand {
     }
 
     async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
+        use std::collections::HashSet;
+        use std::time::Instant;
+
         // If disabled, nothing to explore.
         if !self.enabled {
             let _ = self
@@ -324,15 +457,39 @@ impl super::Strand for ExploreStrand {
             return StrandResult::NoWork;
         }
 
+        // Increment cycle counter and check if re-discovery is due.
+        let cycles = self
+            .cycles_since_rediscovery
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if self.rediscovery_cycles > 0 && cycles >= self.rediscovery_cycles {
+            // Reset the counter first (in case rediscovery takes time or errors).
+            self.cycles_since_rediscovery
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+
+            // Re-discover workspaces.
+            let added = self.rediscover_workspaces();
+            if added > 0 {
+                tracing::info!(
+                    worker = %self.qualified_id,
+                    added,
+                    "periodic workspace re-discovery found new workspaces"
+                );
+            }
+        }
+
         // Empty workspaces (after discovery attempt) means no workspaces found.
-        if self.workspaces.is_empty() {
-            let _ = self
-                .telemetry
-                .emit(crate::telemetry::EventKind::StrandSkipped {
-                    strand_name: "explore".to_string(),
-                    reason: "no_workspaces_discovered".to_string(),
-                });
-            return StrandResult::NoWork;
+        {
+            let workspaces = self.workspaces.lock().unwrap();
+            if workspaces.is_empty() {
+                let _ = self
+                    .telemetry
+                    .emit(crate::telemetry::EventKind::StrandSkipped {
+                        strand_name: "explore".to_string(),
+                        reason: "no_workspaces_discovered".to_string(),
+                    });
+                return StrandResult::NoWork;
+            }
         }
 
         let filters = Filters {
@@ -348,24 +505,42 @@ impl super::Strand for ExploreStrand {
         let workspaces = self.rotated_workspace_order();
         let start_index = self.compute_start_index();
 
+        let total_workspaces = {
+            let workspaces = self.workspaces.lock().unwrap();
+            workspaces.len()
+        };
+
         tracing::debug!(
             qualified_id = %self.qualified_id,
-            total_workspaces = self.workspaces.len(),
+            total_workspaces,
             start_index,
             "worker scan rotation: starting at workspace index {}",
             start_index
         );
 
+        // Track scan summary information for telemetry
+        let scan_start = Instant::now();
+        let mut workspaces_visited: Vec<String> = Vec::new();
+        let mut workspaces_with_candidates: Vec<String> = Vec::new();
+        let mut total_candidates = 0usize;
+        let mut exclusion_reasons: HashSet<String> = HashSet::new();
+
         for workspace in &workspaces {
+            // Track this workspace as visited
+            let workspace_str = workspace.display().to_string();
+            workspaces_visited.push(workspace_str.clone());
+
             // Skip the home workspace — Pluck already checked it.
             if workspace == &self.home_workspace {
                 tracing::debug!(workspace = %workspace.display(), "skipping home workspace");
+                exclusion_reasons.insert("home_workspace".to_string());
                 continue;
             }
 
             // Check that .beads/ exists before attempting to query.
             if !Self::has_beads_dir(workspace) {
                 tracing::debug!(workspace = %workspace.display(), "no .beads/ directory, skipping");
+                exclusion_reasons.insert("no_beads_dir".to_string());
                 continue;
             }
 
@@ -378,6 +553,7 @@ impl super::Strand for ExploreStrand {
                         error = %e,
                         "failed to create bead store for workspace, skipping"
                     );
+                    exclusion_reasons.insert(format!("store_error: {}", e));
                     continue;
                 }
             };
@@ -388,12 +564,18 @@ impl super::Strand for ExploreStrand {
                     // The store.ready() method receives exclude_labels in its Filters,
                     // but some backend implementations may not filter correctly.
                     // This ensures excluded/assigned beads are never returned as candidates.
+                    let before_count = candidates.len();
                     candidates.retain(|b| {
                         let assignee_ok = b.assignee.is_none();
                         let labels_ok =
                             !b.labels.iter().any(|l| filters.exclude_labels.contains(l));
                         assignee_ok && labels_ok
                     });
+                    let filtered_count = before_count - candidates.len();
+
+                    if filtered_count > 0 {
+                        exclusion_reasons.insert(format!("filtered_{}", filtered_count));
+                    }
 
                     if candidates.is_empty() {
                         // No ready candidates. Run cross-workspace mend to release
@@ -402,6 +584,7 @@ impl super::Strand for ExploreStrand {
                             workspace = %workspace.display(),
                             "no ready candidates, running cross-workspace mend"
                         );
+                        exclusion_reasons.insert("no_ready_candidates".to_string());
 
                         match super::cleanup_orphaned_in_progress(
                             remote_store.as_ref(),
@@ -422,6 +605,7 @@ impl super::Strand for ExploreStrand {
                                 match remote_store.ready(&filters).await {
                                     Ok(mut retry_candidates) => {
                                         // Apply the same defensive filtering.
+                                        let retry_before = retry_candidates.len();
                                         retry_candidates.retain(|b| {
                                             let assignee_ok = b.assignee.is_none();
                                             let labels_ok = !b
@@ -430,6 +614,14 @@ impl super::Strand for ExploreStrand {
                                                 .any(|l| filters.exclude_labels.contains(l));
                                             assignee_ok && labels_ok
                                         });
+                                        let retry_filtered = retry_before - retry_candidates.len();
+
+                                        if retry_filtered > 0 {
+                                            exclusion_reasons.insert(format!(
+                                                "retry_filtered_{}",
+                                                retry_filtered
+                                            ));
+                                        }
 
                                         if !retry_candidates.is_empty() {
                                             // Found candidates after releasing orphans.
@@ -444,6 +636,23 @@ impl super::Strand for ExploreStrand {
                                             for bead in &mut retry_candidates {
                                                 bead.workspace = workspace.clone();
                                             }
+
+                                            // Track scan results before returning
+                                            workspaces_with_candidates.push(workspace_str);
+                                            total_candidates += retry_candidates.len();
+                                            let duration_ms =
+                                                scan_start.elapsed().as_millis() as u64;
+                                            let _ = self.telemetry.emit(
+                                                crate::telemetry::EventKind::ExploreScanSummary {
+                                                    workspaces_visited,
+                                                    workspaces_with_candidates,
+                                                    total_candidates,
+                                                    exclusion_reasons: exclusion_reasons
+                                                        .into_iter()
+                                                        .collect(),
+                                                    duration_ms,
+                                                },
+                                            );
 
                                             tracing::info!(
                                                 workspace = %workspace.display(),
@@ -464,6 +673,8 @@ impl super::Strand for ExploreStrand {
                                             released,
                                             "cross-workspace mend released orphans but re-query found no candidates (beads may not pass filters), continuing to next workspace"
                                         );
+                                        exclusion_reasons
+                                            .insert("orphans_released_no_candidates".to_string());
                                     }
                                     Err(e) => {
                                         tracing::warn!(
@@ -471,6 +682,7 @@ impl super::Strand for ExploreStrand {
                                             error = %e,
                                             "failed to re-query workspace after cross-workspace mend, skipping"
                                         );
+                                        exclusion_reasons.insert(format!("requery_error: {}", e));
                                     }
                                 }
                             }
@@ -480,6 +692,7 @@ impl super::Strand for ExploreStrand {
                                     workspace = %workspace.display(),
                                     "cross-workspace mend found no orphans"
                                 );
+                                exclusion_reasons.insert("no_orphans".to_string());
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -487,6 +700,7 @@ impl super::Strand for ExploreStrand {
                                     error = %e,
                                     "cross-workspace mend failed, skipping workspace"
                                 );
+                                exclusion_reasons.insert(format!("mend_error: {}", e));
                             }
                         }
 
@@ -508,6 +722,21 @@ impl super::Strand for ExploreStrand {
                         bead.workspace = workspace.clone();
                     }
 
+                    // Track successful workspace scan
+                    workspaces_with_candidates.push(workspace_str);
+                    total_candidates += candidates.len();
+                    let duration_ms = scan_start.elapsed().as_millis() as u64;
+
+                    let _ = self
+                        .telemetry
+                        .emit(crate::telemetry::EventKind::ExploreScanSummary {
+                            workspaces_visited,
+                            workspaces_with_candidates,
+                            total_candidates,
+                            exclusion_reasons: exclusion_reasons.into_iter().collect(),
+                            duration_ms,
+                        });
+
                     tracing::info!(
                         workspace = %workspace.display(),
                         candidates = candidates.len(),
@@ -522,10 +751,23 @@ impl super::Strand for ExploreStrand {
                         error = %e,
                         "failed to query workspace, skipping"
                     );
+                    exclusion_reasons.insert(format!("query_error: {}", e));
                     continue;
                 }
             }
         }
+
+        // No candidates found in any workspace - emit scan summary
+        let duration_ms = scan_start.elapsed().as_millis() as u64;
+        let _ = self
+            .telemetry
+            .emit(crate::telemetry::EventKind::ExploreScanSummary {
+                workspaces_visited,
+                workspaces_with_candidates,
+                total_candidates,
+                exclusion_reasons: exclusion_reasons.into_iter().collect(),
+                duration_ms,
+            });
 
         let _ = self
             .telemetry
@@ -555,6 +797,8 @@ mod tests {
             enabled,
             workspaces,
             workspace_root: PathBuf::from("/tmp/needle-test-root"),
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 0,
         }
     }
 
@@ -567,6 +811,8 @@ mod tests {
             enabled,
             workspaces,
             workspace_root: root,
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 0,
         }
     }
 
@@ -653,6 +899,9 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
     }
 
     use super::super::Strand;
@@ -725,7 +974,7 @@ mod tests {
             PathBuf::from("/c"),
         ];
         let strand = make_test_explore_strand(true, workspaces.clone(), PathBuf::from("/home"));
-        assert_eq!(strand.workspaces, workspaces);
+        assert_eq!(*strand.workspaces.lock().unwrap(), workspaces);
     }
 
     #[test]
@@ -808,8 +1057,8 @@ mod tests {
             ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
 
         // The discovered workspace should be in the list
-        assert_eq!(strand.workspaces.len(), 1);
-        assert!(strand.workspaces.contains(&ws1));
+        assert_eq!(strand.workspaces.lock().unwrap().len(), 1);
+        assert!(strand.workspaces.lock().unwrap().contains(&ws1));
     }
 
     #[test]
@@ -828,7 +1077,7 @@ mod tests {
             ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
 
         // Should use the explicit list, not discovery
-        assert_eq!(strand.workspaces, explicit_workspaces);
+        assert_eq!(*strand.workspaces.lock().unwrap(), explicit_workspaces);
     }
 
     // ── Rotation Tests ─────────────────────────────────────────────────────────────
@@ -1218,6 +1467,9 @@ mod tests {
             StrandResult::Skipped { .. } => {
                 panic!("unexpected Skipped result");
             }
+            StrandResult::FoundButExcluded => {
+                panic!("unexpected FoundButExcluded result");
+            }
         }
     }
 
@@ -1310,6 +1562,9 @@ mod tests {
             StrandResult::Skipped { .. } => {
                 panic!("unexpected Skipped result");
             }
+            StrandResult::FoundButExcluded => {
+                panic!("unexpected FoundButExcluded result");
+            }
         }
     }
 
@@ -1377,6 +1632,9 @@ mod tests {
             }
             StrandResult::Skipped { .. } => {
                 panic!("unexpected Skipped result");
+            }
+            StrandResult::FoundButExcluded => {
+                panic!("unexpected FoundButExcluded result");
             }
         }
     }
@@ -1479,6 +1737,9 @@ mod tests {
             }
             StrandResult::Skipped { .. } => {
                 panic!("unexpected Skipped result");
+            }
+            StrandResult::FoundButExcluded => {
+                panic!("unexpected FoundButExcluded result");
             }
         }
     }
@@ -1593,10 +1854,6 @@ mod tests {
                 workspace2,
                 call_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             }
-        }
-
-        fn call_count(&self) -> u32 {
-            self.call_count.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -1796,6 +2053,9 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Mock store that returns only assigned beads.
@@ -1913,6 +2173,9 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Mock store that returns beads with "blocked" label (excluded by filters).
@@ -2012,6 +2275,9 @@ mod tests {
             _blocked_id: &BeadId,
             _blocker_id: &BeadId,
         ) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
     }
@@ -2153,6 +2419,9 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
     }
 
     /// Mock store that returns a valid unassigned bead.
@@ -2240,5 +2509,822 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    // ── Regression Tests: 2026-07-19/20 Incident (plan.md Phase 8.4) ─────────
+
+    /// Regression Test 1: Empty workspaces config triggers full discovery.
+    ///
+    /// Test: ExploreStrand::new() with an empty `config.workspaces` and a
+    /// `workspace_root` containing several `.beads/`-having directories produces
+    /// a worker that scans all of them, not a hardcoded subset.
+    ///
+    /// This is the DEFAULT behavior and should be the normal case for the fleet.
+    /// When `workspaces` is empty, the strand MUST run recursive discovery under
+    /// `workspace_root` and find every directory containing a `.beads/` subdirectory.
+    #[test]
+    fn regression_empty_workspaces_config_triggers_full_discovery() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create multiple workspaces with .beads/ directories
+        let workspace1 = root.path().join("workspace1");
+        let workspace2 = root.path().join("workspace2");
+        let workspace3 = root.path().join("workspace3");
+        let workspace4 = root.path().join("workspace4");
+
+        for ws in &[&workspace1, &workspace2, &workspace3, &workspace4] {
+            fs::create_dir(ws).unwrap();
+            fs::create_dir(ws.join(".beads")).unwrap();
+        }
+
+        // Create a non-workspace directory (no .beads/)
+        let not_a_workspace = root.path().join("not-a-workspace");
+        fs::create_dir(&not_a_workspace).unwrap();
+
+        // Empty workspaces config with a valid root
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should trigger discovery
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 0,
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // The strand MUST have discovered all 4 workspaces with .beads/
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            4,
+            "empty workspaces config must discover all .beads/ directories under workspace_root"
+        );
+
+        // All workspaces should be present
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&workspace1),
+            "workspace1 should be discovered"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&workspace2),
+            "workspace2 should be discovered"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&workspace3),
+            "workspace3 should be discovered"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&workspace4),
+            "workspace4 should be discovered"
+        );
+
+        // Non-workspace should NOT be present
+        assert!(
+            !strand.workspaces.lock().unwrap().contains(&not_a_workspace),
+            "directory without .beads/ should not be discovered"
+        );
+    }
+
+    /// Regression Test 2: Non-empty workspaces config is a pin, never falls back to discovery.
+    ///
+    /// Test: ExploreStrand::new() with a non-empty `config.workspaces` (simulating
+    /// a deliberate pin) scans exactly that list, never falling back to discovery.
+    ///
+    /// This preserves the exception mechanism. When `workspaces` is explicitly
+    /// set, auto-discovery MUST be disabled and the strand MUST use only the
+    /// explicitly listed paths. This is the PINNED mode and should emit a WARN log.
+    #[test]
+    fn regression_non_empty_workspaces_config_is_pinned_never_discovers() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create the directories that ARE in the explicit list
+        let pinned1 = root.path().join("pinned-workspace1");
+        let pinned2 = root.path().join("pinned-workspace2");
+
+        for ws in &[&pinned1, &pinned2] {
+            fs::create_dir(ws).unwrap();
+            fs::create_dir(ws.join(".beads")).unwrap();
+        }
+
+        // Create additional workspaces that are NOT in the explicit list
+        let unpinned1 = root.path().join("unpinned-workspace1");
+        let unpinned2 = root.path().join("unpinned-workspace2");
+
+        for ws in &[&unpinned1, &unpinned2] {
+            fs::create_dir(ws).unwrap();
+            fs::create_dir(ws.join(".beads")).unwrap();
+        }
+
+        // Non-empty workspaces config — explicit pin list
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![pinned1.clone(), pinned2.clone()], // PINNED — should NOT discover
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 0,
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // The strand MUST have ONLY the 2 pinned workspaces
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            2,
+            "non-empty workspaces config must use only the explicit list, not discover additional workspaces"
+        );
+
+        // Pinned workspaces should be present
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&pinned1),
+            "pinned workspace 1 should be in the list"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&pinned2),
+            "pinned workspace 2 should be in the list"
+        );
+
+        // Unpinned workspaces must NOT be present — even though they have .beads/
+        assert!(
+            !strand.workspaces.lock().unwrap().contains(&unpinned1),
+            "unpinned workspace 1 should NOT be discovered when workspaces list is non-empty"
+        );
+        assert!(
+            !strand.workspaces.lock().unwrap().contains(&unpinned2),
+            "unpinned workspace 2 should NOT be discovered when workspaces list is non-empty"
+        );
+    }
+
+    /// Regression Test 3: Fixture reproducing the exact 2026-07-19/20 incident.
+    ///
+    /// Test: A `workspace_root` containing `commitgraph` and `twitterapi-proxy`
+    /// (both with `.beads/`) alongside other known repos — with an empty `workspaces`
+    /// config, all are discovered, not just a previously hand-listed subset.
+    ///
+    /// This reproduces the EXACT incident scenario. At the time of the incident,
+    /// the fleet config had a static 24-entry list that didn't include the two
+    /// newly-added repos. This test proves that with empty config (the intended
+    /// default), discovery finds everything without manual list maintenance.
+    #[test]
+    fn regression_fixture_2026_07_19_incident_all_workspaces_discovered() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create the 24 "known repos" from the original static list
+        let known_repos = [
+            "NEEDLE",
+            "bead-forge",
+            "CLASP",
+            "SIGIL",
+            "ARMOR",
+            "spaxel",
+            "mta-my-way",
+            "kalshi-tape",
+            "kalshi-weather",
+            "duck-e",
+            "vista",
+            "botburrow-agents",
+            "news-trader",
+            "domain-check",
+            "AgentScribe",
+            "telegram-claude-bridge",
+            "forge",
+            "declarative-config",
+            "nixos-asterisk",
+            "perles-orchestration-control-plane",
+            "junk-drawer",
+            "private-dotfiles",
+            "hoop",
+            "FABRIC",
+        ];
+
+        for repo_name in &known_repos {
+            let ws = root.path().join(repo_name);
+            fs::create_dir(&ws).unwrap();
+            fs::create_dir(ws.join(".beads")).unwrap();
+        }
+
+        // Create the two newly-added repos that were missing from the static list
+        let commitgraph = root.path().join("commitgraph");
+        let twitterapi_proxy = root.path().join("twitterapi-proxy");
+
+        fs::create_dir(&commitgraph).unwrap();
+        fs::create_dir(commitgraph.join(".beads")).unwrap();
+        fs::create_dir(&twitterapi_proxy).unwrap();
+        fs::create_dir(twitterapi_proxy.join(".beads")).unwrap();
+
+        // Empty workspaces config — the INTENDED default
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should discover ALL repos including the new ones
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 0,
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // The strand MUST have discovered ALL 26 repos (24 original + 2 new)
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            26,
+            "with empty workspaces config, all repos including newly-added ones must be discovered"
+        );
+
+        // The two previously-missing repos MUST be present
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&commitgraph),
+            "commitgraph must be discovered (was missing from static list in incident)"
+        );
+        assert!(
+            strand
+                .workspaces
+                .lock()
+                .unwrap()
+                .contains(&twitterapi_proxy),
+            "twitterapi-proxy must be discovered (was missing from static list in incident)"
+        );
+
+        // All original repos should still be present
+        for repo_name in &known_repos {
+            let ws = root.path().join(repo_name);
+            assert!(
+                strand.workspaces.lock().unwrap().contains(&ws),
+                "{} should still be discovered",
+                repo_name
+            );
+        }
+    }
+
+    /// Regression Test 4: Discovery handles non-existent workspace_root gracefully.
+    ///
+    /// Test: ExploreStrand::new() with empty `config.workspaces` and a
+    /// `workspace_root` that doesn't exist returns an empty workspace list
+    /// (not an error).
+    ///
+    /// This is a defensive test — discovery should fail gracefully when the
+    /// configured root doesn't exist, not panic or error. Workers in this state
+    /// will simply have no workspaces to explore (which is valid).
+    #[test]
+    fn regression_discovery_with_nonexistent_root_returns_empty() {
+        let nonexistent_root = PathBuf::from("/this/path/definitely/does/not/exist/xyz123");
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should attempt discovery
+            workspace_root: nonexistent_root,
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 0,
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // Should return empty list, not panic or error
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            0,
+            "non-existent workspace_root should result in empty workspace list"
+        );
+    }
+
+    /// Regression Test 5: Discovery filters correctly, only finding .beads/ directories.
+    ///
+    /// Test: ExploreStrand::new() with empty `config.workspaces` and a
+    /// `workspace_root` containing a mix of `.beads/`-having directories,
+    /// non-workspace directories, and files — discovers ONLY the directories
+    /// that actually contain `.beads/`.
+    ///
+    /// This proves that discovery is selective, not indiscriminate. It should
+    /// only find valid workspace directories, not every directory under the root.
+    #[test]
+    fn regression_discovery_filters_only_beads_directories() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create valid workspaces (have .beads/)
+        let valid1 = root.path().join("valid-workspace1");
+        let valid2 = root.path().join("valid-workspace2");
+        fs::create_dir(&valid1).unwrap();
+        fs::create_dir(valid1.join(".beads")).unwrap();
+        fs::create_dir(&valid2).unwrap();
+        fs::create_dir(valid2.join(".beads")).unwrap();
+
+        // Create directories without .beads/
+        let no_beads1 = root.path().join("no-beads-dir1");
+        let no_beads2 = root.path().join("no-beads-dir2");
+        fs::create_dir(&no_beads1).unwrap();
+        fs::create_dir(&no_beads2).unwrap();
+
+        // Create a file (not a directory) — should be ignored
+        let a_file = root.path().join("not-a-directory.txt");
+        fs::write(&a_file, b"some content").unwrap();
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should trigger discovery
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 0,
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // Should discover only the 2 valid workspaces
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            2,
+            "discovery should find only directories with .beads/"
+        );
+
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&valid1),
+            "valid workspace 1 should be discovered"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&valid2),
+            "valid workspace 2 should be discovered"
+        );
+
+        // Directories without .beads/ should NOT be present
+        assert!(
+            !strand.workspaces.lock().unwrap().contains(&no_beads1),
+            "directory without .beads/ should not be discovered"
+        );
+        assert!(
+            !strand.workspaces.lock().unwrap().contains(&no_beads2),
+            "directory without .beads/ should not be discovered"
+        );
+    }
+
+    /// Regression Test 6: Pinned mode with directories that don't exist.
+    ///
+    /// Test: ExploreStrand::new() with a non-empty `config.workspaces` that
+    /// includes paths that don't exist — the strand includes them in the list
+    /// anyway (validation happens later during strand evaluation).
+    ///
+    /// This is a defensive test proving that the pinned mode doesn't validate
+    /// existence at construction time. The strand faithfully uses whatever
+    /// list it's given — failures during evaluation are handled gracefully.
+    #[test]
+    fn regression_pinned_mode_includes_nonexistent_paths_in_list() {
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![
+                PathBuf::from("/nonexistent/path/1"),
+                PathBuf::from("/nonexistent/path/2"),
+                PathBuf::from("/another/fake/path"),
+            ],
+            workspace_root: PathBuf::from("/tmp/irrelevant"),
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 15,
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // The strand should include the nonexistent paths in its list
+        // (validation happens during strand evaluation, not construction)
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            3,
+            "pinned mode should include all configured paths regardless of existence"
+        );
+    }
+
+    /// Regression Test 7: Empty workspace_root with empty config.
+    ///
+    /// Test: ExploreStrand::new() with empty `config.workspaces` and a
+    /// `workspace_root` that exists but is empty returns an empty workspace list.
+    ///
+    /// This is an edge case — the root directory exists but has no subdirectories.
+    /// Discovery should return empty (no error), not panic.
+    #[test]
+    fn regression_empty_workspace_root_returns_empty_discovery() {
+        let root = tempfile::tempdir().unwrap(); // Root exists but is empty
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should trigger discovery
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 0,
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // Should return empty list (root has no subdirectories)
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            0,
+            "empty workspace_root should result in empty discovery list"
+        );
+    }
+
+    /// Regression Test 8: Discovery order is deterministic.
+    ///
+    /// Test: ExploreStrand::new() with empty `config.workspaces` and multiple
+    /// workspaces — the discovered list is in a deterministic order (filesystem
+    /// order, which is stable for a given set of directory names).
+    ///
+    /// This test verifies that discovery produces consistent results across
+    /// multiple runs given the same filesystem state. Determinism is a core
+    /// NEEDLE principle.
+    #[test]
+    fn regression_discovery_order_is_deterministic() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create workspaces in alphabetical order
+        let workspace_names = vec!["alpha", "bravo", "charlie", "delta", "echo"];
+        let mut workspaces = Vec::new();
+
+        for name in &workspace_names {
+            let ws = root.path().join(name);
+            fs::create_dir(&ws).unwrap();
+            fs::create_dir(ws.join(".beads")).unwrap();
+            workspaces.push(ws);
+        }
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should trigger discovery
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 0,
+        };
+
+        let home = PathBuf::from("/home/test");
+
+        // Create two strands with the same config
+        let temp_dir1 = tempfile::tempdir().unwrap();
+        let registry1 = crate::registry::Registry::new(temp_dir1.path());
+        let telemetry1 = Telemetry::new("test-worker-1".to_string());
+
+        let strand1 = ExploreStrand::new(
+            config.clone(),
+            home.clone(),
+            registry1,
+            telemetry1,
+            "test-worker-1".to_string(),
+        );
+
+        let temp_dir2 = tempfile::tempdir().unwrap();
+        let registry2 = crate::registry::Registry::new(temp_dir2.path());
+        let telemetry2 = Telemetry::new("test-worker-2".to_string());
+
+        let strand2 = ExploreStrand::new(
+            config,
+            home,
+            registry2,
+            telemetry2,
+            "test-worker-2".to_string(),
+        );
+
+        // Both strands should have the same workspace list
+        assert_eq!(
+            strand1.workspaces.lock().unwrap().len(),
+            strand2.workspaces.lock().unwrap().len(),
+            "both strands should discover the same number of workspaces"
+        );
+
+        // Order should be the same (filesystem order is deterministic)
+        assert_eq!(
+            *strand1.workspaces.lock().unwrap(),
+            *strand2.workspaces.lock().unwrap(),
+            "discovery order should be deterministic across multiple strand constructions"
+        );
+    }
+
+    /// Regression Test 9: Discovery handles nested .beads/ directories correctly.
+    ///
+    /// Test: ExploreStrand::new() with empty `config.workspaces` only discovers
+    /// IMMEDIATE children of workspace_root, not nested grandchildren.
+    ///
+    /// This is a critical test — discovery should be shallow (one level deep)
+    /// to avoid unbounded filesystem traversal. A .beads/ directory in a
+    /// subdirectory of a subdirectory should NOT be discovered.
+    #[test]
+    fn regression_discovery_is_shallow_single_level_only() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create a valid workspace at the top level
+        let top_level = root.path().join("top-level-workspace");
+        fs::create_dir(&top_level).unwrap();
+        fs::create_dir(top_level.join(".beads")).unwrap();
+
+        // Create a nested subdirectory WITH .beads/ (should NOT be discovered)
+        let parent_dir = root.path().join("parent-dir");
+        fs::create_dir(&parent_dir).unwrap();
+        let nested_dir = parent_dir.join("nested-workspace");
+        fs::create_dir(&nested_dir).unwrap();
+        fs::create_dir(nested_dir.join(".beads")).unwrap();
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — should trigger discovery
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 0,
+        };
+
+        let home = PathBuf::from("/home/test");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand =
+            ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
+
+        // Should discover ONLY the top-level workspace
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            1,
+            "discovery should be shallow — only immediate children of workspace_root"
+        );
+
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&top_level),
+            "top-level workspace should be discovered"
+        );
+
+        // Nested workspace should NOT be discovered
+        assert!(
+            !strand.workspaces.lock().unwrap().contains(&nested_dir),
+            "nested workspace (grandchild of root) should NOT be discovered"
+        );
+
+        // Parent directory without .beads/ should not be discovered
+        assert!(
+            !strand.workspaces.lock().unwrap().contains(&parent_dir),
+            "parent directory without .beads/ should NOT be discovered"
+        );
+    }
+
+    /// Test: Periodic workspace re-discovery picks up new workspaces.
+    ///
+    /// This test verifies that when a new workspace with a .beads/ directory
+    /// appears after the ExploreStrand is constructed, it is discovered
+    /// during periodic re-discovery without requiring a worker restart.
+    ///
+    /// Test flow:
+    /// 1. Create a root with one initial workspace
+    /// 2. Create an ExploreStrand with rediscovery_cycles = 2
+    /// 3. Call evaluate() once (cycle 1 of 2) - no rediscovery yet
+    /// 4. Create a second workspace with .beads/
+    /// 5. Call evaluate() again (cycle 2) - triggers rediscovery, picks up new workspace
+    /// 6. Verify the new workspace is now in the strand's workspace list
+    #[tokio::test]
+    async fn periodic_rediscovery_discovers_new_workspaces() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create initial workspace with .beads/
+        let ws1 = root.path().join("workspace1");
+        fs::create_dir(&ws1).unwrap();
+        fs::create_dir(ws1.join(".beads")).unwrap();
+
+        // Configure auto-discovery with rediscovery_cycles = 2
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // EMPTY — auto-discovery mode
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 2, // Re-discover every 2 cycles
+            starvation_threshold_minutes: 15,
+        };
+
+        let home = PathBuf::from("/some/other/home");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new(
+            config,
+            home,
+            registry,
+            telemetry,
+            "test-worker-rediscovery".to_string(),
+        );
+
+        // Initial state: should have discovered workspace1
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            1,
+            "initial discovery should find 1 workspace"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&ws1),
+            "initial workspace should be in list"
+        );
+
+        // Cycle 1: no rediscovery yet (we need 2 cycles)
+        let store = DummyStore;
+        let _ = strand.evaluate(&store).await;
+
+        // Verify we haven't done rediscovery yet (still 1 workspace)
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            1,
+            "after cycle 1, still 1 workspace"
+        );
+
+        // Create a second workspace with .beads/ (simulating a new repo being added)
+        let ws2 = root.path().join("workspace2");
+        fs::create_dir(&ws2).unwrap();
+        fs::create_dir(ws2.join(".beads")).unwrap();
+
+        // Cycle 2: this should trigger rediscovery and pick up the new workspace
+        let _ = strand.evaluate(&store).await;
+
+        // After rediscovery, we should have both workspaces
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            2,
+            "after cycle 2 (rediscovery), should have 2 workspaces"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&ws1),
+            "original workspace should still be in list"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&ws2),
+            "new workspace should be discovered during rediscovery"
+        );
+    }
+
+    /// Test: Periodic re-discovery is skipped in pinned mode (explicit workspaces list).
+    ///
+    /// When config.workspaces is non-empty (pinned mode), periodic re-discovery
+    /// should be skipped even if rediscovery_cycles > 0. This preserves the
+    /// "explicit workspaces override" constraint.
+    #[tokio::test]
+    async fn periodic_rediscovery_skipped_in_pinned_mode() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create a workspace that exists but is NOT in the explicit list
+        let unlisted_ws = root.path().join("unlisted-workspace");
+        fs::create_dir(&unlisted_ws).unwrap();
+        fs::create_dir(unlisted_ws.join(".beads")).unwrap();
+
+        // Configure with explicit workspaces list (pinned mode)
+        let pinned_ws = PathBuf::from("/pinned/workspace");
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![pinned_ws.clone()], // NON-EMPTY — pinned mode
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 2, // Should be ignored in pinned mode
+            starvation_threshold_minutes: 15,
+        };
+
+        let home = PathBuf::from("/some/other/home");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new(
+            config,
+            home,
+            registry,
+            telemetry,
+            "test-worker-pinned".to_string(),
+        );
+
+        // Initial state: should have the explicit pinned workspace only
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            1,
+            "pinned mode should use explicit list"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&pinned_ws),
+            "pinned workspace should be in list"
+        );
+
+        // Run through 2 cycles (enough to trigger rediscovery in auto-discovery mode)
+        let store = DummyStore;
+        let _ = strand.evaluate(&store).await; // Cycle 1
+        let _ = strand.evaluate(&store).await; // Cycle 2 - would trigger rediscovery in auto mode
+
+        // In pinned mode, the workspace list should NOT change
+        // (unlisted_ws should NOT be discovered)
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            1,
+            "pinned mode should not re-discover"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&pinned_ws),
+            "pinned workspace should still be in list"
+        );
+        assert!(
+            !strand.workspaces.lock().unwrap().contains(&unlisted_ws),
+            "unlisted workspace should NOT be discovered in pinned mode"
+        );
+    }
+
+    /// Test: Re-discovery with rediscovery_cycles = 0 is disabled.
+    ///
+    /// When rediscovery_cycles is 0, periodic re-discovery should never run,
+    /// even in auto-discovery mode.
+    #[tokio::test]
+    async fn rediscovery_disabled_when_cycles_is_zero() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Create initial workspace
+        let ws1 = root.path().join("workspace1");
+        fs::create_dir(&ws1).unwrap();
+        fs::create_dir(ws1.join(".beads")).unwrap();
+
+        // Configure with rediscovery_cycles = 0 (disabled)
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![], // Auto-discovery mode
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 0, // DISABLED
+            starvation_threshold_minutes: 15,
+        };
+
+        let home = PathBuf::from("/some/other/home");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new(
+            config,
+            home,
+            registry,
+            telemetry,
+            "test-worker-norediscovery".to_string(),
+        );
+
+        // Initial state
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            1,
+            "initial discovery should find 1 workspace"
+        );
+
+        // Create a second workspace
+        let ws2 = root.path().join("workspace2");
+        fs::create_dir(&ws2).unwrap();
+        fs::create_dir(ws2.join(".beads")).unwrap();
+
+        // Run multiple cycles (rediscovery is disabled)
+        let store = DummyStore;
+        for _ in 0..5 {
+            let _ = strand.evaluate(&store).await;
+        }
+
+        // With rediscovery disabled, new workspace should NOT be discovered
+        assert_eq!(
+            strand.workspaces.lock().unwrap().len(),
+            1,
+            "with rediscovery disabled, new workspace should not be discovered"
+        );
+        assert!(
+            strand.workspaces.lock().unwrap().contains(&ws1),
+            "original workspace should still be in list"
+        );
+        assert!(
+            !strand.workspaces.lock().unwrap().contains(&ws2),
+            "new workspace should NOT be discovered when rediscovery is disabled"
+        );
     }
 }

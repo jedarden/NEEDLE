@@ -215,6 +215,10 @@ impl BeadStore for ConcurrentMockStore {
         Ok(())
     }
 
+    async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
     fn has_valid_store(&self) -> bool {
         true
     }
@@ -1404,6 +1408,8 @@ async fn explore_discovers_work_in_other_workspace() {
         enabled: true,
         workspaces: vec![ws.path().to_path_buf()],
         workspace_root: PathBuf::from("/tmp"),
+        rediscovery_cycles: 60,
+        starvation_threshold_minutes: 15,
     };
     let strand = ExploreStrand::new(
         config,
@@ -1816,6 +1822,10 @@ impl BeadStore for MitosisDedupeStore {
     }
 
     async fn full_rebuild(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
         Ok(())
     }
 

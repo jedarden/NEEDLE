@@ -278,7 +278,7 @@ impl super::Strand for UnravelStrand {
             Ok(beads) => beads,
             Err(e) => {
                 tracing::warn!(error = %e, "unravel strand: failed to list beads");
-                return StrandResult::Error(crate::types::StrandError::StoreError(e.into()));
+                return StrandResult::Error(crate::types::StrandError::StoreError(e));
             }
         };
 
@@ -690,6 +690,9 @@ mod tests {
             _blocked_id: &BeadId,
             _blocker_id: &BeadId,
         ) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
         async fn doctor_repair(&self) -> Result<RepairReport> {

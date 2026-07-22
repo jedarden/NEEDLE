@@ -514,6 +514,13 @@ impl BeadStore for MockCandidateStore {
         Ok(())
     }
 
+    async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+        if self.should_fail {
+            anyhow::bail!(self.error_message.clone());
+        }
+        Ok(())
+    }
+
     fn has_valid_store(&self) -> bool {
         true // Mock store always has a valid store
     }

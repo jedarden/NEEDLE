@@ -112,6 +112,12 @@ pub enum EventKind {
     WorkerIdle {
         backoff_seconds: u64,
     },
+    /// Worker found candidates but all were excluded (short retry case).
+    WorkerFoundButExcluded {
+        total_candidates: usize,
+        excluded_count: usize,
+        backoff_seconds: u64,
+    },
     IdleSleepCompleted {
         backoff_secs: u64,
         elapsed_secs: u64,
@@ -121,6 +127,11 @@ pub enum EventKind {
         backoff_secs: u64,
         beads_processed: u64,
         uptime_secs: u64,
+    },
+    /// Event-driven wakeup triggered by workspace mtime change.
+    EventDrivenWakeup {
+        workspace: String,
+        mtime_age_secs: u64,
     },
     StateTransition {
         from: WorkerState,
@@ -183,6 +194,11 @@ pub enum EventKind {
     ClaimRaceLostSkipped {
         consecutive_losses: u32,
         threshold: u32,
+    },
+    ClaimErrorThreshold {
+        bead_id: BeadId,
+        consecutive_errors: u32,
+        last_error: String,
     },
 
     // ── Bead lifecycle ──
@@ -317,6 +333,7 @@ pub enum EventKind {
         workers_deregistered: u32,
         idle_workers_flagged: u32,
         rate_limits_cleaned: u32,
+        assignees_cleared: u32,
     },
     MendTraceCleanup {
         traces_pruned: u32,
@@ -371,6 +388,15 @@ pub enum EventKind {
     MendZeroActivityLogCleaned {
         worker_id: String,
         log_path: String,
+    },
+    MendStaleAssigneeCleared {
+        bead_id: BeadId,
+        assignee: String,
+    },
+    MendAssigneeClearFailed {
+        bead_id: String,
+        assignee: String,
+        error: String,
     },
 
     // ── Effort tracking ──
@@ -667,6 +693,21 @@ pub enum EventKind {
         fleet_idle: String,
     },
 
+    // ── Explore strand telemetry ──
+    ExploreScanSummary {
+        workspaces_visited: Vec<String>,
+        workspaces_with_candidates: Vec<String>,
+        total_candidates: usize,
+        exclusion_reasons: Vec<String>,
+        duration_ms: u64,
+    },
+    ExploreStarvationAlarm {
+        minutes_without_claim: u64,
+        threshold_minutes: u64,
+        ready_beads_count: usize,
+        workspaces_with_ready: Vec<String>,
+    },
+
     // ── Internal ──
     SinkError {
         message: String,
@@ -692,8 +733,10 @@ impl EventKind {
             EventKind::WorkerErrored { .. } => "worker.errored",
             EventKind::WorkerExhausted { .. } => "worker.exhausted",
             EventKind::WorkerIdle { .. } => "worker.idle",
+            EventKind::WorkerFoundButExcluded { .. } => "worker.found_but_excluded",
             EventKind::IdleSleepCompleted { .. } => "worker.idle_sleep_completed",
             EventKind::IdleSleepEntered { .. } => "worker.idle_sleep_entered",
+            EventKind::EventDrivenWakeup { .. } => "worker.event_driven_wakeup",
             EventKind::StateTransition { .. } => "worker.state_transition",
             EventKind::InitStepStarted { .. } => "init.step.started",
             EventKind::InitStepCompleted { .. } => "init.step.completed",
@@ -708,6 +751,7 @@ impl EventKind {
             EventKind::ClaimRaceLost { .. } => "bead.claim.race_lost",
             EventKind::ClaimRaceLostSkipped { .. } => "bead.claim.race_lost_skipped",
             EventKind::ClaimFailed { .. } => "bead.claim.failed",
+            EventKind::ClaimErrorThreshold { .. } => "bead.claim.error_threshold",
             EventKind::BeadReleased { .. } => "bead.released",
             EventKind::BeadReleaseFailed { .. } => "bead.release.failed",
             EventKind::BeadCompleted { .. } => "bead.completed",
@@ -745,6 +789,8 @@ impl EventKind {
             EventKind::MendRateLimitProviderRemoved { .. } => "mend.rate_limit_provider_removed",
             EventKind::MendRateLimitProviderReset { .. } => "mend.rate_limit_provider_reset",
             EventKind::MendZeroActivityLogCleaned { .. } => "mend.zero_activity_log_cleaned",
+            EventKind::MendStaleAssigneeCleared { .. } => "mend.stale_assignee_cleared",
+            EventKind::MendAssigneeClearFailed { .. } => "mend.assignee_clear_failed",
             EventKind::EffortRecorded { .. } => "effort.recorded",
             EventKind::BudgetWarning { .. } => "budget.warning",
             EventKind::BudgetStop { .. } => "budget.stop",
@@ -806,6 +852,8 @@ impl EventKind {
             EventKind::SupervisorStopped { .. } => "supervisor.stopped",
             EventKind::SupervisorWorkerSpawned { .. } => "supervisor.worker_spawned",
             EventKind::SupervisorIdleCycle { .. } => "supervisor.idle_cycle",
+            EventKind::ExploreScanSummary { .. } => "explore.scan_summary",
+            EventKind::ExploreStarvationAlarm { .. } => "explore.starvation_alarm",
             EventKind::SinkError { .. } => "telemetry.sink_error",
             EventKind::OtlpDropped { .. } => "telemetry.otlp.dropped",
             EventKind::OtlpShutdownTimeout { .. } => "telemetry.otlp.shutdown_timeout",
@@ -819,6 +867,7 @@ impl EventKind {
             | EventKind::ClaimSuccess { bead_id, .. }
             | EventKind::ClaimRaceLost { bead_id }
             | EventKind::ClaimFailed { bead_id, .. }
+            | EventKind::ClaimErrorThreshold { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
             | EventKind::BeadReleaseFailed { bead_id, .. }
             | EventKind::BeadCompleted { bead_id, .. }
@@ -862,7 +911,9 @@ impl EventKind {
             | EventKind::WorkerStopped { .. }
             | EventKind::WorkerErrored { .. }
             | EventKind::WorkerExhausted { .. }
+            | EventKind::WorkerFoundButExcluded { .. }
             | EventKind::WorkerIdle { .. }
+            | EventKind::EventDrivenWakeup { .. }
             | EventKind::IdleSleepCompleted { .. }
             | EventKind::IdleSleepEntered { .. }
             | EventKind::StateTransition { .. }
@@ -890,6 +941,8 @@ impl EventKind {
             | EventKind::MendRateLimitProviderRemoved { .. }
             | EventKind::MendRateLimitProviderReset { .. }
             | EventKind::MendZeroActivityLogCleaned { .. }
+            | EventKind::MendStaleAssigneeCleared { .. }
+            | EventKind::MendAssigneeClearFailed { .. }
             | EventKind::MendTraceCleanup { .. }
             | EventKind::MendLearningCleanup { .. }
             | EventKind::BudgetWarning { .. }
@@ -937,6 +990,8 @@ impl EventKind {
             | EventKind::SupervisorStopped { .. }
             | EventKind::SupervisorWorkerSpawned { .. }
             | EventKind::SupervisorIdleCycle { .. } => None,
+            EventKind::ExploreScanSummary { .. } => None,
+            EventKind::ExploreStarvationAlarm { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
     }
@@ -1292,6 +1347,7 @@ impl EventKind {
                 workers_deregistered,
                 idle_workers_flagged,
                 rate_limits_cleaned,
+                assignees_cleared,
             } => {
                 serde_json::json!({
                     "beads_released": beads_released,
@@ -1306,6 +1362,7 @@ impl EventKind {
                     "workers_deregistered": workers_deregistered,
                     "idle_workers_flagged": idle_workers_flagged,
                     "rate_limits_cleaned": rate_limits_cleaned,
+                    "assignees_cleared": assignees_cleared,
                 })
             }
             EventKind::EffortRecorded {
@@ -1910,6 +1967,68 @@ impl EventKind {
                 "consecutive_empty": consecutive_empty,
                 "fleet_idle": fleet_idle,
             }),
+            EventKind::ExploreScanSummary {
+                workspaces_visited,
+                workspaces_with_candidates,
+                total_candidates,
+                exclusion_reasons,
+                duration_ms,
+            } => serde_json::json!({
+                "workspaces_visited": workspaces_visited,
+                "workspaces_with_candidates": workspaces_with_candidates,
+                "total_candidates": total_candidates,
+                "exclusion_reasons": exclusion_reasons,
+                "duration_ms": duration_ms,
+            }),
+            EventKind::ExploreStarvationAlarm {
+                minutes_without_claim,
+                threshold_minutes,
+                ready_beads_count,
+                workspaces_with_ready,
+            } => serde_json::json!({
+                "minutes_without_claim": minutes_without_claim,
+                "threshold_minutes": threshold_minutes,
+                "ready_beads_count": ready_beads_count,
+                "workspaces_with_ready": workspaces_with_ready,
+            }),
+            EventKind::WorkerFoundButExcluded {
+                total_candidates,
+                excluded_count,
+                backoff_seconds,
+            } => serde_json::json!({
+                "total_candidates": total_candidates,
+                "excluded_count": excluded_count,
+                "backoff_seconds": backoff_seconds,
+            }),
+            EventKind::EventDrivenWakeup {
+                workspace,
+                mtime_age_secs,
+            } => serde_json::json!({
+                "workspace": workspace,
+                "mtime_age_secs": mtime_age_secs,
+            }),
+            EventKind::ClaimErrorThreshold {
+                bead_id,
+                consecutive_errors,
+                last_error,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "consecutive_errors": consecutive_errors,
+                "last_error": last_error,
+            }),
+            EventKind::MendStaleAssigneeCleared { bead_id, assignee } => serde_json::json!({
+                "bead_id": bead_id,
+                "assignee": assignee,
+            }),
+            EventKind::MendAssigneeClearFailed {
+                bead_id,
+                assignee,
+                error,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "assignee": assignee,
+                "error": error,
+            }),
         }
     }
 
@@ -1924,7 +2043,9 @@ impl EventKind {
                 elapsed_ms: duration_ms,
                 ..
             }
-            | EventKind::CargoTestCompleted { duration_ms, .. } => Some(*duration_ms),
+            | EventKind::CargoTestCompleted { duration_ms, .. }
+            | EventKind::ExploreScanSummary { duration_ms, .. }
+            | EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
             EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
@@ -2033,6 +2154,7 @@ impl EventKind {
             | EventKind::SupervisorStopped { .. }
             | EventKind::SupervisorWorkerSpawned { .. }
             | EventKind::SupervisorIdleCycle { .. }
+            | EventKind::ExploreStarvationAlarm { .. }
             | EventKind::SinkError { .. }
             | EventKind::OtlpDropped { .. }
             | EventKind::OtlpShutdownTimeout { .. }
@@ -2040,8 +2162,12 @@ impl EventKind {
             | EventKind::IdleSleepEntered { .. }
             | EventKind::RoutingDecision { .. }
             | EventKind::RoutingFailed { .. }
-            | EventKind::BeadStoreError { .. } => None,
-            EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
+            | EventKind::BeadStoreError { .. }
+            | EventKind::WorkerFoundButExcluded { .. }
+            | EventKind::EventDrivenWakeup { .. }
+            | EventKind::ClaimErrorThreshold { .. }
+            | EventKind::MendStaleAssigneeCleared { .. }
+            | EventKind::MendAssigneeClearFailed { .. } => None,
         }
     }
 }

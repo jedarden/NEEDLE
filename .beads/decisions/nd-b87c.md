@@ -1,0 +1,24 @@
+# ADR: Use Edit
+
+**Decision ID:** nd-b87c
+**Date:** 2026-07-21
+
+## Context
+
+Analysis of options during task execution
+
+## Alternatives Considered
+
+1. Considered alternatives
+
+## Decision
+
+Use Edit
+
+## Rationale
+
+Good! Now let me fix the error message that references `worker` instead of `run`:
+
+## Outcome
+
+Decision implemented (success)

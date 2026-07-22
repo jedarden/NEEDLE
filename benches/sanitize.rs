@@ -25,20 +25,21 @@
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use needle::sanitize::Sanitizer;
-use needle::stats::calculate_p95;
+use needle::stats::{calculate_median, calculate_p95, calculate_p99};
 
-/// Configure Criterion for p95 latency reporting.
+/// Configure Criterion for p95 and p99 latency reporting.
 ///
-/// Creates a Criterion instance configured to capture accurate p95 percentiles:
+/// Creates a Criterion instance configured to capture accurate p95 and p99 percentiles:
 /// - Confidence level: 0.95 (95% confidence interval for reported statistics)
 /// - Sample size: 100 measurements (more accurate percentiles via bootstrap)
 /// - Warm-up time: 3 seconds (allows CPU cache/JIT warm-up)
 /// - Measurement time: 5 seconds (sufficient samples for stable percentiles)
 /// - Noise threshold: 0.02 (2% noise filtering for stable measurements)
 ///
-/// P95 calculation is done using `needle::stats::calculate_p95()` which implements
-/// linear interpolation for accurate percentile estimation. Criterion.rs also
-/// calculates p95 automatically via bootstrap analysis (see criterion.toml).
+/// P95 calculation is done using `needle::stats::calculate_p95()` and p99 using
+/// `needle::stats::calculate_p99()`, which implement linear interpolation for accurate
+/// percentile estimation. Criterion.rs also calculates percentiles automatically via
+/// bootstrap analysis (see criterion.toml).
 ///
 /// The confidence_level affects the confidence interval around the mean,
 /// not the percentile calculation itself. Percentiles use bootstrap analysis.
@@ -193,7 +194,7 @@ fn generate_trace_content(target_bytes: usize) -> String {
     result
 }
 
-/// Benchmarks sanitization at 10KB trace size with explicit p95 output.
+/// Benchmarks sanitization at 10KB trace size with explicit median, p95, and p99 output.
 fn bench_sanitize_10kb(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_10KB);
@@ -203,7 +204,7 @@ fn bench_sanitize_10kb(c: &mut Criterion) {
         let _ = sanitizer.sanitize(&content);
     }
 
-    // Collect samples for explicit p95 calculation
+    // Collect samples for explicit median, p95, and p99 calculation
     let mut latencies = Vec::with_capacity(ASSERTION_SAMPLE_COUNT);
     for _ in 0..ASSERTION_SAMPLE_COUNT {
         let start = std::time::Instant::now();
@@ -211,12 +212,16 @@ fn bench_sanitize_10kb(c: &mut Criterion) {
         latencies.push(start.elapsed().as_micros());
     }
 
+    let median_us = calculate_median(&latencies);
+    let median_ms = median_us as f64 / 1000.0;
     let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
+    let p99_us = calculate_p99(&latencies);
+    let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "10KB trace p95 latency: {:.2} ms ({} samples)",
-        p95_ms, ASSERTION_SAMPLE_COUNT
+        "10KB trace - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms ({} samples)",
+        median_ms, p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
     );
 
     let mut group = c.benchmark_group("sanitize_10kb");
@@ -246,7 +251,7 @@ fn bench_sanitize_10kb_ops(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmarks sanitization at 100KB trace size with explicit p95 output.
+/// Benchmarks sanitization at 100KB trace size with explicit median, p95, and p99 output.
 fn bench_sanitize_100kb(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_100KB);
@@ -256,7 +261,7 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
         let _ = sanitizer.sanitize(&content);
     }
 
-    // Collect samples for explicit p95 calculation
+    // Collect samples for explicit median, p95, and p99 calculation
     let mut latencies = Vec::with_capacity(ASSERTION_SAMPLE_COUNT);
     for _ in 0..ASSERTION_SAMPLE_COUNT {
         let start = std::time::Instant::now();
@@ -264,12 +269,16 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
         latencies.push(start.elapsed().as_micros());
     }
 
+    let median_us = calculate_median(&latencies);
+    let median_ms = median_us as f64 / 1000.0;
     let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
+    let p99_us = calculate_p99(&latencies);
+    let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "100KB trace p95 latency: {:.2} ms ({} samples)",
-        p95_ms, ASSERTION_SAMPLE_COUNT
+        "100KB trace - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms ({} samples)",
+        median_ms, p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
     );
 
     let mut group = c.benchmark_group("sanitize_100kb");
@@ -299,7 +308,7 @@ fn bench_sanitize_100kb_ops(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmarks sanitization at 1MB trace size with explicit p95 output.
+/// Benchmarks sanitization at 1MB trace size with explicit median, p95, and p99 output.
 fn bench_sanitize_1mb(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_1MB);
@@ -309,7 +318,7 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
         let _ = sanitizer.sanitize(&content);
     }
 
-    // Collect samples for explicit p95 calculation
+    // Collect samples for explicit median, p95, and p99 calculation
     let mut latencies = Vec::with_capacity(ASSERTION_SAMPLE_COUNT);
     for _ in 0..ASSERTION_SAMPLE_COUNT {
         let start = std::time::Instant::now();
@@ -317,12 +326,16 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
         latencies.push(start.elapsed().as_micros());
     }
 
+    let median_us = calculate_median(&latencies);
+    let median_ms = median_us as f64 / 1000.0;
     let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
+    let p99_us = calculate_p99(&latencies);
+    let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "1MB trace p95 latency: {:.2} ms ({} samples)",
-        p95_ms, ASSERTION_SAMPLE_COUNT
+        "1MB trace - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms ({} samples)",
+        median_ms, p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
     );
 
     let mut group = c.benchmark_group("sanitize_1mb");
@@ -395,8 +408,7 @@ fn measure_median_latency_100kb() -> (Vec<u128>, u128) {
         latencies.push(elapsed_ms);
     }
 
-    latencies.sort();
-    let median = latencies[sample_count / 2];
+    let median = calculate_median(&latencies);
 
     (latencies, median)
 }
@@ -420,6 +432,7 @@ fn assertion_test() {
     let max = *latencies.last().unwrap();
     let avg = latencies.iter().sum::<u128>() / latencies.len() as u128;
     let p95 = calculate_p95(&latencies);
+    let p99 = calculate_p99(&latencies);
 
     eprintln!(
         "Sanitizer latency assertion test (100KB trace, {} iterations):",
@@ -429,6 +442,7 @@ fn assertion_test() {
     eprintln!("  Median:  {} ms", median);
     eprintln!("  Avg:     {} ms", avg);
     eprintln!("  P95:     {} ms", p95);
+    eprintln!("  P99:     {} ms", p99);
     eprintln!("  Max:     {} ms", max);
     eprintln!("  Threshold: {} ms", threshold);
 
@@ -440,7 +454,7 @@ fn assertion_test() {
     );
 }
 
-/// Specialized benchmark that reports median and p95 latency directly.
+/// Specialized benchmark that reports median, p95, and p99 latency directly.
 ///
 /// This complements the criterion benchmark by providing explicit
 /// percentile measurements that can be compared against performance thresholds.
@@ -460,28 +474,16 @@ fn bench_median_latency(c: &mut Criterion) {
         latencies.push(start.elapsed().as_micros());
     }
 
-    latencies.sort();
-    let median_us = latencies[ASSERTION_SAMPLE_COUNT / 2];
+    let median_us = calculate_median(&latencies);
     let median_ms = median_us as f64 / 1000.0;
     let p95_us = calculate_p95(&latencies);
     let p95_ms = p95_us as f64 / 1000.0;
+    let p99_us = calculate_p99(&latencies);
+    let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "Median latency for 100KB trace: {:.2} ms ({} samples)",
-        median_ms, ASSERTION_SAMPLE_COUNT
-    );
-    eprintln!(
-        "  Min: {:.2} ms",
-        *latencies.first().unwrap() as f64 / 1000.0
-    );
-    eprintln!(
-        "  Max: {:.2} ms",
-        *latencies.last().unwrap() as f64 / 1000.0
-    );
-    eprintln!("  P95: {:.2} ms", p95_ms);
-    eprintln!(
-        "  P99: {:.2} ms",
-        latencies[(latencies.len() * 99) / 100] as f64 / 1000.0
+        "100KB trace latency - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms ({} samples)",
+        median_ms, p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
     );
 
     // Report to criterion for plotting with proper p95 measurement configuration.

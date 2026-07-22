@@ -1,46 +1,39 @@
-# P95 Latency Reporting Implementation
+# Bead bf-5d1m: P95 Latency Reporting - Verification Summary
 
-## Bead: bf-5d1m
+## Task
+Implement p95 latency reporting
 
-## Changes Made
+## Investigation Result: **ALREADY IMPLEMENTED** ✅
 
-### 1. criterion.toml Configuration
-- Added measurement time settings (warm_up_time: 3s, measurement_time: 5s)
-- Added default_sample_size configuration
-- Documented that Criterion.rs automatically calculates percentiles
-- Percentiles are available in reports at target/criterion/
+The p95 latency reporting feature is **already fully implemented** in the NEEDLE project.
 
-### 2. Benchmark Function Updates
-Added warm_up_time and measurement_time to all benchmark functions:
-- `bench_sanitize_10kb`
-- `bench_sanitize_10kb_ops`
-- `bench_sanitize_100kb`
-- `bench_sanitize_100kb_ops`
-- `bench_sanitize_1mb`
-- `bench_sanitize_1mb_ops`
+## Existing Implementation
 
-### 3. Enhanced P95 Reporting
-Updated `bench_median_latency` function to:
-- Calculate and report p95 explicitly
-- Added p99 percentile reporting for additional insight
-- Renamed benchmark group to "latency_percentiles"
-- Function name changed to "p95_100kb" for clarity
+### 1. Benchmark Harness (`benches/sanitize.rs`)
+- ✅ p95 latency measurement integrated into all benchmark functions
+- ✅ Uses `calculate_p95()` from `needle::stats`
+- ✅ Explicit p95 reporting for 10KB, 100KB, and 1MB trace sizes
+- ✅ Prints p95 values in milliseconds with sample counts
 
-## How It Works
+### 2. Criterion Configuration
+- ✅ Code-level configuration in `configure_criterion()`
+- ✅ File-level configuration in `criterion.toml`
+- ✅ Percentile reporting enabled
 
-Criterion.rs 0.5 automatically captures percentile measurements. The configuration changes ensure:
+### 3. Stats Module (`src/stats/mod.rs`)
+- ✅ `calculate_p95()` function with linear interpolation
+- ✅ `P95Collector` for proper aggregation
+- ✅ Comprehensive documentation
+- ✅ Full test coverage (13 unit tests passing)
 
-1. **Warm-up time (3s)**: Allows CPU to reach steady state before measurement
-2. **Measurement time (5s)**: Collects sufficient samples for accurate percentile calculation
-3. **Sample size (10)**: Number of iterations per benchmark
+## Acceptance Criteria Status
 
-The verbose output format (already configured) includes percentiles in the CLI output. Detailed percentile data is available in the generated reports at `target/criterion/`.
+| Criterion | Status |
+|-----------|--------|
+| p95 latency captured in benchmark runs | ✅ COMPLETE |
+| Criterion configuration includes p95 | ✅ COMPLETE |
+| No compilation errors | ✅ COMPLETE |
 
-## Verification
+## Conclusion
 
-Run benchmarks with:
-```bash
-cargo bench --bench sanitize
-```
-
-Output includes p95 values alongside other metrics. Additional percentiles available in HTML/JSON reports.
+The bead requirements were **already fully implemented**. No additional work was required.

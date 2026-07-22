@@ -25,6 +25,139 @@ const CORRUPTION_MARKERS: &[&str] = &[
     "file is not a database",
 ];
 
+// ─── Version handshake ───────────────────────────────────────────────────────
+
+/// Known-bad bead-forge versions and their issues.
+///
+/// Each entry maps a version prefix to a description of known bugs.
+const KNOWN_BAD_VERSIONS: &[(&str, &str)] = &[
+    (
+        "0.2.0",
+        "--limit 0 returns empty set (should return all beads)",
+    ),
+    (
+        "0.1.",
+        "pre-0.2.0 versions have truncation bugs with default limits",
+    ),
+];
+
+/// Result of a version check.
+#[derive(Debug)]
+pub enum VersionCheck {
+    /// Version is OK or unknown (no known issues).
+    Ok,
+    /// Known-bad version detected with specific issues.
+    KnownBad {
+        version: String,
+        issues: Vec<String>,
+    },
+    /// Version check failed (bf not found, parse error, etc.).
+    Failed { reason: String },
+}
+
+/// Check the bead-forge version and detect known-bad versions.
+///
+/// This function runs `bf --version` and parses the output to detect
+/// versions with known bugs. The primary use case is detecting bead-forge
+/// 0.2.0, which has a bug where `--limit 0` returns an empty set instead
+/// of all beads.
+///
+/// # Returns
+///
+/// - `VersionCheck::Ok` if the version is not known to be bad
+/// - `VersionCheck::KnownBad` if a known-bad version is detected
+/// - `VersionCheck::Failed` if the version check failed
+pub async fn check_bead_forge_version(br_path: &Path) -> VersionCheck {
+    let timeout = std::time::Duration::from_secs(5);
+
+    let output = match tokio::time::timeout(
+        timeout,
+        tokio::process::Command::new(br_path)
+            .arg("--version")
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            return VersionCheck::Failed {
+                reason: format!("failed to spawn bf --version: {e}"),
+            };
+        }
+        Err(_) => {
+            return VersionCheck::Failed {
+                reason: "bf --version timed out after 5s".to_string(),
+            };
+        }
+    };
+
+    if !output.status.success() {
+        return VersionCheck::Failed {
+            reason: format!(
+                "bf --version exited with code {}",
+                output.status.code().unwrap_or(-1)
+            ),
+        };
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let version = stdout.trim().to_string();
+
+    if version.is_empty() {
+        return VersionCheck::Failed {
+            reason: "bf --version produced no output".to_string(),
+        };
+    }
+
+    // Extract version number by taking the second word if present
+    // This handles formats like "bf 0.2.0" or "br 0.2.0-github"
+    let version_number = version.split_whitespace().nth(1).unwrap_or(&version);
+
+    // Check against known-bad version prefixes
+    let mut issues = Vec::new();
+    for &(bad_prefix, issue) in KNOWN_BAD_VERSIONS {
+        if version_number.starts_with(bad_prefix) {
+            issues.push(issue.to_string());
+        }
+    }
+
+    if !issues.is_empty() {
+        VersionCheck::KnownBad { version, issues }
+    } else {
+        VersionCheck::Ok
+    }
+}
+
+/// Run version handshake and emit telemetry for known-bad versions.
+///
+/// This is called during worker boot to detect and warn about known-bad
+/// bead-forge versions. It emits a WARN-level telemetry event if issues
+/// are found.
+pub async fn run_version_handshake(br_path: &Path) {
+    match check_bead_forge_version(br_path).await {
+        VersionCheck::Ok => {
+            tracing::debug!("bead-forge version check passed");
+        }
+        VersionCheck::KnownBad { version, issues } => {
+            for issue in &issues {
+                tracing::warn!(
+                    version = %version,
+                    issue = %issue,
+                    "bead-forge version has known bugs — explicit limits will be used to work around"
+                );
+            }
+        }
+        VersionCheck::Failed { reason } => {
+            tracing::warn!(
+                reason = %reason,
+                "failed to check bead-forge version — cannot detect known-bad versions"
+            );
+        }
+    }
+}
+
+// ─── Corruption detection ────────────────────────────────────────────────────
+
 /// Known error strings that indicate SQLite database is locked (transient).
 const LOCK_MARKERS: &[&str] = &[
     "database is locked",
@@ -34,15 +167,6 @@ const LOCK_MARKERS: &[&str] = &[
 
 /// Known error strings that indicate br sync conflicts.
 const SYNC_CONFLICT_MARKERS: &[&str] = &["SYNC_CONFLICT", "JSONL is newer", "sync conflict"];
-
-/// Known error strings that indicate a missing or invalid bead store.
-const MISSING_STORE_MARKERS: &[&str] = &[
-    "no such file or directory",
-    "cannot find",
-    "does not exist",
-    ".beads",
-    "database disk image is malformed", // Often occurs when .beads/ doesn't exist
-];
 
 /// Check if an error message indicates SQLite database corruption.
 ///
@@ -181,6 +305,11 @@ pub trait BeadStore: Send + Sync {
 
     /// Release a claimed bead back to open (e.g., after agent failure).
     async fn release(&self, id: &BeadId) -> Result<()>;
+
+    /// Clear the assignee on a bead without changing its status.
+    ///
+    /// Used by mend to heal open beads with stale assignees (e.g., after reopen).
+    async fn clear_assignee(&self, id: &BeadId) -> Result<()>;
 
     /// Flush local bead changes to JSONL before release.
     ///
@@ -633,7 +762,10 @@ impl BeadStore for BrCliBeadStore {
     }
 
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
-        let mut args = vec!["ready", "--json"];
+        // Always pass an explicit large limit to avoid default truncation that
+        // hides low-priority beads in busy stores, and to avoid the --limit 0
+        // bug in bead-forge 0.2.0 (which returns an empty set).
+        let mut args = vec!["ready", "--json", "--limit", "10000"];
 
         // Build filter args — stored so they live long enough for the slice.
         let assignee_arg;
@@ -700,7 +832,7 @@ impl BeadStore for BrCliBeadStore {
                     .unwrap_or_else(|| "(unknown)".to_string());
                 Ok(ClaimResult::RaceLost { claimed_by })
             }
-            _ => Ok(ClaimResult::NotClaimable {
+            _ => Ok(ClaimResult::ClaimError {
                 reason: format!("br update exited with code {code}"),
             }),
         }
@@ -711,6 +843,14 @@ impl BeadStore for BrCliBeadStore {
         self.run_br(&["update", id_str, "--status", "open", "--assignee", ""])
             .await
             .with_context(|| format!("br release {id_str} failed"))?;
+        Ok(())
+    }
+
+    async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_br(&["update", id_str, "--assignee", ""])
+            .await
+            .with_context(|| format!("br clear_assignee {id_str} failed"))?;
         Ok(())
     }
 
@@ -1047,7 +1187,6 @@ impl BfCliBeadStore {
         const BASE_DELAY_MS: u64 = 50;
 
         let mut attempt = 0;
-        let mut last_error = None;
 
         loop {
             attempt += 1;
@@ -1063,30 +1202,30 @@ impl BfCliBeadStore {
                 .spawn()
                 .with_context(|| format!("failed to spawn bf subprocess: {args:?}"))?;
 
-            let output = match tokio::time::timeout(timeout_duration, child.wait_with_output())
-                .await
-            {
-                Ok(Ok(output)) => output,
-                Ok(Err(e)) => {
-                    let err = anyhow::anyhow!("bf subprocess failed: {args:?}: {e}");
-                    last_error = Some(err);
-                    // For subprocess spawn errors, don't retry - these are not transient
-                    break;
-                }
-                Err(_) => {
-                    tracing::error!(
-                        args = ?args,
-                        timeout_secs,
-                        attempt,
-                        "bf subprocess timed out, killing process"
-                    );
-                    let err =
-                        anyhow::anyhow!("bf subprocess timed out after {timeout_secs}s: {args:?}");
-                    last_error = Some(err);
-                    // Timeouts are not transient lock errors - don't retry
-                    break;
-                }
-            };
+            let output =
+                match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
+                    Ok(Ok(output)) => output,
+                    Ok(Err(e)) => {
+                        // For subprocess spawn errors, don't retry - these are not transient
+                        tracing::error!(
+                            args = ?args,
+                            attempt,
+                            error = %e,
+                            "bf subprocess spawn failed, not retrying"
+                        );
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeouts are not transient lock errors - don't retry
+                        tracing::error!(
+                            args = ?args,
+                            timeout_secs,
+                            attempt,
+                            "bf subprocess timed out, not retrying"
+                        );
+                        break;
+                    }
+                };
 
             let stdout =
                 String::from_utf8(output.stdout).context("bf stdout was not valid UTF-8")?;
@@ -1139,12 +1278,13 @@ impl BfCliBeadStore {
             let delay = std::time::Duration::from_millis(delay_ms);
 
             tokio::time::sleep(delay).await;
-            last_error = None; // Clear last_error since we're retrying
         }
 
-        // If we broke out of the loop, return the last error
-        Err(last_error
-            .unwrap_or_else(|| anyhow::anyhow!("bf subprocess failed with unknown error")))
+        // If we broke out of the loop, return an appropriate error
+        Err(anyhow::anyhow!(
+            "bf subprocess failed after {} attempts",
+            attempt
+        ))
     }
 
     /// Parse a JSON array of beads from bf output.
@@ -1306,6 +1446,14 @@ impl BeadStore for BfCliBeadStore {
         self.run_bf(&["update", id_str, "--status", "open", "--assignee", ""])
             .await
             .with_context(|| format!("bf release {id_str} failed"))?;
+        Ok(())
+    }
+
+    async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_bf(&["update", id_str, "--assignee", ""])
+            .await
+            .with_context(|| format!("bf clear_assignee {id_str} failed"))?;
         Ok(())
     }
 
@@ -1675,5 +1823,354 @@ mod tests {
     fn parse_beads_whitespace_only_returns_empty() {
         let beads = BrCliBeadStore::parse_beads("   \n\t  ", "test").unwrap();
         assert!(beads.is_empty());
+    }
+
+    // ── version handshake tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn version_check_known_bad_0_2_0() {
+        // Create a temporary script that mimics bead-forge 0.2.0
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bf = tmp_dir.path().join("fake-bf-0.2.0");
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+echo "bf 0.2.0"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_bf,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let result = check_bead_forge_version(&fake_bf).await;
+        match result {
+            VersionCheck::KnownBad { version, issues } => {
+                assert_eq!(version, "bf 0.2.0");
+                assert!(issues
+                    .iter()
+                    .any(|i| i.contains("--limit 0 returns empty set")));
+            }
+            other => panic!("Expected KnownBad, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn version_check_known_bad_0_1_x() {
+        // Test detection of 0.1.x versions
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bf = tmp_dir.path().join("fake-bf-0.1.9");
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+echo "bf 0.1.9"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_bf,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let result = check_bead_forge_version(&fake_bf).await;
+        match result {
+            VersionCheck::KnownBad { version, issues } => {
+                assert_eq!(version, "bf 0.1.9");
+                assert!(issues.iter().any(|i| i.contains("pre-0.2.0 versions")));
+            }
+            other => panic!("Expected KnownBad, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn version_check_ok_for_newer_versions() {
+        // Test that newer versions (e.g., 0.3.0) are not flagged as bad
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bf = tmp_dir.path().join("fake-bf-0.3.0");
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+echo "bf 0.3.0"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_bf,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let result = check_bead_forge_version(&fake_bf).await;
+        match result {
+            VersionCheck::Ok => {
+                // Expected result for unknown/good versions
+            }
+            other => panic!("Expected Ok, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn version_check_failed_for_missing_binary() {
+        let fake_bf = PathBuf::from("/nonexistent/bf-binary-xyz");
+        let result = check_bead_forge_version(&fake_bf).await;
+        match result {
+            VersionCheck::Failed { reason } => {
+                assert!(reason.contains("failed to spawn") || reason.contains("No such file"));
+            }
+            other => panic!("Expected Failed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn version_check_failed_for_empty_output() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bf = tmp_dir.path().join("fake-bf-empty");
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+# Output nothing
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_bf,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let result = check_bead_forge_version(&fake_bf).await;
+        match result {
+            VersionCheck::Failed { reason } => {
+                assert!(reason.contains("no output"));
+            }
+            other => panic!("Expected Failed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn version_check_handles_various_output_formats() {
+        // Test that the parser handles different version output formats
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bf = tmp_dir.path().join("fake-bf-various");
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+echo "bf 0.2.0-github"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_bf,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let result = check_bead_forge_version(&fake_bf).await;
+        match result {
+            VersionCheck::KnownBad { version, issues } => {
+                assert_eq!(version, "bf 0.2.0-github");
+                assert!(issues.iter().any(|i| i.contains("--limit 0")));
+            }
+            other => panic!("Expected KnownBad, got {:?}", other),
+        }
+    }
+
+    // ── CLI arg verification tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn br_cli_bead_store_ready_passes_explicit_limit() {
+        // Verify that ready() passes an explicit limit of 10000
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let workspace = tmp_dir.path();
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+
+        // Use test-specific args file in temp dir to avoid race conditions
+        let args_file = tmp_dir.path().join("br-ready-args.txt");
+
+        // Create a fake br that logs its arguments
+        let fake_br = tmp_dir.path().join("fake-br-ready-limit");
+        std::fs::write(
+            &fake_br,
+            format!(
+                r#"#!/bin/sh
+echo "$@" > {}
+echo '[]'
+"#,
+                args_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_br,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let store = BrCliBeadStore::new(fake_br.clone(), workspace.to_path_buf()).unwrap();
+        let filters = Filters::default();
+
+        let _ = store.ready(&filters).await;
+
+        // Read back the arguments that were passed
+        let args = std::fs::read_to_string(&args_file).unwrap();
+        assert!(args.contains("--limit"), "ready() must pass --limit flag");
+        assert!(args.contains("10000"), "ready() must pass limit of 10000");
+
+        // Cleanup handled by tmp_dir drop
+    }
+
+    #[tokio::test]
+    async fn br_cli_bead_store_list_all_passes_large_explicit_limit() {
+        // Verify that list_all() passes an explicit limit of 999999 (not 0)
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let workspace = tmp_dir.path();
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+
+        // Use test-specific args file in temp dir to avoid race conditions
+        let args_file = tmp_dir.path().join("br-list-args.txt");
+
+        // Create a fake br that logs its arguments
+        let fake_br = tmp_dir.path().join("fake-br-list-limit");
+        std::fs::write(
+            &fake_br,
+            format!(
+                r#"#!/bin/sh
+echo "$@" > {}
+echo '[]'
+"#,
+                args_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_br,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let store = BrCliBeadStore::new(fake_br.clone(), workspace.to_path_buf()).unwrap();
+
+        let _ = store.list_all().await;
+
+        // Read back the arguments that were passed
+        let args = std::fs::read_to_string(&args_file).unwrap();
+        assert!(
+            args.contains("--limit"),
+            "list_all() must pass --limit flag"
+        );
+        assert!(
+            args.contains("999999"),
+            "list_all() must pass limit of 999999"
+        );
+        assert!(
+            !args.contains("--limit 0"),
+            "list_all() must NOT pass limit of 0"
+        );
+
+        // Cleanup handled by tmp_dir drop
+    }
+
+    #[tokio::test]
+    async fn bf_cli_bead_store_ready_passes_explicit_limit() {
+        // Verify that BfCliBeadStore ready() passes an explicit limit of 999999
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let workspace = tmp_dir.path();
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+
+        // Use test-specific args file in temp dir to avoid race conditions
+        let args_file = tmp_dir.path().join("bf-ready-args.txt");
+
+        // Create a fake bf that logs its arguments
+        let fake_bf = tmp_dir.path().join("fake-bf-ready-limit");
+        std::fs::write(
+            &fake_bf,
+            format!(
+                r#"#!/bin/sh
+echo "$@" > {}
+echo '[]'
+"#,
+                args_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_bf,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let store = BfCliBeadStore::new(fake_bf.clone(), workspace.to_path_buf(), None, None, None)
+            .unwrap();
+        let filters = Filters::default();
+
+        let _ = store.ready(&filters).await;
+
+        // Read back the arguments that were passed
+        let args = std::fs::read_to_string(&args_file).unwrap();
+        assert!(
+            args.contains("--limit"),
+            "bf ready() must pass --limit flag"
+        );
+        assert!(
+            args.contains("999999"),
+            "bf ready() must pass limit of 999999"
+        );
+
+        // Cleanup handled by tmp_dir drop
+    }
+
+    #[tokio::test]
+    async fn bf_cli_bead_store_list_all_passes_explicit_limit() {
+        // Verify that BfCliBeadStore list_all() passes an explicit limit of 999999
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let workspace = tmp_dir.path();
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+
+        // Use test-specific args file in temp dir to avoid race conditions
+        let args_file = tmp_dir.path().join("bf-list-args.txt");
+
+        // Create a fake bf that logs its arguments
+        let fake_bf = tmp_dir.path().join("fake-bf-list-limit");
+        std::fs::write(
+            &fake_bf,
+            format!(
+                r#"#!/bin/sh
+echo "$@" > {}
+echo '[]'
+"#,
+                args_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_bf,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let store = BfCliBeadStore::new(fake_bf.clone(), workspace.to_path_buf(), None, None, None)
+            .unwrap();
+
+        let _ = store.list_all().await;
+
+        // Read back the arguments that were passed
+        let args = std::fs::read_to_string(&args_file).unwrap();
+        assert!(
+            args.contains("--limit"),
+            "bf list_all() must pass --limit flag"
+        );
+        assert!(
+            args.contains("999999"),
+            "bf list_all() must pass limit of 999999"
+        );
+        assert!(
+            !args.contains("--limit 0"),
+            "bf list_all() must NOT pass limit of 0"
+        );
+
+        // Cleanup handled by tmp_dir drop
     }
 }
