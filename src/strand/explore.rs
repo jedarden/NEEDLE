@@ -67,7 +67,12 @@ struct DefaultStoreFactory;
 #[async_trait::async_trait]
 impl StoreFactory for DefaultStoreFactory {
     async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
-        Ok(Arc::new(BrCliBeadStore::discover(workspace.to_path_buf())?))
+        Ok(Arc::new(BrCliBeadStore::discover(
+            workspace.to_path_buf(),
+            None,
+            Some("needle".to_string()),
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+        )?))
     }
 }
 
@@ -420,7 +425,12 @@ impl ExploreStrand {
     /// Create a BrCliBeadStore for a given workspace path.
     #[allow(dead_code)]
     async fn store_for_workspace(workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
-        Ok(Arc::new(BrCliBeadStore::discover(workspace.to_path_buf())?))
+        Ok(Arc::new(BrCliBeadStore::discover(
+            workspace.to_path_buf(),
+            None,
+            Some("needle".to_string()),
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+        )?))
     }
 
     /// Create a BrCliBeadStore for a given workspace path.

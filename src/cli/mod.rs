@@ -22,6 +22,7 @@ use crate::bead_store::{BeadStore, BfCliBeadStore, BrCliBeadStore};
 use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
+use crate::rate_limit::RateLimiter;
 use crate::registry::{Registry, WorkerEntry};
 use crate::telemetry::{self, EventKind, Telemetry};
 use crate::types::IdleAction;
@@ -642,9 +643,21 @@ pub fn launch_workers(
             "launching worker"
         );
 
-        // Stagger: sleep before launching subsequent workers.
+        // Stagger: load-adaptive delay before launching subsequent workers.
         if seq > 0 && stagger_secs > 0 {
-            std::thread::sleep(std::time::Duration::from_secs(stagger_secs));
+            // Create a minimal telemetry emitter for stagger events.
+            let telemetry = Telemetry::new("cli-launch".to_string());
+
+            // Use load-adaptive stagger: extend wait when system is saturated,
+            // otherwise use the configured base delay.
+            RateLimiter::load_adaptive_stagger(
+                config.worker.cpu_load_warn,
+                config.worker.memory_free_warn_mb,
+                stagger_secs,
+                config.worker.adaptive_stagger_max_wait_secs,
+                config.worker.adaptive_stagger_check_interval_secs,
+                &telemetry,
+            );
         }
 
         launch_in_tmux(
@@ -667,7 +680,7 @@ pub fn launch_workers(
     let sanitized_agent = sanitize_session_name(&agent_name);
     if effective_count > 1 {
         println!(
-            "\nStarted {effective_count} workers (stagger: {stagger_secs}s between launches)."
+            "\nStarted {effective_count} workers (base stagger: {stagger_secs}s, load-adaptive)."
         );
         println!("Attach to a worker with: tmux attach -t needle-{sanitized_agent}-<name>");
     } else {
@@ -3244,15 +3257,17 @@ fn doctor_check_bead_store(
     let store: Box<dyn BeadStore> =
         match BfCliBeadStore::discover(workspace.to_path_buf(), None, None, None) {
             Ok(s) => Box::new(s),
-            Err(bf_err) => match BrCliBeadStore::discover(workspace.to_path_buf()) {
-                Ok(s) => Box::new(s),
-                Err(br_err) => {
-                    return Ok(CheckResult::fail(
-                        "Bead store",
-                        format!("no bead store CLI found (bf: {bf_err}; br: {br_err})"),
-                    ))
+            Err(bf_err) => {
+                match BrCliBeadStore::discover(workspace.to_path_buf(), None, None, None) {
+                    Ok(s) => Box::new(s),
+                    Err(br_err) => {
+                        return Ok(CheckResult::fail(
+                            "Bead store",
+                            format!("no bead store CLI found (bf: {bf_err}; br: {br_err})"),
+                        ))
+                    }
                 }
-            },
+            }
         };
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     if repair {

@@ -147,6 +147,12 @@ pub enum EventKind {
     WorkerBootTimeout {
         elapsed_ms: u64,
     },
+    /// Worker launch was deferred due to resource saturation.
+    WorkerLaunchDeferred {
+        deferred_count: u64,
+        total_wait_secs: u64,
+        reason: String,
+    },
 
     // ── Strand evaluation ──
     StrandEvaluated {
@@ -216,6 +222,11 @@ pub enum EventKind {
     },
     BeadOrphaned {
         bead_id: BeadId,
+    },
+    BeadQuarantined {
+        bead_id: BeadId,
+        failure_count: u32,
+        threshold: u32,
     },
 
     // ── Agent dispatch ──
@@ -609,6 +620,21 @@ pub enum EventKind {
         reason: String,
     },
 
+    // ── Spawn-path binary integrity ──
+    /// The spawn-path binary was modified in place without re-exec.
+    SpawnPathModifiedInPlace {
+        /// Path to the modified binary.
+        path: String,
+        /// Original SHA-256 hash.
+        original_hash: String,
+        /// Current SHA-256 hash.
+        current_hash: String,
+        /// Type of modification.
+        modification_type: String,
+        /// Human-readable description.
+        description: String,
+    },
+
     // ── Cargo testing ──
     CargoTestStarted {
         test_name: String,
@@ -741,6 +767,7 @@ impl EventKind {
             EventKind::InitStepStarted { .. } => "init.step.started",
             EventKind::InitStepCompleted { .. } => "init.step.completed",
             EventKind::WorkerBootTimeout { .. } => "worker.boot.timeout",
+            EventKind::WorkerLaunchDeferred { .. } => "worker.launch.deferred",
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
             EventKind::StrandSkipped { .. } => "strand.skipped",
             EventKind::BeadStoreError { .. } => "bead_store.error",
@@ -756,6 +783,7 @@ impl EventKind {
             EventKind::BeadReleaseFailed { .. } => "bead.release.failed",
             EventKind::BeadCompleted { .. } => "bead.completed",
             EventKind::BeadOrphaned { .. } => "bead.orphaned",
+            EventKind::BeadQuarantined { .. } => "bead.quarantined",
             EventKind::DispatchStarted { .. } => "agent.dispatched",
             EventKind::DispatchCompleted { .. } => "agent.completed",
             EventKind::RoutingDecision { .. } => "agent.routing_decision",
@@ -835,6 +863,7 @@ impl EventKind {
             EventKind::CanarySuiteCompleted { .. } => "canary.suite_completed",
             EventKind::CanaryPromoted { .. } => "canary.promoted",
             EventKind::CanaryRejected { .. } => "canary.rejected",
+            EventKind::SpawnPathModifiedInPlace { .. } => "spawn_path.modified_in_place",
             EventKind::CargoTestStarted { .. } => "cargo_test.started",
             EventKind::CargoTestCompleted { .. } => "cargo_test.completed",
             EventKind::OutputTransformSpawned { .. } => "agent.transform.spawned",
@@ -900,7 +929,8 @@ impl EventKind {
             | EventKind::TransformSkipped { bead_id, .. }
             | EventKind::ReflectDecisionExtracted { bead_id, .. }
             | EventKind::ReflectAdrCreated { bead_id, .. }
-            | EventKind::SplitSkipped { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::SplitSkipped { bead_id, .. }
+            | EventKind::BeadQuarantined { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::MitosisOutOfScope { bead_id } => Some(bead_id.clone()),
@@ -920,6 +950,7 @@ impl EventKind {
             | EventKind::InitStepStarted { .. }
             | EventKind::InitStepCompleted { .. }
             | EventKind::WorkerBootTimeout { .. }
+            | EventKind::WorkerLaunchDeferred { .. }
             | EventKind::StrandEvaluated { .. }
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
@@ -992,6 +1023,7 @@ impl EventKind {
             | EventKind::SupervisorIdleCycle { .. } => None,
             EventKind::ExploreScanSummary { .. } => None,
             EventKind::ExploreStarvationAlarm { .. } => None,
+            EventKind::SpawnPathModifiedInPlace { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
         }
     }
@@ -1062,6 +1094,17 @@ impl EventKind {
             }
             EventKind::WorkerBootTimeout { elapsed_ms } => {
                 serde_json::json!({ "elapsed_ms": elapsed_ms })
+            }
+            EventKind::WorkerLaunchDeferred {
+                deferred_count,
+                total_wait_secs,
+                reason,
+            } => {
+                serde_json::json!({
+                    "deferred_count": deferred_count,
+                    "total_wait_secs": total_wait_secs,
+                    "reason": reason
+                })
             }
             EventKind::StrandEvaluated {
                 strand_name,
@@ -2029,6 +2072,28 @@ impl EventKind {
                 "assignee": assignee,
                 "error": error,
             }),
+            EventKind::BeadQuarantined {
+                bead_id,
+                failure_count,
+                threshold,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "failure_count": failure_count,
+                "threshold": threshold,
+            }),
+            EventKind::SpawnPathModifiedInPlace {
+                path,
+                original_hash,
+                current_hash,
+                modification_type,
+                description,
+            } => serde_json::json!({
+                "path": path,
+                "original_hash": original_hash,
+                "current_hash": current_hash,
+                "modification_type": modification_type,
+                "description": description,
+            }),
         }
     }
 
@@ -2167,7 +2232,10 @@ impl EventKind {
             | EventKind::EventDrivenWakeup { .. }
             | EventKind::ClaimErrorThreshold { .. }
             | EventKind::MendStaleAssigneeCleared { .. }
-            | EventKind::MendAssigneeClearFailed { .. } => None,
+            | EventKind::MendAssigneeClearFailed { .. }
+            | EventKind::WorkerLaunchDeferred { .. }
+            | EventKind::BeadQuarantined { .. }
+            | EventKind::SpawnPathModifiedInPlace { .. } => None,
         }
     }
 }

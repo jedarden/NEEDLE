@@ -382,19 +382,51 @@ pub struct BrCliBeadStore {
     pub br_path: PathBuf,
     /// Workspace root (directory containing `.beads/`).
     pub workspace: PathBuf,
+    /// Model name for velocity-aware claim scoring (e.g., "claude-sonnet-4-6").
+    ///
+    /// Passed to `bf claim --model` so bead-forge can route beads to the
+    /// model/harness combo that closes each issue_type fastest (plan §4B.6).
+    /// `None` falls back to the population-wide average.
+    pub model: Option<String>,
+    /// Harness name for velocity-aware claim scoring (e.g., "needle").
+    pub harness: Option<String>,
+    /// Harness version for velocity-aware claim scoring.
+    pub harness_version: Option<String>,
 }
 
 impl BrCliBeadStore {
     /// Construct a new store, validating that the `br` binary exists.
-    pub fn new(br_path: PathBuf, workspace: PathBuf) -> Result<Self> {
+    pub fn new(
+        br_path: PathBuf,
+        workspace: PathBuf,
+        model: Option<String>,
+        harness: Option<String>,
+        harness_version: Option<String>,
+    ) -> Result<Self> {
         if !br_path.exists() {
             bail!("br binary not found at {}", br_path.display());
         }
-        Ok(BrCliBeadStore { br_path, workspace })
+        Ok(BrCliBeadStore {
+            br_path,
+            workspace,
+            model,
+            harness,
+            harness_version,
+        })
     }
 
     /// Try to find `br` on PATH or the default install location.
-    pub fn discover(workspace: PathBuf) -> Result<Self> {
+    ///
+    /// `model`/`harness`/`harness_version` are threaded into `bf claim` for
+    /// velocity-aware scoring (plan §4B.6). Any may be `None` — `bf claim`
+    /// treats missing metadata as a documented fallback to the
+    /// population-wide average, so partial metadata is safe.
+    pub fn discover(
+        workspace: PathBuf,
+        model: Option<String>,
+        harness: Option<String>,
+        harness_version: Option<String>,
+    ) -> Result<Self> {
         let br_path = which::which("br")
             .or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_default();
@@ -406,7 +438,13 @@ impl BrCliBeadStore {
                 }
             })
             .context("br CLI not found; install beads_rust")?;
-        Ok(BrCliBeadStore { br_path, workspace })
+        Ok(BrCliBeadStore {
+            br_path,
+            workspace,
+            model,
+            harness,
+            harness_version,
+        })
     }
 
     /// Default timeout for br subprocess calls (30 seconds).
@@ -686,6 +724,13 @@ impl BrCliBeadStore {
     /// This uses bead-forge's atomic claim which performs scoring
     /// (downstream_impact + critical_float + priority + created_at) and
     /// the UPDATE in a single BEGIN IMMEDIATE transaction.
+    ///
+    /// The worker's `--model`/`--harness`/`--harness-version` are folded into
+    /// the claim so bead-forge can record a `worker_sessions`/`velocity_stats`
+    /// row and compute a velocity_adjusted_score (plan §4B.6) — routing beads
+    /// to the model/harness combo that closes each issue_type fastest. The
+    /// flags are emitted before `--assignee`/`--json`; any that are `None` are
+    /// omitted, and `bf claim` falls back to the population-wide average.
     async fn run_bf_claim(&self, actor: &str) -> Result<String> {
         let timeout_duration = std::time::Duration::from_secs(30);
 
@@ -707,9 +752,28 @@ impl BrCliBeadStore {
             }
         };
 
-        let args = ["claim", "--assignee", actor, "--json"];
+        // Build the claim args. Velocity-aware scoring metadata is passed
+        // BEFORE --assignee/--json; missing values are simply omitted.
+        let mut args: Vec<&str> = Vec::with_capacity(10);
+        args.push("claim");
+        if let Some(model) = &self.model {
+            args.push("--model");
+            args.push(model.as_str());
+        }
+        if let Some(harness) = &self.harness {
+            args.push("--harness");
+            args.push(harness.as_str());
+        }
+        if let Some(harness_version) = &self.harness_version {
+            args.push("--harness-version");
+            args.push(harness_version.as_str());
+        }
+        args.push("--assignee");
+        args.push(actor);
+        args.push("--json");
+
         let mut cmd = tokio::process::Command::new(&bf_path);
-        cmd.args(args)
+        cmd.args(&args)
             .current_dir(&self.workspace)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -2009,7 +2073,13 @@ echo '[]'
         )
         .unwrap();
 
-        let store = BrCliBeadStore::new(fake_br.clone(), workspace.to_path_buf()).unwrap();
+        let store = BrCliBeadStore::new(
+            fake_br.clone(),
+            workspace.to_path_buf(),
+            None,  // model
+            None,  // harness
+            None,  // harness_version
+        ).unwrap();
         let filters = Filters::default();
 
         let _ = store.ready(&filters).await;
@@ -2051,7 +2121,13 @@ echo '[]'
         )
         .unwrap();
 
-        let store = BrCliBeadStore::new(fake_br.clone(), workspace.to_path_buf()).unwrap();
+        let store = BrCliBeadStore::new(
+            fake_br.clone(),
+            workspace.to_path_buf(),
+            None,  // model
+            None,  // harness
+            None,  // harness_version
+        ).unwrap();
 
         let _ = store.list_all().await;
 

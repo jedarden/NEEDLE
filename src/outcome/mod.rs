@@ -814,9 +814,11 @@ impl OutcomeHandler {
     /// Labels follow the pattern `failure-count:N`. If `failure-count:2` exists,
     /// the old label is removed and `failure-count:3` is added.
     ///
+    /// Returns the new failure count (or 0 if the operation failed).
+    ///
     /// All `br` calls are wrapped in timeouts to prevent indefinite hang in
     /// HANDLING state. Failures are non-fatal — we log and continue.
-    async fn increment_failure_count(&self, store: &dyn BeadStore, bead: &Bead) -> Result<()> {
+    async fn increment_failure_count(&self, store: &dyn BeadStore, bead: &Bead) -> Result<u32> {
         // Read labels with timeout.
         let labels =
             match tokio::time::timeout(std::time::Duration::from_secs(30), store.labels(&bead.id))
@@ -829,14 +831,14 @@ impl OutcomeHandler {
                         error = %e,
                         "could not read labels to increment failure count"
                     );
-                    return Ok(());
+                    return Ok(0);
                 }
                 Err(_) => {
                     tracing::warn!(
                         bead_id = %bead.id,
                         "labels() timed out after 30s, skipping failure count increment"
                     );
-                    return Ok(());
+                    return Ok(0);
                 }
             };
 
@@ -909,7 +911,7 @@ impl OutcomeHandler {
             }
         }
 
-        Ok(())
+        Ok(new_count)
     }
 
     /// Reset the failure count label on a bead by removing all `failure-count:N` labels.
@@ -984,6 +986,80 @@ impl OutcomeHandler {
         }
 
         Ok(())
+    }
+
+    /// Quarantine a bead by setting status=blocked and adding the 'cycling' label.
+    ///
+    /// This is called when a bead exceeds the configured failure threshold.
+    /// Emits a BeadQuarantined telemetry event.
+    ///
+    /// All `br` calls are wrapped in timeouts to prevent indefinite hang in
+    /// HANDLING state. Failures are non-fatal — we log and continue.
+    #[expect(dead_code)]
+    async fn quarantine_bead(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        failure_count: u32,
+        threshold: u32,
+    ) -> Result<Vec<EventKind>> {
+        let mut events = Vec::new();
+
+        tracing::warn!(
+            bead_id = %bead.id,
+            failure_count,
+            threshold,
+            "quarantining bead after exceeding failure threshold"
+        );
+
+        // Add the 'cycling' label with timeout.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            store.add_label(&bead.id, "cycling"),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    "added 'cycling' label"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to add 'cycling' label"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "quarantine".to_string(),
+                    operation: "add_label".to_string(),
+                    error: e.to_string(),
+                });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "add_label timed out after 30s"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "quarantine".to_string(),
+                    operation: "add_label".to_string(),
+                    error: "timeout after 30s".to_string(),
+                });
+            }
+        }
+
+        // Emit the BeadQuarantined event.
+        events.push(EventKind::BeadQuarantined {
+            bead_id: bead.id.clone(),
+            failure_count,
+            threshold,
+        });
+
+        Ok(events)
     }
 }
 

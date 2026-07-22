@@ -744,8 +744,13 @@ impl SpliceStrand {
         }
 
         // Instantiate bead store for the report workspace.
-        let store = BrCliBeadStore::discover(report_workspace.clone())
-            .context("failed to instantiate bead store for report workspace")?;
+        let store = BrCliBeadStore::discover(
+            report_workspace.clone(),
+            None,
+            Some("needle".to_string()),
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+        )
+        .context("failed to instantiate bead store for report workspace")?;
 
         // Build bead title.
         let title = format!("Worker failure: {} ({})", record.worker_id, record.session);
@@ -831,8 +836,13 @@ impl SpliceStrand {
         }
 
         // Instantiate bead store for the report workspace.
-        let store = BrCliBeadStore::discover(report_workspace.clone())
-            .context("failed to instantiate bead store for report workspace")?;
+        let store = BrCliBeadStore::discover(
+            report_workspace.clone(),
+            None,
+            Some("needle".to_string()),
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+        )
+        .context("failed to instantiate bead store for report workspace")?;
 
         // Build bead title and body based on loop type, and extract the stuck bead_id.
         let (title, pattern_name, details, stuck_bead_id) = match &worker.loop_type {
@@ -986,7 +996,12 @@ impl SpliceStrand {
             let beads_dir = workspace_path.join(".beads");
             if workspace_path.exists() && beads_dir.exists() {
                 // Instantiate bead store for the original workspace
-                if let Ok(original_store) = BrCliBeadStore::discover(workspace_path.clone()) {
+                if let Ok(original_store) = BrCliBeadStore::discover(
+                    workspace_path.clone(),
+                    None,
+                    Some("needle".to_string()),
+                    Some(env!("CARGO_PKG_VERSION").to_string()),
+                ) {
                     // Label the stuck bead as "human" to stop Pluck from redispatching it
                     if original_store
                         .add_label(&crate::types::BeadId::from(stuck_bead_id.clone()), "human")

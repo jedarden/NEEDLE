@@ -1172,9 +1172,24 @@ impl Worker {
     /// Creates a new BrCliBeadStore and rebuilds the Claimer to use it.
     /// The home store is restored at the start of the next select cycle.
     fn switch_store_to(&mut self, workspace: &std::path::Path) -> Result<()> {
+        // Resolve this worker's default adapter model so remote-workspace
+        // claims (which go through BrCliBeadStore::run_bf_claim) carry the
+        // same velocity-scoring metadata as home-workspace claims. The model
+        // is the default adapter's model — routing overrides apply post-claim
+        // at dispatch time, so the default is the correct identity to score.
+        let model = self
+            .dispatcher
+            .adapter(&self.config.agent.default)
+            .and_then(|a| a.model.clone());
+
         let remote_store = Arc::new(
-            crate::bead_store::BrCliBeadStore::discover(workspace.to_path_buf())
-                .context("failed to create bead store for remote workspace")?,
+            crate::bead_store::BrCliBeadStore::discover(
+                workspace.to_path_buf(),
+                model,
+                Some("needle".to_string()),
+                Some(env!("CARGO_PKG_VERSION").to_string()),
+            )
+            .context("failed to create bead store for remote workspace")?,
         );
         self.store = remote_store.clone();
         self.current_workspace = workspace.to_path_buf();

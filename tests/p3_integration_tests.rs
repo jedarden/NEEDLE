@@ -141,7 +141,7 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
 
 /// Get a bead store for a workspace.
 fn store_for_workspace(workspace: &Path) -> Result<BrCliBeadStore> {
-    BrCliBeadStore::new(br_path(), workspace.to_path_buf())
+    BrCliBeadStore::new(br_path(), workspace.to_path_buf(), None, None, None)
 }
 
 /// Mock WeaveAgent that returns fixed JSON.

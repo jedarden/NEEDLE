@@ -29,6 +29,7 @@ pub mod skill;
 pub mod span;
 pub mod stats;
 pub mod strand;
+pub mod spawn_path;
 pub mod supervisor;
 pub mod telemetry;
 pub mod test_output;

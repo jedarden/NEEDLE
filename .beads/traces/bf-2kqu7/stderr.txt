@@ -1,3 +1,5 @@
-Running as unit: run-p2456957-i224645686.scope; invocation ID: 056b831d47684b198db0ea979751ab01
+Running as unit: run-p2427708-i224616439.scope; invocation ID: 378a9bb6d80d432db30779e20cd4d5ec
 Ignoring 23 permissions.allow entries from .claude/settings.json: this workspace has not been trusted. Run Claude Code interactively here once and accept the trust dialog, or set projects["/home/coding/NEEDLE"].hasTrustDialogAccepted: true in /home/coding/.claude.json.
 ⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth source is set and takes precedence over your claude.ai login · Unset it to load your organization's connectors
+SessionEnd hook [/home/coding/.ccdash/hooks/session-end.sh] failed: /bin/sh: line 1: /home/coding/.ccdash/hooks/session-end.sh: cannot execute: required file not found
+

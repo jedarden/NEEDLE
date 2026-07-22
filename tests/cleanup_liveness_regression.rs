@@ -518,3 +518,175 @@ fn cleanup_command_invocation_compiles() {
     let result_i = Cli::try_parse_from(args_i);
     assert!(result_i.is_ok(), "cleanup -i should parse");
 }
+
+/// P7.1a Regression Test: tmux-backed cleanup liveness test (real session, not constructed struct).
+///
+/// This test addresses the critical gap that let P7.1a ship undetected: the existing tests
+/// construct TmuxSession structs directly rather than launching real tmux sessions. This bypasses
+/// the exact indirection where the pane_pid-vs-child-PID bug lives.
+///
+/// The test:
+/// 1. Launches a real tmux session with the exact command shape that launch_in_tmux() uses:
+///    `NEEDLE_INNER=1 <cmd> ... 2>> <log>` — the output redirection defeats bash's exec
+///    optimization, so pane_pid is the shell wrapper, not the child process.
+/// 2. Verifies that pane_pid is NOT the actual child process (reproduces the bug condition).
+/// 3. Asserts that bare `needle cleanup` does NOT remove the session (because the liveness
+///    check walks the process tree and finds the live child).
+///
+/// This is the authoritative regression test for P7.1a — it exercises the real indirection,
+/// not a mock. See ADR-003 addendum and plan.md Phase 7.1a for full context.
+#[test]
+#[cfg(unix)]
+fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup() {
+    use std::fs;
+    use std::path::Path;
+
+    // Skip if tmux not available
+    if Command::new("tmux").arg("-V").output().is_err() {
+        println!("Skipping test: tmux not available");
+        return;
+    }
+
+    let session_name = "needle-test-p71a-live";
+    let test_log = "/tmp/needle-test-p71a.log";
+
+    // Clean up any existing test session and log
+    let _ = kill_session(session_name);
+    let _ = std::fs::remove_file(test_log);
+    thread::sleep(Duration::from_millis(100));
+
+    // Launch a REAL tmux session with the exact command shape that launch_in_tmux() uses.
+    // This is critical: the `NEEDLE_INNER=1 sleep 30 2>> /tmp/test.log` shape produces
+    // the shell-wrapper-vs-child PID split because the output redirection defeats bash's
+    // last-command exec optimization. pane_pid will be the shell, not sleep.
+    let create_result = Command::new("tmux")
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            &format!("NEEDLE_INNER=1 sleep 30 2>> {}", test_log),
+        ])
+        .status();
+
+    match create_result {
+        Ok(status) if status.success() => {
+            // Session created successfully
+        }
+        Ok(_) => {
+            panic!("tmux new-session returned non-zero exit code");
+        }
+        Err(e) => {
+            panic!("failed to create tmux session: {}", e);
+        }
+    }
+
+    // Give the session a moment to stabilize
+    thread::sleep(Duration::from_millis(200));
+
+    // Get the pane_pid from tmux (this is the shell wrapper PID, not the sleep PID)
+    let pane_pid_output = Command::new("tmux")
+        .args(["list-panes", "-t", session_name, "-F", "#{pane_pid}"])
+        .output();
+
+    let pane_pid: u32 = match pane_pid_output {
+        Ok(output) if output.status.success() => {
+            let pid_str = String::from_utf8_lossy(&output.stdout).trim();
+            match pid_str.parse() {
+                Ok(pid) => pid,
+                Err(_) => {
+                    let _ = kill_session(session_name);
+                    panic!("failed to parse pane_pid from tmux: '{}'", pid_str);
+                }
+            }
+        }
+        Ok(output) => {
+            let _ = kill_session(session_name);
+            panic!(
+                "tmux list-panes failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Err(e) => {
+            let _ = kill_session(session_name);
+            panic!("failed to run tmux list-panes: {}", e);
+        }
+    };
+
+    // Verify the pane_pid exists and is a shell process (reproduces the bug condition)
+    let proc_path = Path::new("/proc").join(pane_pid.to_string()).join("cmdline");
+    let cmdline = fs::read_to_string(&proc_path).unwrap_or_default();
+    let cmdline_str = cmdline.replace('\0', " ");
+
+    // The cmdline should contain bash/sh and NEEDLE_INNER, proving this is the shell wrapper
+    assert!(
+        cmdline_str.contains("NEEDLE_INNER"),
+        "pane_pid {} should be a shell wrapper with NEEDLE_INNER in cmdline, got: {}",
+        pane_pid,
+        cmdline_str
+    );
+
+    // Verify the session exists in the session list
+    let sessions_before = list_needle_sessions();
+    assert!(
+        sessions_before.iter().any(|s| s.contains(session_name)),
+        "session should exist before cleanup"
+    );
+
+    // Run bare needle cleanup (no --all, no -i)
+    // This should NOT remove the live session because:
+    // 1. filter_sessions_for_cleanup() calls find_needle_process_in_tree(pane_pid)
+    // 2. That walks the process tree and finds the actual sleep process
+    // 3. The sleep PID is in the live_pids set (from scan_needle_processes())
+    // 4. So the session is correctly classified as LIVE, not orphaned
+    let needle_binary =
+        std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
+
+    let output = Command::new(&needle_binary)
+        .arg("cleanup")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    match output {
+        Ok(result) => {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+
+            // The command should succeed
+            assert!(
+                result.status.success(),
+                "needle cleanup should succeed: stdout: {}, stderr: {}",
+                stdout,
+                stderr
+            );
+
+            // Verify the session was NOT removed (it's still live!)
+            let sessions_after = list_needle_sessions();
+            assert!(
+                sessions_after.iter().any(|s| s.contains(session_name)),
+                "LIVE session should NOT be removed by bare cleanup (P7.1a regression)"
+            );
+
+            // Should report no sessions cleaned (or at least not this session)
+            if stdout.contains(session_name) {
+                panic!(
+                    "cleanup output should not mention the live session '{}', got: {}",
+                    session_name, stdout
+                );
+            }
+
+            println!(
+                "P7.1a regression test passed: bare cleanup preserved live session with shell-wrapper split"
+            );
+        }
+        Err(e) => {
+            let _ = kill_session(session_name);
+            panic!("needle cleanup command failed: {}", e);
+        }
+    }
+
+    // Clean up the test session
+    let _ = kill_session(session_name);
+    let _ = std::fs::remove_file(test_log);
+}

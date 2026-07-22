@@ -407,6 +407,236 @@ impl RateLimiter {
             }
         }
     }
+
+    /// Check system resources before worker launch.
+    ///
+    /// Returns an error if CPU or memory resources are saturated, blocking
+    /// launch with a clear actionable reason. Unlike `check_system_resources`,
+    /// which only emits telemetry warnings, this function returns a `Result`
+    /// so the caller can defer/retry launch instead of proceeding into a step
+    /// known to be slow (~5s) and vulnerable to being killed mid-step by the OS.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if:
+    /// - Normalized CPU load (1-minute average / core count) exceeds `cpu_load_warn`
+    /// - Available memory falls below `memory_free_warn_mb`
+    pub fn check_system_resources_for_launch(
+        cpu_load_warn: f64,
+        memory_free_warn_mb: u64,
+        telemetry: &Telemetry,
+    ) -> Result<()> {
+        // CPU load: read /proc/loadavg on Linux.
+        if let Ok(loadavg) = std::fs::read_to_string("/proc/loadavg") {
+            if let Some(load_str) = loadavg.split_whitespace().next() {
+                if let Ok(load) = load_str.parse::<f64>() {
+                    // Normalize by number of CPUs.
+                    let num_cpus = std::thread::available_parallelism()
+                        .map(|n| n.get())
+                        .unwrap_or(1);
+                    let normalized = load / num_cpus as f64;
+                    if normalized > cpu_load_warn {
+                        // Emit structured telemetry event.
+                        let _ = telemetry.emit(EventKind::FleetCpuSaturated {
+                            load_average: load,
+                            threshold: cpu_load_warn,
+                            core_count: num_cpus,
+                        });
+                        return Err(anyhow::anyhow!(
+                            "CPU load saturated: {:.2} (1-minute average) / {} cores = {:.2} > threshold {:.2}",
+                            load,
+                            num_cpus,
+                            normalized,
+                            cpu_load_warn
+                        ));
+                    }
+                }
+            }
+        }
+
+        // Memory: read /proc/meminfo on Linux.
+        if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+            let mut mem_available_kb: Option<u64> = None;
+            for line in meminfo.lines() {
+                if line.starts_with("MemAvailable:") {
+                    if let Some(val) = line.split_whitespace().nth(1) {
+                        mem_available_kb = val.parse().ok();
+                    }
+                    break;
+                }
+            }
+            if let Some(avail_kb) = mem_available_kb {
+                let avail_mb = avail_kb / 1024;
+                if avail_mb < memory_free_warn_mb {
+                    // Emit structured telemetry event.
+                    let _ = telemetry.emit(EventKind::FleetMemoryLow {
+                        free_mb: avail_mb,
+                        threshold_mb: memory_free_warn_mb,
+                    });
+                    return Err(anyhow::anyhow!(
+                        "Memory saturated: {} MB available < {} MB threshold",
+                        avail_mb,
+                        memory_free_warn_mb
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Load-adaptive stagger for batch worker launches.
+    ///
+    /// Replaces fixed-interval sleep with a load-aware delay: uses the short
+    /// default `base_stagger_secs` when system load is comfortable (CPU and
+    /// memory within thresholds), extends the wait (bounded by `max_wait_secs`)
+    /// when saturated. This prevents batch launches from blindly pushing past
+    /// the saturation threshold their own later-launched members would then be
+    /// killed by.
+    ///
+    /// # Parameters
+    ///
+    /// * `cpu_load_warn` - Normalized CPU load threshold (0.0–1.0). Above this,
+    ///   stagger is extended.
+    /// * `memory_free_warn_mb` - Available memory threshold (MB). Below this,
+    ///   stagger is extended.
+    /// * `base_stagger_secs` - Default stagger delay when load is comfortable.
+    /// * `max_wait_secs` - Maximum additional wait time when load is high.
+    /// * `check_interval_secs` - How often to recheck load during extended wait.
+    /// * `telemetry` - Telemetry emitter for structured events.
+    ///
+    /// # Behavior
+    ///
+    /// 1. Check current system load (CPU and memory).
+    /// 2. If comfortable: sleep for `base_stagger_secs`, return.
+    /// 3. If saturated: loop and recheck every `check_interval_secs` until either:
+    ///    - Load drops below threshold → proceed immediately.
+    ///    - `max_wait_secs` total wait time reached → proceed anyway (bounded).
+    /// 4. Emit `WorkerLaunchDeferred` telemetry when extended wait occurs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `check_interval_secs` is zero (would loop forever).
+    pub fn load_adaptive_stagger(
+        cpu_load_warn: f64,
+        memory_free_warn_mb: u64,
+        base_stagger_secs: u64,
+        max_wait_secs: u64,
+        check_interval_secs: u64,
+        telemetry: &Telemetry,
+    ) {
+        assert!(
+            check_interval_secs > 0,
+            "check_interval_secs must be positive (got {})",
+            check_interval_secs
+        );
+
+        // Helper to check if system is saturated (returns true if CPU or memory is high).
+        let is_saturated = || -> bool {
+            let mut saturated = false;
+
+            // CPU load: read /proc/loadavg on Linux.
+            if let Ok(loadavg) = std::fs::read_to_string("/proc/loadavg") {
+                if let Some(load_str) = loadavg.split_whitespace().next() {
+                    if let Ok(load) = load_str.parse::<f64>() {
+                        let num_cpus = std::thread::available_parallelism()
+                            .map(|n| n.get())
+                            .unwrap_or(1);
+                        let normalized = load / num_cpus as f64;
+                        if normalized > cpu_load_warn {
+                            saturated = true;
+                            tracing::debug!(
+                                load_1min = %load_str,
+                                normalized = %format!("{:.2}", normalized),
+                                threshold = %format!("{:.2}", cpu_load_warn),
+                                "CPU load exceeds threshold - extending stagger"
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Memory: read /proc/meminfo on Linux.
+            if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+                for line in meminfo.lines() {
+                    if line.starts_with("MemAvailable:") {
+                        if let Some(val) = line.split_whitespace().nth(1) {
+                            if let Ok(avail_kb) = val.parse::<u64>() {
+                                let avail_mb = avail_kb / 1024;
+                                if avail_mb < memory_free_warn_mb {
+                                    saturated = true;
+                                    tracing::debug!(
+                                        available_mb = avail_mb,
+                                        threshold_mb = memory_free_warn_mb,
+                                        "available memory below threshold - extending stagger"
+                                    );
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            saturated
+        };
+
+        // First check: if comfortable, use the short default stagger.
+        if !is_saturated() {
+            tracing::debug!(
+                stagger_secs = base_stagger_secs,
+                "system load comfortable - using default stagger"
+            );
+            std::thread::sleep(std::time::Duration::from_secs(base_stagger_secs));
+            return;
+        }
+
+        // System is saturated: enter extended wait loop with periodic rechecks.
+        tracing::info!(
+            max_wait_secs = max_wait_secs,
+            check_interval_secs = check_interval_secs,
+            "system load saturated - entering extended stagger wait"
+        );
+
+        let mut total_waited = 0u64;
+        let mut deferred_count = 0u64;
+
+        while total_waited < max_wait_secs {
+            // Sleep for the check interval.
+            let sleep_time = std::cmp::min(check_interval_secs, max_wait_secs - total_waited);
+            std::thread::sleep(std::time::Duration::from_secs(sleep_time));
+            total_waited += sleep_time;
+            deferred_count += 1;
+
+            // Recheck: if load dropped, proceed immediately.
+            if !is_saturated() {
+                tracing::info!(
+                    total_waited_secs = total_waited,
+                    deferred_count = deferred_count,
+                    "load recovered - proceeding with launch"
+                );
+                let _ = telemetry.emit(EventKind::WorkerLaunchDeferred {
+                    deferred_count,
+                    total_wait_secs: total_waited,
+                    reason: "load-adaptive stagger: load recovered within wait window".to_string(),
+                });
+                return;
+            }
+        }
+
+        // Max wait reached without recovery - proceed anyway (bounded).
+        tracing::warn!(
+            total_waited_secs = total_waited,
+            deferred_count = deferred_count,
+            "max stagger wait reached without load recovery - proceeding anyway"
+        );
+        let _ = telemetry.emit(EventKind::WorkerLaunchDeferred {
+            deferred_count,
+            total_wait_secs: total_waited,
+            reason: "load-adaptive stagger: max wait reached, proceeding despite saturation"
+                .to_string(),
+        });
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

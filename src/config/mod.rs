@@ -209,7 +209,8 @@ impl Default for WorkerConfig {
             cpu_load_warn: Self::default_cpu_load_warn(),
             memory_free_warn_mb: Self::default_memory_free_warn_mb(),
             adaptive_stagger_max_wait_secs: Self::default_adaptive_stagger_max_wait_secs(),
-            adaptive_stagger_check_interval_secs: Self::default_adaptive_stagger_check_interval_secs(),
+            adaptive_stagger_check_interval_secs:
+                Self::default_adaptive_stagger_check_interval_secs(),
             building_timeout: Self::default_building_timeout(),
             idle_backoff_min: Self::default_idle_backoff_min(),
             idle_backoff_max: Self::default_idle_backoff_max(),
@@ -1692,6 +1693,35 @@ impl FabricConfig {
     }
 }
 
+/// Outcome handling configuration (failure circuit-breaker, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutcomeConfig {
+    /// Consecutive failures before quarantining a bead (0 = disabled).
+    ///
+    /// When a bead accumulates this many consecutive failures, it is automatically
+    /// quarantined: status is set to `blocked`, a `cycling` label is added, and a
+    /// `BeadQuarantined` telemetry event is emitted.
+    ///
+    /// The default (5) is above Pluck's `split_after_failures` default (3) so
+    /// mitosis gets first crack at splitting the bead before quarantine kicks in.
+    #[serde(default = "OutcomeConfig::default_quarantine_after_failures")]
+    pub quarantine_after_failures: u32,
+}
+
+impl Default for OutcomeConfig {
+    fn default() -> Self {
+        OutcomeConfig {
+            quarantine_after_failures: Self::default_quarantine_after_failures(),
+        }
+    }
+}
+
+impl OutcomeConfig {
+    fn default_quarantine_after_failures() -> u32 {
+        5
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Config Source Tracking
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1839,6 +1869,9 @@ pub struct Config {
     /// Supervisor detection configuration.
     #[serde(default)]
     pub supervisor: SupervisorConfig,
+    /// Outcome handling configuration (failure circuit-breaker).
+    #[serde(default)]
+    pub outcome: OutcomeConfig,
 }
 
 impl Config {
@@ -2268,7 +2301,10 @@ impl ConfigLoader {
         }
         if let Some(explore_root) = overrides.explore_workspace_root {
             config.strands.explore.workspace_root = explore_root;
-            sources.insert("explore.workspace_root".to_string(), ConfigSource::CliOverride);
+            sources.insert(
+                "explore.workspace_root".to_string(),
+                ConfigSource::CliOverride,
+            );
         }
         // worker_name is handled at the Worker level, not stored in Config
     }

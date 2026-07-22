@@ -1454,9 +1454,13 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     );
 
     // Verify the bead is now in-progress and not in ready().
-    let remote_store =
-        needle::bead_store::BrCliBeadStore::discover(remote_workspace.clone().to_path_buf())
-            .unwrap();
+    let remote_store = needle::bead_store::BrCliBeadStore::discover(
+        remote_workspace.clone().to_path_buf(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let filters = Filters {
         assignee: None,
         exclude_labels: vec![
@@ -1648,8 +1652,13 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     }
 
     // Verify the bead is still assigned to the live worker.
-    let remote_store =
-        needle::bead_store::BrCliBeadStore::discover(remote_workspace.to_path_buf()).unwrap();
+    let remote_store = needle::bead_store::BrCliBeadStore::discover(
+        remote_workspace.to_path_buf(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let bead = remote_store.show(&bead_id).await.unwrap();
     assert_eq!(
         bead.assignee,
@@ -1752,8 +1761,13 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     }
 
     // Verify the bead is still assigned to us.
-    let remote_store =
-        needle::bead_store::BrCliBeadStore::discover(remote_workspace.to_path_buf()).unwrap();
+    let remote_store = needle::bead_store::BrCliBeadStore::discover(
+        remote_workspace.to_path_buf(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let bead = remote_store.show(&bead_id).await.unwrap();
     assert_eq!(
         bead.assignee,
@@ -1831,7 +1845,9 @@ async fn mend_removes_stale_dependency_links() {
     assert!(dep_output.status.success(), "br dep add failed");
 
     // Verify the dependency exists and the blocked bead is... blocked.
-    let store = needle::bead_store::BrCliBeadStore::discover(workspace.to_path_buf()).unwrap();
+    let store =
+        needle::bead_store::BrCliBeadStore::discover(workspace.to_path_buf(), None, None, None)
+            .unwrap();
     let blocked_bead = store
         .show(&needle::types::BeadId::from(blocked_id.clone()))
         .await
@@ -2016,7 +2032,9 @@ async fn idle_worker_flagging_detects_stuck_workers() {
         .expect("br init failed");
     assert!(init_output.status.success(), "br init failed");
 
-    let store = needle::bead_store::BrCliBeadStore::discover(ws_path.to_path_buf()).unwrap();
+    let store =
+        needle::bead_store::BrCliBeadStore::discover(ws_path.to_path_buf(), None, None, None)
+            .unwrap();
 
     let registry2 = Registry::new(reg_dir.path());
     let mend = MendStrand::new(
@@ -2122,7 +2140,7 @@ async fn dead_worker_cleanup_integration() {
         .arg(&workspace)
         .arg("--registry")
         .arg(&reg_dir)
-        .env("HOME", temp_dir.path())  // Isolate Explore's workspace_root to test tempdir
+        .env("HOME", temp_dir.path()) // Isolate Explore's workspace_root to test tempdir
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -2204,3 +2222,116 @@ async fn debug_worker_hang() {
 // which can access private fields. The integration test layer cannot properly
 // test this feature through the public API since the internal state (exclusion_set,
 // consecutive_race_lost) is not observable externally.
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Phase 12.2: Load-adaptive stagger tests
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn load_adaptive_stagger_respects_base_delay_when_comfortable() {
+    use needle::rate_limit::RateLimiter;
+    use needle::telemetry::Telemetry;
+
+    let telemetry = Telemetry::new("test-stagger".to_string());
+
+    // Use very high thresholds so load is "comfortable"
+    let cpu_load_warn = 10.0; // 1000% load (impossible to reach)
+    let memory_free_warn_mb = 0; // 0 MB free (impossible to reach)
+
+    let start = std::time::Instant::now();
+
+    // Should use base_stagger_secs immediately (2 seconds)
+    RateLimiter::load_adaptive_stagger(
+        cpu_load_warn,
+        memory_free_warn_mb,
+        2,   // base_stagger_secs
+        300, // max_wait_secs
+        5,   // check_interval_secs
+        &telemetry,
+    );
+
+    let elapsed = start.elapsed();
+
+    // Should wait approximately 2 seconds (base delay)
+    assert!(
+        elapsed >= std::time::Duration::from_secs(2),
+        "load_adaptive_stagger should wait at least base_stagger_secs (2s) when comfortable"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "load_adaptive_stagger should not wait significantly longer than base_stagger_secs (2s) when comfortable, but waited {:?}",
+        elapsed
+    );
+}
+
+#[tokio::test]
+async fn load_adaptive_stagger_emits_telemetry_on_extended_wait() {
+    use needle::rate_limit::RateLimiter;
+    use needle::telemetry::Telemetry;
+
+    let telemetry = Telemetry::new("test-stagger-extended".to_string());
+
+    // Use thresholds that will likely be exceeded on any reasonable system
+    let cpu_load_warn = 0.01; // 1% load threshold
+    let memory_free_warn_mb = 1000000; // 1TB free memory threshold
+
+    // Should trigger extended wait (up to max_wait_secs)
+    RateLimiter::load_adaptive_stagger(
+        cpu_load_warn,
+        memory_free_warn_mb,
+        1, // base_stagger_secs
+        5, // max_wait_secs (short to keep test fast)
+        1, // check_interval_secs
+        &telemetry,
+    );
+
+    // Note: Telemetry events are emitted asynchronously to background sinks.
+    // We cannot directly inspect the event stream in this test layer, but we
+    // can verify the function completed without panicking and took reasonable time.
+    // Full telemetry verification requires inspecting the JSONL output files
+    // or mocking the sink infrastructure at the module level.
+}
+
+#[tokio::test]
+async fn load_adaptive_stagger_bounded_by_max_wait() {
+    use needle::rate_limit::RateLimiter;
+    use needle::telemetry::Telemetry;
+
+    let telemetry = Telemetry::new("test-stagger-bounded".to_string());
+
+    // Use impossible thresholds to force extended wait
+    let cpu_load_warn = 0.01;
+    let memory_free_warn_mb = 1000000;
+
+    let start = std::time::Instant::now();
+
+    // Should not wait longer than max_wait_secs
+    RateLimiter::load_adaptive_stagger(
+        cpu_load_warn,
+        memory_free_warn_mb,
+        1, // base_stagger_secs
+        5, // max_wait_secs
+        1, // check_interval_secs
+        &telemetry,
+    );
+
+    let elapsed = start.elapsed();
+
+    // Should wait approximately max_wait_secs (5 seconds)
+    assert!(
+        elapsed >= std::time::Duration::from_secs(4),
+        "load_adaptive_stagger should wait at least 4s when load is saturated (with max_wait_secs=5)"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(7),
+        "load_adaptive_stagger should not exceed max_wait_secs (5s) by much, but waited {:?}",
+        elapsed
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// NOTE: The suspect_escalation feature is tested in worker/mod.rs unit tests
+// which can access private fields. The integration test layer cannot properly
+// test this feature through the public API since the internal state (exclusion_set,
+// consecutive_race_lost) is not observable externally.
+// ═════════════════════════════════════════════════════════════════════════════

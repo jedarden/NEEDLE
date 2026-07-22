@@ -258,8 +258,8 @@ pub fn perform_upgrade() -> Result<PathBuf> {
     // Write the new binary to :testing.
     let mut cursor = Cursor::new(&content);
     {
-        let mut file = fs::File::create(&testing_binary)
-            .context("failed to create testing binary file")?;
+        let mut file =
+            fs::File::create(&testing_binary).context("failed to create testing binary file")?;
         io::copy(&mut cursor, &mut file).context("failed to write testing binary")?;
     }
 
@@ -271,7 +271,11 @@ pub fn perform_upgrade() -> Result<PathBuf> {
             .context("failed to set executable permissions on testing binary")?;
     }
 
-    println!("Downloaded version {} to {}", check.latest_version, testing_binary.display());
+    println!(
+        "Downloaded version {} to {}",
+        check.latest_version,
+        testing_binary.display()
+    );
 
     // Run canary validation if canary workspace exists.
     let canary_workspace = home.join("canary");
@@ -290,36 +294,48 @@ pub fn perform_upgrade() -> Result<PathBuf> {
 
         if !report.suite_passed {
             // Canary failed - reject the testing binary
-            runner.reject().context("failed to reject testing binary after canary failure")?;
+            runner
+                .reject()
+                .context("failed to reject testing binary after canary failure")?;
 
             anyhow::bail!(
                 "canary validation failed: {}/{} tests passed. \
                  The testing binary has been rejected. \
                  Run 'needle canary --status' for details.",
-                report.passed, report.total_tests
+                report.passed,
+                report.total_tests
             );
         }
 
-        println!("Canary validation passed: {}/{} tests passed.", report.passed, report.total_tests);
+        println!(
+            "Canary validation passed: {}/{} tests passed.",
+            report.passed, report.total_tests
+        );
 
         // Promote :testing to :stable
-        runner.promote().context("failed to promote testing binary to stable")?;
+        runner
+            .promote()
+            .context("failed to promote testing binary to stable")?;
         println!("Promoted to :stable");
     } else {
-        println!("No canary workspace found at {}. Installing without validation.", canary_workspace.display());
+        println!(
+            "No canary workspace found at {}. Installing without validation.",
+            canary_workspace.display()
+        );
         println!("WARNING: Skipping canary validation is not recommended for production upgrades.");
-        println!("         Set up a canary workspace at {} to enable validation.", canary_workspace.display());
+        println!(
+            "         Set up a canary workspace at {} to enable validation.",
+            canary_workspace.display()
+        );
 
         // Create a minimal canary runner for promotion only (no tests run)
         use crate::canary::CanaryRunner;
-        let runner = CanaryRunner::new(
-            home.clone(),
-            canary_workspace,
-            300,
-        );
+        let runner = CanaryRunner::new(home.clone(), canary_workspace, 300);
 
         // Promote without canary validation (fallback behavior)
-        runner.promote().context("failed to promote testing binary to stable")?;
+        runner
+            .promote()
+            .context("failed to promote testing binary to stable")?;
         println!("Promoted to :stable (without canary validation)");
     }
 

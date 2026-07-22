@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::bead_store::{BeadStore, BrCliBeadStore, Filters};
 use crate::config::{CliOverrides, Config, ConfigLoader};
@@ -83,8 +83,13 @@ impl Supervisor {
     pub fn new(config: SupervisorConfig, needle_config: Config) -> Result<Self> {
         // Initialize bead store
         let store: Arc<dyn BeadStore> = Arc::new(
-            BrCliBeadStore::discover(config.workspace.clone())
-                .context("failed to initialize bead store for supervisor")?,
+            BrCliBeadStore::discover(
+                config.workspace.clone(),
+                None,
+                Some("needle".to_string()),
+                Some(env!("CARGO_PKG_VERSION").to_string()),
+            )
+            .context("failed to initialize bead store for supervisor")?,
         );
 
         // Initialize registry
@@ -332,6 +337,63 @@ impl Supervisor {
 
     /// Spawn a new worker process.
     async fn spawn_worker(&self, ready_count: usize) -> Result<()> {
+        // Phase 1: resource check before worker spawn.
+        // Check system resources (CPU and memory) before spawning a worker.
+        // If saturated, retry with bounded backoff rather than proceeding into
+        // a launch that may be killed by the OS due to resource pressure.
+        const MAX_RESOURCE_WAIT_SECS: u64 = 120; // Maximum total wait time
+        const RESOURCE_RETRY_DELAY_SECS: u64 = 5; // Initial retry delay
+        let mut resource_wait_total = 0u64;
+        let mut resource_retry_delay = RESOURCE_RETRY_DELAY_SECS;
+
+        loop {
+            match crate::rate_limit::RateLimiter::check_system_resources_for_launch(
+                self.needle_config.worker.cpu_load_warn,
+                self.needle_config.worker.memory_free_warn_mb,
+                &self.telemetry,
+            ) {
+                Ok(()) => {
+                    // Resources are acceptable, proceed to spawn
+                    break;
+                }
+                Err(e) => {
+                    if resource_wait_total >= MAX_RESOURCE_WAIT_SECS {
+                        // Still saturated after max wait, fail the spawn explicitly
+                        self.telemetry.emit(EventKind::SupervisorSpawnFailed {
+                            error: format!(
+                                "system still saturated after {}s wait: {}",
+                                MAX_RESOURCE_WAIT_SECS, e
+                            ),
+                        })?;
+                        bail!(
+                            "worker spawn deferred {} times ({}s total wait), system still saturated: {}. Spawn aborted — retry when load drops",
+                            resource_wait_total / resource_retry_delay,
+                            resource_wait_total,
+                            e
+                        );
+                    }
+
+                    // Resources are saturated, wait and retry
+                    tracing::warn!(
+                        error = %e,
+                        wait_secs = resource_retry_delay,
+                        total_waited_secs = resource_wait_total,
+                        "system resources saturated, deferring worker spawn"
+                    );
+
+                    self.telemetry.emit(EventKind::SupervisorSpawnFailed {
+                        error: format!("system saturated: {}", e),
+                    })?;
+
+                    tokio::time::sleep(Duration::from_secs(resource_retry_delay)).await;
+                    resource_wait_total += resource_retry_delay;
+
+                    // Exponential backoff with cap at 30 seconds
+                    resource_retry_delay = std::cmp::min(resource_retry_delay * 2, 30);
+                }
+            }
+        }
+
         let worker_id = self.generate_worker_id()?;
         let agent_name = self
             .config
