@@ -225,11 +225,6 @@ impl CompilationErrorVariant {
             | "E0605" | "E0606" | "E0607" | "E0608" | "E0609" | "E0610" | "E0612" | "E0613"
             | "E0614" | "E0615" => CompilationErrorVariant::ImportOrPath,
 
-            // Lifetime errors (subset of borrow checker but distinct for UX)
-            "E0495" | "E0597" | "E0623" | "E0515" | "E0503" | "E0504" | "E0510" | "E0391"
-            | "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
-            | "E0400" | "E0401" | "E0402" => CompilationErrorVariant::Lifetime,
-
             // Trait bound errors
             "E0277" | "E0207" | "E0119" | "E0210" | "E0220" | "E0222" | "E0223" | "E0224"
             | "E0225" | "E0226" | "E0227" | "E0228" | "E0229" | "E0230" | "E0231" | "E0232"
@@ -347,8 +342,8 @@ impl CompilationError {
                 let error_code = line[start + 6..end].to_string();
                 let message = if end + 1 < line.len() {
                     let rest = line[end + 1..].trim();
-                    if rest.starts_with(':') {
-                        rest[1..].trim().to_string()
+                    if let Some(stripped) = rest.strip_prefix(':') {
+                        stripped.trim().to_string()
                     } else {
                         rest.to_string()
                     }
@@ -568,6 +563,7 @@ pub fn detect_compilation_errors(stderr: &str) -> (bool, Vec<CompilationError>) 
 ///
 /// Input: "error[E0308]: mismatched types"
 /// Output: Some("E0308: mismatched types")
+#[allow(dead_code)]
 fn parse_error_line(line: &str) -> Option<String> {
     // Extract everything after "error[" until end of line
     if let Some(start) = line.find("error[") {
@@ -587,6 +583,7 @@ fn parse_error_line(line: &str) -> Option<String> {
 ///
 /// Input: "error: could not compile `my_crate`"
 /// Output: Some("my_crate")
+#[allow(dead_code)]
 fn extract_crate_name(line: &str) -> Option<String> {
     if let Some(start) = line.find('`') {
         if let Some(end) = line.rfind('`') {

@@ -4267,13 +4267,12 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
                         i += 1;
                     }
                 }
+                "--identifier" | "-i" if i + 1 < args.len() => {
+                    identifier = Some(args[i + 1].to_string());
+                    i += 2;
+                }
                 "--identifier" | "-i" => {
-                    if i + 1 < args.len() {
-                        identifier = Some(args[i + 1].to_string());
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
+                    i += 1;
                 }
                 _ => {
                     i += 1;

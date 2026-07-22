@@ -180,7 +180,7 @@ fn create_test_bead(bf_path: &PathBuf, workspace: &PathBuf) -> Result<String, an
 fn run_bf_claim(
     bf_path: &PathBuf,
     workspace: &PathBuf,
-    bead_id: &str,
+    _bead_id: &str,
     assignee: &str,
     task_id: usize,
 ) -> Result<String, anyhow::Error> {

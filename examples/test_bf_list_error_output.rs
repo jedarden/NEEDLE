@@ -3,10 +3,6 @@
 //! Run with: cargo run --example test_bf_list_error_output
 
 use anyhow::{anyhow, Context, Result};
-use std::path::PathBuf;
-
-// Import StrandError from the crate
-use needle::types::StrandError;
 
 /// Simulate the error chain that occurs when bf list fails.
 fn simulate_bf_list_error() -> Result<()> {
@@ -29,7 +25,7 @@ fn simulate_strand_error() -> Result<()> {
     simulate_bf_list_error().map_err(|e| {
         // This matches the real pattern: StrandError::StoreError(e.into())
         // which preserves the error chain.
-        let strand_err = needle::types::StrandError::StoreError(e.into());
+        let strand_err = needle::types::StrandError::StoreError(e);
         anyhow::Error::from(strand_err)
     })
 }

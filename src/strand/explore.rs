@@ -99,14 +99,18 @@ pub struct ExploreStrand {
     /// When false (pinned mode), re-discovery is skipped even if cycles elapse.
     auto_discovery_mode: bool,
     /// Starvation threshold in minutes (0 = disabled).
+    #[allow(dead_code)]
     starvation_threshold_minutes: u64,
     /// Timestamp of the last successful claim (Unix timestamp, seconds).
     /// Used for starvation detection.
+    #[allow(dead_code)]
     last_successful_claim_seconds: AtomicU64,
     /// Flag indicating whether ready beads were detected in the last scan.
+    #[allow(dead_code)]
     ready_beads_detected: AtomicU64, // 0 = no, 1 = yes
     /// Last scan timestamp per workspace (workspace path -> Unix timestamp).
     /// Tracks when each workspace was last scanned for status reporting.
+    #[allow(dead_code)]
     last_scan_per_workspace: std::sync::Mutex<std::collections::HashMap<String, u64>>,
 }
 
@@ -1463,6 +1467,9 @@ mod tests {
             StrandResult::Skipped { .. } => {
                 panic!("unexpected Skipped result");
             }
+            StrandResult::FoundButExcluded => {
+                panic!("unexpected FoundButExcluded result");
+            }
         }
     }
 
@@ -1555,6 +1562,9 @@ mod tests {
             StrandResult::Skipped { .. } => {
                 panic!("unexpected Skipped result");
             }
+            StrandResult::FoundButExcluded => {
+                panic!("unexpected FoundButExcluded result");
+            }
         }
     }
 
@@ -1622,6 +1632,9 @@ mod tests {
             }
             StrandResult::Skipped { .. } => {
                 panic!("unexpected Skipped result");
+            }
+            StrandResult::FoundButExcluded => {
+                panic!("unexpected FoundButExcluded result");
             }
         }
     }
@@ -1724,6 +1737,9 @@ mod tests {
             }
             StrandResult::Skipped { .. } => {
                 panic!("unexpected Skipped result");
+            }
+            StrandResult::FoundButExcluded => {
+                panic!("unexpected FoundButExcluded result");
             }
         }
     }

@@ -553,14 +553,20 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         bead: Mutex<Option<Bead>>,
         /// Tracks claimed beads (moved here from `bead` on claim).
         claimed: Mutex<Vec<Bead>>,
+        /// Signals that the bead has been released and the worker should exit.
+        bead_released: AtomicU32,
     }
 
     #[async_trait]
     impl BeadStore for DelayedBeadStore {
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            // After the bead is released, signal the worker to exit by returning an error.
+            if self.bead_released.load(Ordering::SeqCst) == 1 {
+                return Err(anyhow::anyhow!("test complete - bead was released"));
+            }
             let count = self.call_count.fetch_add(1, Ordering::SeqCst);
             if count >= self.bead_after {
-                // Only return the bead if it hasn't been claimed yet.
+                // Return the bead if it's available (not yet claimed or claimed but not yet released).
                 let bead = self.bead.lock().unwrap();
                 let claimed = self.claimed.lock().unwrap();
                 if bead.is_some() && !claimed.iter().any(|b| b.id == bead.as_ref().unwrap().id) {
@@ -620,7 +626,12 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
             })
         }
 
-        async fn release(&self, _id: &BeadId) -> Result<()> {
+        async fn release(&self, id: &BeadId) -> Result<()> {
+            // Remove the bead from claimed after it's been processed.
+            let mut claimed = self.claimed.lock().unwrap();
+            claimed.retain(|b| b.id != *id);
+            // Mark that the bead has been released - worker should exit on next cycle.
+            self.bead_released.store(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -701,11 +712,12 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         bead_after: 2, // Add bead after 2 calls (first call goes to EXHAUSTED, second after sleep)
         bead: Mutex::new(Some(bead)),
         claimed: Mutex::new(vec![]),
+        bead_released: AtomicU32::new(0),
     });
 
     let _home_dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
-    config.worker.idle_action = IdleAction::Wait;
+    config.worker.idle_action = IdleAction::Wait; // Wait for delayed bead
     config.worker.idle_timeout = 1; // 1 second for fast test
     config.agent.default = "echo-test".to_string();
     config.agent.routing = None; // Disable routing in tests - use adapter directly
@@ -1384,6 +1396,18 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     let remote_beads_dir = remote_workspace.join(".beads");
     fs::create_dir_all(&remote_beads_dir).unwrap();
 
+    // Initialize the br workspace first.
+    let init_output = std::process::Command::new("/home/coding/.local/bin/br")
+        .arg("init")
+        .current_dir(&remote_workspace)
+        .output()
+        .expect("br init command failed to execute");
+    assert!(
+        init_output.status.success(),
+        "br init failed: {}",
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+
     // Create a zombie bead in the remote workspace using br CLI.
     // First, create the bead as open.
     let output = std::process::Command::new("/home/coding/.local/bin/br")
@@ -1519,6 +1543,18 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     let remote_workspace = remote_dir.path().to_path_buf();
     let remote_beads_dir = remote_workspace.join(".beads");
     fs::create_dir_all(&remote_beads_dir).unwrap();
+
+    // Initialize the br workspace first.
+    let init_output = std::process::Command::new("/home/coding/.local/bin/br")
+        .arg("init")
+        .current_dir(&remote_workspace)
+        .output()
+        .expect("br init command failed to execute");
+    assert!(
+        init_output.status.success(),
+        "br init failed: {}",
+        String::from_utf8_lossy(&init_output.stderr)
+    );
 
     // Create a bead in the remote workspace.
     let output = std::process::Command::new("/home/coding/.local/bin/br")
@@ -2121,6 +2157,43 @@ async fn dead_worker_cleanup_integration() {
         raw_reg_after.workers[0].id, "claude-live-worker",
         "the live worker should be in the file"
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Debug test to find hang
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn debug_worker_hang() {
+    use std::path::PathBuf;
+    eprintln!("DEBUG: Starting test");
+
+    eprintln!("DEBUG: Creating empty store");
+    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+
+    eprintln!("DEBUG: Creating config");
+    let mut config = Config::default();
+    config.worker.idle_action = IdleAction::Exit;
+    config.agent.default = "echo-test".to_string();
+    config.agent.routing = None;
+    config.workspace.home = PathBuf::from("/tmp");
+    config.workspace.default = PathBuf::from("/tmp/test-workspace");
+
+    eprintln!("DEBUG: Creating worker");
+    let mut worker = Worker::new(config, "debug-worker".to_string(), store.clone());
+
+    let adapter = test_adapter("echo-test", "echo done", 10);
+    let mut adapters = HashMap::new();
+    adapters.insert("echo-test".to_string(), adapter);
+    worker.set_dispatcher(Dispatcher::with_adapters(
+        adapters,
+        Telemetry::new("debug-worker".to_string()),
+        10,
+    ));
+
+    eprintln!("DEBUG: About to call run()");
+    let result = worker.run().await;
+    eprintln!("DEBUG: run() returned: {:?}", result);
 }
 
 // NOTE: The suspect_escalation feature is tested in worker/mod.rs unit tests

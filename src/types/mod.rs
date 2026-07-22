@@ -319,6 +319,13 @@ pub enum StrandResult {
     ///
     /// Contains the bead to split and the current failure count.
     Split(Box<Bead>, u32),
+    /// Candidates were found but all were excluded/assigned — short retry needed.
+    ///
+    /// This is distinct from `NoWork` (which means "truly no candidates").
+    /// `FoundButExcluded` means "candidates exist but this worker can't claim
+    /// them right now" — they're assigned to other workers or blocked by labels.
+    /// This signals the worker to use short retry backoff instead of long idle.
+    FoundButExcluded,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

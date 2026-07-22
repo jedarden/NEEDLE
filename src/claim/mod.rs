@@ -276,9 +276,32 @@ impl Claimer {
                     // Continue to next candidate when threshold not yet reached
                     continue;
                 }
-                Ok(ClaimResult::Suspect { .. }) => {
-                    // Bead is already marked suspect — skip and continue
-                    continue;
+                Ok(ClaimResult::Suspect {
+                    bead_id: id,
+                    consecutive_errors,
+                    last_error,
+                }) => {
+                    // Bead is already marked suspect — propagate Suspect immediately
+                    tracing::warn!(
+                        bead_id = %id,
+                        consecutive_errors,
+                        %last_error,
+                        "bead already marked suspect, propagating without retry"
+                    );
+                    // Set Error status on the bead.claim span
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current().record(
+                        "otel.status_description",
+                        format!(
+                            "suspect: {} consecutive errors: {}",
+                            consecutive_errors, last_error
+                        ),
+                    );
+                    return Ok(ClaimOutcome::Suspect {
+                        bead_id: id,
+                        consecutive_errors,
+                        last_error,
+                    });
                 }
                 Err(e) => {
                     let reason = format!("store error: {e}");

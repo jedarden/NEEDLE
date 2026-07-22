@@ -28,6 +28,7 @@ use clap::Parser;
 
 /// Test helper to check if a PID exists in the process table.
 #[cfg(unix)]
+#[allow(dead_code)]
 fn pid_exists(pid: u32) -> bool {
     unsafe {
         let ret = libc::kill(pid as libc::pid_t, 0);
@@ -68,10 +69,10 @@ fn create_orphaned_session(session_name: &str) -> Result<(), std::io::Error> {
         .status()?;
 
     if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("failed to create tmux session: {}", status),
-        ));
+        return Err(std::io::Error::other(format!(
+            "failed to create tmux session: {}",
+            status
+        )));
     }
 
     Ok(())
@@ -106,10 +107,10 @@ fn kill_session(session_name: &str) -> Result<(), std::io::Error> {
         .status()?;
 
     if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("failed to kill tmux session: {}", status),
-        ));
+        return Err(std::io::Error::other(format!(
+            "failed to kill tmux session: {}",
+            status
+        )));
     }
 
     Ok(())
