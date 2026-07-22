@@ -26,6 +26,9 @@ use std::time::Duration;
 #[cfg(unix)]
 use clap::Parser;
 
+// Declare the tmux_fixture module (defined in tmux_fixture.rs in the same tests/ directory)
+mod tmux_fixture;
+
 /// Test helper to check if a PID exists in the process table.
 #[cfg(unix)]
 #[allow(dead_code)]
@@ -491,6 +494,175 @@ fn regression_cleanup_all_removes_all_sessions_regardless_of_liveness() {
     // No cleanup needed -- --all already removed everything
 }
 
+/// P7.1a Regression Test using TmuxSession fixture.
+///
+/// This test uses the TmuxSession fixture (from tmux_fixture.rs) to spawn a real tmux
+/// session with the exact production command shape that creates the pane_pid-vs-child-PID
+/// split, then asserts that bare `needle cleanup` does NOT remove the live session.
+///
+/// This test FAILS before the P7.1a fix (when pane_pid confusion caused cleanup to kill
+/// live sessions) and PASSES after the fix (when process tree walking correctly finds
+/// the live child process).
+///
+/// The fixture automatically handles cleanup via Drop, ensuring no leaked sessions.
+///
+/// # What this test catches
+///
+/// The P7.1a bug: pane_pid (shell wrapper) != actual needle process PID. The buggy
+/// cleanup code directly checked if pane_pid was in live_pids, which always failed because
+/// live_pids contains actual needle PIDs, not shell wrapper PIDs. This caused live sessions
+/// to be incorrectly marked as orphaned and killed.
+///
+/// # How this test works
+///
+/// 1. Spawns a real tmux session via TmuxSession::spawn(), which uses the exact production
+///    command shape: `NEEDLE_INNER=1 sleep 3600 2>> <log>`
+/// 2. The fixture captures pane_pid (shell wrapper) and log_path for verification
+/// 3. Runs bare `needle cleanup` (no --all, no --force)
+/// 4. Asserts the session still exists (cleanup did NOT kill it)
+/// 5. Asserts the log file still exists (cleanup did NOT remove it)
+/// 6. Fixture automatically kills the session on drop
+#[tokio::test]
+#[cfg(unix)]
+async fn regression_real_tmux_session_not_removed_by_bare_cleanup() {
+    use std::fs;
+    use std::process::Stdio;
+    use tmux_fixture;
+
+    // Skip if tmux not available
+    if !tmux_fixture::tmux_available() {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    // Spawn a real tmux session using the fixture.
+    // TmuxSession::spawn() creates sessions with the exact production command shape:
+    // `NEEDLE_INNER=1 sleep 3600 2>> <log>`
+    // This produces the pane_pid-vs-child-PID split that the P7.1a bug exploits.
+    let session = tmux_fixture::TmuxSession::spawn("test-cleanup-regression")
+        .await
+        .expect("Failed to spawn tmux session for regression test");
+
+    // Verify the session is alive
+    session.assert_alive();
+
+    // Capture session details for assertions
+    let session_name = session.session_name.clone();
+    let pane_pid = session.pane_pid;
+    let log_path = session.log_path.clone();
+
+    // Verify the log file exists (created by the fixture)
+    assert!(
+        log_path.exists(),
+        "Log file should exist at {:?} after spawning session",
+        log_path
+    );
+
+    // Verify the pane_pid exists in the process table
+    // On Unix, kill(0) checks if process exists without sending signal
+    #[cfg(unix)]
+    {
+        let exists = unsafe {
+            let ret = libc::kill(pane_pid as libc::pid_t, 0);
+            ret == 0 || std::io::Error::last_os_error().raw_os_error() != Some(3)
+        };
+        assert!(
+            exists,
+            "pane_pid {} should exist in process table (session is alive)",
+            pane_pid
+        );
+    }
+
+    // Verify the pane_pid is a shell wrapper process (reproduces the bug condition).
+    // Read /proc/<pane_pid>/cmdline to check if it's a shell wrapper.
+    let proc_path = format!("/proc/{}/cmdline", pane_pid);
+    if let Ok(cmdline) = fs::read_to_string(&proc_path) {
+        let cmdline_str = cmdline.replace('\0', " ");
+
+        // The cmdline should contain shell wrapper indicators (bash/sh and NEEDLE_INNER)
+        // This proves we're reproducing the exact bug condition where pane_pid != child PID
+        assert!(
+            cmdline_str.contains("NEEDLE_INNER"),
+            "pane_pid {} should be a shell wrapper with NEEDLE_INNER in cmdline, got: {}",
+            pane_pid,
+            cmdline_str
+        );
+    }
+
+    // Verify the session appears in the tmux session list
+    let sessions_before = tmux_fixture::list_all_sessions();
+    assert!(
+        sessions_before.iter().any(|s| s.contains(&session_name)),
+        "Session '{}' should exist in tmux session list before cleanup",
+        session_name
+    );
+
+    // Run bare needle cleanup (no --all, no --force).
+    // This is the exact scenario that killed armor-p6a and needle-supervisor on 2026-07-19.
+    let needle_binary =
+        std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
+
+    let output = Command::new(&needle_binary)
+        .arg("cleanup")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+
+    match output {
+        Ok(result) => {
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            let stderr = String::from_utf8_lossy(&result.stderr);
+
+            // The command should succeed
+            assert!(
+                result.status.success(),
+                "needle cleanup should succeed: stdout: {}, stderr: {}",
+                stdout,
+                stderr
+            );
+
+            // CRITICAL ASSERTION: The session should still exist after cleanup.
+            // This is the regression check that FAILS before the P7.1a fix and PASSES after.
+            let sessions_after = tmux_fixture::list_all_sessions();
+            assert!(
+                sessions_after.iter().any(|s| s.contains(&session_name)),
+                "LIVE tmux session '{}' should NOT be removed by bare cleanup \
+                 (this assertion fails before P7.1a fix, passes after)",
+                session_name
+            );
+
+            // The session should still be alive (not just in the list)
+            session.assert_alive();
+
+            // The log file should still exist (cleanup should not remove it)
+            assert!(
+                log_path.exists(),
+                "Log file should still exist at {:?} after cleanup (cleanup should not remove live session logs)",
+                log_path
+            );
+
+            // The cleanup output should not claim to have removed this session
+            if stdout.contains(&session_name) && stdout.contains("Removed") {
+                panic!(
+                    "cleanup output should not report removing live session '{}', got: {}",
+                    session_name, stdout
+                );
+            }
+
+            eprintln!(
+                "Regression test passed: bare cleanup preserved live tmux session with pane_pid split"
+            );
+        }
+        Err(e) => {
+            panic!("needle cleanup command failed: {}", e);
+        }
+    }
+
+    // Explicit cleanup for clarity (though Drop would handle it)
+    session.kill().expect("Failed to kill test session");
+    session.assert_dead();
+}
+
 /// Unit test: verify that the cleanup command can be invoked.
 ///
 /// This is a basic compilation and invocation test to ensure the cleanup
@@ -591,7 +763,8 @@ fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup(
 
     let pane_pid: u32 = match pane_pid_output {
         Ok(output) if output.status.success() => {
-            let pid_str = String::from_utf8_lossy(&output.stdout).trim();
+            let pane_str = String::from_utf8_lossy(&output.stdout);
+            let pid_str = pane_str.trim();
             match pid_str.parse() {
                 Ok(pid) => pid,
                 Err(_) => {
@@ -614,7 +787,9 @@ fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup(
     };
 
     // Verify the pane_pid exists and is a shell process (reproduces the bug condition)
-    let proc_path = Path::new("/proc").join(pane_pid.to_string()).join("cmdline");
+    let proc_path = Path::new("/proc")
+        .join(pane_pid.to_string())
+        .join("cmdline");
     let cmdline = fs::read_to_string(&proc_path).unwrap_or_default();
     let cmdline_str = cmdline.replace('\0', " ");
 
