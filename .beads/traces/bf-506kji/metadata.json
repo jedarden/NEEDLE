@@ -1,0 +1,33 @@
+{
+  "trace_id": "bf-506kji",
+  "task_type": "test_execution",
+  "timestamp": "2026-07-24T06:50:00Z",
+  "status": "incomplete",
+  "description": "NEEDLE test suite execution and output capture",
+  "exit_code": null,
+  "duration_seconds": 300,
+  "terminated_early": true,
+  "termination_reason": "Tests stuck on explore deadlock scenarios - processes terminated after 60+ seconds",
+  "test_summary": {
+    "total_tests": 1504,
+    "failed_tests": 3,
+    "failed_test_names": [
+      "bead_store::tests::br_cli_bead_store_ready_passes_explicit_limit",
+      "cli::tests::cleanup_no_flags_with_zero_dead_removes_nothing",
+      "cli::tests::scan_needle_processes_discovers_needle_run_processes"
+    ],
+    "stuck_tests": 3,
+    "stuck_test_names": [
+      "health::tests::heartbeat_creates_and_refreshes_every_30_seconds",
+      "strand::explore::tests::deadlock_scenario_assigned_beads_allow_advancement",
+      "strand::explore::tests::deadlock_scenario_excluded_and_assigned_beads_allow_advancement"
+    ]
+  },
+  "workspace": "/home/coding/NEEDLE",
+  "output_files": [
+    "cargo-test-output.txt",
+    "stdout.txt",
+    "stderr.txt",
+    "metadata.json"
+  ]
+}

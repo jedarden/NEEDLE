@@ -1,0 +1,11 @@
+tee: .beads/traces/bf-506kji/cargo-test-output.txt: No such file or directory
+
+[Initial error - directory was created and command would have succeeded on retry]
+
+Test execution was terminated due to stuck processes running for over 60 seconds.
+The following tests were stuck:
+- health::tests::heartbeat_creates_and_refreshes_every_30_seconds
+- strand::explore::tests::deadlock_scenario_assigned_beads_allow_advancement
+- strand::explore::tests::deadlock_scenario_excluded_and_assigned_beads_allow_advancement
+
+Processes were manually terminated to complete the test capture.
