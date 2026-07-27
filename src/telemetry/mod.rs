@@ -625,10 +625,10 @@ pub enum EventKind {
     SpawnPathModifiedInPlace {
         /// Path to the modified binary.
         path: String,
-        /// Original SHA-256 hash.
-        original_hash: String,
-        /// Current SHA-256 hash.
-        current_hash: String,
+        /// Original binary metadata before modification.
+        old_metadata: serde_json::Value,
+        /// New binary metadata after modification.
+        new_metadata: serde_json::Value,
         /// Type of modification.
         modification_type: String,
         /// Human-readable description.
@@ -2083,14 +2083,14 @@ impl EventKind {
             }),
             EventKind::SpawnPathModifiedInPlace {
                 path,
-                original_hash,
-                current_hash,
+                old_metadata,
+                new_metadata,
                 modification_type,
                 description,
             } => serde_json::json!({
                 "path": path,
-                "original_hash": original_hash,
-                "current_hash": current_hash,
+                "old_metadata": old_metadata,
+                "new_metadata": new_metadata,
                 "modification_type": modification_type,
                 "description": description,
             }),

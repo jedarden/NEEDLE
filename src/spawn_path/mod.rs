@@ -37,8 +37,7 @@ pub struct BinaryMetadata {
 impl BinaryMetadata {
     /// Record metadata for the current executable.
     pub fn from_current_exe() -> Result<Self> {
-        let exe_path = std::env::current_exe()
-            .context("failed to get current executable path")?;
+        let exe_path = std::env::current_exe().context("failed to get current executable path")?;
 
         Self::from_path(&exe_path)
     }
@@ -49,9 +48,11 @@ impl BinaryMetadata {
             .with_context(|| format!("failed to read metadata for {}", path.display()))?;
 
         let inode = metadata.ino();
-        let mtime = metadata.modified()
+        let mtime = metadata
+            .modified()
             .with_context(|| format!("failed to get mtime for {}", path.display()))?;
-        let mtime_secs = mtime.duration_since(SystemTime::UNIX_EPOCH)
+        let mtime_secs = mtime
+            .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
         let size = metadata.len();
@@ -320,9 +321,7 @@ impl ChangeDetectionResult {
             ChangeDetectionResult::Unchanged => {
                 "Binary unchanged since baseline recording".to_string()
             }
-            ChangeDetectionResult::ModifiedInPlace(modification) => {
-                modification.describe()
-            }
+            ChangeDetectionResult::ModifiedInPlace(modification) => modification.describe(),
             ChangeDetectionResult::Replaced {
                 original_path,
                 current_path,
@@ -341,8 +340,8 @@ impl ChangeDetectionResult {
 
 /// Compute SHA-256 hash of a file.
 fn compute_sha256(path: &Path) -> Result<String> {
-    let contents = fs::read(path)
-        .with_context(|| format!("failed to read binary at {}", path.display()))?;
+    let contents =
+        fs::read(path).with_context(|| format!("failed to read binary at {}", path.display()))?;
 
     let mut hasher = Sha256::new();
     hasher.update(&contents);
@@ -370,20 +369,39 @@ pub fn check_spawn_path_at_boot<F>(
 where
     F: FnMut(SpawnPathModificationEvent),
 {
-    let current_metadata = BinaryMetadata::from_current_exe()
-        .context("failed to record current binary metadata")?;
+    let current_metadata =
+        BinaryMetadata::from_current_exe().context("failed to record current binary metadata")?;
 
     // If we have recorded metadata, check for modification
     if let Some(recorded) = recorded_metadata {
         // Only check if the path matches (worker is running the same binary)
         if recorded.path == current_metadata.path {
-            if let Some(modification) = recorded.detect_modification()
+            if let Some(modification) = recorded
+                .detect_modification()
                 .context("failed to check for binary modification")?
             {
+                // Build old metadata from the recorded baseline
+                let old_metadata = BinaryMetadata {
+                    path: modification.path.clone(),
+                    hash: modification.original_hash.clone(),
+                    inode: modification.original_inode,
+                    mtime_secs: modification.original_mtime_secs,
+                    size: modification.original_size,
+                };
+
+                // Build new metadata from the current state
+                let new_metadata = BinaryMetadata {
+                    path: modification.path.clone(),
+                    hash: modification.current_hash.clone(),
+                    inode: modification.current_inode,
+                    mtime_secs: modification.current_mtime_secs,
+                    size: modification.current_size,
+                };
+
                 emit_telemetry(SpawnPathModificationEvent {
                     path: modification.path.display().to_string(),
-                    original_hash: modification.original_hash.clone(),
-                    current_hash: modification.current_hash.clone(),
+                    old_metadata,
+                    new_metadata,
                     modification_type: match modification.modification_type {
                         ModificationType::HashChanged => "hash_changed".to_string(),
                         ModificationType::MetadataChanged => "metadata_changed".to_string(),
@@ -401,8 +419,8 @@ where
 #[derive(Debug, Clone)]
 pub struct SpawnPathModificationEvent {
     pub path: String,
-    pub original_hash: String,
-    pub current_hash: String,
+    pub old_metadata: BinaryMetadata,
+    pub new_metadata: BinaryMetadata,
     pub modification_type: String,
     pub description: String,
 }
@@ -416,8 +434,8 @@ mod tests {
 
     #[test]
     fn test_binary_metadata_from_current_exe() {
-        let metadata = BinaryMetadata::from_current_exe()
-            .expect("failed to get current exe metadata");
+        let metadata =
+            BinaryMetadata::from_current_exe().expect("failed to get current exe metadata");
 
         assert!(!metadata.path.as_os_str().is_empty());
         assert!(!metadata.hash.is_empty());
@@ -431,24 +449,26 @@ mod tests {
 
     #[test]
     fn test_binary_metadata_no_modification() {
-        let metadata = BinaryMetadata::from_current_exe()
-            .expect("failed to get current exe metadata");
+        let metadata =
+            BinaryMetadata::from_current_exe().expect("failed to get current exe metadata");
 
         // Immediately check again — should report no modification
-        let modification = metadata.detect_modification()
+        let modification = metadata
+            .detect_modification()
             .expect("failed to check modification");
 
-        assert!(modification.is_none(), "binary should not be modified immediately after recording");
+        assert!(
+            modification.is_none(),
+            "binary should not be modified immediately after recording"
+        );
     }
 
     #[test]
     fn test_compute_sha256() {
         // Test with a known file
-        let exe_path = std::env::current_exe()
-            .expect("failed to get current exe");
+        let exe_path = std::env::current_exe().expect("failed to get current exe");
 
-        let hash = compute_sha256(&exe_path)
-            .expect("failed to compute hash");
+        let hash = compute_sha256(&exe_path).expect("failed to compute hash");
 
         assert_eq!(hash.len(), 64);
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
@@ -457,10 +477,11 @@ mod tests {
     #[test]
     fn test_compare_current_state_unchanged() {
         // Test that comparing immediately returns Unchanged
-        let baseline = BinaryMetadata::from_current_exe()
-            .expect("failed to get current exe metadata");
+        let baseline =
+            BinaryMetadata::from_current_exe().expect("failed to get current exe metadata");
 
-        let result = baseline.compare_current_state()
+        let result = baseline
+            .compare_current_state()
             .expect("failed to compare current state");
 
         assert_eq!(result, ChangeDetectionResult::Unchanged);
@@ -478,8 +499,8 @@ mod tests {
         fs::write(&binary_path, initial_content).expect("failed to write initial binary");
 
         // Record baseline metadata
-        let baseline = BinaryMetadata::from_path(&binary_path)
-            .expect("failed to record baseline metadata");
+        let baseline =
+            BinaryMetadata::from_path(&binary_path).expect("failed to record baseline metadata");
 
         // Wait a moment to ensure different mtime
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -489,13 +510,17 @@ mod tests {
         fs::write(&binary_path, modified_content).expect("failed to write modified binary");
 
         // Compare current state - should detect hash change
-        let result = baseline.compare_current_state()
+        let result = baseline
+            .compare_current_state()
             .expect("failed to compare current state");
 
         assert!(result.has_changed(), "should detect binary modification");
         match result {
             ChangeDetectionResult::ModifiedInPlace(modification) => {
-                assert_eq!(modification.modification_type, ModificationType::HashChanged);
+                assert_eq!(
+                    modification.modification_type,
+                    ModificationType::HashChanged
+                );
                 assert_ne!(modification.original_hash, modification.current_hash);
                 assert_ne!(modification.original_size, modification.current_size);
             }
@@ -514,8 +539,8 @@ mod tests {
         fs::write(&binary_path, initial_content).expect("failed to write initial binary");
 
         // Record baseline metadata
-        let baseline = BinaryMetadata::from_path(&binary_path)
-            .expect("failed to record baseline metadata");
+        let baseline =
+            BinaryMetadata::from_path(&binary_path).expect("failed to record baseline metadata");
 
         // Wait to ensure different mtime
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -525,19 +550,25 @@ mod tests {
         // On some systems, touching may not change mtime if granularity is low
 
         // Instead, let's test the logic directly by creating a modified metadata struct
-        let current_metadata = BinaryMetadata::from_path(&binary_path)
-            .expect("failed to get current metadata");
+        let current_metadata =
+            BinaryMetadata::from_path(&binary_path).expect("failed to get current metadata");
 
         // If mtime or inode changed (due to filesystem), we should detect metadata change
-        if current_metadata.mtime_secs != baseline.mtime_secs || current_metadata.inode != baseline.inode {
+        if current_metadata.mtime_secs != baseline.mtime_secs
+            || current_metadata.inode != baseline.inode
+        {
             // The modification detection should work
-            let result = baseline.compare_current_state()
+            let result = baseline
+                .compare_current_state()
                 .expect("failed to compare current state");
 
             // We may get metadata changed or unchanged depending on filesystem behavior
             match result {
                 ChangeDetectionResult::ModifiedInPlace(modification) => {
-                    assert_eq!(modification.modification_type, ModificationType::MetadataChanged);
+                    assert_eq!(
+                        modification.modification_type,
+                        ModificationType::MetadataChanged
+                    );
                     assert_eq!(modification.original_hash, modification.current_hash);
                 }
                 ChangeDetectionResult::Unchanged => {
@@ -559,8 +590,8 @@ mod tests {
 
         // Create and record a temporary binary
         fs::write(&binary_path, b"temporary content").expect("failed to write binary");
-        let baseline = BinaryMetadata::from_path(&binary_path)
-            .expect("failed to record baseline metadata");
+        let baseline =
+            BinaryMetadata::from_path(&binary_path).expect("failed to record baseline metadata");
 
         // Delete the binary
         fs::remove_file(&binary_path).expect("failed to delete binary");
@@ -568,10 +599,14 @@ mod tests {
         // Since current_exe() still returns the real needle binary, this test
         // would normally return Replaced. Instead, let's test the logic directly
         // through the detect_modification path which handles deleted files
-        let result = baseline.detect_modification()
+        let result = baseline
+            .detect_modification()
             .expect("failed to check modification");
 
-        assert!(result.is_none(), "deleted binary should return None from detect_modification");
+        assert!(
+            result.is_none(),
+            "deleted binary should return None from detect_modification"
+        );
     }
 
     #[test]
@@ -581,13 +616,18 @@ mod tests {
         // Unchanged
         let unchanged = ChangeDetectionResult::Unchanged;
         let description = unchanged.describe();
-        assert!(description.contains("unchanged"), "unchanged description should mention no changes");
+        assert!(
+            description.contains("unchanged"),
+            "unchanged description should mention no changes"
+        );
 
         // ModifiedInPlace
         let modification = BinaryModification {
             path: PathBuf::from("/test/binary"),
-            original_hash: "abc1230000000000000000000000000000000000000000000000000000001234".to_string(),
-            current_hash: "def4560000000000000000000000000000000000000000000000000000004567".to_string(),
+            original_hash: "abc1230000000000000000000000000000000000000000000000000000001234"
+                .to_string(),
+            current_hash: "def4560000000000000000000000000000000000000000000000000000004567"
+                .to_string(),
             original_inode: 100,
             current_inode: 200,
             original_mtime_secs: 1000,
@@ -598,8 +638,14 @@ mod tests {
         };
         let modified = ChangeDetectionResult::ModifiedInPlace(modification);
         let description = modified.describe();
-        assert!(description.contains("modified in place"), "should mention in-place modification");
-        assert!(description.contains("abc1230000000000"), "should show original hash prefix");
+        assert!(
+            description.contains("modified in place"),
+            "should mention in-place modification"
+        );
+        assert!(
+            description.contains("abc1230000000000"),
+            "should show original hash prefix"
+        );
         assert!(description.contains("1024"), "should show original size");
 
         // Replaced
@@ -609,9 +655,18 @@ mod tests {
             reason: "binary was replaced during deployment".to_string(),
         };
         let description = replaced.describe();
-        assert!(description.contains("replaced"), "should mention replacement");
-        assert!(description.contains("/old/binary"), "should show original path");
-        assert!(description.contains("/new/binary"), "should show current path");
+        assert!(
+            description.contains("replaced"),
+            "should mention replacement"
+        );
+        assert!(
+            description.contains("/old/binary"),
+            "should show original path"
+        );
+        assert!(
+            description.contains("/new/binary"),
+            "should show current path"
+        );
         assert!(description.contains("deployment"), "should include reason");
     }
 
@@ -651,8 +706,10 @@ mod tests {
         // HashChanged
         let hash_change = BinaryModification {
             path: PathBuf::from("/usr/bin/needle"),
-            original_hash: "original0000000000000000000000000000000000000000000000000000000000".to_string(),
-            current_hash: "modified0000000000000000000000000000000000000000000000000000000000".to_string(),
+            original_hash: "original0000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            current_hash: "modified0000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             original_inode: 12345,
             current_inode: 12345, // Same inode for hash change test
             original_mtime_secs: 1000000,
@@ -673,8 +730,10 @@ mod tests {
         // MetadataChanged
         let metadata_change = BinaryModification {
             path: PathBuf::from("/usr/bin/needle"),
-            original_hash: "same0000000000000000000000000000000000000000000000000000000000".to_string(),
-            current_hash: "same0000000000000000000000000000000000000000000000000000000000".to_string(),
+            original_hash: "same0000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
+            current_hash: "same0000000000000000000000000000000000000000000000000000000000"
+                .to_string(),
             original_inode: 11111,
             current_inode: 22222,
             original_mtime_secs: 1000000,

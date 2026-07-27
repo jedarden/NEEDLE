@@ -659,10 +659,15 @@ impl Worker {
         // Record spawn-path binary metadata at boot time
         match crate::spawn_path::check_spawn_path_at_boot(None, |event| {
             // Emit telemetry event if modification was detected
+            let old_metadata_json = serde_json::to_value(&event.old_metadata)
+                .unwrap_or_else(|_| serde_json::Value::Null);
+            let new_metadata_json = serde_json::to_value(&event.new_metadata)
+                .unwrap_or_else(|_| serde_json::Value::Null);
+
             let _ = self.telemetry.emit(EventKind::SpawnPathModifiedInPlace {
                 path: event.path,
-                original_hash: event.original_hash,
-                current_hash: event.current_hash,
+                old_metadata: old_metadata_json,
+                new_metadata: new_metadata_json,
                 modification_type: event.modification_type,
                 description: event.description,
             });
