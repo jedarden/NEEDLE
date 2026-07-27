@@ -298,6 +298,7 @@ impl super::Strand for PluckStrand {
         let filters = Filters {
             assignee: None,
             exclude_labels: self.exclude_labels.clone(),
+            exclude_ids: HashSet::new(),
         };
 
         tracing::debug!(

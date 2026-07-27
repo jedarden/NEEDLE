@@ -509,6 +509,7 @@ impl super::Strand for ExploreStrand {
                 "human".to_string(),
                 "blocked".to_string(),
             ],
+            exclude_ids: HashSet::new(),
         };
 
         // Get this worker's rotated workspace order to de-herd workers

@@ -1,0 +1,30 @@
+warning: unused variable: `global_routing`
+   --> tests/routing_integration.rs:737:9
+    |
+737 |     let global_routing = RoutingConfig {
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_global_routing`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `global_routing`
+   --> tests/routing_integration.rs:797:9
+    |
+797 |     let global_routing = RoutingConfig {
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_global_routing`
+
+warning: unused variable: `dispatcher`
+    --> tests/routing_integration.rs:1910:9
+     |
+1910 |     let dispatcher = make_test_dispatcher(vec![make_test_adapter(
+     |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_dispatcher`
+
+warning: `needle` (test "routing_integration") generated 3 warnings (run `cargo fix --test "routing_integration" -p needle` to apply 3 suggestions)
+warning: unused doc comment
+  --> tests/routing_matcher_baseline.rs:22:5
+   |
+22 | /     /// Baseline test documenting CURRENT matcher behavior when multiple rules
+23 | |     /// both match the same model AND route to the same adapter.
+24 | |     ///
+25 | |     /// This test verifies that the matcher implements "first-match-wins" behavior:
+...  |
+29 | |     ///

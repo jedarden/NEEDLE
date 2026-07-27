@@ -1,0 +1,16 @@
+{
+  "bead_id": "bf-24ftj1",
+  "agent": "claude-code-glm-4.7-h1-bforge",
+  "provider": "zai",
+  "model": "glm-4.7",
+  "exit_code": null,
+  "outcome": "running",
+  "duration_ms": null,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-07-24T07:52:13.827106982Z",
+  "trace_format": "test_capture",
+  "pruned": false,
+  "template_version": "1.0"
+}
