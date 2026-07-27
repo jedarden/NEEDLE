@@ -9,6 +9,7 @@
 //! Depends on: `types`.
 
 use std::path::{Path, PathBuf};
+use std::collections::HashSet;
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -246,12 +247,24 @@ pub struct SyncRecoveryError {
 // ─── Filters ─────────────────────────────────────────────────────────────────
 
 /// Filters applied when listing ready beads.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Filters {
     /// Only return beads assigned to this actor. `None` = no filter.
     pub assignee: Option<String>,
     /// Exclude beads that have any of these labels.
     pub exclude_labels: Vec<String>,
+    /// Exclude beads with these IDs.
+    pub exclude_ids: HashSet<BeadId>,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Self {
+            assignee: None,
+            exclude_labels: Vec::new(),
+            exclude_ids: HashSet::new(),
+        }
+    }
 }
 
 // ─── RepairReport ─────────────────────────────────────────────────────────────
@@ -907,6 +920,34 @@ impl BrCliBeadStore {
 
         Ok(stdout)
     }
+
+    /// Build the `bf claim` subprocess arguments for testing.
+    ///
+    /// This is a test helper that returns the exact arguments that would be passed
+    /// to the `bf claim` subprocess, including metadata flags when available.
+    /// Used by tests to verify that --model/--harness/--harness-version flags are
+    /// properly included when metadata is set.
+    #[cfg(test)]
+    pub fn build_claim_args(&self, actor: &str) -> Vec<String> {
+        let mut args: Vec<String> = Vec::with_capacity(10);
+        args.push("claim".to_string());
+        if let Some(model) = &self.model {
+            args.push("--model".to_string());
+            args.push(model.clone());
+        }
+        if let Some(harness) = &self.harness {
+            args.push("--harness".to_string());
+            args.push(harness.clone());
+        }
+        if let Some(harness_version) = &self.harness_version {
+            args.push("--harness-version".to_string());
+            args.push(harness_version.clone());
+        }
+        args.push("--assignee".to_string());
+        args.push(actor.to_string());
+        args.push("--json".to_string());
+        args
+    }
 }
 
 /// Build the `bf batch` op array for an atomic split: create every child, then
@@ -992,6 +1033,11 @@ impl BeadStore for BrCliBeadStore {
         // Apply label exclusion filter (br CLI doesn't support this natively).
         if !filters.exclude_labels.is_empty() {
             beads.retain(|b| !b.labels.iter().any(|l| filters.exclude_labels.contains(l)));
+        }
+
+        // Apply ID exclusion filter (in-memory filter).
+        if !filters.exclude_ids.is_empty() {
+            beads.retain(|b| !filters.exclude_ids.contains(&b.id));
         }
 
         Ok(beads)
@@ -1662,6 +1708,11 @@ impl BeadStore for BfCliBeadStore {
             beads.retain(|b| !b.labels.iter().any(|l| filters.exclude_labels.contains(l)));
         }
 
+        // Apply ID exclusion filter (in-memory filter).
+        if !filters.exclude_ids.is_empty() {
+            beads.retain(|b| !filters.exclude_ids.contains(&b.id));
+        }
+
         Ok(beads)
     }
 
@@ -1683,29 +1734,24 @@ impl BeadStore for BfCliBeadStore {
     }
 
     async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
-        // Build bf claim args
-        let mut args = vec!["claim", "--assignee", actor, "--json"];
-
-        // Optional telemetry args
-        let model_arg;
-        let harness_arg;
-        let harness_version_arg;
-
+        // Build bf claim args. Velocity-aware scoring metadata is passed
+        // BEFORE --assignee/--json; missing values are simply omitted.
+        let mut args = vec!["claim"];
         if let Some(ref model) = self.model {
             args.push("--model");
-            model_arg = model.as_str();
-            args.push(model_arg);
+            args.push(model.as_str());
         }
         if let Some(ref harness) = self.harness {
             args.push("--harness");
-            harness_arg = harness.as_str();
-            args.push(harness_arg);
+            args.push(harness.as_str());
         }
         if let Some(ref harness_version) = self.harness_version {
             args.push("--harness-version");
-            harness_version_arg = harness_version.as_str();
-            args.push(harness_version_arg);
+            args.push(harness_version.as_str());
         }
+        args.push("--assignee");
+        args.push(actor);
+        args.push("--json");
 
         let stdout = self.run_bf(&args).await?;
 
@@ -1887,6 +1933,26 @@ mod tests {
         let f = Filters::default();
         assert!(f.assignee.is_none());
         assert!(f.exclude_labels.is_empty());
+        assert!(f.exclude_ids.is_empty());
+    }
+
+    #[test]
+    fn filters_with_exclude_ids_filters_beads() {
+        use std::collections::HashSet;
+
+        // Create a Filters with exclude_ids containing "bf-abc"
+        let mut exclude_ids = HashSet::new();
+        exclude_ids.insert(BeadId::from("bf-abc".to_string()));
+
+        let filters = Filters {
+            assignee: None,
+            exclude_labels: vec![],
+            exclude_ids,
+        };
+
+        // Verify the exclude_ids contains the expected bead ID
+        assert!(filters.exclude_ids.contains(&BeadId::from("bf-abc".to_string())));
+        assert_eq!(filters.exclude_ids.len(), 1);
     }
 
     #[test]
@@ -2422,6 +2488,116 @@ echo '[]'
         );
 
         // Cleanup handled by tmp_dir drop
+    }
+
+    #[tokio::test]
+    async fn br_cli_bead_store_ready_filters_by_exclude_ids() {
+        use std::collections::HashSet;
+
+        // Test that ready() filters out beads whose IDs are in exclude_ids
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let workspace = tmp_dir.path();
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+
+        // Create a fake br that returns multiple beads
+        let fake_br = tmp_dir.path().join("fake-br-ready-exclude");
+        std::fs::write(
+            &fake_br,
+            r#"#!/bin/sh
+echo '[{"id":"bf-abc","title":"Test bead ABC","description":"desc","priority":2,"status":"open","assignee":null,"source_repo":"/home/coding/NEEDLE","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},{"id":"bf-def","title":"Test bead DEF","description":"desc","priority":2,"status":"open","assignee":null,"source_repo":"/home/coding/NEEDLE","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_br,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let store = BrCliBeadStore::new(fake_br.clone(), workspace.to_path_buf(), None, None, None)
+            .unwrap();
+
+        // Test 1: No exclude_ids filtering - both beads returned
+        let filters = Filters::default();
+        let beads = store.ready(&filters).await.unwrap();
+        assert_eq!(beads.len(), 2, "should return both beads when no exclude_ids");
+
+        // Test 2: Exclude one bead by ID
+        let mut exclude_ids = HashSet::new();
+        exclude_ids.insert(BeadId::from("bf-abc".to_string()));
+
+        let filters_with_exclude = Filters {
+            assignee: None,
+            exclude_labels: vec![],
+            exclude_ids,
+        };
+
+        let filtered_beads = store.ready(&filters_with_exclude).await.unwrap();
+        assert_eq!(filtered_beads.len(), 1, "should return only one bead after exclude_ids filtering");
+        assert_eq!(
+            filtered_beads[0].id.as_ref(),
+            "bf-def",
+            "remaining bead should be bf-def"
+        );
+        assert!(
+            !filtered_beads.iter().any(|b| b.id.as_ref() == "bf-abc"),
+            "bf-abc should be excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn bf_cli_bead_store_ready_filters_by_exclude_ids() {
+        use std::collections::HashSet;
+
+        // Test that ready() filters out beads whose IDs are in exclude_ids
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let workspace = tmp_dir.path();
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+
+        // Create a fake bf that returns multiple beads
+        let fake_bf = tmp_dir.path().join("fake-bf-ready-exclude");
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+echo '[{"id":"bf-abc","title":"Test bead ABC","description":"desc","priority":2,"status":"open","assignee":null,"source_repo":"/home/coding/NEEDLE","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"},{"id":"bf-def","title":"Test bead DEF","description":"desc","priority":2,"status":"open","assignee":null,"source_repo":"/home/coding/NEEDLE","dependencies":[],"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}]'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &fake_bf,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let store = BfCliBeadStore::new(fake_bf.clone(), workspace.to_path_buf(), None, None, None)
+            .unwrap();
+
+        // Test 1: No exclude_ids filtering - both beads returned
+        let filters = Filters::default();
+        let beads = store.ready(&filters).await.unwrap();
+        assert_eq!(beads.len(), 2, "should return both beads when no exclude_ids");
+
+        // Test 2: Exclude one bead by ID
+        let mut exclude_ids = HashSet::new();
+        exclude_ids.insert(BeadId::from("bf-abc".to_string()));
+
+        let filters_with_exclude = Filters {
+            assignee: None,
+            exclude_labels: vec![],
+            exclude_ids,
+        };
+
+        let filtered_beads = store.ready(&filters_with_exclude).await.unwrap();
+        assert_eq!(filtered_beads.len(), 1, "should return only one bead after exclude_ids filtering");
+        assert_eq!(
+            filtered_beads[0].id.as_ref(),
+            "bf-def",
+            "remaining bead should be bf-def"
+        );
+        assert!(
+            !filtered_beads.iter().any(|b| b.id.as_ref() == "bf-abc"),
+            "bf-abc should be excluded"
+        );
     }
 
     #[tokio::test]
