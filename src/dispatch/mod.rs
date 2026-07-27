@@ -23,6 +23,7 @@ use crate::prompt::BuiltPrompt;
 use crate::sanitize::{CustomPattern, Sanitizer};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::trace::{detect_trace_format, TraceCapture, TraceMetadata};
+use crate::tsnet::{inject_identity_env, IdentityRegistry, TsnetConfig};
 use crate::types::{BeadId, InputMethod, Outcome};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -217,6 +218,12 @@ pub struct AgentAdapter {
     /// report an error if it cannot be found.
     #[serde(default)]
     pub output_transform: Option<String>,
+    /// Harness name for velocity-aware claim scoring.
+    #[serde(default)]
+    pub harness: Option<String>,
+    /// Harness version for velocity-aware claim scoring.
+    #[serde(default)]
+    pub harness_version: Option<String>,
 }
 
 fn default_input_method() -> InputMethod {
@@ -272,6 +279,8 @@ fn builtin_claude_sonnet() -> AgentAdapter {
         model: Some("claude-sonnet-4-6".to_string()),
         token_extraction: TokenExtraction::None,
         output_transform: Some("needle-transform-claude".to_string()),
+        harness: Some("needle".to_string()),
+        harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     }
 }
 
@@ -295,6 +304,8 @@ fn builtin_claude_opus() -> AgentAdapter {
         model: Some("claude-opus-4-6".to_string()),
         token_extraction: TokenExtraction::None,
         output_transform: Some("needle-transform-claude".to_string()),
+        harness: Some("needle".to_string()),
+        harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     }
 }
 
@@ -317,6 +328,8 @@ fn builtin_opencode() -> AgentAdapter {
         model: None,
         token_extraction: TokenExtraction::None,
         output_transform: None,
+        harness: Some("needle".to_string()),
+        harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     }
 }
 
@@ -343,6 +356,8 @@ fn builtin_codex() -> AgentAdapter {
         model: Some("gpt-5.6-terra".to_string()),
         token_extraction: TokenExtraction::None,
         output_transform: Some("needle-transform-codex".to_string()),
+        harness: Some("needle".to_string()),
+        harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     }
 }
 
@@ -371,6 +386,8 @@ fn builtin_aider() -> AgentAdapter {
             output_group: 2,
         },
         output_transform: None,
+        harness: Some("needle".to_string()),
+        harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     }
 }
 
@@ -389,6 +406,8 @@ fn builtin_generic() -> AgentAdapter {
         model: None,
         token_extraction: TokenExtraction::None,
         output_transform: None,
+        harness: Some("needle".to_string()),
+        harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     }
 }
 
@@ -475,6 +494,11 @@ pub struct Dispatcher {
     /// Sanitizer applied to all trace content before writing to disk.
     /// `None` when trace sanitization is disabled in config.
     sanitizer: Option<Arc<Sanitizer>>,
+    /// Tsnet identity registry for per-worker network identity.
+    /// `None` when tsnet is disabled in config.
+    tsnet_registry: Option<IdentityRegistry>,
+    /// Tsnet configuration (cached from config).
+    tsnet_config: TsnetConfig,
 }
 
 impl Dispatcher {
@@ -482,11 +506,22 @@ impl Dispatcher {
     pub fn new(config: &Config, telemetry: Telemetry) -> Result<Self> {
         let adapters = load_adapters(&config.agent.adapters_dir, &builtin_adapters())?;
         let sanitizer = build_sanitizer(config);
+        let tsnet_config = config.tsnet.clone();
+
+        // Create tsnet registry only if enabled
+        let tsnet_registry = if tsnet_config.enabled {
+            Some(IdentityRegistry::new(tsnet_config.clone()))
+        } else {
+            None
+        };
+
         Ok(Dispatcher {
             adapters,
             telemetry,
             global_timeout_secs: config.agent.timeout,
             sanitizer,
+            tsnet_registry,
+            tsnet_config,
         })
     }
 
@@ -501,6 +536,8 @@ impl Dispatcher {
             telemetry,
             global_timeout_secs,
             sanitizer: None,
+            tsnet_registry: None,
+            tsnet_config: TsnetConfig::default(),
         }
     }
 
@@ -714,6 +751,25 @@ impl Dispatcher {
         let trace_capture =
             TraceCapture::new_with_sanitizer(bead_id, workspace, self.sanitizer.clone());
 
+        // Provision tsnet identity if enabled
+        let worker_id = self.telemetry.worker_id().to_string();
+        let tsnet_identity = if let Some(ref registry) = self.tsnet_registry {
+            match registry.provision_identity(&worker_id, bead_id).await {
+                Ok(identity) => Some(identity),
+                Err(e) => {
+                    tracing::warn!(
+                        worker_id = %worker_id,
+                        bead_id = %bead_id.as_ref(),
+                        error = %e,
+                        "failed to provision tsnet identity, continuing without network identity"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let model = adapter.model.as_deref().unwrap_or("default");
         let rendered = render_template(
             &adapter.invoke_template,
@@ -723,6 +779,14 @@ impl Dispatcher {
             model,
         );
 
+        // Build environment variables for the child process
+        let mut child_env = adapter.environment.clone();
+
+        // Inject tsnet identity environment variables if provisioned
+        if let (Some(ref identity), Some(ref registry)) = (&tsnet_identity, &self.tsnet_registry) {
+            inject_identity_env(identity, &self.tsnet_config, &mut child_env);
+        }
+
         // Safety: setpgid(0,0) is async-signal-safe and idempotent.
         let mut child = unsafe {
             tokio::process::Command::new("bash")
@@ -730,7 +794,7 @@ impl Dispatcher {
                 .arg(&rendered)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
-                .envs(&adapter.environment)
+                .envs(&child_env)
                 .pre_exec(|| {
                     libc::setpgid(0, 0);
                     Ok(())
@@ -1139,6 +1203,11 @@ impl Dispatcher {
         } else {
             None
         };
+
+        // Release tsnet identity if it was provisioned
+        if let (Some(ref identity), Some(ref registry)) = (&tsnet_identity, &self.tsnet_registry) {
+            registry.release_identity(&identity.hostname).await;
+        }
 
         Ok(ExecutionResult {
             exit_code,
@@ -1555,6 +1624,8 @@ mod tests {
             model: None,
             token_extraction: TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         }
     }
 
