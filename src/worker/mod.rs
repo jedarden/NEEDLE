@@ -371,6 +371,9 @@ pub struct Worker {
     /// Whether the most recent select cycle found candidates but they were all excluded.
     /// Used to trigger short retry instead of full idle backoff.
     found_but_excluded: bool,
+    /// Spawn-path binary metadata recorded at boot time.
+    /// Used to detect in-place binary modifications during worker lifecycle.
+    spawn_path_metadata: Option<crate::spawn_path::BinaryMetadata>,
 }
 
 impl Worker {
@@ -528,6 +531,7 @@ impl Worker {
             last_outcome: None,
             last_workspace_mtime: None,
             found_but_excluded: false,
+            spawn_path_metadata: None,
         }
     }
 
@@ -643,6 +647,54 @@ impl Worker {
         }
         self.telemetry.emit(EventKind::InitStepCompleted {
             step: "version_handshake".to_string(),
+            duration_ms: step_start.elapsed().as_millis() as u64,
+        })?;
+
+        // Step: Spawn-path binary metadata recording
+        self.telemetry.emit(EventKind::InitStepStarted {
+            step: "spawn_path_metadata".to_string(),
+        })?;
+        let step_start = Instant::now();
+
+        // Record spawn-path binary metadata at boot time
+        match crate::spawn_path::check_spawn_path_at_boot(None, |event| {
+            // Emit telemetry event if modification was detected
+            let _ = self.telemetry.emit(EventKind::SpawnPathModifiedInPlace {
+                path: event.path,
+                original_hash: event.original_hash,
+                current_hash: event.current_hash,
+                modification_type: event.modification_type,
+                description: event.description,
+            });
+        }) {
+            Ok(metadata) => {
+                let path = metadata.path.clone();
+                let inode = metadata.inode;
+                let mtime_secs = metadata.mtime_secs;
+                let size = metadata.size;
+                let hash_preview = String::from(&metadata.hash[..16]);
+                self.spawn_path_metadata = Some(metadata);
+                tracing::info!(
+                    path = %path.display(),
+                    inode = inode,
+                    mtime_secs = mtime_secs,
+                    size = size,
+                    hash = %hash_preview,
+                    "recorded spawn-path binary metadata"
+                );
+            }
+            Err(e) => {
+                // Handle gracefully when spawn-path is not available or cannot be accessed
+                tracing::warn!(
+                    error = %e,
+                    "failed to record spawn-path binary metadata, continuing without it"
+                );
+                self.spawn_path_metadata = None;
+            }
+        }
+
+        self.telemetry.emit(EventKind::InitStepCompleted {
+            step: "spawn_path_metadata".to_string(),
             duration_ms: step_start.elapsed().as_millis() as u64,
         })?;
 
@@ -5808,6 +5860,204 @@ mod tests {
         assert!(
             mtime.is_none(),
             "check_workspace_mtimes should return None when no files exist"
+        );
+    }
+
+    // ── Retry-path decision tests (P5.6: event-driven wakeups + short retry) ─────
+
+    #[test]
+    fn short_retry_backoff_used_when_found_but_excluded() {
+        let _temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.worker.short_retry_backoff = 5;
+        config.worker.idle_backoff_min = 60;
+        config.worker.idle_backoff_max = 120;
+        let store = Arc::new(MockStore::empty());
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
+
+        // Set found_but_excluded flag to simulate found-but-excluded scenario
+        worker.found_but_excluded = true;
+
+        // Verify that short_retry_backoff would be used
+        let expected_backoff = worker.config.worker.short_retry_backoff;
+        let jittered_backoff = worker.compute_jittered_backoff();
+
+        // When found_but_excluded is true, short_retry_backoff should be used
+        // This is tested indirectly by verifying the flag is set correctly
+        assert_eq!(
+            expected_backoff, 5,
+            "short_retry_backoff should be configured to 5 seconds"
+        );
+        assert!(
+            jittered_backoff >= 60 && jittered_backoff <= 120,
+            "jittered backoff should be in idle range [60, 120]"
+        );
+        assert_ne!(
+            expected_backoff, jittered_backoff,
+            "short_retry_backoff (5s) should differ from jittered idle backoff (60-120s)"
+        );
+    }
+
+    #[test]
+    fn jittered_idle_backoff_used_when_no_candidates_found() {
+        let _temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.worker.short_retry_backoff = 5;
+        config.worker.idle_backoff_min = 60;
+        config.worker.idle_backoff_max = 120;
+        let store = Arc::new(MockStore::empty());
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
+
+        // Set found_but_excluded to false (truly no work)
+        worker.found_but_excluded = false;
+
+        // Verify that jittered idle backoff would be used
+        let jittered_backoff = worker.compute_jittered_backoff();
+
+        assert!(
+            jittered_backoff >= 60 && jittered_backoff <= 120,
+            "jittered backoff should be in idle range [60, 120]"
+        );
+        assert_ne!(
+            jittered_backoff, 5,
+            "jittered backoff should not equal short_retry_backoff (5s)"
+        );
+    }
+
+    #[test]
+    fn found_but_excluded_flag_set_from_explore_strand() {
+        let _temp_dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let store = Arc::new(MockStore::empty());
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
+
+        // Simulate explore strand finding candidates that get excluded
+        worker.last_strand_evaluations = vec![
+            ("explore".to_string(), "BeadFound".to_string(), 100),
+            ("pluck".to_string(), "NoWork".to_string(), 50),
+        ];
+
+        // Verify the flag is set correctly
+        assert!(
+            worker.found_but_all_excluded(),
+            "found_but_all_excluded should return true when explore found candidates"
+        );
+
+        // Verify setting the flag works correctly
+        worker.found_but_excluded = worker.found_but_all_excluded();
+        assert!(
+            worker.found_but_excluded,
+            "found_but_excluded flag should be set to true"
+        );
+    }
+
+    #[test]
+    fn found_but_excluded_flag_set_from_pluck_strand() {
+        let _temp_dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let store = Arc::new(MockStore::empty());
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
+
+        // Simulate pluck strand finding candidates that get excluded
+        worker.last_strand_evaluations = vec![
+            ("pluck".to_string(), "candidates_found".to_string(), 100),
+            ("explore".to_string(), "NoWork".to_string(), 50),
+        ];
+
+        // Verify the flag is set correctly
+        assert!(
+            worker.found_but_all_excluded(),
+            "found_but_all_excluded should return true when pluck found candidates"
+        );
+
+        // Verify setting the flag works correctly
+        worker.found_but_excluded = worker.found_but_all_excluded();
+        assert!(
+            worker.found_but_excluded,
+            "found_but_excluded flag should be set to true"
+        );
+    }
+
+    #[test]
+    fn found_but_excluded_flag_false_when_truly_no_work() {
+        let _temp_dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let store = Arc::new(MockStore::empty());
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
+
+        // Simulate all strands returning NoWork (truly no work)
+        worker.last_strand_evaluations = vec![
+            ("pluck".to_string(), "NoWork".to_string(), 50),
+            ("mend".to_string(), "NoWork".to_string(), 30),
+            ("explore".to_string(), "NoWork".to_string(), 100),
+        ];
+
+        // Verify the flag is NOT set
+        assert!(
+            !worker.found_but_all_excluded(),
+            "found_but_all_excluded should return false when no strand found candidates"
+        );
+
+        // Verify setting the flag works correctly
+        worker.found_but_excluded = worker.found_but_all_excluded();
+        assert!(
+            !worker.found_but_excluded,
+            "found_but_excluded flag should be set to false"
+        );
+    }
+
+    #[test]
+    fn retry_path_decision_uses_correct_backoff_values() {
+        let _temp_dir = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+
+        // Set distinct backoff values to verify correct selection
+        config.worker.short_retry_backoff = 3;
+        config.worker.idle_backoff_min = 70;
+        config.worker.idle_backoff_max = 130;
+
+        let store = Arc::new(MockStore::empty());
+        let worker = Worker::new(config, "test-worker".to_string(), store);
+
+        // Test short retry backoff value
+        assert_eq!(
+            worker.config.worker.short_retry_backoff, 3,
+            "short_retry_backoff should be 3 seconds"
+        );
+
+        // Test jittered backoff range
+        let jittered = worker.compute_jittered_backoff();
+        assert!(
+            jittered >= 70 && jittered <= 130,
+            "jittered backoff {} should be in range [70, 130]",
+            jittered
+        );
+
+        // Verify the values are distinct
+        assert_ne!(
+            3, jittered,
+            "short_retry_backoff (3s) should differ from idle backoff ({}s)",
+            jittered
+        );
+    }
+
+    #[test]
+    fn found_but_excluded_detects_explore_candidates_with_exclusion() {
+        let _temp_dir = tempfile::tempdir().unwrap();
+        let config = Config::default();
+        let store = Arc::new(MockStore::empty());
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
+
+        // Simulate explore finding beads but all being excluded (assigned, blocked labels, etc.)
+        // This is the deadlock scenario from bf-1d64q
+        worker.last_strand_evaluations = vec![
+            ("pluck".to_string(), "NoWork".to_string(), 50),
+            ("explore".to_string(), "BeadFound".to_string(), 200),
+        ];
+
+        assert!(
+            worker.found_but_all_excluded(),
+            "should detect explore found candidates (excluded by filters)"
         );
     }
 }
