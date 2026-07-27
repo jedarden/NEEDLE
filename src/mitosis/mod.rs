@@ -116,6 +116,37 @@ impl MitosisEvaluator {
             return Ok(MitosisResult::OutOfScope);
         }
 
+        // Check if the bead has exceeded the maximum mitosis depth.
+        let current_depth = parse_mitosis_depth(bead);
+        if self.config.max_depth > 0 && current_depth >= self.config.max_depth {
+            tracing::info!(
+                bead_id = %bead.id,
+                current_depth,
+                max_depth = self.config.max_depth,
+                "mitosis skipped: bead has reached maximum generation depth"
+            );
+            // Flag the bead for human attention by adding a 'human' label.
+            // This signals that the bead requires manual decomposition or
+            // that the task is too granular for further automated splitting.
+            if let Err(e) = store.add_label(&bead.id, "human").await {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to add 'human' label to depth-limited bead"
+                );
+            }
+            self.telemetry.emit(EventKind::MitosisSkipped {
+                parent_id: bead.id.clone(),
+                existing_children: 0,
+            })?;
+            return Ok(MitosisResult::Skipped {
+                reason: format!(
+                    "depth {} exceeds maximum depth {}",
+                    current_depth, self.config.max_depth
+                ),
+            });
+        }
+
         // Check failure count conditions.
         let failure_count = self.get_failure_count(store, &bead.id).await?;
 
@@ -290,12 +321,23 @@ impl MitosisEvaluator {
         let existing = self.get_existing_children(store, &parent.id).await?;
         let existing_titles: Vec<String> = existing.iter().map(|t| t.to_lowercase()).collect();
 
+        // Compute the depth for child beads based on the parent's depth.
+        // If parent has no mitosis-depth label (depth 0), children get depth 1.
+        // If parent has mitosis-depth:N, children get depth N+1.
+        let parent_depth = parse_mitosis_depth(parent);
+        let child_depth = parent_depth + 1;
+
         // Child beads carry parent-tracking labels for reliable dedup. Labels
         // are stored on the bead itself and survive FrankenSQLite index
         // corruption, unlike dependency relationships. All children in this
         // split share the same label set.
         let parent_label = format!("parent-{}", parent.id);
-        let labels: Vec<&str> = vec!["mitosis-child", "mitosis-depth:1", &parent_label];
+        let depth_label = format!("mitosis-depth:{}", child_depth);
+        let labels: Vec<&str> = vec![
+            "mitosis-child",
+            &depth_label,
+            &parent_label,
+        ];
 
         // Dedup first, then build the list of children to create.
         let mut to_create: Vec<NewChild> = Vec::new();
@@ -318,7 +360,7 @@ impl MitosisEvaluator {
             to_create.push(NewChild {
                 title: &child.title,
                 body: &child.body,
-                labels: &labels,
+                labels: labels.as_slice(),
             });
         }
 
@@ -567,6 +609,19 @@ fn titles_match(existing: &str, proposed: &str) -> bool {
     let p = normalize(proposed);
 
     e == p || e.contains(&p) || p.contains(&e)
+}
+
+/// Parse the mitosis depth from a bead's labels.
+///
+/// Returns the depth value if a mitosis-depth label exists and is valid,
+/// otherwise returns 0 (indicating this is not a mitosis child).
+fn parse_mitosis_depth(bead: &Bead) -> u32 {
+    bead.labels
+        .iter()
+        .filter_map(|l| l.strip_prefix("mitosis-depth:"))
+        .filter_map(|n| n.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Detect if a bead references NEEDLE-internal configuration.
@@ -885,6 +940,7 @@ End of response."#;
             first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 0,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -918,6 +974,7 @@ End of response."#;
             first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 0,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -941,6 +998,11 @@ End of response."#;
 
     /// Create a bead that looks like an existing mitosis child of a parent.
     fn existing_child(title: &str, parent_id: &str) -> Bead {
+        existing_child_with_depth(title, parent_id, 1)
+    }
+
+    /// Create a bead that looks like an existing mitosis child with a specific depth.
+    fn existing_child_with_depth(title: &str, parent_id: &str, depth: u32) -> Bead {
         Bead {
             id: BeadId::from(format!("existing-{}", title.replace(' ', "-"))),
             title: title.to_string(),
@@ -950,7 +1012,7 @@ End of response."#;
             assignee: None,
             labels: vec![
                 "mitosis-child".to_string(),
-                "mitosis-depth:1".to_string(),
+                format!("mitosis-depth:{}", depth),
                 format!("parent-{}", parent_id),
             ],
             workspace: PathBuf::from("/tmp/test"),
@@ -968,6 +1030,7 @@ End of response."#;
             first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 0,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1014,6 +1077,7 @@ End of response."#;
             first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 0,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1056,6 +1120,7 @@ End of response."#;
             first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 0,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1103,6 +1168,7 @@ End of response."#;
             first_failure_only: false,
             force_failure_threshold: 0,
             repeat_interval: 50,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1193,6 +1259,7 @@ End of response."#;
             first_failure_only: false,
             force_failure_threshold: 0,
             repeat_interval: 50,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1234,6 +1301,7 @@ End of response."#;
             first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 0,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1286,6 +1354,7 @@ End of response."#;
             first_failure_only: false,
             force_failure_threshold: 0,
             repeat_interval: 50,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1338,6 +1407,7 @@ End of response."#;
             first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 0,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1396,6 +1466,7 @@ End of response."#;
             first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 0,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1440,6 +1511,7 @@ End of response."#;
             first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 0,
+            max_depth: 0,
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1474,5 +1546,293 @@ End of response."#;
             created.is_empty(),
             "expected no child beads for strand config bead"
         );
+    }
+
+    #[tokio::test]
+    async fn max_depth_prevents_splitting_beyond_limit() {
+        // Test that beads exceeding max_depth are not split further.
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+            max_depth: 3, // Maximum depth is 3
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // A bead already at depth 3 should not be split further.
+        let mut bead = test_bead();
+        bead.labels = vec!["failure-count:1".to_string(), "mitosis-depth:3".to_string()];
+
+        let store = MockStore::new().with_labels(vec![
+            "failure-count:1".to_string(),
+            "mitosis-depth:3".to_string(),
+        ]);
+
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+
+        // Should skip with depth limit reason
+        match result {
+            MitosisResult::Skipped { reason } => {
+                assert!(reason.contains("exceeds maximum depth"), "wrong skip reason: {}", reason);
+            }
+            other => panic!("expected Skipped, got {:?}", other),
+        }
+
+        // No children should be created
+        let created = store.created.lock().unwrap();
+        assert!(
+            created.is_empty(),
+            "expected no child beads when max_depth exceeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn max_depth_zero_allows_unlimited_splitting() {
+        // Test that max_depth = 0 allows unlimited splitting (no limit).
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+            max_depth: 0, // No limit
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // A bead at depth 100 should still be allowed to split when max_depth = 0.
+        let mut bead = test_bead();
+        bead.labels = vec![
+            "failure-count:1".to_string(),
+            "mitosis-depth:100".to_string(),
+        ];
+
+        let store = MockStore::new().with_labels(vec![
+            "failure-count:1".to_string(),
+            "mitosis-depth:100".to_string(),
+        ]);
+
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+
+        // Should not skip due to depth (adapter not found is expected)
+        assert!(
+            !matches!(result, MitosisResult::Skipped { reason } if reason.contains("exceeds maximum depth")),
+            "should not skip due to depth when max_depth = 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn children_get_incremented_depth() {
+        // Test that children get depth = parent_depth + 1.
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+            max_depth: 5,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // Parent bead at depth 2 should create children at depth 3.
+        let mut bead = test_bead();
+        bead.labels = vec!["failure-count:1".to_string(), "mitosis-depth:2".to_string()];
+
+        let store = MockStore::new().with_labels(vec![
+            "failure-count:1".to_string(),
+            "mitosis-depth:2".to_string(),
+        ]);
+
+        let proposed = vec![ProposedChild {
+            title: "Child task".to_string(),
+            body: "Child description".to_string(),
+        }];
+
+        let result = evaluator
+            .create_children(&store, &bead, &proposed)
+            .await
+            .unwrap();
+
+        match result {
+            MitosisResult::Split { children } => {
+                assert_eq!(children.len(), 1);
+                // The child should have been created with depth 3 (parent depth 2 + 1)
+                let created = store.created.lock().unwrap();
+                assert_eq!(created.len(), 1);
+                assert_eq!(created[0].0, "Child task");
+            }
+            other => panic!("expected Split, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn root_bead_creates_depth_1_children() {
+        // Test that a root bead (no mitosis-depth label) creates children at depth 1.
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+            max_depth: 5,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // Root bead with no mitosis-depth label (depth 0).
+        let bead = test_bead();
+
+        let store = MockStore::new();
+
+        let proposed = vec![ProposedChild {
+            title: "Child task".to_string(),
+            body: "Child description".to_string(),
+        }];
+
+        let result = evaluator
+            .create_children(&store, &bead, &proposed)
+            .await
+            .unwrap();
+
+        match result {
+            MitosisResult::Split { children } => {
+                assert_eq!(children.len(), 1);
+                // The child should have been created with depth 1 (root depth 0 + 1)
+                let created = store.created.lock().unwrap();
+                assert_eq!(created.len(), 1);
+                assert_eq!(created[0].0, "Child task");
+            }
+            other => panic!("expected Split, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_mitosis_depth_test() {
+        // Test the parse_mitosis_depth helper function.
+        let mut bead = test_bead();
+
+        // No mitosis-depth label should return 0.
+        bead.labels = vec!["failure-count:1".to_string()];
+        assert_eq!(parse_mitosis_depth(&bead), 0);
+
+        // mitosis-depth:1 should return 1.
+        bead.labels = vec!["mitosis-depth:1".to_string()];
+        assert_eq!(parse_mitosis_depth(&bead), 1);
+
+        // mitosis-depth:5 should return 5.
+        bead.labels = vec!["mitosis-depth:5".to_string()];
+        assert_eq!(parse_mitosis_depth(&bead), 5);
+
+        // Multiple mitosis-depth labels should return the max.
+        bead.labels = vec![
+            "mitosis-depth:2".to_string(),
+            "mitosis-depth:7".to_string(),
+            "mitosis-depth:3".to_string(),
+        ];
+        assert_eq!(parse_mitosis_depth(&bead), 7);
+
+        // Invalid mitosis-depth label should be ignored.
+        bead.labels = vec![
+            "mitosis-depth:1".to_string(),
+            "mitosis-depth:invalid".to_string(),
+        ];
+        assert_eq!(parse_mitosis_depth(&bead), 1);
+    }
+
+    #[tokio::test]
+    async fn multi_generation_depth_tracking() {
+        // Test that depth tracking works across multiple generations.
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+            max_depth: 5,
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // Generation 0: Root bead (no mitosis-depth label).
+        let mut root = test_bead();
+        root.labels = vec!["failure-count:1".to_string()];
+
+        let store = MockStore::new();
+
+        // Create children from root (should be depth 1).
+        let proposed_gen1 = vec![ProposedChild {
+            title: "Gen1 child".to_string(),
+            body: "First generation child".to_string(),
+        }];
+
+        let result_gen1 = evaluator
+            .create_children(&store, &root, &proposed_gen1)
+            .await
+            .unwrap();
+
+        assert!(matches!(result_gen1, MitosisResult::Split { .. }));
+
+        // Simulate creating a generation 1 child with depth 1.
+        let mut gen1_child = test_bead();
+        gen1_child.labels = vec![
+            "failure-count:1".to_string(),
+            "mitosis-depth:1".to_string(),
+        ];
+
+        // Create children from gen1 (should be depth 2).
+        let proposed_gen2 = vec![ProposedChild {
+            title: "Gen2 child".to_string(),
+            body: "Second generation child".to_string(),
+        }];
+
+        let result_gen2 = evaluator
+            .create_children(&store, &gen1_child, &proposed_gen2)
+            .await
+            .unwrap();
+
+        assert!(matches!(result_gen2, MitosisResult::Split { .. }));
+
+        // Simulate creating a generation 2 child with depth 2.
+        let mut gen2_child = test_bead();
+        gen2_child.labels = vec![
+            "failure-count:1".to_string(),
+            "mitosis-depth:2".to_string(),
+        ];
+
+        // Create children from gen2 (should be depth 3).
+        let proposed_gen3 = vec![ProposedChild {
+            title: "Gen3 child".to_string(),
+            body: "Third generation child".to_string(),
+        }];
+
+        let result_gen3 = evaluator
+            .create_children(&store, &gen2_child, &proposed_gen3)
+            .await
+            .unwrap();
+
+        assert!(matches!(result_gen3, MitosisResult::Split { .. }));
+
+        // Total splits = 3 generations, so we should have created 3 beads total.
+        let created = store.created.lock().unwrap();
+        assert_eq!(created.len(), 3);
     }
 }
