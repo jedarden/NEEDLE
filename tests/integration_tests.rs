@@ -11,7 +11,7 @@
 //! 5. Deterministic ordering (property test)
 //! 6. Cross-workspace mend: two-workspace zombie scenario
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -221,6 +221,8 @@ fn test_adapter(name: &str, template: &str, timeout_secs: u64) -> AgentAdapter {
         model: None,
         token_extraction: needle::dispatch::TokenExtraction::None,
         output_transform: None,
+        harness: None,
+        harness_version: None,
     }
 }
 
@@ -1468,6 +1470,7 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
             "human".to_string(),
             "blocked".to_string(),
         ],
+        exclude_ids: HashSet::new(),
     };
     let ready_result = remote_store.ready(&filters).await.unwrap();
     assert!(
@@ -1863,6 +1866,7 @@ async fn mend_removes_stale_dependency_links() {
     let filters = Filters {
         assignee: None,
         exclude_labels: vec!["deferred".to_string(), "human".to_string()],
+        exclude_ids: HashSet::new(),
     };
     let ready_before = store.ready(&filters).await.unwrap();
     assert!(
