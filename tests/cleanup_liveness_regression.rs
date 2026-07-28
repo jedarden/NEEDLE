@@ -43,10 +43,24 @@ fn pid_exists(pid: u32) -> bool {
     }
 }
 
+/// Build a `tmux` Command scoped to this process's isolated test socket.
+///
+/// bf-6alqi: every helper in this file used to call `Command::new("tmux")`
+/// directly against the DEFAULT socket — the same one a real production
+/// NEEDLE fleet's `needle-*` sessions live on. Routing through here (which
+/// shares `tmux_fixture::test_tmux_socket()`) keeps every session this file
+/// creates or kills fully isolated from any real fleet on the same box.
+#[cfg(unix)]
+fn tmux() -> Command {
+    let mut cmd = Command::new("tmux");
+    cmd.args(["-L", tmux_fixture::test_tmux_socket()]);
+    cmd
+}
+
 /// Test helper to find all needle tmux sessions.
 #[cfg(unix)]
 fn list_needle_sessions() -> Vec<String> {
-    let output = Command::new("tmux")
+    let output = tmux()
         .args(["list-sessions", "-F", "#{session_name}"])
         .output();
 
@@ -67,7 +81,7 @@ fn list_needle_sessions() -> Vec<String> {
 #[cfg(unix)]
 fn create_orphaned_session(session_name: &str) -> Result<(), std::io::Error> {
     // Create a new tmux session
-    let status = Command::new("tmux")
+    let status = tmux()
         .args(["new-session", "-d", "-s", session_name, "sleep", "3600"])
         .status()?;
 
@@ -85,7 +99,7 @@ fn create_orphaned_session(session_name: &str) -> Result<(), std::io::Error> {
 #[cfg(unix)]
 fn create_live_session(session_name: &str) -> Result<std::process::Child, std::io::Error> {
     // Start a long-running needle process in a tmux session
-    let child = Command::new("tmux")
+    let child = tmux()
         .args([
             "new-session",
             "-d",
@@ -105,7 +119,7 @@ fn create_live_session(session_name: &str) -> Result<std::process::Child, std::i
 /// Test helper to kill a tmux session.
 #[cfg(unix)]
 fn kill_session(session_name: &str) -> Result<(), std::io::Error> {
-    let status = Command::new("tmux")
+    let status = tmux()
         .args(["kill-session", "-t", session_name])
         .status()?;
 
@@ -191,6 +205,7 @@ fn regression_cleanup_no_flags_removes_only_dead_sessions() {
         std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
 
     let output = Command::new(&needle_binary)
+        .env("NEEDLE_TMUX_SOCKET", tmux_fixture::test_tmux_socket())
         .arg("cleanup")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -307,6 +322,7 @@ fn regression_cleanup_no_flags_with_only_live_sessions_removes_nothing() {
         std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
 
     let output = Command::new(&needle_binary)
+        .env("NEEDLE_TMUX_SOCKET", tmux_fixture::test_tmux_socket())
         .arg("cleanup")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -444,6 +460,7 @@ fn regression_cleanup_all_removes_all_sessions_regardless_of_liveness() {
         std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
 
     let output = Command::new(&needle_binary)
+        .env("NEEDLE_TMUX_SOCKET", tmux_fixture::test_tmux_socket())
         .args(["cleanup", "--all"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -606,6 +623,7 @@ async fn regression_real_tmux_session_not_removed_by_bare_cleanup() {
         std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
 
     let output = Command::new(&needle_binary)
+        .env("NEEDLE_TMUX_SOCKET", tmux_fixture::test_tmux_socket())
         .arg("cleanup")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -734,7 +752,7 @@ fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup(
     // This is critical: the `NEEDLE_INNER=1 sleep 30 2>> /tmp/test.log` shape produces
     // the shell-wrapper-vs-child PID split because the output redirection defeats bash's
     // last-command exec optimization. pane_pid will be the shell, not sleep.
-    let create_result = Command::new("tmux")
+    let create_result = tmux()
         .args([
             "new-session",
             "-d",
@@ -760,7 +778,7 @@ fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup(
     thread::sleep(Duration::from_millis(500));
 
     // Get the pane_pid from tmux (this is the shell wrapper PID, not the sleep PID)
-    let pane_pid_output = Command::new("tmux")
+    let pane_pid_output = tmux()
         .args(["list-panes", "-t", session_name, "-F", "#{pane_pid}"])
         .output();
 
@@ -821,6 +839,7 @@ fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup(
         std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
 
     let output = Command::new(&needle_binary)
+        .env("NEEDLE_TMUX_SOCKET", tmux_fixture::test_tmux_socket())
         .arg("cleanup")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

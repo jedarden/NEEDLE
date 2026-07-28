@@ -19,9 +19,46 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Isolated test tmux socket (bf-6alqi)
+// ────────────────────────────────────────────────────────────────────────────────
+//
+// Every helper below used to call `Command::new("tmux")` directly, which talks
+// to the DEFAULT tmux socket — the exact same socket a real production NEEDLE
+// fleet's `needle-*` worker sessions live on. `list_needle_sessions()`-style
+// filtering by the literal "needle-" prefix plus a blunt `kill-session` loop
+// meant any test exercising this fixture could (and did, live, twice on
+// 2026-07-28) kill an entire production fleet as collateral damage.
+//
+// The fix: every tmux invocation in this file goes through `tmux()`, which
+// pins the whole test process to its own private `-L <socket>` namespace.
+// `NEEDLE_TMUX_SOCKET` is exported to the process environment so that any
+// real `needle` binary a test spawns as a subprocess (see
+// cleanup_liveness_regression.rs) inherits the same isolation via
+// `src/tmux_socket.rs`.
+
+static TEST_TMUX_SOCKET: OnceLock<String> = OnceLock::new();
+
+/// The isolated tmux socket name shared by every test in this process.
+pub fn test_tmux_socket() -> &'static str {
+    TEST_TMUX_SOCKET.get_or_init(|| {
+        let socket = format!("needle-itest-{}", std::process::id());
+        std::env::set_var("NEEDLE_TMUX_SOCKET", &socket);
+        socket
+    })
+}
+
+/// Build a `tmux` `Command` scoped to the isolated test socket.
+fn tmux() -> Command {
+    let mut cmd = Command::new("tmux");
+    cmd.args(["-L", test_tmux_socket()]);
+    cmd
+}
 
 // ────────────────────────────────────────────────────────────────────────────────
 // TmuxSession Handle
@@ -99,7 +136,7 @@ impl TmuxSession {
         );
 
         // Spawn the tmux session
-        let status = Command::new("tmux")
+        let status = tmux()
             .args([
                 "new-session",
                 "-d",
@@ -137,7 +174,7 @@ impl TmuxSession {
     /// This runs `tmux list-panes -t <session> -F "#{pane_pid}"` and parses
     /// the output to extract the pane PID.
     fn capture_pane_pid(session_name: &str) -> Result<u32> {
-        let output = Command::new("tmux")
+        let output = tmux()
             .args([
                 "list-panes",
                 "-t",
@@ -168,7 +205,7 @@ impl TmuxSession {
     ///
     /// Returns true if the session exists in tmux, false otherwise.
     pub fn is_alive(&self) -> bool {
-        Command::new("tmux")
+        tmux()
             .args([
                 "has-session",
                 "-t",
@@ -199,7 +236,7 @@ impl TmuxSession {
             return Ok(());
         }
 
-        let status = Command::new("tmux")
+        let status = tmux()
             .args([
                 "kill-session",
                 "-t",
@@ -257,7 +294,7 @@ impl Drop for TmuxSession {
 ///
 /// Returns a list of all session names.
 pub fn list_all_sessions() -> Vec<String> {
-    let output = Command::new("tmux")
+    let output = tmux()
         .args(["list-sessions", "-F", "#{session_name}"])
         .output();
 
@@ -303,7 +340,7 @@ pub fn tmux_available() -> bool {
 ///
 /// Returns the number of sessions killed.
 pub fn kill_sessions_with_prefix(prefix: &str) -> Result<usize> {
-    let output = Command::new("tmux")
+    let output = tmux()
         .args(["list-sessions", "-F", "#{session_name}"])
         .output()
         .context("failed to list tmux sessions")?;
@@ -319,7 +356,7 @@ pub fn kill_sessions_with_prefix(prefix: &str) -> Result<usize> {
         .collect();
 
     for session in &sessions {
-        Command::new("tmux")
+        tmux()
             .args(["kill-session", "-t", session])
             .status()
             .context(format!("failed to kill session '{}'", session))?;
@@ -448,7 +485,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Verify session is dead
-        let output = Command::new("tmux")
+        let output = tmux()
             .args(["has-session", "-t", &session_name])
             .output();
         assert!(

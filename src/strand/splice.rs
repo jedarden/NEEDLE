@@ -700,7 +700,7 @@ impl SpliceStrand {
             }
 
             // Check if tmux session is still alive.
-            let alive = std::process::Command::new("tmux")
+            let alive = crate::tmux_socket::command()
                 .args(["has-session", "-t", &record.session])
                 .status()
                 .map(|s| s.success())

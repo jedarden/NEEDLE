@@ -10,7 +10,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1059,7 +1058,7 @@ fn launch_in_tmux(
         shell_escape(&stderr_log)
     );
 
-    let status = ProcessCommand::new("tmux")
+    let status = crate::tmux_socket::command()
         .args(["new-session", "-d", "-s", session_name, &inner_cmd])
         .status()
         .context("failed to launch tmux — is tmux installed?")?;
@@ -1465,7 +1464,7 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
                     session.name
                 );
                 // Still kill the session for cleanup
-                let _ = ProcessCommand::new("tmux")
+                let _ = crate::tmux_socket::command()
                     .args(["kill-session", "-t", &session.name])
                     .status();
                 continue;
@@ -1523,7 +1522,7 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         }
 
         // Kill the tmux session for cleanup
-        let kill_status = ProcessCommand::new("tmux")
+        let kill_status = crate::tmux_socket::command()
             .args(["kill-session", "-t", &session.name])
             .status();
 
@@ -1692,7 +1691,7 @@ fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
     let mut cleaned = 0;
     for session in &targets {
         // Kill the session
-        let status = ProcessCommand::new("tmux")
+        let status = crate::tmux_socket::command()
             .args(["kill-session", "-t", session])
             .status();
 
@@ -2278,7 +2277,7 @@ fn cmd_attach(identifier: &str) -> Result<()> {
     }
 
     let session = &matches[0].name;
-    let status = ProcessCommand::new("tmux")
+    let status = crate::tmux_socket::command()
         .args(["attach-session", "-t", session])
         .status()
         .with_context(|| format!("failed to attach to tmux session '{session}'"))?;
@@ -4252,7 +4251,7 @@ struct TmuxSession {
 
 /// List all tmux sessions whose names start with `needle-`.
 fn list_needle_sessions() -> Result<Vec<TmuxSession>> {
-    let output = ProcessCommand::new("tmux")
+    let output = crate::tmux_socket::command()
         .args([
             "list-sessions",
             "-F",
