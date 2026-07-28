@@ -838,8 +838,7 @@ impl Drop for HealthMonitor {
 /// Clean up a heartbeat file by removing it from disk.
 ///
 /// This function removes the heartbeat file at the given path. It returns
-/// `Ok(())` if the file is successfully removed or if it doesn't exist.
-/// It returns an error only if removal fails for an unexpected reason.
+/// the raw result from `std::fs::remove_file` without error handling.
 ///
 /// # Arguments
 ///
@@ -847,8 +846,8 @@ impl Drop for HealthMonitor {
 ///
 /// # Returns
 ///
-/// * `Ok(())` - If the file was removed or doesn't exist
-/// * `Err(e)` - If removal fails for an unexpected reason
+/// * `Ok(())` - If the file was removed successfully
+/// * `Err(e)` - If removal fails (including if the file doesn't exist)
 ///
 /// # Example
 ///
@@ -858,36 +857,10 @@ impl Drop for HealthMonitor {
 ///
 /// let path = Path::new("/tmp/heartbeat.json");
 /// cleanup_heartbeat_file(path)?;
-/// # Ok::<(), anyhow::Error>(())
+/// # Ok::<(), std::io::Error>(())
 /// ```
-pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
-    // Attempt to remove the file.
-    match std::fs::remove_file(path) {
-        Ok(_) => {
-            tracing::debug!(
-                path = %path.display(),
-                "heartbeat file removed successfully"
-            );
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // File doesn't exist - this is fine, return Ok
-            tracing::debug!(
-                path = %path.display(),
-                "heartbeat file does not exist, skipping cleanup"
-            );
-            Ok(())
-        }
-        Err(e) => {
-            // Log the error but don't fail - cleanup is best-effort
-            tracing::warn!(
-                error = %e,
-                path = %path.display(),
-                "failed to remove heartbeat file during cleanup"
-            );
-            Ok(())
-        }
-    }
+pub fn cleanup_heartbeat_file(path: &Path) -> Result<(), std::io::Error> {
+    std::fs::remove_file(path)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
