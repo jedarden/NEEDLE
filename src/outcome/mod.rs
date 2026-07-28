@@ -2142,4 +2142,61 @@ mod tests {
             |e| matches!(e, EventKind::BeadReleased { reason, .. } if reason == "handler_timeout")
         ));
     }
+
+    #[tokio::test]
+    async fn handle_with_cancellation_kills_a_slow_verification_gate_command() {
+        // End-to-end version of the test above, using a real `verification:`
+        // gate command instead of a slow store call — the exact scenario
+        // GitHub issue jedarden/NEEDLE#8 is actually about, and the one that
+        // originally exposed bf-3saat (CommandGate used a blocking
+        // std::process::Command with no .await yield point, so this same
+        // setup used to run the full 3s command to completion instead of
+        // being cut off at the configured 1s timeout). Now that CommandGate
+        // uses tokio::process::Command with kill_on_drop(true)
+        // (src/validation/mod.rs), this must actually preempt and kill the
+        // gate command around the configured timeout, not just eventually
+        // report it as having taken too long.
+        let marker = tempfile::NamedTempFile::new().unwrap();
+        let marker_path = marker.path().to_path_buf();
+        std::fs::remove_file(&marker_path).ok();
+
+        let config = Config {
+            verification: vec![format!("sleep 3 && touch {}", marker_path.display())],
+            validation: ValidationConfig {
+                outcome_timeout_seconds: 1,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let handler = test_handler_with_config(config);
+        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        let start = std::time::Instant::now();
+        let result = handler
+            .handle_with_cancellation(&store, &bead, &test_output(0), false, cancelled)
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_secs() < 3,
+            "expected the ~1s configured timeout to cut off the 3s gate command, took {:?}",
+            elapsed
+        );
+        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(result.telemetry_events.iter().any(
+            |e| matches!(e, EventKind::BeadReleased { reason, .. } if reason == "handler_timeout")
+        ));
+
+        // Give any straggling kill signal a moment to land, then confirm the
+        // gate command was actually killed, not left running in the
+        // background to finish on its own.
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        assert!(
+            !marker_path.exists(),
+            "gate command was not actually killed — it ran to completion in the background"
+        );
+    }
 }

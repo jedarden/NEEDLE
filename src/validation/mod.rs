@@ -133,12 +133,20 @@ pub struct ValidationRunResult {
 /// Gates are run after an agent exits successfully (code 0). If any gate
 /// returns `GateResult::Fail`, the bead is released instead of having its
 /// closure accepted.
+///
+/// `validate` is async so a slow gate is a genuine `.await` yield point:
+/// `OutcomeHandler::handle_with_cancellation`'s `tokio::time::timeout` can
+/// only preempt a future at such a point (see bf-3saat) — a synchronous,
+/// blocking implementation would let the configured
+/// `validation.outcome_timeout_seconds` observe a slow gate only after the
+/// fact, never actually cut it off.
+#[async_trait::async_trait]
 pub trait Gate: Send + Sync {
     /// Validate the bead's work in the given workspace.
     ///
     /// Returns `GateResult::Pass` if validation succeeds, or `GateResult::Fail`
     /// with a human-readable reason if it fails.
-    fn validate(&self, bead: &crate::types::Bead, workspace: &Path) -> Result<GateResult>;
+    async fn validate(&self, bead: &crate::types::Bead, workspace: &Path) -> Result<GateResult>;
 
     /// Gate type name for telemetry and configuration (e.g., "command", "custom").
     fn gate_type(&self) -> &str;
@@ -262,8 +270,9 @@ impl CommandGate {
     }
 }
 
+#[async_trait::async_trait]
 impl Gate for CommandGate {
-    fn validate(&self, bead: &crate::types::Bead, workspace: &Path) -> Result<GateResult> {
+    async fn validate(&self, bead: &crate::types::Bead, workspace: &Path) -> Result<GateResult> {
         // Run commands sequentially; stop at first failure.
         for cmd in &self.commands {
             tracing::info!(
@@ -272,7 +281,7 @@ impl Gate for CommandGate {
                 "running command gate"
             );
 
-            match self.run_command(cmd, bead, workspace) {
+            match self.run_command(cmd, bead, workspace).await {
                 Ok(()) => {
                     tracing::info!(command = %cmd, "command gate passed");
                 }
@@ -306,19 +315,30 @@ impl CommandGate {
     /// so a gate can identify the bead it is judging without racily guessing it
     /// from external state (e.g. `br list --json` assignee) — see GitHub issue
     /// jedarden/NEEDLE#7.
-    fn run_command(
+    ///
+    /// Uses `tokio::process::Command` (not `std::process::Command`) with
+    /// `kill_on_drop(true)`: this makes the command a genuine `.await` yield
+    /// point, so `OutcomeHandler::handle_with_cancellation`'s
+    /// `tokio::time::timeout` can actually abandon and kill a gate command
+    /// that outruns `validation.outcome_timeout_seconds`, instead of only
+    /// observing after the fact that it ran too long (see bf-3saat — a
+    /// blocking `std::process::Command` call has no yield point, so a
+    /// wrapping timeout can never preempt it mid-command).
+    async fn run_command(
         &self,
         cmd: &str,
         bead: &crate::types::Bead,
         workspace: &Path,
     ) -> std::result::Result<(), GateFailure> {
-        let result = std::process::Command::new("sh")
+        let result = tokio::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
             .current_dir(workspace)
             .env("NEEDLE_BEAD_ID", bead.id.to_string())
             .env("NEEDLE_WORKSPACE", workspace.display().to_string())
-            .output();
+            .kill_on_drop(true)
+            .output()
+            .await;
 
         match result {
             Ok(output) => {
@@ -432,7 +452,7 @@ impl ValidationGate {
         let mut results = HashMap::new();
 
         for (name, gate) in &self.gates {
-            let result = gate.validate(bead, &self.workspace)?;
+            let result = gate.validate(bead, &self.workspace).await?;
             results.insert(name.clone(), result);
 
             // Stop on first failure.
@@ -578,8 +598,13 @@ mod tests {
     // Test gate for registry testing
     struct TestGate;
 
+    #[async_trait::async_trait]
     impl Gate for TestGate {
-        fn validate(&self, _bead: &crate::types::Bead, _workspace: &Path) -> Result<GateResult> {
+        async fn validate(
+            &self,
+            _bead: &crate::types::Bead,
+            _workspace: &Path,
+        ) -> Result<GateResult> {
             Ok(GateResult::Pass)
         }
 
@@ -590,32 +615,32 @@ mod tests {
 
     // ── CommandGate tests ──
 
-    #[test]
-    fn command_gate_passes_on_true() {
+    #[tokio::test]
+    async fn command_gate_passes_on_true() {
         let gate = CommandGate::new(vec!["true".to_string()]);
         let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
         assert!(result.passed());
     }
 
-    #[test]
-    fn command_gate_fails_on_false() {
+    #[tokio::test]
+    async fn command_gate_fails_on_false() {
         let gate = CommandGate::new(vec!["false".to_string()]);
         let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
         assert!(!result.passed());
         assert!(result.failure_reason().unwrap().contains("failed"));
     }
 
-    #[test]
-    fn command_gate_stops_at_first_failure() {
+    #[tokio::test]
+    async fn command_gate_stops_at_first_failure() {
         let gate = CommandGate::new(vec![
             "true".to_string(),
             "false".to_string(),
             "echo should-not-run".to_string(),
         ]);
         let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
         assert!(!result.passed());
         // Should be the false command that failed
         assert!(result.failure_reason().unwrap().contains("false"));
@@ -627,8 +652,8 @@ mod tests {
         assert_eq!(gate.gate_type(), "command");
     }
 
-    #[test]
-    fn command_gate_exposes_bead_id_and_workspace_env() {
+    #[tokio::test]
+    async fn command_gate_exposes_bead_id_and_workspace_env() {
         // GitHub issue jedarden/NEEDLE#7: gate commands had no way to identify
         // the bead they were judging. The command below fails (non-zero exit)
         // unless both env vars are present with the expected values, so a
@@ -638,7 +663,7 @@ mod tests {
                 .to_string(),
         ]);
         let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
         assert!(
             result.passed(),
             "expected gate to see NEEDLE_BEAD_ID=needle-test and NEEDLE_WORKSPACE=/tmp: {:?}",
@@ -646,13 +671,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn command_gate_missing_env_fails_the_assertion() {
+    #[tokio::test]
+    async fn command_gate_missing_env_fails_the_assertion() {
         // Sanity check for the test above: an unexpected bead ID must fail,
         // proving the assertion isn't vacuously true.
         let gate = CommandGate::new(vec![r#"[ "$NEEDLE_BEAD_ID" = "wrong-id" ]"#.to_string()]);
         let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
         assert!(!result.passed());
     }
 
@@ -663,24 +688,24 @@ mod tests {
         format!("head -c {n} /dev/zero | tr '\\0' 'x' 1>&2; exit 1")
     }
 
-    #[test]
-    fn command_gate_default_cap_truncates_large_stderr() {
+    #[tokio::test]
+    async fn command_gate_default_cap_truncates_large_stderr() {
         // Baseline: CommandGate::new() (no explicit cap) still truncates at
         // the previous hardcoded default, 4096 bytes.
         let gate = CommandGate::new(vec![fail_with_stderr_bytes(6000)]);
         let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
         assert!(!result.passed());
         assert!(result.failure_reason().unwrap().contains("[truncated]"));
     }
 
-    #[test]
-    fn command_gate_configured_cap_larger_than_default_avoids_truncation() {
+    #[tokio::test]
+    async fn command_gate_configured_cap_larger_than_default_avoids_truncation() {
         // A configured cap larger than the old hardcoded 4096 must actually be
         // honored — proof the value isn't still pinned to the old constant.
         let gate = CommandGate::with_stderr_cap(vec![fail_with_stderr_bytes(6000)], 8192);
         let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
         assert!(!result.passed());
         assert!(
             !result.failure_reason().unwrap().contains("[truncated]"),
@@ -689,18 +714,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn command_gate_configured_cap_smaller_than_default_truncates_more() {
+    #[tokio::test]
+    async fn command_gate_configured_cap_smaller_than_default_truncates_more() {
         // A cap smaller than the default must also be honored.
         let gate = CommandGate::with_stderr_cap(vec![fail_with_stderr_bytes(200)], 10);
         let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
         assert!(!result.passed());
         assert!(result.failure_reason().unwrap().contains("[truncated]"));
     }
 
-    #[test]
-    fn gate_config_stderr_cap_bytes_defaults_to_none_and_registry_falls_back_to_4096() {
+    #[tokio::test]
+    async fn gate_config_stderr_cap_bytes_defaults_to_none_and_registry_falls_back_to_4096() {
         // When a "gates:" entry omits stderr_cap_bytes, the registry-created
         // CommandGate must still behave like the pre-#9 hardcoded default when
         // no caller (e.g. OutcomeHandler) has filled in an override.
@@ -711,9 +736,49 @@ mod tests {
         };
         let gate = registry.create_gate(&config).unwrap();
         let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
         assert!(!result.passed());
         assert!(result.failure_reason().unwrap().contains("[truncated]"));
+    }
+
+    #[tokio::test]
+    async fn command_gate_slow_command_is_killed_when_dropped_mid_flight() {
+        // GitHub issue jedarden/NEEDLE#8 follow-up (bf-3saat): the gate command
+        // must be a genuine .await yield point so a wrapping tokio::time::timeout
+        // can actually cancel and kill it, not just observe it after the fact.
+        // Simulate that here directly: race the gate's future against a short
+        // timeout and confirm (a) the timeout wins and (b) the child process
+        // is actually gone afterward, not left running in the background.
+        let marker = tempfile::NamedTempFile::new().unwrap();
+        let marker_path = marker.path().to_path_buf();
+        std::fs::remove_file(&marker_path).ok();
+
+        // Writes the marker file only after a 3s sleep — if the process is
+        // truly killed before then, the marker must never appear.
+        let gate = CommandGate::new(vec![format!(
+            "sleep 3 && touch {}",
+            marker_path.display()
+        )]);
+        let bead = test_bead();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(300),
+            gate.validate(&bead, Path::new("/tmp")),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "expected the 300ms timeout to fire before the 3s sleep completed"
+        );
+
+        // Give the kill signal a moment to actually land, then confirm the
+        // command never reached its `touch` — proof the child was killed,
+        // not merely abandoned to finish in the background.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            !marker_path.exists(),
+            "gate command was not actually killed — it ran to completion in the background"
+        );
     }
 
     // ── ValidationGate tests ──
