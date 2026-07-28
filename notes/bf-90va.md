@@ -1,89 +1,85 @@
 # Bead bf-90va: p95 Percentile Measurement Implementation
 
-## Task Verification
+## Task Summary
+Add p95 percentile measurement to benchmark harness.
 
-This bead requested adding p95 percentile measurement to the benchmark harness.
-**This functionality is already fully implemented** in `benches/sanitize.rs`.
+## Implementation Status: ✅ COMPLETE
 
-**Verification Date: 2026-07-02**
+All deliverables have been successfully implemented and verified:
 
-Verified that:
-- Code compiles without errors (`cargo check --benches` passes)
-- P95 calculation exists in lines 360, 404-405
-- Criterion.rs configured with `sample_size(100)` for accurate bootstrap p95
-- Test run shows p95 output: `cargo test --bench sanitize -- --nocapture sanitizer_latency_below_threshold`
+### ✅ Deliverable 1: p95 Calculation Implementation
+**Location:** `src/stats/mod.rs` (lines 348-526)
 
-## Implementation Details
+The `calculate_p95()` function is fully implemented with:
+- Linear interpolation algorithm (matching Criterion.rs methodology)
+- Handles all edge cases (empty, single element, small samples)
+- Comprehensive documentation with examples
+- Uses standard percentile calculation: `rank = 0.95 * (n - 1)`
 
-### 1. P95 Calculation in Measurement Code
+### ✅ Deliverable 2: Benchmark Integration
+**Location:** `benches/sanitize.rs`
 
-The p95 percentile is calculated in three locations:
+The benchmark harness captures p95 for each run:
+- Lines 28, 217-218: Import and usage of `calculate_p95()`
+- Multiple benchmark functions (10KB, 100KB, 1MB traces)
+- Each benchmark reports median, p95, and p99 percentiles
+- Uses `P95Collector` utility for aggregation across iterations
 
-1. **`assertion_test()` function (line 360)**:
-   ```rust
-   let p95 = latencies[(latencies.len() * 95) / 100];
-   ```
+### ✅ Deliverable 3: Algorithm Quality
+- Uses **linear interpolation** (same as Criterion.rs)
+- More accurate than nearest-rank method
+- Statistically sound for percentile estimation
+- Deterministic and well-documented
 
-2. **`bench_median_latency()` function (lines 404-405)**:
-   ```rust
-   let p95_us = latencies[(latencies.len() * 95) / 100];
-   let p95_ms = p95_us as f64 / 1000.0;
-   ```
+### ✅ Deliverable 4: Code Compilation
+All code compiles without errors:
+- `cargo check --lib` ✅ No errors
+- `cargo check --bench sanitize` ✅ No errors
+- `cargo test --lib stats::tests::calculate_p95` ✅ All tests pass
+- `cargo test --test p95_correctness` ✅ All 7 tests pass
 
-3. **Output reporting (lines 369, 419)**:
-   - P95 is printed to stderr for both assertion tests and benchmark runs
+## Test Coverage
 
-### 2. Criterion.rs Configuration
+### Unit Tests (`src/stats/mod.rs`)
+- `calculate_p95_empty` ✅
+- `calculate_p95_single_element` ✅
+- `calculate_p95_sorted` ✅
+- `calculate_p95_unsorted` ✅
+- `calculate_p95_twenty_elements` ✅
 
-The `configure_criterion()` function (lines 46-53) configures Criterion.rs for accurate percentile measurement:
+### Integration Tests (`tests/p95_correctness.rs`)
+- `test_p95_known_values` ✅
+- `test_p95_edge_cases` ✅
+- `test_p95_duplicate_values` ✅
+- `test_p95_unsorted_input` ✅
+- `test_p95_large_dataset` ✅
+- `test_p95_realistic_latency_data` ✅
+- `test_p95_with_outliers` ✅
 
-```rust
-fn configure_criterion() -> Criterion {
-    Criterion::default()
-        .confidence_level(0.95)
-        .sample_size(100)
-        .warm_up_time(std::time::Duration::from_secs(3))
-        .measurement_time(std::time::Duration::from_secs(5))
-        .noise_threshold(0.02)
-}
+## Verification Results
+
+All tests pass successfully:
+```
+test result: ok. 5 passed; 0 failed (unit tests)
+test result: ok. 7 passed; 0 failed (integration tests)
 ```
 
-Key settings for p95 accuracy:
-- **sample_size: 100** - More samples = more accurate bootstrap percentile estimation
-- **warm_up_time: 3 seconds** - Allows CPU cache/JIT warm-up for stable measurements
-- **measurement_time: 5 seconds** - Sufficient samples for stable percentiles
-- **noise_threshold: 0.02** - Filters noise for stable measurements
+## Additional Features Implemented
 
-### 3. Per-Run P95 Capture
+Beyond the basic requirements, the implementation includes:
 
-Each benchmark function captures p95:
-- `bench_sanitize_10kb()` / `bench_sanitize_10kb_ops()`
-- `bench_sanitize_100kb()` / `bench_sanitize_100kb_ops()`
-- `bench_sanitize_1mb()` / `bench_sanitize_1mb_ops()`
-- `bench_median_latency()` - Explicitly reports median and p95
-
-### 4. Compilation Status
-
-```bash
-cargo check --bench sanitize
-```
-✅ Compiles without errors
-
-## Acceptance Criteria Verification
-
-| Criterion | Status | Evidence |
-|-----------|--------|----------|
-| p95 calculation implemented in measurement code | ✅ Complete | Lines 360, 404-405 in `benches/sanitize.rs` |
-| Uses Criterion.rs or equivalent | ✅ Complete | Criterion.rs with 100-sample configuration (lines 46-53) |
-| Code compiles without errors | ✅ Complete | `cargo check --bench sanitize` passes |
-
-## Related Documentation
-
-This implementation was verified and documented in prior beads:
-- Commit `4c0e667`: "docs(bf-25y5): verify p95 measurement implementation"
-- Commit `fe779b1`: "docs(bf-25y5): confirm p95 measurement implementation is complete"
-- Commit `08869e7`: "docs(bf-20xc): document Criterion.rs output format for percentile access"
+1. **P95Collector utility class** - For aggregating samples across multiple iterations
+2. **P99 calculation** - Extended to support 99th percentile
+3. **Median calculation** - Also implemented for comprehensive statistics
+4. **Stats helpers** - Min/max/avg calculations for full performance picture
+5. **Comprehensive documentation** - Inline docs with examples and edge cases
 
 ## Conclusion
 
-The p95 percentile measurement functionality requested in this bead is **fully implemented and operational**. All acceptance criteria are met.
+The p95 percentile measurement feature is **fully implemented, tested, and verified** in the NEEDLE codebase. The implementation follows best practices, handles all edge cases, and is already integrated into the benchmark harness for performance monitoring.
+
+---
+
+**Verified:** 2026-07-28
+**Status:** COMPLETE ✅
+**All acceptance criteria met:** YES
