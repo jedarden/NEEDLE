@@ -3758,6 +3758,16 @@ mod tests {
         let mut config = Config::default();
         // Disable hot-reload in tests — it would re-exec into a different binary.
         config.self_modification.hot_reload = false;
+        // Disable Explore: it defaults to scanning the real $HOME for any
+        // `.beads/` directory and operating on whatever it finds via the real
+        // `bf`/`br` CLI. This shared helper is used by unit tests that never
+        // intend to exercise real filesystem discovery (that's what
+        // strand::explore::tests own, with its own tempdir isolation) — a
+        // multi-cycle test using this helper (e.g. via `.run()`) previously
+        // reached a real Explore scan once its MockStore emptied out,
+        // claiming/mutating real beads across unrelated repos on this
+        // server. See bf-2unnq's contamination addendum.
+        config.strands.explore.enabled = false;
         Worker::new(config, "test-worker".to_string(), store)
     }
 
@@ -3859,6 +3869,11 @@ mod tests {
         let mut config = Config::default();
         config.worker.idle_action = IdleAction::Exit;
         config.self_modification.hot_reload = false;
+        // Disable Explore strand so it doesn't scan the real filesystem —
+        // safe today only because run_inner()'s loop checks `shutdown` before
+        // reaching do_select()/Explore; disable explicitly rather than rely
+        // on that ordering never changing (see bf-2unnq contamination).
+        config.strands.explore.enabled = false;
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
         // Set shutdown before run.
@@ -4847,6 +4862,12 @@ mod tests {
         // Set workspace.default to match the bead's workspace so the remote
         // store switch logic doesn't fire.
         config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
+        // Disable Explore: once the MockStore's one bead is processed and
+        // `run()` loops again, Pluck/Mend return NoWork and the waterfall
+        // previously fell through to a real Explore scan of $HOME, claiming
+        // and mutating real beads in unrelated repos on this server via the
+        // real bf/br CLI. See bf-2unnq's contamination addendum.
+        config.strands.explore.enabled = false;
 
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 

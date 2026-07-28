@@ -400,13 +400,24 @@ impl ExploreStrand {
     /// covering all workspaces exactly once. Each worker with a different qualified_id
     /// will visit workspaces in a different rotation.
     fn rotated_workspace_order(&self) -> Vec<PathBuf> {
+        // Compute the start index *before* taking the lock below:
+        // `compute_start_index()` acquires `self.workspaces` itself, and
+        // `std::sync::Mutex` is not reentrant — calling it while already
+        // holding the lock here previously self-deadlocked every time this
+        // function ran (see bf-2unnq).
+        let start = self.compute_start_index();
+
         let workspaces = self.workspaces.lock().unwrap();
         if workspaces.is_empty() {
             return vec![];
         }
 
-        let start = self.compute_start_index();
         let n = workspaces.len();
+        // Defensive: `compute_start_index()` released its lock before we
+        // re-acquired ours above, so guard against the (currently
+        // never-concurrent, but cheap to guard) case where the count
+        // changed in between.
+        let start = start % n;
         let mut rotated = Vec::with_capacity(n);
 
         // Add workspaces from start to end
