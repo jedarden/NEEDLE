@@ -79,7 +79,7 @@ pub trait Strand: Send + Sync {
     fn name(&self) -> &str;
 
     /// Evaluate this strand against the current queue state.
-    async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult;
+    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult;
 }
 
 /// Runs strands in order, returning the first candidate found.
