@@ -1518,4 +1518,55 @@ mod tests {
         assert!(match_glob("model-[a-c]", "model-c"));
         assert!(!match_glob("model-[a-c]", "model-d"));
     }
+
+    #[test]
+    fn first_match_wins_glob_patterns() {
+        // Test that rule order matters with glob patterns.
+        // Earlier specific rules should win over later general rules.
+        let rules = vec![
+            // More specific pattern first
+            make_rule("claude-sonnet-*", "specific-adapter"),
+            // Less specific pattern later
+            make_rule("claude-*", "general-adapter"),
+            // Catch-all last
+            make_rule("*", "catchall"),
+        ];
+
+        // Both "claude-sonnet-*" and "claude-*" would match "claude-sonnet-4-6",
+        // but the first rule should win.
+        assert_eq!(
+            match_adapter("claude-sonnet-4-6", &rules, "fallback"),
+            Some("specific-adapter".to_string())
+        );
+
+        // Only "claude-*" matches "claude-opus-4-6"
+        assert_eq!(
+            match_adapter("claude-opus-4-6", &rules, "fallback"),
+            Some("general-adapter".to_string())
+        );
+
+        // Only "*" matches "gpt-4"
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("catchall".to_string())
+        );
+    }
+
+    #[test]
+    fn rule_order_matters_reversed() {
+        // Test the opposite: when general rule comes first, it wins.
+        let rules = vec![
+            // General pattern first
+            make_rule("claude-*", "general-adapter"),
+            // More specific pattern later (never reached for claude-* models)
+            make_rule("claude-sonnet-*", "specific-adapter"),
+        ];
+
+        // "claude-*" matches first and wins, even though "claude-sonnet-*"
+        // would also match and is more specific.
+        assert_eq!(
+            match_adapter("claude-sonnet-4-6", &rules, "fallback"),
+            Some("general-adapter".to_string())
+        );
+    }
 }
