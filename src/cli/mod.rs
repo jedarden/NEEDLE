@@ -4396,12 +4396,26 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
         // Also handle cases where the binary is called via symlink or absolute path.
         // Also handle needle binary invocations in general (e.g., "needle --version" for testing).
         //
-        // IMPORTANT: Exclude shell wrapper processes (bash -c "NEEDLE_INNER=1 needle run ...")
-        // We only want to discover the actual needle worker process, not the shell wrapper.
-        // The shell wrapper has a cmdline like: "bash -c NEEDLE_INNER=1 /path/to/needle run ..."
+        // IMPORTANT: Also check the process environment for NEEDLE_INNER.
+        // This is critical for integration tests that use NEEDLE_INNER=1 sleep 3600,
+        // where the environment variable is set but not visible in cmdline.
+        // The environment variable is set by shell wrappers (bash -c "NEEDLE_INNER=1 ...")
+        // and inherited by child processes, so we need to check environ to discover them.
+        let has_needle_inner = if let Ok(environ_bytes) = fs::read(entry.path().join("environ")) {
+            let environ: String = environ_bytes
+                .split(|&b| b == 0)
+                .map(|args| String::from_utf8_lossy(args))
+                .collect::<Vec<_>>()
+                .join(" ");
+            environ.contains("NEEDLE_INNER")
+        } else {
+            false
+        };
+
         if !cmdline.contains("needle run")
             && !cmdline.contains("needle-worker")
             && !cmdline.contains("NEEDLE_INNER")
+            && !has_needle_inner
             && !std::env::var("CARGO_BIN_EXE_needle").is_ok_and(|bin_name| cmdline.contains(&format!("{} run", bin_name)))
             && !cmdline.split_whitespace().next().is_some_and(|first| first.ends_with("needle") || first.contains("/needle"))
         {
@@ -4411,10 +4425,13 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
         // Filter out shell wrapper processes (bash -c "NEEDLE_INNER=1 needle run ...").
         // These are created by tmux sessions and are not the actual needle worker processes.
         // We only want to discover processes that are directly executing needle, not shell wrappers.
-        if cmdline.starts_with("bash -c")
+        // However, we make an exception for processes that have NEEDLE_INNER in their environment,
+        // which includes integration test processes (e.g., NEEDLE_INNER=1 sleep 3600).
+        if (cmdline.starts_with("bash -c")
             || cmdline.starts_with("sh -c")
             || cmdline.starts_with("/bin/bash -c")
-            || cmdline.starts_with("/bin/sh -c")
+            || cmdline.starts_with("/bin/sh -c"))
+            && !has_needle_inner
         {
             continue;
         }

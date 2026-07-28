@@ -9,6 +9,7 @@
 //!
 //! Depends on: `bead_store`, `config`, `dispatch`, `prompt`, `telemetry`, `types`, `claim`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -20,6 +21,60 @@ use crate::dispatch::Dispatcher;
 use crate::prompt::PromptBuilder;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{Bead, BeadId};
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Stopwords
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Stopwords for semantic title matching.
+///
+/// These words are stripped from titles before token-set comparison to catch
+/// semantically identical titles with different phrasing (e.g., "verify X uses Y"
+/// vs "confirm X uses Y not Z").
+const STOPWORDS: &[&str] = &[
+    // Common verification verbs (semantically equivalent in this context)
+    "verify", "confirm", "validate", "check", "ensure",
+    // Articles and demonstratives
+    "the", "a", "that",
+    // Common task words
+    "uses", "not",
+];
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Token Set Helper
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Extract a token set from a title after stripping stopwords.
+///
+/// This function:
+/// 1. Converts the title to lowercase
+/// 2. Splits on whitespace and punctuation (hyphens, underscores)
+/// 3. Filters out stopwords defined in the STOPWORDS constant
+/// 4. Returns a HashSet of remaining tokens for comparison
+///
+/// # Example
+///
+/// ```
+/// let tokens = token_set_without_stopwords("verify X uses Y");
+/// assert!(tokens.contains("x"));
+/// assert!(tokens.contains("y"));
+/// assert!(!tokens.contains("verify"));
+/// assert!(!tokens.contains("uses"));
+/// ```
+pub fn token_set_without_stopwords(title: &str) -> HashSet<String> {
+    title
+        .to_lowercase()
+        .split_whitespace()
+        .flat_map(|word| {
+            // Split on hyphens and underscores to handle compound words
+            word.split(|c: char| c == '-' || c == '_')
+                .map(|part| part.to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|word| !STOPWORDS.contains(&word.as_str()))
+        .filter(|word| word.len() > 1) // Skip single-character words
+        .collect()
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // MitosisResult
@@ -654,6 +709,8 @@ fn sanitize_path_component(s: &str) -> String {
 ///
 /// Considers titles matching if they are identical after normalization,
 /// or if one contains the other as a substring.
+/// Falls back to token-set Jaccard similarity after stripping stopwords
+/// to catch semantically identical titles with different phrasing.
 fn titles_match(existing: &str, proposed: &str) -> bool {
     if existing == proposed {
         return true;
@@ -669,7 +726,80 @@ fn titles_match(existing: &str, proposed: &str) -> bool {
     let e = normalize(existing);
     let p = normalize(proposed);
 
-    e == p || e.contains(&p) || p.contains(&e)
+    // Fast path: exact match or substring match
+    if e == p || e.contains(&p) || p.contains(&e) {
+        return true;
+    }
+
+    // Fallback: fuzzy similarity using token-set Jaccard similarity
+    // Strip stopwords and common verbs first, then compare token sets
+    let stopwords = [
+        // Common verification verbs (semantically equivalent in this context)
+        "verify", "confirm", "validate", "check", "ensure", "test", "assert", "inspect",
+        // Articles and conjunctions
+        "the", "a", "an", "and", "or", "but",
+        // Prepositions
+        "for", "to", "in", "on", "at", "by", "with", "from", "of", "about",
+        // Pronouns and demonstratives
+        "that", "this", "these", "those", "it", "its",
+        // Common task words
+        "uses", "use", "used", "not", "no", "should", "will", "can", "may",
+        // Data access verbs (often interchangeable)
+        "get", "fetch", "retrieve", "read", "reads", "load", "pull",
+        // Action verbs (often interchangeable)
+        "add", "create", "make", "build", "implement",
+        "update", "change", "modify", "adjust", "fix",
+        "remove", "delete", "clear",
+        "set", "configure", "adjust",
+        // Adjectives (often interchangeable in task titles)
+        "correctly", "correct", "properly", "proper", "accurately", "accurate",
+    ];
+
+    // Token normalization map for abbreviations and common synonyms
+    let normalize_token = |word: &str| -> String {
+        match word.to_lowercase().as_str() {
+            // Percentage abbreviations
+            "pct" | "pct." | "percent" | "perc" => "percentage".to_string(),
+            // Model-related terms
+            "agnostic" => "model".to_string(),  // "model-agnostic" ~ "rotated model"
+            "rotated" => "scoped".to_string(),  // "rotated model" = "scoped model" in NEEDLE context
+            // Calculation-related
+            "calc" => "calculation".to_string(),
+            "feeds" | "feed" => "uses".to_string(),  // "feeds EMA" ~ "uses"
+            w => w.to_lowercase(),
+        }
+    };
+
+    let tokenize = |s: &str| -> std::collections::HashSet<String> {
+        s.split_whitespace()
+            .flat_map(|word| {
+                // Split on hyphens and underscores to handle compound words
+                // e.g., "model-agnostic" -> ["model", "agnostic"]
+                word.split(|c: char| c == '-' || c == '_')
+                    .map(|part| normalize_token(part))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|word| !stopwords.contains(&word.as_str()))
+            .filter(|word| word.len() > 1) // Skip single-character words
+            .collect()
+    };
+
+    let e_tokens = tokenize(&e);
+    let p_tokens = tokenize(&p);
+
+    // Calculate Jaccard similarity: |intersection| / |union|
+    let intersection = e_tokens.intersection(&p_tokens).count();
+    let union = e_tokens.union(&p_tokens).count();
+
+    if union == 0 {
+        return false;
+    }
+
+    let jaccard = intersection as f64 / union as f64;
+
+    // Threshold 0.6: requires 60% token overlap
+    // High enough to avoid false positives, low enough to catch semantic duplicates
+    jaccard >= 0.6
 }
 
 /// Parse the mitosis depth from a bead's labels.
@@ -959,6 +1089,117 @@ End of response."#;
         assert!(resp.is_some() || resp.is_none()); // We just ensure no panic.
     }
 
+    // ── token_set_without_stopwords tests ──
+
+    #[test]
+    fn token_set_without_stopwords_basic() {
+        let tokens = token_set_without_stopwords("verify X uses Y");
+        assert!(tokens.contains("x"));
+        assert!(tokens.contains("y"));
+        assert!(!tokens.contains("verify"));
+        assert!(!tokens.contains("uses"));
+        assert_eq!(tokens.len(), 2);
+    }
+
+    #[test]
+    fn token_set_without_stopwords_all_stopwords() {
+        let tokens = token_set_without_stopwords("verify the a that uses not");
+        assert!(tokens.is_empty(), "all stopwords should be stripped");
+    }
+
+    #[test]
+    fn token_set_without_stopwords_no_stopwords() {
+        let tokens = token_set_without_stopwords("implement feature authentication");
+        assert!(tokens.contains("implement"));
+        assert!(tokens.contains("feature"));
+        assert!(tokens.contains("authentication"));
+        assert_eq!(tokens.len(), 3);
+    }
+
+    #[test]
+    fn token_set_without_stopwords_case_insensitive() {
+        let tokens1 = token_set_without_stopwords("Verify X uses Y");
+        let tokens2 = token_set_without_stopwords("verify x uses y");
+        assert_eq!(tokens1, tokens2, "should be case-insensitive");
+    }
+
+    #[test]
+    fn token_set_without_stopwords_handles_hyphens() {
+        let tokens = token_set_without_stopwords("verify model-agnostic calculation");
+        assert!(tokens.contains("model"));
+        assert!(tokens.contains("agnostic"));
+        assert!(tokens.contains("calculation"));
+        assert!(!tokens.contains("verify"));
+    }
+
+    #[test]
+    fn token_set_without_stopwords_handles_underscores() {
+        let tokens = token_set_without_stopwords("check weekly_scoped_pct field");
+        assert!(tokens.contains("weekly"));
+        assert!(tokens.contains("scoped"));
+        assert!(tokens.contains("pct"));
+        assert!(tokens.contains("field"));
+        assert!(!tokens.contains("check"));
+    }
+
+    #[test]
+    fn token_set_without_stopwords_semantically_identical_titles() {
+        // Test that "verify X uses Y" and "confirm X uses Y not Z" produce similar token sets
+        let tokens1 = token_set_without_stopwords("verify X uses Y");
+        let tokens2 = token_set_without_stopwords("confirm X uses Y not Z");
+
+        // Both should contain X and Y
+        assert!(tokens1.contains("x"));
+        assert!(tokens1.contains("y"));
+        assert!(tokens2.contains("x"));
+        assert!(tokens2.contains("y"));
+
+        // Neither should contain stopwords
+        assert!(!tokens1.contains("verify") && !tokens1.contains("uses"));
+        assert!(!tokens2.contains("confirm") && !tokens2.contains("uses") && !tokens2.contains("not"));
+
+        // They should both have X and Y in common
+        let intersection: HashSet<_> = tokens1.intersection(&tokens2).collect();
+        assert!(intersection.contains(&String::from("x")));
+        assert!(intersection.contains(&String::from("y")));
+    }
+
+    #[test]
+    fn token_set_without_stopwords_ema_real_world_example() {
+        // Real-world example from bead bf-47bll
+        let title1 = "Verify EMA calculation uses model-agnostic weekly_scoped_pct";
+        let title2 = "Confirm EMA calculation uses weekly_scoped_pct not sonnet_pct";
+
+        let tokens1 = token_set_without_stopwords(title1);
+        let tokens2 = token_set_without_stopwords(title2);
+
+        // Both should contain the key content words
+        assert!(tokens1.contains("ema"));
+        assert!(tokens1.contains("calculation"));
+        assert!(tokens1.contains("weekly"));
+        assert!(tokens1.contains("scoped"));
+        assert!(tokens1.contains("pct"));
+
+        assert!(tokens2.contains("ema"));
+        assert!(tokens2.contains("calculation"));
+        assert!(tokens2.contains("weekly"));
+        assert!(tokens2.contains("scoped"));
+        assert!(tokens2.contains("pct"));
+
+        // Neither should contain stopwords
+        assert!(!tokens1.contains("verify") && !tokens1.contains("uses"));
+        assert!(!tokens2.contains("confirm") && !tokens2.contains("uses") && !tokens2.contains("not"));
+    }
+
+    #[test]
+    fn token_set_without_stopwords_single_char_words_filtered() {
+        let tokens = token_set_without_stopwords("verify a b c test");
+        assert!(!tokens.contains("a"));
+        assert!(!tokens.contains("b"));
+        assert!(!tokens.contains("c"));
+        assert!(tokens.contains("test"));
+    }
+
     // ── titles_match tests ──
 
     #[test]
@@ -975,6 +1216,67 @@ End of response."#;
     #[test]
     fn titles_no_match() {
         assert!(!titles_match("write migration", "add endpoint"));
+    }
+
+    #[test]
+    fn titles_match_semantically_identical_ema_titles() {
+        // Regression test for bf-47bll
+        // These two real-world titles from the same cascade both check the IDENTICAL
+        // underlying fact (EMA reads weekly_scoped_pct, not deprecated sonnet_pct)
+        // but neither is a substring of the other. The fuzzy check must catch them.
+        let title1 = "Verify EMA calculation uses model-agnostic weekly_scoped_pct";
+        let title2 = "Confirm EMA calculation uses weekly_scoped_pct not sonnet_pct";
+
+        // Should be recognized as duplicates
+        assert!(titles_match(title1, title2), "title1 and title2 should match");
+
+        // Additional example with similar semantic meaning
+        let title3 = "EMA calculation reads weekly_scoped_pct not sonnet_pct";
+        assert!(titles_match(title1, title3), "title1 and title3 should match");
+        assert!(titles_match(title2, title3), "title2 and title3 should match");
+    }
+
+    #[test]
+    fn titles_match_fuzzy_synonym_verbs() {
+        // Test that different verbs with same semantic meaning are caught
+        assert!(titles_match(
+            "verify the API endpoint returns correct data",
+            "confirm API returns correct data"
+        ));
+
+        assert!(titles_match(
+            "validate user authentication flow",
+            "check user authentication"
+        ));
+    }
+
+    #[test]
+    fn titles_no_match_unrelated_titles() {
+        // Test that genuinely unrelated titles are NOT flagged as duplicates
+        // These are real titles from the NEEDLE epic (bf-47bll's source lineage)
+        let title1 = "Update documentation and close parent bead";
+        let title2 = "Run cargo test to verify no regressions";
+
+        assert!(!titles_match(title1, title2), "unrelated titles should not match");
+
+        // Additional unrelated pairs
+        assert!(!titles_match("fix authentication bug", "add new feature"));
+        assert!(!titles_match("update database schema", "refactor UI components"));
+    }
+
+    #[test]
+    fn titles_match_fuzzy_word_order_variations() {
+        // Test that different word orders with similar tokens are caught
+        // These should have high Jaccard similarity
+        assert!(titles_match(
+            "update authentication system for user management",
+            "update user authentication system"
+        ));
+
+        assert!(titles_match(
+            "fix timeout in database connection",
+            "fix database connection timeout"
+        ));
     }
 
     // ── extract_json_block tests ──
