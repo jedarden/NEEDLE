@@ -6,11 +6,13 @@
 use crate::config::RoutingRule;
 use std::sync::Arc;
 
-/// Compiled routing rule with cached regex for efficient matching.
+/// Compiled routing rule with cached glob pattern for efficient matching.
 #[derive(Debug, Clone)]
 struct CompiledRule {
-    /// Compiled regex matcher.
-    matcher: Arc<regex::Regex>,
+    /// Compiled glob pattern matcher.
+    glob_matcher: Option<Arc<glob::Pattern>>,
+    /// Fallback regex matcher for patterns that aren't valid globs.
+    regex_matcher: Option<Arc<regex::Regex>>,
     /// Adapter to use on match.
     adapter: String,
 }
@@ -19,33 +21,68 @@ impl CompiledRule {
     /// Compile a routing rule into an efficient matcher.
     ///
     /// Supports both regex patterns (any valid regex) and glob-style patterns:
-    /// - `*` matches any single path segment (non-greedy `[^/]+`)
-    /// - `**` matches zero or more path segments (`.+?` with greedy quantifier)
-    /// - Literal `*` or `**` must be escaped as `\*` or `\*\*`
-    fn from_rule(rule: &RoutingRule) -> Result<Self, regex::Error> {
+    /// - `*` matches any sequence of non-separator characters
+    /// - `**` matches any sequence of characters, including slashes
+    /// - `?` matches any single character
+    /// - `[a-z]` matches any character in the bracket
+    /// - `[!a-z]` matches any character not in the bracket
+    ///
+    /// Detects whether a pattern should be treated as regex or glob based on
+    /// the presence of regex metacharacters. If the pattern contains regex
+    /// features (like `.*`, `^`, `$`, etc.), it's compiled as regex. Otherwise,
+    /// if it contains glob wildcards (`*`, `?`, etc.), it's compiled as glob
+    /// using the glob crate for efficient pattern matching.
+    fn from_rule(rule: &RoutingRule) -> Result<Self, String> {
         let pattern = &rule.match_model;
         let adapter = rule.adapter.clone();
 
-        // Convert glob patterns to regex if needed.
-        // If the pattern contains * or ** without proper regex escaping,
-        // treat it as a glob pattern and convert.
-        let regex_pattern = if needs_glob_conversion(pattern) {
-            convert_glob_to_regex(pattern)
-        } else {
-            pattern.clone()
-        };
+        // First, check if the pattern should be treated as regex
+        // If it has clear regex features, compile as regex
+        if !needs_glob_conversion(pattern) {
+            // Try regex compilation
+            match regex::Regex::new(pattern) {
+                Ok(regex) => {
+                    return Ok(CompiledRule {
+                        glob_matcher: None,
+                        regex_matcher: Some(Arc::new(regex)),
+                        adapter,
+                    })
+                }
+                Err(_) => {
+                    // Regex failed, try glob as fallback
+                }
+            }
+        }
 
-        let matcher = regex::Regex::new(&regex_pattern)?;
-
-        Ok(CompiledRule {
-            matcher: Arc::new(matcher),
-            adapter,
-        })
+        // Try glob pattern compilation using the glob crate
+        match glob::Pattern::new(pattern) {
+            Ok(glob_pattern) => {
+                Ok(CompiledRule {
+                    glob_matcher: Some(Arc::new(glob_pattern)),
+                    regex_matcher: None,
+                    adapter,
+                })
+            }
+            Err(e) => {
+                // Glob compilation failed, return error
+                Err(format!("Failed to compile glob pattern '{}': {}", pattern, e))
+            }
+        }
     }
 
     /// Test if a model name matches this rule.
     fn matches(&self, model: &str) -> bool {
-        self.matcher.is_match(model)
+        // Prefer glob matching if available
+        if let Some(ref glob) = self.glob_matcher {
+            return glob.matches(model);
+        }
+
+        // Fall back to regex matching
+        if let Some(ref regex) = self.regex_matcher {
+            return regex.is_match(model);
+        }
+
+        false
     }
 }
 
@@ -132,60 +169,64 @@ fn needs_glob_conversion(pattern: &str) -> bool {
 /// Convert glob-style pattern to regex.
 ///
 /// Rules:
-/// - `*` alone → `.*` (match anything, catch-all)
-/// - `*` in other contexts → `[^/]+` (match any single segment, no slashes)
-/// - `**` → `.*` (match any characters including slashes, greedy)
-/// - Escaped `\*` and `\*\*` treated literally
-/// - No implicit start anchor for glob patterns (unlike regex patterns)
+/// - `*` → `[^/]*` (match any characters except slashes)
+/// - `**` → `.*` (match any characters including slashes)
+/// - `?` → `.` (match any single character except slash)
+/// - Escaped `\*`, `\?\`, `\*\*` treated literally
+/// - Pattern is anchored to match the full string
 fn convert_glob_to_regex(glob: &str) -> String {
-    // Special case: * and ** should match anything (including empty).
-    if glob == "*" || glob == "**" {
-        return "^.*$".to_string();
-    }
-
-    let mut result = String::new();
+    let mut result = String::from("^"); // Start with anchor
     let chars: Vec<char> = glob.chars().collect();
     let mut i = 0;
 
     while i < chars.len() {
         match chars[i] {
             '\\' => {
-                // Escaped character - pass through the backslash and the character.
-                // This ensures that \* in the glob becomes \* in the regex (literal asterisk).
+                // Escaped character - pass through the next character literally.
                 if i + 1 < chars.len() {
-                    result.push('\\');
-                    result.push(chars[i + 1]);
+                    // Need to escape special regex characters
+                    let next_char = chars[i + 1];
+                    if matches!(next_char, '.' | '$' | '^' | '*' | '+' | '?' | '|' | '(' | ')' | '[' | ']' | '{' | '}' | '\\') {
+                        result.push('\\');
+                    }
+                    result.push(next_char);
                     i += 2;
                 } else {
-                    // Trailing backslash - treat literally.
+                    // Trailing backslash - treat literally
                     result.push('\\');
                     i += 1;
                 }
             }
             '*' => {
-                // Check for **.
+                // Check for **
                 if i + 1 < chars.len() && chars[i + 1] == '*' {
-                    // ** matches any characters including slashes.
+                    // ** matches any characters including slashes
                     result.push_str(".*");
                     i += 2;
                 } else {
-                    // * matches any non-slash characters.
-                    result.push_str("[^/]+");
+                    // * matches any characters except slashes
+                    result.push_str("[^/]*");
                     i += 1;
                 }
             }
+            '?' => {
+                // ? matches any single character except slash
+                result.push_str("[^/]");
+                i += 1;
+            }
             c => {
-                // Pass through regex metacharacters literally - regex::Regex::new
-                // will handle escaping. We only need to escape backslashes for
-                // the glob conversion.
+                // Escape special regex characters
+                if matches!(c, '.' | '$' | '^' | '+' | '|' | '(' | ')' | '[' | ']' | '{' | '}' | '\\') {
+                    result.push('\\');
+                }
                 result.push(c);
                 i += 1;
             }
         }
     }
 
-    // Only add end anchor, not start anchor (glob patterns match substrings).
-    format!("{}$", result)
+    result.push('$'); // End anchor
+    result
 }
 
 /// Match a model name against routing rules, returning the adapter to use.
