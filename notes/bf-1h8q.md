@@ -1,54 +1,43 @@
 # Verification of cleanup_heartbeat_file Compilation
 
 ## Task
-Verify that `cleanup_heartbeat_file` compiles without errors.
+Verify that the `cleanup_heartbeat_file` function compiles successfully with all changes from bead bf-547k.
 
-**Date:** 2026-07-28
-**Bead:** bf-1h8q
+## Verification Summary
 
-## Verification Results
+### 1. Function Signatures Verified
+Two `cleanup_heartbeat_file` functions exist in the health module:
 
-### 1. Compilation Check ✓
-- Ran `cargo check --lib` - **PASSED** (no errors)
-- Ran `cargo clippy --lib -- -D warnings` - **PASSED** (no warnings)
+1. **Method** (`HealthMonitor::cleanup_heartbeat_file`):
+   - Signature: `pub fn cleanup_heartbeat_file(&self) -> Result<()>`
+   - Returns: `anyhow::Result<()>`
+   - Location: lines 280-312 in `src/health/mod.rs`
 
-### 2. Function Signatures Verified ✓
+2. **Free Function** (module-level):
+   - Signature: `pub fn cleanup_heartbeat_file(path: &Path) -> Result<(), std::io::Error>`
+   - Returns: Raw `std::io::Error` from `std::fs::remove_file`
+   - Location: lines 862-864 in `src/health/mod.rs`
 
-**Standalone function (line 862-864):**
-```rust
-pub fn cleanup_heartbeat_file(path: &Path) -> Result<(), std::io::Error> {
-    std::fs::remove_file(path)
-}
-```
-- Returns: `Result<(), std::io::Error>` ✓
-- Correctly wraps `std::fs::remove_file` return type ✓
+### 2. Compilation Status
+- ✓ `cargo check --lib -p needle` passed with no errors
+- ✓ Health module has no clippy warnings
+- ✓ All type signatures match correctly
 
-**Method on HealthMonitor (line 280-312):**
-```rust
-pub fn cleanup_heartbeat_file(&self) -> Result<()> {
-    // ... cleanup logic with error handling
-    Ok(())
-}
-```
-- Returns: `Result<()>` (anyhow::Result) ✓
-- Handles file existence check and removal with logging ✓
+### 3. Test Results
+All 8 `cleanup_heartbeat_file` tests passed:
+- `cleanup_heartbeat_file_removes_existing_file` ✓
+- `cleanup_heartbeat_file_errs_when_file_missing` ✓
+- `cleanup_heartbeat_file_errs_on_removal_failure` ✓
+- `cleanup_heartbeat_file_with_heartbeat_path` ✓
+- `healthmonitor_cleanup_heartbeat_file_removes_existing_file` ✓
+- `healthmonitor_cleanup_heartbeat_file_ok_when_file_missing` ✓
+- `healthmonitor_cleanup_heartbeat_file_logs_errors_on_failure` ✓
+- `healthmonitor_cleanup_heartbeat_file_with_running_emitter` ✓
 
-### 3. Type Compatibility ✓
-- Both functions use appropriate Result types
-- No type mismatches detected
-- All error handling paths return correct Result types
-
-### 4. Integration Tests ✓
-The module includes comprehensive test coverage:
-- `cleanup_heartbeat_file_removes_existing_file` (line 2054)
-- `cleanup_heartbeat_file_ok_when_file_missing` (line 2069)
-- `cleanup_heartbeat_file_logs_errors_on_failure` (line 2090)
-- `cleanup_heartbeat_file_with_heartbeat_path` (line 2114)
-- `healthmonitor_cleanup_heartbeat_file_*` tests (lines 2484-2607)
+## Acceptance Criteria Status
+- ✓ cargo check passes for the health module
+- ✓ No compiler errors or warnings (in health module)
+- ✓ Function signature is correct and all types match
 
 ## Conclusion
-The `cleanup_heartbeat_file` function compiles successfully with:
-- **Zero compiler errors**
-- **Zero compiler warnings**
-- **Correct function signatures**
-- **All type matches verified**
+The `cleanup_heartbeat_file` function compiles successfully with all changes from bead bf-547k. The function now returns the raw `std::fs::remove_file` result, allowing error propagation to callers while maintaining backward compatibility through the `HealthMonitor` method that swallows errors.
