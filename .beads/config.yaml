@@ -22,3 +22,4 @@ secret_protection:
   allowlist:
     - "repeat_interval_zero_preserves_first_failure"
     - "test_deadlock_multi_workspace_with_excluded_"
+    - "deadlock_scenario_assigned_beads_allow_advan"
