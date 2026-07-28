@@ -76,6 +76,47 @@ pub fn token_set_without_stopwords(title: &str) -> HashSet<String> {
         .collect()
 }
 
+/// Calculate Jaccard similarity between two token sets.
+///
+/// Jaccard similarity is defined as the size of the intersection divided by
+/// the size of the union: |A ∩ B| / |A ∪ B|.
+///
+/// Returns a value between 0.0 (no overlap) and 1.0 (identical sets).
+///
+/// # Arguments
+///
+/// * `set1` - First token set
+/// * `set2` - Second token set
+///
+/// # Returns
+///
+/// * `f64` - Jaccard similarity coefficient (0.0 to 1.0)
+///
+/// # Examples
+///
+/// ```
+/// use std::collections::HashSet;
+///
+/// let set1: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+/// let set2: HashSet<String> = ["a", "b", "d"].iter().map(|s| s.to_string()).collect();
+///
+/// // Intersection: {a, b} (2 elements)
+/// // Union: {a, b, c, d} (4 elements)
+/// // Jaccard: 2/4 = 0.5
+/// assert_eq!(jaccard_similarity(&set1, &set2), 0.5);
+/// ```
+pub fn jaccard_similarity(set1: &HashSet<String>, set2: &HashSet<String>) -> f64 {
+    let intersection = set1.intersection(set2).count();
+    let union = set1.union(set2).count();
+
+    if union == 0 {
+        // Both sets are empty - define as identical (1.0)
+        return 1.0;
+    }
+
+    intersection as f64 / union as f64
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // MitosisResult
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1198,6 +1239,185 @@ End of response."#;
         assert!(!tokens.contains("b"));
         assert!(!tokens.contains("c"));
         assert!(tokens.contains("test"));
+    }
+
+    // ── jaccard_similarity tests ──
+
+    #[test]
+    fn jaccard_identical_sets() {
+        let set1: HashSet<String> = ["a", "b", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let set2: HashSet<String> = ["a", "b", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Identical sets should have Jaccard similarity of 1.0
+        assert_eq!(jaccard_similarity(&set1, &set2), 1.0);
+    }
+
+    #[test]
+    fn jaccard_both_empty() {
+        let set1: HashSet<String> = HashSet::new();
+        let set2: HashSet<String> = HashSet::new();
+
+        // Two empty sets are defined as identical
+        assert_eq!(jaccard_similarity(&set1, &set2), 1.0);
+    }
+
+    #[test]
+    fn jaccard_one_empty() {
+        let set1: HashSet<String> = ["a", "b", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let set2: HashSet<String> = HashSet::new();
+
+        // One empty, one non-empty should have 0.0 similarity
+        assert_eq!(jaccard_similarity(&set1, &set2), 0.0);
+    }
+
+    #[test]
+    fn jaccard_no_overlap() {
+        let set1: HashSet<String> = ["a", "b", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let set2: HashSet<String> = ["x", "y", "z"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // No overlap should have 0.0 similarity
+        assert_eq!(jaccard_similarity(&set1, &set2), 0.0);
+    }
+
+    #[test]
+    fn jaccard_partial_overlap() {
+        let set1: HashSet<String> = ["a", "b", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let set2: HashSet<String> = ["a", "b", "d"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Intersection: {a, b} (2 elements)
+        // Union: {a, b, c, d} (4 elements)
+        // Jaccard: 2/4 = 0.5
+        assert_eq!(jaccard_similarity(&set1, &set2), 0.5);
+    }
+
+    #[test]
+    fn jaccard_subset() {
+        let set1: HashSet<String> = ["a", "b", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let set2: HashSet<String> = ["a", "b"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // set2 is a subset of set1
+        // Intersection: {a, b} (2 elements)
+        // Union: {a, b, c} (3 elements)
+        // Jaccard: 2/3 ≈ 0.6667
+        let result = jaccard_similarity(&set1, &set2);
+        assert!((result - 0.6667).abs() < 0.0001);
+    }
+
+    #[test]
+    fn jaccard_high_overlap() {
+        let set1: HashSet<String> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let set2: HashSet<String> = ["a", "b", "c", "d", "f"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Intersection: {a, b, c, d} (4 elements)
+        // Union: {a, b, c, d, e, f} (6 elements)
+        // Jaccard: 4/6 ≈ 0.6667
+        let result = jaccard_similarity(&set1, &set2);
+        assert!((result - 0.6667).abs() < 0.0001);
+    }
+
+    #[test]
+    fn jaccard_completely_different_sizes() {
+        let set1: HashSet<String> = ["a"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let set2: HashSet<String> = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Intersection: {a} (1 element)
+        // Union: {a, b, c, d, e, f, g, h, i, j} (10 elements)
+        // Jaccard: 1/10 = 0.1
+        assert_eq!(jaccard_similarity(&set1, &set2), 0.1);
+    }
+
+    #[test]
+    fn jaccard_symmetric() {
+        let set1: HashSet<String> = ["a", "b", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let set2: HashSet<String> = ["a", "b", "d"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Jaccard similarity should be symmetric
+        assert_eq!(
+            jaccard_similarity(&set1, &set2),
+            jaccard_similarity(&set2, &set1)
+        );
+    }
+
+    #[test]
+    fn jaccard_single_element_match() {
+        let set1: HashSet<String> = ["a", "b", "c"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let set2: HashSet<String> = ["a"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Intersection: {a} (1 element)
+        // Union: {a, b, c} (3 elements)
+        // Jaccard: 1/3 ≈ 0.3333
+        let result = jaccard_similarity(&set1, &set2);
+        assert!((result - 0.3333).abs() < 0.0001);
+    }
+
+    #[test]
+    fn jaccard_integration_with_token_set() {
+        // Test integration with token_set_without_stopwords
+        let title1 = "verify API endpoint authentication";
+        let title2 = "confirm API authentication flow";
+
+        let tokens1 = token_set_without_stopwords(title1);
+        let tokens2 = token_set_without_stopwords(title2);
+
+        // Both should have "api" and "authentication" in common
+        // tokens1: {api, endpoint, authentication}
+        // tokens2: {api, authentication, flow}
+        // Intersection: {api, authentication} (2)
+        // Union: {api, endpoint, authentication, flow} (4)
+        // Jaccard: 2/4 = 0.5
+        let result = jaccard_similarity(&tokens1, &tokens2);
+        assert!((result - 0.5).abs() < 0.0001);
     }
 
     // ── titles_match tests ──
