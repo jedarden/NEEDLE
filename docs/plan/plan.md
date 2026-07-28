@@ -4343,3 +4343,42 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 - No worker launch is silently killed mid-`worker_construction` under CPU saturation — the outcome is either a successful (possibly delayed) launch or an explicit, logged failure with a reason.
 - A `--count=N` batch launch on an already-loaded host does not itself push load high enough to kill its own later-launched members.
 - `needle supervise`'s auto-scaler and the CLI's manual launch path share one resource-gating implementation, not two that can drift apart.
+
+# Phase 13: External-Adopter Hardening — Gate Bead-Context, Gate Configurability, Deferred Bead Status, Spawn-Path Robustness
+
+**Status:** implemented (ADR-009), fixes GitHub issues #7, #8, #9, #10, #11.
+
+**Goal:** close five independent hardening gaps surfaced by the first external production adopter of NEEDLE-rs + bead-forge (a ~900-bead monorepo migrated from bd/Dolt, run alongside a legacy orchestrator during cutover). All five were filed as GitHub issues within the same 23-minute window on 2026-07-28, each citing head `74356cd`, each confirmed against source before any fix was written, and each already running as a validated local patch in the reporter's production fork. None requires a design change — each is a hardcoded constant or unhandled enum variant that assumed NEEDLE's own defaults would hold for every deployment. Full evidence and rationale in [ADR-009](../adr/009-external-adopter-hardening.md).
+
+## Changes
+
+### 13.1 Gate commands receive bead context (#7)
+- `CommandGate::run_command` (`src/validation/mod.rs`) exports `NEEDLE_BEAD_ID` and `NEEDLE_WORKSPACE` into the spawned command's environment, sourced from the `bead: &Bead` parameter `CommandGate::validate` already receives but previously discarded (`_bead`). Enables bead-aware gates (resolve acceptance criteria, tag commits, write labels back) without racing other workers to guess bead identity from `br list --json` assignee state.
+
+### 13.2 Configurable outcome-handler gate timeout (#8)
+- New `ValidationConfig` section on `Config`: `validation.outcome_timeout_seconds`, default `50` (preserves current behavior). Threaded into `OutcomeHandler::handle_with_cancellation`'s `tokio::time::timeout` (`src/outcome/mod.rs`) in place of the hardcoded `Duration::from_secs(50)`. Unblocks gates running real verification workloads (container test suites, secret scanning, fresh-model diff verification) that need minutes, not seconds.
+
+### 13.3 Configurable gate stderr cap (#9)
+- Same `ValidationConfig` section: `validation.stderr_cap_bytes`, default `4096` (preserves current behavior). Threaded into `CommandGate` (constructed with the configured cap from `ValidationGate::new`/`from_commands`) in place of the `MAX_OUTPUT_BYTES` const in `src/validation/mod.rs`. A gate veto now carries as much diagnostic evidence as the operator configures, instead of always being cut to 4KB.
+
+### 13.4 `BeadStatus` accepts bead-forge's `deferred` status (#10)
+- New `Deferred` variant on `BeadStatus` (`src/types/mod.rs`), alongside the existing `Done`/`Closed` aliasing precedent. `is_done()` returns `false` for `Deferred` (distinct from `Blocked` — deliberately-postponed vs. blocked-by-dependency are different states, both now representable). Closes a silent-data-loss gap: a store with `deferred` beads previously failed deserialization for those records only, making them invisible to every strand and to `needle supervise`'s queue view with no surfaced error.
+
+### 13.5 Supervisor spawns workers via its own binary path (#11)
+- `Supervisor::spawn_worker` (`src/supervisor/mod.rs`) resolves the worker binary via `std::env::current_exe()` by default instead of `Command::new("needle")` (a bare `$PATH` lookup), since supervisor and worker are built from the same binary. New optional `worker.worker_binary_path` config override for deployments that deliberately want a different spawn target. The resolved path is logged once at supervisor startup so a name collision on `$PATH` (as in the reporter's migration, where a legacy tool occupied the name `needle`) is visible immediately rather than only via stalled worker heartbeats.
+
+### 13.6 Testing
+- `src/validation/mod.rs`: gate command sees both `NEEDLE_BEAD_ID` and `NEEDLE_WORKSPACE` in its environment; configurable stderr cap truncates at the configured value, not just the old default.
+- `src/outcome/mod.rs`: config parse test for `validation.outcome_timeout_seconds`; behavioral test that a gate running longer than the default-but-shorter-than-configured timeout completes successfully.
+- `src/types/mod.rs`: `"deferred"` deserializes to `BeadStatus::Deferred`; `is_done()` is `false` for it; round-trip serialize/deserialize.
+- `src/supervisor/mod.rs`: spawn resolves to `current_exe()` when no override is configured; override path is honored when set.
+- Full suite run via `needle-ci` on iad-ci (fmt + clippy + test), triggered by the push to `main` per this repo's standard CI convention (`CLAUDE.md`).
+
+### 13.7 Deployment
+- Direct commit to `main` (this repo's established convention — no PR/branch workflow), triggering `needle-ci` on iad-ci automatically. Version bump and GitHub Release follow the existing convention once CI is green.
+
+## Exit criteria
+- All five reproduction cases from issues #7–#11 pass with the fix applied and fail without it (regression-tested).
+- No existing NEEDLE deployment's behavior changes by upgrading alone — every new config field defaults to today's hardcoded value.
+- `needle-ci` (fmt + clippy + test) passes on `main` at the commit implementing this phase.
+- Each of #7–#11 is closed on GitHub with a comment showing the fixing commit and the passing CI run.

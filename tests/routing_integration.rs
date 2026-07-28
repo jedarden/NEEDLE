@@ -71,6 +71,8 @@ fn make_test_adapter(name: &str, cli: &str, template: &str) -> AgentAdapter {
         model: None,
         token_extraction: TokenExtraction::None,
         output_transform: None,
+        harness: None,
+        harness_version: None,
     }
 }
 

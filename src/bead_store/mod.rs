@@ -247,7 +247,7 @@ pub struct SyncRecoveryError {
 // ─── Filters ─────────────────────────────────────────────────────────────────
 
 /// Filters applied when listing ready beads.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Filters {
     /// Only return beads assigned to this actor. `None` = no filter.
     pub assignee: Option<String>,
@@ -255,16 +255,6 @@ pub struct Filters {
     pub exclude_labels: Vec<String>,
     /// Exclude beads with these IDs.
     pub exclude_ids: HashSet<BeadId>,
-}
-
-impl Default for Filters {
-    fn default() -> Self {
-        Self {
-            assignee: None,
-            exclude_labels: Vec::new(),
-            exclude_ids: HashSet::new(),
-        }
-    }
 }
 
 // ─── RepairReport ─────────────────────────────────────────────────────────────

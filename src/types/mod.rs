@@ -108,6 +108,13 @@ pub enum BeadStatus {
     /// to `Done` so deserialization succeeds.
     Closed,
     Blocked,
+    /// `bf` (bead-forge) emits `"deferred"` for beads deliberately postponed
+    /// rather than blocked by a dependency. Distinct from `Blocked`: a
+    /// deferred bead has no unmet dependency, it was just set aside — see
+    /// GitHub issue jedarden/NEEDLE#10. Without this variant, `bf list --json`
+    /// fails deserialization for every such bead, and it silently disappears
+    /// from strand/supervise visibility with no surfaced error.
+    Deferred,
 }
 
 impl BeadStatus {
@@ -124,6 +131,7 @@ impl fmt::Display for BeadStatus {
             BeadStatus::InProgress => write!(f, "in_progress"),
             BeadStatus::Done | BeadStatus::Closed => write!(f, "done"),
             BeadStatus::Blocked => write!(f, "blocked"),
+            BeadStatus::Deferred => write!(f, "deferred"),
         }
     }
 }
@@ -614,6 +622,8 @@ mod tests {
         assert_eq!(json, r#""done""#);
         let json = serde_json::to_string(&BeadStatus::Blocked).unwrap();
         assert_eq!(json, r#""blocked""#);
+        let json = serde_json::to_string(&BeadStatus::Deferred).unwrap();
+        assert_eq!(json, r#""deferred""#);
     }
 
     #[test]
@@ -761,6 +771,7 @@ mod tests {
         assert!(BeadStatus::Done.is_done());
         assert!(BeadStatus::Closed.is_done());
         assert!(!BeadStatus::Blocked.is_done());
+        assert!(!BeadStatus::Deferred.is_done());
     }
 
     #[test]
@@ -770,6 +781,26 @@ mod tests {
         assert_eq!(BeadStatus::Done.to_string(), "done");
         assert_eq!(BeadStatus::Closed.to_string(), "done"); // Closed displays as done
         assert_eq!(BeadStatus::Blocked.to_string(), "blocked");
+        assert_eq!(BeadStatus::Deferred.to_string(), "deferred");
+    }
+
+    #[test]
+    fn bead_status_deferred_deserialization() {
+        // bf (bead-forge) emits "deferred" for beads deliberately postponed —
+        // GitHub issue jedarden/NEEDLE#10. Previously this failed deserialization
+        // and silently dropped the bead from every strand/supervise view.
+        let status: BeadStatus = serde_json::from_str(r#""deferred""#).unwrap();
+        assert_eq!(status, BeadStatus::Deferred);
+        assert!(!status.is_done());
+        // Round-trip: serializing back must produce the same wire format bf expects.
+        assert_eq!(serde_json::to_string(&status).unwrap(), r#""deferred""#);
+    }
+
+    #[test]
+    fn bead_status_deferred_distinct_from_blocked() {
+        // Deferred (deliberately postponed) and Blocked (unmet dependency) are
+        // different states, not aliases of one another.
+        assert_ne!(BeadStatus::Deferred, BeadStatus::Blocked);
     }
 
     #[test]

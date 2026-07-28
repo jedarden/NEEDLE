@@ -194,6 +194,19 @@ pub struct WorkerConfig {
     /// Short retry backoff in seconds (for found-but-excluded case).
     #[serde(default = "WorkerConfig::default_short_retry_backoff")]
     pub short_retry_backoff: u64,
+
+    /// Explicit path to the worker binary `needle supervise` spawns.
+    ///
+    /// When `None` (the default), the supervisor resolves
+    /// `std::env::current_exe()` — the supervisor and worker are the same
+    /// binary, so this is always correct absent an override. Set this only
+    /// when the running binary's own path is deliberately not what should be
+    /// spawned (e.g. a wrapper script). See GitHub issue jedarden/NEEDLE#11:
+    /// the previous hardcoded `Command::new("needle")` resolved whatever
+    /// binary happened to occupy that name on `$PATH`, silently spawning the
+    /// wrong process when another tool shared the name.
+    #[serde(default)]
+    pub worker_binary_path: Option<PathBuf>,
 }
 
 impl Default for WorkerConfig {
@@ -215,6 +228,7 @@ impl Default for WorkerConfig {
             idle_backoff_min: Self::default_idle_backoff_min(),
             idle_backoff_max: Self::default_idle_backoff_max(),
             short_retry_backoff: Self::default_short_retry_backoff(),
+            worker_binary_path: None,
         }
     }
 }
@@ -576,6 +590,15 @@ pub struct MitosisConfig {
     /// Beads already carrying a mitosis-depth label are skipped.
     #[serde(default)]
     pub repeat_interval: u32,
+
+    /// Maximum mitosis generation depth (0 = unlimited).
+    ///
+    /// A bead's depth is tracked via its `mitosis-depth:N` label (root beads
+    /// are depth 0; each split increments the depth by 1 for its children).
+    /// Beads at or beyond this depth are flagged with a `human` label instead
+    /// of being split further, to prevent unbounded recursive splitting.
+    #[serde(default)]
+    pub max_depth: u32,
 }
 
 impl Default for MitosisConfig {
@@ -585,6 +608,7 @@ impl Default for MitosisConfig {
             first_failure_only: Self::default_first_failure_only(),
             force_failure_threshold: 0,
             repeat_interval: 0,
+            max_depth: 0,
         }
     }
 }
@@ -1722,6 +1746,43 @@ impl OutcomeConfig {
     }
 }
 
+/// Validation gate execution configuration.
+///
+/// Both fields preserve NEEDLE's previous hardcoded behavior as their default,
+/// so upgrading alone changes nothing for an existing deployment. See GitHub
+/// issues jedarden/NEEDLE#8 and jedarden/NEEDLE#9: a gate running a real
+/// verification workload (container test suite, secret scan, fresh-model diff
+/// verifier) needs more than 50 seconds and more than 4KB of stderr to report
+/// a useful failure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationConfig {
+    /// Timeout (seconds) for the outcome handler's gate-execution wrapper.
+    #[serde(default = "ValidationConfig::default_outcome_timeout_seconds")]
+    pub outcome_timeout_seconds: u64,
+
+    /// Maximum bytes of gate command stderr captured on failure.
+    #[serde(default = "ValidationConfig::default_stderr_cap_bytes")]
+    pub stderr_cap_bytes: usize,
+}
+
+impl Default for ValidationConfig {
+    fn default() -> Self {
+        ValidationConfig {
+            outcome_timeout_seconds: Self::default_outcome_timeout_seconds(),
+            stderr_cap_bytes: Self::default_stderr_cap_bytes(),
+        }
+    }
+}
+
+impl ValidationConfig {
+    fn default_outcome_timeout_seconds() -> u64 {
+        50
+    }
+    fn default_stderr_cap_bytes() -> usize {
+        4096
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Config Source Tracking
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1819,7 +1880,7 @@ pub struct WorkspaceStrandsOverrides {
 ///
 /// Note: `workspace` is intentionally absent — `workspace.labels` IS overridable
 /// per-workspace. The path fields (`default`, `home`) are simply ignored if set.
-const NON_OVERRIDABLE_KEYS: &[&str] = &["worker", "limits", "health", "telemetry"];
+const NON_OVERRIDABLE_KEYS: &[&str] = &["worker", "limits", "health", "telemetry", "validation"];
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Top-level Config
@@ -1872,6 +1933,12 @@ pub struct Config {
     /// Outcome handling configuration (failure circuit-breaker).
     #[serde(default)]
     pub outcome: OutcomeConfig,
+    /// Tsnet identity provisioning configuration.
+    #[serde(default)]
+    pub tsnet: crate::tsnet::TsnetConfig,
+    /// Validation gate execution configuration (timeout, stderr cap).
+    #[serde(default)]
+    pub validation: ValidationConfig,
 }
 
 impl Config {
@@ -1884,6 +1951,9 @@ impl Config {
         // workspace section
         self.workspace.default = expand_tilde(&self.workspace.default);
         self.workspace.home = expand_tilde(&self.workspace.home);
+
+        // worker section
+        self.worker.worker_binary_path = expand_tilde_option(&self.worker.worker_binary_path);
 
         // agent section
         self.agent.adapters_dir = expand_tilde(&self.agent.adapters_dir);
@@ -4509,5 +4579,83 @@ agent:
             "splice with report_workspace should not cause validation errors: {:?}",
             errors
         );
+    }
+
+    // ── ValidationConfig tests (GitHub issues jedarden/NEEDLE#8, #9) ──
+
+    #[test]
+    fn validation_config_defaults_preserve_previous_hardcoded_behavior() {
+        let config = ValidationConfig::default();
+        assert_eq!(config.outcome_timeout_seconds, 50);
+        assert_eq!(config.stderr_cap_bytes, 4096);
+    }
+
+    #[test]
+    fn validation_config_parses_from_yaml() {
+        let yaml = "validation:\n  outcome_timeout_seconds: 300\n  stderr_cap_bytes: 65536\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.validation.outcome_timeout_seconds, 300);
+        assert_eq!(config.validation.stderr_cap_bytes, 65536);
+    }
+
+    #[test]
+    fn validation_config_absent_from_yaml_uses_defaults() {
+        // A config file that predates this feature must still parse and get
+        // the previous hardcoded behavior, not an error or zeroed values.
+        let yaml = "agent:\n  default: claude\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.validation.outcome_timeout_seconds, 50);
+        assert_eq!(config.validation.stderr_cap_bytes, 4096);
+    }
+
+    #[test]
+    fn validation_is_non_overridable_at_workspace_level() {
+        assert!(NON_OVERRIDABLE_KEYS.contains(&"validation"));
+    }
+
+    // ── MitosisConfig.max_depth (fixes pre-existing compile breakage) ──
+
+    #[test]
+    fn mitosis_config_max_depth_defaults_to_unlimited() {
+        assert_eq!(MitosisConfig::default().max_depth, 0);
+    }
+
+    #[test]
+    fn mitosis_config_max_depth_parses_from_yaml() {
+        let yaml = "strands:\n  mitosis:\n    max_depth: 3\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.strands.mitosis.max_depth, 3);
+    }
+
+    // ── worker.worker_binary_path (GitHub issue jedarden/NEEDLE#11) ──
+
+    #[test]
+    fn worker_binary_path_defaults_to_none() {
+        assert_eq!(Config::default().worker.worker_binary_path, None);
+    }
+
+    #[test]
+    fn worker_binary_path_parses_from_yaml() {
+        let yaml = "worker:\n  worker_binary_path: /opt/custom/needle\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.worker.worker_binary_path,
+            Some(PathBuf::from("/opt/custom/needle"))
+        );
+    }
+
+    #[test]
+    fn worker_binary_path_tilde_is_expanded() {
+        let mut config = Config {
+            worker: WorkerConfig {
+                worker_binary_path: Some(PathBuf::from("~/bin/needle")),
+                ..Config::default().worker
+            },
+            ..Config::default()
+        };
+        config.expand_tildes();
+        let expanded = config.worker.worker_binary_path.unwrap();
+        assert!(!expanded.starts_with("~"), "tilde was not expanded: {:?}", expanded);
+        assert!(expanded.ends_with("bin/needle"));
     }
 }

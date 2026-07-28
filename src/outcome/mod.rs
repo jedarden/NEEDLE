@@ -305,11 +305,16 @@ impl OutcomeHandler {
 
         // Wrap the handler in a timeout to prevent indefinite hangs.
         // This is a safety net in case the internal br call timeouts don't work.
+        // Configurable via `validation.outcome_timeout_seconds` (default 50) —
+        // see GitHub issue jedarden/NEEDLE#8: a gate running a real verification
+        // workload (container test suite, secret scan, fresh-model diff verifier)
+        // needs minutes, not seconds.
         let bead_id = bead.id.clone();
         let telemetry = self.telemetry.clone();
+        let timeout_secs = self.config.validation.outcome_timeout_seconds;
 
         match tokio::time::timeout(
-            std::time::Duration::from_secs(50),
+            std::time::Duration::from_secs(timeout_secs),
             self.handle(store, bead, output, was_interrupted),
         )
         .await
@@ -325,10 +330,11 @@ impl OutcomeHandler {
                 Err(e)
             }
             Err(_) => {
-                // Timeout after 50 seconds.
+                // Timeout after `timeout_secs` seconds.
                 tracing::error!(
                     bead_id = %bead_id,
-                    "outcome handler timed out after 50s, returning early to allow worker recovery"
+                    timeout_secs,
+                    "outcome handler timed out, returning early to allow worker recovery"
                 );
                 // Emit a timeout event for observability.
                 let _ = telemetry.emit(EventKind::WorkerHandlingTimeout {
@@ -337,7 +343,7 @@ impl OutcomeHandler {
                         .as_str()
                         .to_string(),
                     operation: "handle".to_string(),
-                    error: "timeout after 50s".to_string(),
+                    error: format!("timeout after {}s", timeout_secs),
                 });
                 // Return a default HandlerResult to allow the worker to recover.
                 // The worker's 60-second timeout wrapper will handle best-effort release.
@@ -372,18 +378,34 @@ impl OutcomeHandler {
 
         // Try pluggable gates first, fall back to legacy verification commands.
         let gate = if !self.config.gates.is_empty() {
-            // New pluggable gate system.
+            // New pluggable gate system. Fill in each command gate's stderr
+            // cap from `validation.stderr_cap_bytes` unless the gate already
+            // set its own override — see GitHub issue jedarden/NEEDLE#9.
+            let default_stderr_cap = self.config.validation.stderr_cap_bytes;
             let gate_configs: Vec<(String, GateConfig)> = self
                 .config
                 .gates
                 .iter()
                 .enumerate()
-                .map(|(i, config)| (format!("gate_{}", i), config.clone()))
+                .map(|(i, config)| {
+                    let mut config = config.clone();
+                    let GateConfig::Command {
+                        stderr_cap_bytes, ..
+                    } = &mut config;
+                    if stderr_cap_bytes.is_none() {
+                        *stderr_cap_bytes = Some(default_stderr_cap);
+                    }
+                    (format!("gate_{}", i), config)
+                })
                 .collect();
             ValidationGate::new(gate_configs, bead.workspace.clone())
         } else if !self.config.verification.is_empty() {
             // Legacy verification command format.
-            ValidationGate::from_commands(self.config.verification.clone(), bead.workspace.clone())
+            ValidationGate::from_commands_with_stderr_cap(
+                self.config.verification.clone(),
+                bead.workspace.clone(),
+                self.config.validation.stderr_cap_bytes,
+            )
         } else {
             None
         };
@@ -1088,6 +1110,7 @@ impl fmt::Display for Outcome {
 mod tests {
     use super::*;
     use crate::bead_store::Filters;
+    use crate::config::ValidationConfig;
     use crate::telemetry::Sink;
     use crate::types::{BeadId, ClaimResult};
     use async_trait::async_trait;
@@ -1966,5 +1989,64 @@ mod tests {
         assert_eq!(result.outcome, Outcome::Failure);
         assert_eq!(result.bead_action, BeadAction::None);
         assert!(result.telemetry_events.is_empty());
+    }
+
+    // ── configurable outcome timeout tests (GitHub issue jedarden/NEEDLE#8) ──
+
+    fn test_handler_with_config(config: Config) -> OutcomeHandler {
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), NopSink);
+        OutcomeHandler::new(config, telemetry)
+    }
+
+    #[test]
+    fn validation_outcome_timeout_seconds_defaults_to_50() {
+        // Preserves the previous hardcoded behavior as the default.
+        assert_eq!(Config::default().validation.outcome_timeout_seconds, 50);
+    }
+
+    #[test]
+    fn validation_outcome_timeout_seconds_parses_override() {
+        let yaml = "validation:\n  outcome_timeout_seconds: 300\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.validation.outcome_timeout_seconds, 300);
+        // stderr_cap_bytes still defaults even though only outcome_timeout_seconds was set.
+        assert_eq!(config.validation.stderr_cap_bytes, 4096);
+    }
+
+    #[tokio::test]
+    async fn handle_with_cancellation_respects_configured_timeout() {
+        // A gate that runs ~2s, with outcome_timeout_seconds configured to 1 —
+        // far shorter than the previous hardcoded 50s. If the timeout fires
+        // here, the *configured* value is what's enforced, not the old constant
+        // (a 2s gate would sail through a 50s cap with time to spare).
+        let config = Config {
+            verification: vec!["sleep 2".to_string()],
+            validation: ValidationConfig {
+                outcome_timeout_seconds: 1,
+                ..Default::default()
+            },
+            ..Config::default()
+        };
+        let handler = test_handler_with_config(config);
+        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+        let cancelled = Arc::new(AtomicBool::new(false));
+
+        let start = std::time::Instant::now();
+        let result = handler
+            .handle_with_cancellation(&store, &bead, &test_output(0), false, cancelled)
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed.as_secs() < 10,
+            "expected the ~1s configured timeout to fire, took {:?}",
+            elapsed
+        );
+        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(result.telemetry_events.iter().any(
+            |e| matches!(e, EventKind::BeadReleased { reason, .. } if reason == "handler_timeout")
+        ));
     }
 }

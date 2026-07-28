@@ -783,7 +783,7 @@ impl Dispatcher {
         let mut child_env = adapter.environment.clone();
 
         // Inject tsnet identity environment variables if provisioned
-        if let (Some(ref identity), Some(ref registry)) = (&tsnet_identity, &self.tsnet_registry) {
+        if let (Some(ref identity), Some(_)) = (&tsnet_identity, &self.tsnet_registry) {
             inject_identity_env(identity, &self.tsnet_config, &mut child_env);
         }
 

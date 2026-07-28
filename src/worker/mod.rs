@@ -659,10 +659,10 @@ impl Worker {
         // Record spawn-path binary metadata at boot time
         match crate::spawn_path::check_spawn_path_at_boot(None, |event| {
             // Emit telemetry event if modification was detected
-            let old_metadata_json = serde_json::to_value(&event.old_metadata)
-                .unwrap_or_else(|_| serde_json::Value::Null);
-            let new_metadata_json = serde_json::to_value(&event.new_metadata)
-                .unwrap_or_else(|_| serde_json::Value::Null);
+            let old_metadata_json =
+                serde_json::to_value(&event.old_metadata).unwrap_or(serde_json::Value::Null);
+            let new_metadata_json =
+                serde_json::to_value(&event.new_metadata).unwrap_or(serde_json::Value::Null);
 
             let _ = self.telemetry.emit(EventKind::SpawnPathModifiedInPlace {
                 path: event.path,
@@ -4864,6 +4864,8 @@ mod tests {
             model: None,
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
         let mut adapters = HashMap::new();
         adapters.insert("echo-test".to_string(), echo_adapter);
@@ -4968,6 +4970,8 @@ mod tests {
             model: Some("gpt-4o".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -5014,6 +5018,8 @@ mod tests {
             model: Some("gpt-4o".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -5053,6 +5059,8 @@ mod tests {
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -5092,6 +5100,8 @@ mod tests {
             model: Some("gpt-4o".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -5170,6 +5180,8 @@ mod tests {
                 model: Some(model_name.to_string()),
                 token_extraction: crate::dispatch::TokenExtraction::None,
                 output_transform: None,
+                harness: None,
+                harness_version: None,
             };
 
             let result = worker.apply_routing_rules(&adapter);
@@ -5219,6 +5231,8 @@ mod tests {
                 model: Some(model_name.to_string()),
                 token_extraction: crate::dispatch::TokenExtraction::None,
                 output_transform: None,
+                harness: None,
+                harness_version: None,
             };
 
             let result = worker.apply_routing_rules(&adapter);
@@ -5286,6 +5300,8 @@ mod tests {
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -5348,6 +5364,8 @@ mod tests {
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -5419,6 +5437,8 @@ mod tests {
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -5493,6 +5513,8 @@ mod tests {
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -5571,6 +5593,8 @@ mod tests {
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -5652,6 +5676,8 @@ mod tests {
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
             output_transform: None,
+            harness: None,
+            harness_version: None,
         };
 
         let result = worker.apply_routing_rules(&adapter);
@@ -5894,7 +5920,7 @@ mod tests {
             "short_retry_backoff should be configured to 5 seconds"
         );
         assert!(
-            jittered_backoff >= 60 && jittered_backoff <= 120,
+            (60..=120).contains(&jittered_backoff),
             "jittered backoff should be in idle range [60, 120]"
         );
         assert_ne!(
@@ -5920,7 +5946,7 @@ mod tests {
         let jittered_backoff = worker.compute_jittered_backoff();
 
         assert!(
-            jittered_backoff >= 60 && jittered_backoff <= 120,
+            (60..=120).contains(&jittered_backoff),
             "jittered backoff should be in idle range [60, 120]"
         );
         assert_ne!(
@@ -6033,7 +6059,7 @@ mod tests {
         // Test jittered backoff range
         let jittered = worker.compute_jittered_backoff();
         assert!(
-            jittered >= 70 && jittered <= 130,
+            (70..=130).contains(&jittered),
             "jittered backoff {} should be in range [70, 130]",
             jittered
         );

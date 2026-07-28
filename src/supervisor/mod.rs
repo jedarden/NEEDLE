@@ -48,6 +48,9 @@ pub struct SupervisorConfig {
     pub agent: Option<String>,
     /// Agent timeout in seconds.
     pub agent_timeout: Option<u64>,
+    /// Explicit override for the worker binary path (`worker.worker_binary_path`).
+    /// When `None`, the supervisor resolves `std::env::current_exe()`.
+    pub worker_binary_path: Option<PathBuf>,
 }
 
 impl Default for SupervisorConfig {
@@ -58,6 +61,7 @@ impl Default for SupervisorConfig {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             agent: None,
             agent_timeout: None,
+            worker_binary_path: None,
         }
     }
 }
@@ -76,6 +80,29 @@ pub struct Supervisor {
     telemetry: Telemetry,
     /// Shutdown flag for graceful termination.
     shutdown: Arc<AtomicBool>,
+    /// Resolved worker spawn binary path — see [`resolve_worker_binary`].
+    worker_binary: PathBuf,
+}
+
+/// Resolve the binary path `needle supervise` spawns workers from.
+///
+/// Prefers an explicit `worker.worker_binary_path` override; otherwise
+/// resolves `std::env::current_exe()`, since the supervisor and worker are
+/// the same binary. Falls back to a bare `"needle"` PATH lookup only if
+/// `current_exe()` itself fails (e.g. the executable was deleted after
+/// launch) — this is the previous behavior, now a last resort rather than
+/// the only behavior. See GitHub issue jedarden/NEEDLE#11.
+fn resolve_worker_binary(override_path: Option<&PathBuf>) -> PathBuf {
+    if let Some(path) = override_path {
+        return path.clone();
+    }
+    std::env::current_exe().unwrap_or_else(|e| {
+        tracing::warn!(
+            error = %e,
+            "failed to resolve current_exe for worker spawn, falling back to PATH lookup of 'needle'"
+        );
+        PathBuf::from("needle")
+    })
 }
 
 impl Supervisor {
@@ -103,6 +130,16 @@ impl Supervisor {
                 Telemetry::new(qualified_id)
             });
 
+        // Resolve the worker spawn binary once at startup and log it, so a
+        // name collision on $PATH (another tool occupying "needle") is
+        // visible immediately rather than only via stalled worker heartbeats.
+        // See GitHub issue jedarden/NEEDLE#11.
+        let worker_binary = resolve_worker_binary(config.worker_binary_path.as_ref());
+        tracing::info!(
+            worker_binary = %worker_binary.display(),
+            "resolved worker spawn binary"
+        );
+
         Ok(Supervisor {
             config,
             needle_config,
@@ -110,6 +147,7 @@ impl Supervisor {
             registry,
             telemetry,
             shutdown: Arc::new(AtomicBool::new(false)),
+            worker_binary,
         })
     }
 
@@ -402,10 +440,17 @@ impl Supervisor {
             .unwrap_or(&self.needle_config.agent.default)
             .clone();
 
-        tracing::info!(worker_id = %worker_id, agent = %agent_name, "spawning worker");
+        tracing::info!(
+            worker_id = %worker_id,
+            agent = %agent_name,
+            worker_binary = %self.worker_binary.display(),
+            "spawning worker"
+        );
 
-        // Build the needle run command
-        let mut cmd = std::process::Command::new("needle");
+        // Build the needle run command. Uses the resolved worker binary path
+        // (current_exe() by default) rather than a bare PATH lookup of
+        // "needle" — see GitHub issue jedarden/NEEDLE#11.
+        let mut cmd = std::process::Command::new(&self.worker_binary);
         cmd.arg("run")
             .arg("--workspace")
             .arg(&self.config.workspace)
@@ -510,6 +555,7 @@ pub async fn run_supervisor(workspace_opt: Option<PathBuf>) -> Result<()> {
         poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
         agent: Some(config.agent.default.clone()),
         agent_timeout: Some(config.agent.timeout),
+        worker_binary_path: config.worker.worker_binary_path.clone(),
     };
 
     // Create and run supervisor
@@ -541,5 +587,33 @@ mod tests {
         assert_eq!(NATO_ALPHABET.len(), 26);
         assert_eq!(NATO_ALPHABET[0], "alpha");
         assert_eq!(NATO_ALPHABET[25], "zulu");
+    }
+
+    // ── resolve_worker_binary tests (GitHub issue jedarden/NEEDLE#11) ──
+
+    #[test]
+    fn resolve_worker_binary_uses_explicit_override_when_set() {
+        let override_path = PathBuf::from("/opt/custom/needle-wrapper");
+        let resolved = resolve_worker_binary(Some(&override_path));
+        assert_eq!(resolved, override_path);
+    }
+
+    #[test]
+    fn resolve_worker_binary_defaults_to_current_exe() {
+        // No override — must resolve to the actual running test binary's
+        // path, not a bare "needle" PATH lookup (the pre-#11 behavior).
+        let resolved = resolve_worker_binary(None);
+        let expected = std::env::current_exe().unwrap();
+        assert_eq!(resolved, expected);
+        assert_ne!(
+            resolved,
+            PathBuf::from("needle"),
+            "must not fall back to a bare PATH lookup when current_exe() succeeds"
+        );
+    }
+
+    #[test]
+    fn supervisor_config_default_has_no_worker_binary_override() {
+        assert_eq!(SupervisorConfig::default().worker_binary_path, None);
     }
 }

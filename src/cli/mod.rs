@@ -4403,8 +4403,8 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
         if !cmdline.contains("needle run")
             && !cmdline.contains("needle-worker")
             && !cmdline.contains("NEEDLE_INNER")
-            && !std::env::var("CARGO_BIN_EXE_needle").map_or(false, |bin_name| cmdline.contains(&format!("{} run", bin_name)))
-            && !cmdline.split_whitespace().next().map_or(false, |first| first.ends_with("needle") || first.contains("/needle"))
+            && !std::env::var("CARGO_BIN_EXE_needle").is_ok_and(|bin_name| cmdline.contains(&format!("{} run", bin_name)))
+            && !cmdline.split_whitespace().next().is_some_and(|first| first.ends_with("needle") || first.contains("/needle"))
         {
             continue;
         }
@@ -4434,21 +4434,19 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
                 "NEEDLE_INNER=1" => {
                     i += 1;
                 }
+                "--workspace" | "-w" if i + 1 < args.len() => {
+                    workspace = Some(PathBuf::from(args[i + 1]));
+                    i += 2;
+                }
                 "--workspace" | "-w" => {
-                    if i + 1 < args.len() {
-                        workspace = Some(PathBuf::from(args[i + 1]));
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
+                    i += 1;
+                }
+                "--agent" | "-a" if i + 1 < args.len() => {
+                    agent = Some(args[i + 1].to_string());
+                    i += 2;
                 }
                 "--agent" | "-a" => {
-                    if i + 1 < args.len() {
-                        agent = Some(args[i + 1].to_string());
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
+                    i += 1;
                 }
                 "--identifier" | "-i" if i + 1 < args.len() => {
                     identifier = Some(args[i + 1].to_string());

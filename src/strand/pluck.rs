@@ -13,6 +13,7 @@ use crate::types::{Bead, StrandError, StrandResult};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 

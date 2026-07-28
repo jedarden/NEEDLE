@@ -92,7 +92,16 @@ impl GateReport {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GateConfig {
     /// Run shell commands in the workspace directory.
-    Command { commands: Vec<String> },
+    Command {
+        commands: Vec<String>,
+        /// Maximum bytes of stderr captured on failure. `None` means "inherit
+        /// `validation.stderr_cap_bytes`" — the caller assembling gate configs
+        /// (see `outcome::OutcomeHandler::handle_success`) fills this in from
+        /// the resolved `Config` before construction. See GitHub issue
+        /// jedarden/NEEDLE#9.
+        #[serde(default)]
+        stderr_cap_bytes: Option<usize>,
+    },
 }
 
 /// A single gate command that failed (for backwards compatibility).
@@ -168,7 +177,13 @@ impl GateRegistry {
     /// Register a built-in gate type constructor.
     fn register_builtin_gates(&self) {
         self.register("command", |config| match config {
-            GateConfig::Command { commands } => Ok(Arc::new(CommandGate::new(commands.clone()))),
+            GateConfig::Command {
+                commands,
+                stderr_cap_bytes,
+            } => Ok(Arc::new(CommandGate::with_stderr_cap(
+                commands.clone(),
+                stderr_cap_bytes.unwrap_or(DEFAULT_STDERR_CAP_BYTES),
+            ))),
         });
     }
 
@@ -221,23 +236,34 @@ impl GateRegistry {
 // Built-in Gate Types
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Default stderr capture cap (bytes) — preserves the previous hardcoded value.
+const DEFAULT_STDERR_CAP_BYTES: usize = 4096;
+
 /// Runs configured shell commands as validation gates.
 pub struct CommandGate {
     commands: Vec<String>,
+    /// Maximum bytes of stderr captured on failure. Configurable via
+    /// `validation.stderr_cap_bytes` — see GitHub issue jedarden/NEEDLE#9.
+    stderr_cap_bytes: usize,
 }
 
 impl CommandGate {
-    /// Create a new command gate.
+    /// Create a new command gate with the default stderr cap (4096 bytes).
     pub fn new(commands: Vec<String>) -> Self {
-        CommandGate { commands }
+        Self::with_stderr_cap(commands, DEFAULT_STDERR_CAP_BYTES)
     }
 
-    /// Maximum bytes of stderr to capture per gate command.
-    const MAX_OUTPUT_BYTES: usize = 4096;
+    /// Create a new command gate with an explicit stderr capture cap.
+    pub fn with_stderr_cap(commands: Vec<String>, stderr_cap_bytes: usize) -> Self {
+        CommandGate {
+            commands,
+            stderr_cap_bytes,
+        }
+    }
 }
 
 impl Gate for CommandGate {
-    fn validate(&self, _bead: &crate::types::Bead, workspace: &Path) -> Result<GateResult> {
+    fn validate(&self, bead: &crate::types::Bead, workspace: &Path) -> Result<GateResult> {
         // Run commands sequentially; stop at first failure.
         for cmd in &self.commands {
             tracing::info!(
@@ -246,7 +272,7 @@ impl Gate for CommandGate {
                 "running command gate"
             );
 
-            match self.run_command(cmd, workspace) {
+            match self.run_command(cmd, bead, workspace) {
                 Ok(()) => {
                     tracing::info!(command = %cmd, "command gate passed");
                 }
@@ -275,11 +301,23 @@ impl Gate for CommandGate {
 
 impl CommandGate {
     /// Run a single command. Returns `Ok(())` on exit 0, `Err(GateFailure)` otherwise.
-    fn run_command(&self, cmd: &str, workspace: &Path) -> std::result::Result<(), GateFailure> {
+    ///
+    /// The command's environment carries `NEEDLE_BEAD_ID` and `NEEDLE_WORKSPACE`
+    /// so a gate can identify the bead it is judging without racily guessing it
+    /// from external state (e.g. `br list --json` assignee) — see GitHub issue
+    /// jedarden/NEEDLE#7.
+    fn run_command(
+        &self,
+        cmd: &str,
+        bead: &crate::types::Bead,
+        workspace: &Path,
+    ) -> std::result::Result<(), GateFailure> {
         let result = std::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
             .current_dir(workspace)
+            .env("NEEDLE_BEAD_ID", bead.id.to_string())
+            .env("NEEDLE_WORKSPACE", workspace.display().to_string())
             .output();
 
         match result {
@@ -288,7 +326,7 @@ impl CommandGate {
                     Ok(())
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    let truncated = truncate_output(&stderr, Self::MAX_OUTPUT_BYTES);
+                    let truncated = truncate_output(&stderr, self.stderr_cap_bytes);
                     Err(GateFailure {
                         command: cmd.to_string(),
                         exit_code: output.status.code(),
@@ -363,12 +401,26 @@ impl ValidationGate {
     /// Create from legacy command list (backwards compatibility).
     ///
     /// This method maintains the existing API for code that uses `Vec<String>`
-    /// for verification commands.
+    /// for verification commands. Uses the default stderr cap (4096 bytes);
+    /// use [`Self::from_commands_with_stderr_cap`] to configure it.
     pub fn from_commands(commands: Vec<String>, workspace: PathBuf) -> Option<Self> {
+        Self::from_commands_with_stderr_cap(commands, workspace, DEFAULT_STDERR_CAP_BYTES)
+    }
+
+    /// Create from legacy command list with an explicit stderr capture cap.
+    ///
+    /// See GitHub issue jedarden/NEEDLE#9 — used by
+    /// `OutcomeHandler::handle_success` to apply `validation.stderr_cap_bytes`
+    /// to the legacy `verification:` config format.
+    pub fn from_commands_with_stderr_cap(
+        commands: Vec<String>,
+        workspace: PathBuf,
+        stderr_cap_bytes: usize,
+    ) -> Option<Self> {
         if commands.is_empty() {
             return None;
         }
-        let gate = Arc::new(CommandGate::new(commands));
+        let gate = Arc::new(CommandGate::with_stderr_cap(commands, stderr_cap_bytes));
         Some(ValidationGate {
             gates: vec![("command_gate".to_string(), gate as Arc<dyn Gate>)],
             workspace,
@@ -499,6 +551,7 @@ mod tests {
         let registry = GateRegistry::global();
         let config = GateConfig::Command {
             commands: vec!["true".to_string()],
+            stderr_cap_bytes: None,
         };
         let gate = registry.create_gate(&config).unwrap();
         assert_eq!(gate.gate_type(), "command");
@@ -572,6 +625,95 @@ mod tests {
     fn command_gate_type() {
         let gate = CommandGate::new(vec!["true".to_string()]);
         assert_eq!(gate.gate_type(), "command");
+    }
+
+    #[test]
+    fn command_gate_exposes_bead_id_and_workspace_env() {
+        // GitHub issue jedarden/NEEDLE#7: gate commands had no way to identify
+        // the bead they were judging. The command below fails (non-zero exit)
+        // unless both env vars are present with the expected values, so a
+        // passing gate result is proof the env was actually set.
+        let gate = CommandGate::new(vec![
+            r#"[ "$NEEDLE_BEAD_ID" = "needle-test" ] && [ "$NEEDLE_WORKSPACE" = "/tmp" ]"#
+                .to_string(),
+        ]);
+        let bead = test_bead();
+        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        assert!(
+            result.passed(),
+            "expected gate to see NEEDLE_BEAD_ID=needle-test and NEEDLE_WORKSPACE=/tmp: {:?}",
+            result.failure_reason()
+        );
+    }
+
+    #[test]
+    fn command_gate_missing_env_fails_the_assertion() {
+        // Sanity check for the test above: an unexpected bead ID must fail,
+        // proving the assertion isn't vacuously true.
+        let gate = CommandGate::new(vec![r#"[ "$NEEDLE_BEAD_ID" = "wrong-id" ]"#.to_string()]);
+        let bead = test_bead();
+        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        assert!(!result.passed());
+    }
+
+    // ── configurable stderr cap tests (GitHub issue jedarden/NEEDLE#9) ──
+
+    /// Shell snippet producing exactly `n` bytes of stderr, then failing.
+    fn fail_with_stderr_bytes(n: usize) -> String {
+        format!("head -c {n} /dev/zero | tr '\\0' 'x' 1>&2; exit 1")
+    }
+
+    #[test]
+    fn command_gate_default_cap_truncates_large_stderr() {
+        // Baseline: CommandGate::new() (no explicit cap) still truncates at
+        // the previous hardcoded default, 4096 bytes.
+        let gate = CommandGate::new(vec![fail_with_stderr_bytes(6000)]);
+        let bead = test_bead();
+        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        assert!(!result.passed());
+        assert!(result.failure_reason().unwrap().contains("[truncated]"));
+    }
+
+    #[test]
+    fn command_gate_configured_cap_larger_than_default_avoids_truncation() {
+        // A configured cap larger than the old hardcoded 4096 must actually be
+        // honored — proof the value isn't still pinned to the old constant.
+        let gate = CommandGate::with_stderr_cap(vec![fail_with_stderr_bytes(6000)], 8192);
+        let bead = test_bead();
+        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        assert!(!result.passed());
+        assert!(
+            !result.failure_reason().unwrap().contains("[truncated]"),
+            "expected full 6000-byte stderr under an 8192 cap, got: {:?}",
+            result.failure_reason()
+        );
+    }
+
+    #[test]
+    fn command_gate_configured_cap_smaller_than_default_truncates_more() {
+        // A cap smaller than the default must also be honored.
+        let gate = CommandGate::with_stderr_cap(vec![fail_with_stderr_bytes(200)], 10);
+        let bead = test_bead();
+        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        assert!(!result.passed());
+        assert!(result.failure_reason().unwrap().contains("[truncated]"));
+    }
+
+    #[test]
+    fn gate_config_stderr_cap_bytes_defaults_to_none_and_registry_falls_back_to_4096() {
+        // When a "gates:" entry omits stderr_cap_bytes, the registry-created
+        // CommandGate must still behave like the pre-#9 hardcoded default when
+        // no caller (e.g. OutcomeHandler) has filled in an override.
+        let registry = GateRegistry::global();
+        let config = GateConfig::Command {
+            commands: vec![fail_with_stderr_bytes(6000)],
+            stderr_cap_bytes: None,
+        };
+        let gate = registry.create_gate(&config).unwrap();
+        let bead = test_bead();
+        let result = gate.validate(&bead, Path::new("/tmp")).unwrap();
+        assert!(!result.passed());
+        assert!(result.failure_reason().unwrap().contains("[truncated]"));
     }
 
     // ── ValidationGate tests ──
@@ -648,8 +790,32 @@ mod tests {
         "#;
         let config: GateConfig = serde_yaml::from_str(yaml).unwrap();
         match config {
-            GateConfig::Command { commands } => {
+            GateConfig::Command {
+                commands,
+                stderr_cap_bytes,
+            } => {
                 assert_eq!(commands, vec!["cargo test", "cargo clippy"]);
+                // Not set in YAML — inherits validation.stderr_cap_bytes at the
+                // OutcomeHandler call site rather than baking in a default here.
+                assert_eq!(stderr_cap_bytes, None);
+            }
+        }
+    }
+
+    #[test]
+    fn gate_config_command_deserialize_with_stderr_cap_override() {
+        let yaml = r#"
+            type: command
+            commands:
+                - cargo test
+            stderr_cap_bytes: 65536
+        "#;
+        let config: GateConfig = serde_yaml::from_str(yaml).unwrap();
+        match config {
+            GateConfig::Command {
+                stderr_cap_bytes, ..
+            } => {
+                assert_eq!(stderr_cap_bytes, Some(65536));
             }
         }
     }
@@ -658,12 +824,17 @@ mod tests {
     fn gate_config_command_serialize_roundtrip() {
         let config = GateConfig::Command {
             commands: vec!["echo test".to_string()],
+            stderr_cap_bytes: None,
         };
         let yaml = serde_yaml::to_string(&config).unwrap();
         let decoded: GateConfig = serde_yaml::from_str(&yaml).unwrap();
         match decoded {
-            GateConfig::Command { commands } => {
+            GateConfig::Command {
+                commands,
+                stderr_cap_bytes,
+            } => {
                 assert_eq!(commands, vec!["echo test"]);
+                assert_eq!(stderr_cap_bytes, None);
             }
         }
     }

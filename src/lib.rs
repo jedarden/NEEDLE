@@ -36,6 +36,7 @@ pub mod test_output;
 pub mod test_runner;
 pub mod trace;
 pub mod transcript;
+pub mod tsnet;
 pub mod types;
 pub mod upgrade;
 pub mod validation;
