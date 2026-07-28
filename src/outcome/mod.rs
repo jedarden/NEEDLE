@@ -2015,12 +2015,102 @@ mod tests {
 
     #[tokio::test]
     async fn handle_with_cancellation_respects_configured_timeout() {
-        // A gate that runs ~2s, with outcome_timeout_seconds configured to 1 —
-        // far shorter than the previous hardcoded 50s. If the timeout fires
-        // here, the *configured* value is what's enforced, not the old constant
-        // (a 2s gate would sail through a 50s cap with time to spare).
+        // A bead store whose `show()` genuinely sleeps (a real .await yield
+        // point, unlike a blocking `std::process::Command` gate — see below)
+        // for 2s, with outcome_timeout_seconds configured to 1s: far shorter
+        // than the previous hardcoded 50s and shorter than the store's own
+        // inner 30s timeout_op. If the outer timeout fires here, the
+        // *configured* value is what's enforced, not the old constant.
+        //
+        // Note: this deliberately does NOT use a slow `verification:` gate
+        // command to trigger the timeout. `CommandGate::run_command` calls
+        // the fully synchronous, blocking `std::process::Command::output()`
+        // with no `.await` point — tokio's `Timeout::poll` polls the wrapped
+        // future first and only checks the deadline if it's still `Pending`,
+        // so a wrapped future with no yield point during a slow segment
+        // always "wins" the race once it finally completes, regardless of
+        // the configured timeout. That's a separate, pre-existing limitation
+        // of the blocking gate-execution path (unchanged by this fix, and
+        // out of scope for GitHub issue jedarden/NEEDLE#8) — not something
+        // to paper over by picking a mechanism that can't actually prove the
+        // config value is enforced.
+        struct SlowShowStore {
+            inner: MockBeadStore,
+        }
+
+        #[async_trait]
+        impl BeadStore for SlowShowStore {
+            fn has_valid_store(&self) -> bool {
+                true
+            }
+            async fn list_all(&self) -> Result<Vec<Bead>> {
+                self.inner.list_all().await
+            }
+            async fn ready(&self, filters: &crate::bead_store::Filters) -> Result<Vec<Bead>> {
+                self.inner.ready(filters).await
+            }
+            async fn show(&self, id: &BeadId) -> Result<Bead> {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                self.inner.show(id).await
+            }
+            async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
+                self.inner.claim(id, actor).await
+            }
+            async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
+                self.inner.claim_auto(actor).await
+            }
+            async fn release(&self, id: &BeadId) -> Result<()> {
+                self.inner.release(id).await
+            }
+            async fn flush(&self) -> Result<()> {
+                self.inner.flush().await
+            }
+            async fn reopen(&self, id: &BeadId) -> Result<()> {
+                self.inner.reopen(id).await
+            }
+            async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+                self.inner.labels(id).await
+            }
+            async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+                self.inner.add_label(id, label).await
+            }
+            async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+                self.inner.remove_label(id, label).await
+            }
+            async fn create_bead(
+                &self,
+                title: &str,
+                body: &str,
+                labels: &[&str],
+            ) -> Result<BeadId> {
+                self.inner.create_bead(title, body, labels).await
+            }
+            async fn doctor_repair(&self) -> Result<crate::bead_store::RepairReport> {
+                self.inner.doctor_repair().await
+            }
+            async fn doctor_check(&self) -> Result<crate::bead_store::RepairReport> {
+                self.inner.doctor_check().await
+            }
+            async fn full_rebuild(&self) -> Result<()> {
+                self.inner.full_rebuild().await
+            }
+            async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+                self.inner.add_dependency(blocker_id, blocked_id).await
+            }
+            async fn remove_dependency(
+                &self,
+                blocked_id: &BeadId,
+                blocker_id: &BeadId,
+            ) -> Result<()> {
+                self.inner.remove_dependency(blocked_id, blocker_id).await
+            }
+            async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+                self.inner.clear_assignee(id).await
+            }
+        }
+
+        // No gates configured — `handle_success` goes straight to `store.show()`.
         let config = Config {
-            verification: vec!["sleep 2".to_string()],
             validation: ValidationConfig {
                 outcome_timeout_seconds: 1,
                 ..Default::default()
@@ -2028,7 +2118,9 @@ mod tests {
             ..Config::default()
         };
         let handler = test_handler_with_config(config);
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = SlowShowStore {
+            inner: MockBeadStore::new(BeadStatus::Done),
+        };
         let bead = test_bead(BeadStatus::InProgress);
         let cancelled = Arc::new(AtomicBool::new(false));
 
@@ -2041,7 +2133,8 @@ mod tests {
 
         assert!(
             elapsed.as_secs() < 10,
-            "expected the ~1s configured timeout to fire, took {:?}",
+            "expected the ~1s configured timeout to fire well before the store's \
+             2s show() or its own 30s inner timeout, took {:?}",
             elapsed
         );
         assert_eq!(result.bead_action, BeadAction::Released);
