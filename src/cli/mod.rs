@@ -5039,10 +5039,21 @@ mod tests {
                     assert!(proc.pid > 0, "PID should be positive");
                     // cmdline should be non-empty
                     assert!(!proc.cmdline.is_empty(), "cmdline should not be empty");
-                    // cmdline should contain "needle run"
+                    // cmdline should look needle-related. Not literally "needle
+                    // run" specifically: scan_needle_processes()'s own inclusion
+                    // criteria is broader than that (needle-worker, NEEDLE_INNER,
+                    // CARGO_BIN_EXE_needle, or a path ending in/containing
+                    // "needle") — and this test's own running binary is named
+                    // `needle-<hash>` by cargo, so it legitimately matches the
+                    // path-based criteria while never containing the literal
+                    // substring "needle run". Assert the weaker, still
+                    // meaningful invariant: every match actually mentions
+                    // "needle" somewhere, ruling out unrelated processes without
+                    // duplicating scan_needle_processes()'s own matching logic.
                     assert!(
-                        proc.cmdline.contains("needle run"),
-                        "discovered process cmdline should contain 'needle run'"
+                        proc.cmdline.to_lowercase().contains("needle"),
+                        "discovered process cmdline should mention 'needle': {:?}",
+                        proc.cmdline
                     );
                 }
 

@@ -56,6 +56,35 @@ pub enum VersionCheck {
     Failed { reason: String },
 }
 
+/// Spawn `<br_path> --version`, retrying briefly on ETXTBSY.
+///
+/// A binary written to disk moments earlier (e.g. a freshly-extracted
+/// upgrade, or — as originally surfaced — a test fixture written and
+/// chmod'd immediately before being executed) can transiently report
+/// "Text file busy" (errno 26) if the kernel hasn't released the
+/// write-mode file descriptor yet even though the writer has already
+/// closed it. This is a real, if narrow, race — not a logic bug — so
+/// retry a few times with a short backoff before giving up.
+async fn spawn_version_check(br_path: &Path) -> std::io::Result<std::process::Output> {
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut last_err = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        match tokio::process::Command::new(br_path)
+            .arg("--version")
+            .output()
+            .await
+        {
+            Ok(output) => return Ok(output),
+            Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < MAX_ATTEMPTS => {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("loop always sets last_err before exhausting MAX_ATTEMPTS"))
+}
+
 /// Check the bead-forge version and detect known-bad versions.
 ///
 /// This function runs `bf --version` and parses the output to detect
@@ -71,14 +100,7 @@ pub enum VersionCheck {
 pub async fn check_bead_forge_version(br_path: &Path) -> VersionCheck {
     let timeout = std::time::Duration::from_secs(5);
 
-    let output = match tokio::time::timeout(
-        timeout,
-        tokio::process::Command::new(br_path)
-            .arg("--version")
-            .output(),
-    )
-    .await
-    {
+    let output = match tokio::time::timeout(timeout, spawn_version_check(br_path)).await {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => {
             return VersionCheck::Failed {
