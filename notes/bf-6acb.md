@@ -1,55 +1,45 @@
-# bf-6acb: Heartbeat File Cleanup on Shutdown - Verification
+# Bead bf-6acb: Heartbeat File Cleanup Implementation Status
 
-## Status: ALREADY IMPLEMENTED
+## Task: Implement heartbeat file cleanup on shutdown
 
-This bead's requirements were already satisfied by the existing codebase.
+## Status: ✅ ALREADY IMPLEMENTED
 
-## Implementation Verification
+The heartbeat file cleanup functionality is already fully implemented in the NEEDLE codebase.
 
-All acceptance criteria have been met:
+## Verification of Acceptance Criteria
 
-### 1. Heartbeat file path accessible to shutdown handler ✓
-- `HealthMonitor::heartbeat_path()` (src/health/mod.rs:294-296)
-- Returns: `{heartbeat_dir}/{qualified_id}.json`
-- Called from `stop()` method at line 280
+### 1. ✅ Heartbeat file path accessible to shutdown handler
+- `HealthMonitor::heartbeat_path()` method provides public access
+- Path computed during construction: `src/health/mod.rs:376-378`
+- Stored in `self.heartbeat_path` for efficient access
 
-### 2. Cleanup code removes heartbeat file using std::fs::remove_file ✓
-- Implementation at src/health/mod.rs:282
-```rust
-if let Err(e) = std::fs::remove_file(&path) {
-    tracing::warn!(...);
-}
-```
+### 2. ✅ Cleanup uses std::fs::remove_file
+- Implementation in `src/health/mod.rs:327`
+- Uses `std::fs::remove_file(&path)` for file removal
+- Both instance method and standalone function available
 
-### 3. Proper error handling - logged but doesn't panic ✓
-- src/health/mod.rs:282-290
-- Uses `if let Err(e)` pattern for graceful handling
-- Logs warning with `tracing::warn!` on failure
-- No panic or early return on cleanup failure
+### 3. ✅ Proper error handling (logged, doesn't panic)
+- Errors logged with `tracing::warn!` at `src/health/mod.rs:336-340`
+- Returns `Ok(())` even on failure to prevent blocking shutdown
+- Idempotent: returns Ok for non-existent files
 
-### 4. Cleanup called from shutdown signal handler ✓
-- Worker shutdown calls `self.health.stop()` at src/worker/mod.rs:2719
-- Signal handlers installed at src/worker/mod.rs:920-956
-- Shutdown flow triggered by SIGINT/SIGTERM/SIGHUP
+### 4. ✅ Cleanup called from shutdown signal handler
+Complete signal flow:
+1. Signal handler sets flag (`src/worker/mod.rs:81-94`)
+2. Main loop checks flag and calls `self.stop(&reason).await` (`src/worker/mod.rs:2076-2103`)
+3. `stop()` method calls `self.health.stop()` (`src/worker/mod.rs:3195`)
+4. `health.stop()` calls `cleanup_heartbeat_file()` (`src/health/mod.rs:361`)
 
-## Signal Handler Chain
+## Test Coverage
 
-1. Signal received (SIGINT/SIGTERM/SIGHUP)
-2. Synchronous signal handler (`signal_handler` at src/worker/mod.rs:79-93)
-3. Sets `shutdown` flag via global atomic
-4. Worker's main loop detects shutdown flag
-5. Worker calls `shutdown()` method
-6. `shutdown()` calls `self.health.stop()` at line 2719
-7. `HealthMonitor::stop()` removes heartbeat file (src/health/mod.rs:266-292)
-
-## Test Results
-
-All health module tests pass:
-- `cargo test --lib health` - PASSED (exit code 0)
+Comprehensive test suite validates the implementation:
+- `heartbeat_cleanup_on_graceful_shutdown` - tests normal shutdown flow
+- `heartbeat_cleanup_on_worker_drop` - tests Drop trait fallback
+- `cleanup_heartbeat_file_removes_existing_file` - tests file removal
+- `cleanup_heartbeat_file_ok_when_file_missing` - tests idempotent behavior
+- `cleanup_heartbeat_file_errs_on_removal_failure` - tests error propagation
+- `cleanup_heartbeat_file_with_heartbeat_path` - tests actual path format
 
 ## Conclusion
 
-No code changes were required. The heartbeat file cleanup on shutdown was already fully implemented with:
-- Proper file removal using `std::fs::remove_file`
-- Graceful error handling with logging
-- Integration with the signal handler shutdown flow
+No implementation work is required. The acceptance criteria for bead bf-6acb are fully satisfied by the existing codebase. The heartbeat file cleanup is properly integrated with the signal handler and works correctly in all shutdown scenarios.
