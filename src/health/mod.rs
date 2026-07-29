@@ -23,6 +23,39 @@ use crate::telemetry::Telemetry;
 use crate::types::{BeadId, WorkerState};
 
 // ──────────────────────────────────────────────────────────────────────────────
+// SupervisorDetectionConfig — configuration for supervisor detection
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Configuration for supervisor detection.
+///
+/// This struct configures how workers detect the presence of a running supervisor
+/// process, which is important for determining whether the fleet is being actively
+/// managed or running in standalone mode.
+#[derive(Debug, Clone)]
+pub struct SupervisorDetectionConfig {
+    /// Path to the supervisor's heartbeat file.
+    ///
+    /// The supervisor writes a heartbeat file to signal its presence. Workers
+    /// check this file as part of supervisor detection.
+    pub heartbeat_path: PathBuf,
+
+    /// Optional path to the supervisor's Unix domain socket.
+    ///
+    /// If set, workers will also check for a socket at this path as an additional
+    /// supervisor detection mechanism.
+    pub socket_path: Option<PathBuf>,
+}
+
+impl Default for SupervisorDetectionConfig {
+    fn default() -> Self {
+        SupervisorDetectionConfig {
+            heartbeat_path: PathBuf::from("supervisor-heartbeat.json"),
+            socket_path: None,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // HeartbeatData — on-disk JSON structure
 // ──────────────────────────────────────────────────────────────────────────────
 
