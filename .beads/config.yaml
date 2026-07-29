@@ -24,3 +24,4 @@ secret_protection:
     - "test_deadlock_multi_workspace_with_excluded_"
     - "deadlock_scenario_assigned_beads_allow_advan"
     - "handle_with_cancellation_respects_configured"
+    - "is_pid_alive_returns_true_for_current_proces"

@@ -4384,3 +4384,33 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 - No existing NEEDLE deployment's behavior changes by upgrading alone — every new config field defaults to today's hardcoded value.
 - `needle-ci` (fmt + clippy + test) passes on `main` at the commit implementing this phase.
 - Each of #7–#11 is closed on GitHub with a comment showing the fixing commit and the passing CI run.
+
+# Phase 14: Supervisor Zombie-Child Reaping
+
+**Status:** planned (ADR-010), fixes GitHub issue #12.
+
+**Goal:** stop `needle supervise` from leaking `<defunct>` zombie processes for every worker it spawns, and stop the supervisor's own capacity accounting from being fooled by them. Reported by the same production adopter as #7–#11 (ADR-009), from a cutover soak test on pin `v0.2.12`/`fad0b50`: 22 zombies observed under `needle-supervise` after ~15 minutes of operation. Confirmed against source before any fix was written. Full evidence and rationale in [ADR-010](../adr/010-supervisor-zombie-reaping.md).
+
+## Changes
+
+### 14.1 Reap exited workers once per supervisor tick (#12)
+- `Supervisor::tick()` (`src/supervisor/mod.rs`) gains a reap sweep at the top of each tick: loop `libc::waitpid(-1, &mut status, libc::WNOHANG)` until it returns `0` (nothing left to reap right now) or `-1`/`ECHILD` (no children at all). Safe because `needle supervise` only ever directly spawns worker processes — gate commands, dispatch subprocesses, etc. run inside the *worker* process, a separate PID tree, so this cannot race with the `.wait()` calls already present in `dispatch`/`telemetry`/`canary` for their own, different child processes.
+- No change to `spawn_worker`'s detach model (`setsid` + `process_group(0)`, null stdio) — the supervisor remains the parent for `wait()` purposes; this phase adds the missing reap, not a re-architecture to double-fork/reparent-to-init.
+
+### 14.2 `is_pid_alive` treats zombies as dead, not alive (#12, compounding)
+- `registry::is_pid_alive` (`src/registry/mod.rs`) additionally checks `/proc/<pid>/stat`'s process-state field on Linux and returns `false` for state `Z`, even though `kill(pid, 0)` still succeeds for a zombie. Falls back to today's `kill(pid, 0)`-only behavior on non-Linux platforms and whenever `/proc/<pid>/stat` can't be read. Fixes the compounding bug the reporter connected to the zombie leak: `Supervisor::tick()`'s `alive_count >= max_workers` capacity gate (`src/supervisor/mod.rs:335`) counts zombies as alive today, so unreaped exited workers could hold a fleet at (false) capacity even with real headroom. `strand::mend`'s liveness check inherits the fix for free, since it calls the same function.
+- `cli::is_pid_alive` (`src/cli/mod.rs`, a separate duplicate used for `needle status`/`needle cleanup` display) is intentionally left unchanged — out of scope for this issue's reported impact (supervisor capacity + zombie accumulation, not status display).
+
+### 14.3 Testing
+- `src/supervisor/mod.rs`: spawn a real short-lived child (e.g. `true`), let it exit, assert it appears as a zombie (`/proc/<pid>/stat` state `Z`) before the sweep, then assert the sweep reaps it (`waitpid` no longer finds it / `/proc/<pid>` gone).
+- `src/registry/mod.rs`: `is_pid_alive` returns `false` for a deliberately-created, deliberately-unreaped zombie PID on Linux; existing alive/dead-PID tests unaffected.
+- Regression test reproducing the reporter's capacity-hang scenario: a zombie worker in the registry no longer counts toward `alive_count` in `Supervisor::tick()`.
+
+### 14.4 Deployment
+- Direct commit to `main` (this repo's established convention), triggering `needle-ci` on iad-ci automatically. No config or public API shape changes — purely internal process-management correctness.
+
+## Exit criteria
+- A worker spawned by `needle supervise` that exits is reaped (no zombie) within one `poll_interval_secs` tick, regression-tested.
+- `is_pid_alive` returns `false` for a zombie PID on Linux, regression-tested; behavior on non-Linux platforms and for genuinely-alive/genuinely-dead PIDs is unchanged.
+- `needle-ci` (fmt + clippy + test) passes on `main` at the commit implementing this phase.
+- #12 is closed on GitHub with a comment showing the fixing commit and the passing CI run.
