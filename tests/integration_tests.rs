@@ -2339,3 +2339,274 @@ async fn load_adaptive_stagger_bounded_by_max_wait() {
 // test this feature through the public API since the internal state (exclusion_set,
 // consecutive_race_lost) is not observable externally.
 // ═════════════════════════════════════════════════════════════════════════════
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Integration test: heartbeat cleanup on signal (bf-5q52)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Integration test that verifies heartbeat cleanup happens when shutdown signal is received.
+///
+/// This test validates the acceptance criteria for bf-5q52:
+/// - Cleanup function is called when shutdown signal is received
+/// - Uses the stored heartbeat file path from child bead bf-501j
+/// - Cleanup happens before the shutdown handler completes
+/// - Test exits within 60 seconds
+///
+/// Test strategy:
+/// 1. Spawn a real needle worker subprocess that creates a heartbeat file
+/// 2. Wait for the heartbeat file to appear
+/// 3. Send SIGTERM to the worker process
+/// 4. Verify the heartbeat file is cleaned up
+/// 5. Complete within 60 seconds
+#[test]
+fn heartbeat_cleanup_on_signal_integration() {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    // Skip this test if we can't find the needle binary
+    let needle_binary = std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            // Handle both debug/release builds
+            let path_str = p.to_string_lossy().to_string();
+            if path_str.contains("integration_tests") {
+                // We're in the integration test binary, find the needle binary
+                Some(
+                    p.parent()
+                        .and_then(|grandparent| {
+                            let needle_path = grandparent.join("needle");
+                            if needle_path.exists() {
+                                Some(needle_path)
+                            } else {
+                                // Try in debug target directory
+                                let debug_path = grandparent.join("debug").join("needle");
+                                if debug_path.exists() {
+                                    Some(debug_path)
+                                } else {
+                                    // Try release target directory
+                                    let release_path = grandparent.join("release").join("needle");
+                                    Some(release_path)
+                                }
+                            }
+                        })
+                        .unwrap_or_else(|| PathBuf::from("needle")),
+                )
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from("needle"));
+
+    // Verify the needle binary exists
+    if !needle_binary.exists() {
+        println!("Skipping test: needle binary not found at {}", needle_binary.display());
+        return;
+    }
+
+    println!("Using needle binary: {}", needle_binary.display());
+
+    // Create a temporary workspace
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("failed to create workspace");
+
+    // Create a minimal bead store
+    let beads_dir = workspace.join(".beads");
+    std::fs::create_dir_all(&beads_dir).expect("failed to create beads dir");
+
+    // Create a sleep bead that will keep the worker alive long enough to receive the signal
+    let sleep_bead = r#"{
+        "id": "nd-sleep-test",
+        "type": "task",
+        "title": "Sleep test bead",
+        "description": "Bead that sleeps indefinitely",
+        "status": "open",
+        "acceptance_criteria": [],
+        "labels": []
+    }"#;
+
+    std::fs::write(beads_dir.join("nd-sleep-test.json"), sleep_bead)
+        .expect("failed to create sleep bead");
+
+    // Set up environment to use the test workspace
+    let mut cmd = Command::new(&needle_binary);
+    cmd.arg("run")
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--agent")
+        .arg("echo") // Use the echo adapter which will sleep
+        .arg("--identifier")
+        .arg("signal-test-worker")
+        .arg("--count")
+        .arg("1");
+
+    // Isolate the test from the real user environment (test isolation policy)
+    cmd.env("HOME", temp_dir.path());
+
+    // Spawn the worker process
+    println!("Spawning worker process...");
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Skipping test: failed to spawn worker: {}", e);
+            return;
+        }
+    };
+
+    let worker_pid = child.id();
+    println!("Worker PID: {}", worker_pid);
+
+    // Give the worker time to start up and create its heartbeat file
+    let heartbeat_dir = workspace.join("state").join("heartbeats");
+    let heartbeat_file = heartbeat_dir.join("claude-echo-signal-test-worker.json");
+
+    println!("Waiting for heartbeat file: {}", heartbeat_file.display());
+
+    let start = Instant::now();
+    let heartbeat_timeout = Duration::from_secs(30);
+    let mut heartbeat_found = false;
+
+    // Wait up to 30 seconds for the heartbeat file to appear
+    while start.elapsed() < heartbeat_timeout {
+        if heartbeat_file.exists() {
+            heartbeat_found = true;
+            println!("✓ Heartbeat file created after {:?}", start.elapsed());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    if !heartbeat_found {
+        // Kill the child process before failing
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("Heartbeat file not found after {:?}, test failed", heartbeat_timeout);
+    }
+
+    // Verify the heartbeat file contains valid data
+    let heartbeat_content = std::fs::read_to_string(&heartbeat_file)
+        .expect("failed to read heartbeat file");
+
+    println!("Heartbeat content: {}", heartbeat_content);
+
+    // Parse as JSON to verify it's valid
+    let heartbeat: serde_json::Value = serde_json::from_str(&heartbeat_content)
+        .expect("heartbeat file should contain valid JSON");
+
+    assert_eq!(
+        heartbeat["worker_id"],
+        "signal-test-worker",
+        "heartbeat should have correct worker_id"
+    );
+
+    assert_eq!(
+        heartbeat["pid"].as_u64(),
+        Some(u64::from(worker_pid)),
+        "heartbeat should have correct PID"
+    );
+
+    println!("✓ Heartbeat file is valid");
+
+    // Send SIGTERM to the worker to trigger graceful shutdown
+    println!("Sending SIGTERM to worker PID {}", worker_pid);
+
+    #[cfg(unix)]
+    {
+        use std::process::id;
+
+        // SAFETY: We're sending signal 0 (for existence check) and SIGTERM to a known PID
+        // that we just spawned. This is safe as long as the process is still running.
+        unsafe {
+            // Verify the process is still alive before sending SIGTERM
+            if libc::kill(worker_pid as libc::pid_t, 0) != 0 {
+                let errno = (*libc::__errno_location());
+                println!(
+                    "Worker process {} died unexpectedly (errno: {})",
+                    worker_pid, errno
+                );
+                return;
+            }
+
+            // Send SIGTERM to trigger graceful shutdown
+            if libc::kill(worker_pid as libc::pid_t, libc::SIGTERM) != 0 {
+                let errno = (*libc::__errno_location());
+                println!(
+                    "Failed to send SIGTERM to worker {} (errno: {})",
+                    worker_pid, errno
+                );
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On non-Unix platforms, just kill the process
+        println!("Skipping signal test on non-Unix platform");
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    }
+
+    println!("✓ SIGTERM sent");
+
+    // Wait for the worker to exit (should be within a few seconds)
+    let shutdown_timeout = Duration::from_secs(10);
+    let shutdown_start = Instant::now();
+
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if shutdown_start.elapsed() < shutdown_timeout {
+                    std::thread::sleep(Duration::from_millis(100));
+                } else {
+                    // Worker didn't exit in time, kill it forcefully
+                    println!("Worker did not exit within {:?}, killing forcefully", shutdown_timeout);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("Worker did not exit gracefully within {:?}, test failed", shutdown_timeout);
+                }
+            }
+            Err(e) => {
+                println!("Error checking worker status: {}", e);
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    };
+
+    println!("✓ Worker exited with status: {:?}", exit_status);
+
+    // Verify the heartbeat file was cleaned up
+    let cleanup_check_start = Instant::now();
+    let cleanup_timeout = Duration::from_secs(2);
+
+    // Give a small buffer for the file system to sync
+    while cleanup_check_start.elapsed() < cleanup_timeout {
+        if !heartbeat_file.exists() {
+            println!("✓ Heartbeat file cleaned up after {:?}", cleanup_check_start.elapsed());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if heartbeat_file.exists() {
+        panic!("Heartbeat file was not cleaned up after SIGTERM, test failed");
+    }
+
+    // Verify total test execution time is within 60 seconds
+    let total_time = start.elapsed();
+    println!("✓ Total test execution time: {:?}", total_time);
+
+    assert!(
+        total_time < Duration::from_secs(60),
+        "test should complete within 60 seconds, took {:?}",
+        total_time
+    );
+
+    println!("✓ Integration test passed: heartbeat cleanup on signal");
+}

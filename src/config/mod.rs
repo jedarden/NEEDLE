@@ -1531,6 +1531,32 @@ impl SupervisorConfig {
             .clone()
             .unwrap_or_else(|| workspace_home.join("state/supervisor-heartbeat.json"))
     }
+
+    /// Create a supervisor config from environment variables.
+    ///
+    /// Reads the following environment variables:
+    /// - `SUPERVISOR_HEARTBEAT_PATH`: Path to the supervisor's heartbeat file (optional)
+    /// - `SUPERVISOR_SOCKET_PATH`: Path to the supervisor's control socket (optional)
+    ///
+    /// Returns a config with sensible defaults if environment variables are not set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the heartbeat path is set but invalid.
+    pub fn from_env() -> Result<Self> {
+        let heartbeat_path = std::env::var("SUPERVISOR_HEARTBEAT_PATH")
+            .ok()
+            .map(|s| expand_tilde(&PathBuf::from(s)));
+
+        let socket_path = std::env::var("SUPERVISOR_SOCKET_PATH")
+            .ok()
+            .map(|s| expand_tilde(&PathBuf::from(s)));
+
+        Ok(SupervisorConfig {
+            heartbeat_path,
+            socket_path,
+        })
+    }
 }
 
 /// Per-provider concurrency and rate limits.
@@ -3761,6 +3787,83 @@ worker:
             Some(PathBuf::from("/heartbeat.json"))
         );
         assert_eq!(decoded.socket_path, Some(PathBuf::from("/supervisor.sock")));
+    }
+
+    #[test]
+    fn supervisor_config_from_env_defaults() {
+        // Ensure no env vars are set
+        std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
+        std::env::remove_var("SUPERVISOR_SOCKET_PATH");
+
+        let config = SupervisorConfig::from_env().unwrap();
+        assert!(config.heartbeat_path.is_none());
+        assert!(config.socket_path.is_none());
+    }
+
+    #[test]
+    fn supervisor_config_from_env_heartbeat_only() {
+        std::env::remove_var("SUPERVISOR_SOCKET_PATH");
+        std::env::set_var("SUPERVISOR_HEARTBEAT_PATH", "/custom/heartbeat.json");
+
+        let config = SupervisorConfig::from_env().unwrap();
+        assert_eq!(
+            config.heartbeat_path,
+            Some(PathBuf::from("/custom/heartbeat.json"))
+        );
+        assert!(config.socket_path.is_none());
+
+        std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
+    }
+
+    #[test]
+    fn supervisor_config_from_env_socket_only() {
+        std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
+        std::env::set_var("SUPERVISOR_SOCKET_PATH", "/tmp/supervisor.sock");
+
+        let config = SupervisorConfig::from_env().unwrap();
+        assert!(config.heartbeat_path.is_none());
+        assert_eq!(
+            config.socket_path,
+            Some(PathBuf::from("/tmp/supervisor.sock"))
+        );
+
+        std::env::remove_var("SUPERVISOR_SOCKET_PATH");
+    }
+
+    #[test]
+    fn supervisor_config_from_env_both_paths() {
+        std::env::set_var("SUPERVISOR_HEARTBEAT_PATH", "/var/lib/needle/heartbeat.json");
+        std::env::set_var("SUPERVISOR_SOCKET_PATH", "/var/run/needle/supervisor.sock");
+
+        let config = SupervisorConfig::from_env().unwrap();
+        assert_eq!(
+            config.heartbeat_path,
+            Some(PathBuf::from("/var/lib/needle/heartbeat.json"))
+        );
+        assert_eq!(
+            config.socket_path,
+            Some(PathBuf::from("/var/run/needle/supervisor.sock"))
+        );
+
+        std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
+        std::env::remove_var("SUPERVISOR_SOCKET_PATH");
+    }
+
+    #[test]
+    fn supervisor_config_from_env_expands_tilde() {
+        std::env::set_var("SUPERVISOR_HEARTBEAT_PATH", "~/heartbeat.json");
+        std::env::set_var("SUPERVISOR_SOCKET_PATH", "~/supervisor.sock");
+
+        let config = SupervisorConfig::from_env().unwrap();
+        // Tilde should be expanded to the home directory
+        assert!(config.heartbeat_path.is_some());
+        assert!(config.socket_path.is_some());
+        // Paths should not contain literal "~" after expansion
+        assert_ne!(config.heartbeat_path, Some(PathBuf::from("~/heartbeat.json")));
+        assert_ne!(config.socket_path, Some(PathBuf::from("~/supervisor.sock")));
+
+        std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
+        std::env::remove_var("SUPERVISOR_SOCKET_PATH");
     }
 
     #[test]

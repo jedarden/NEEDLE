@@ -36,6 +36,7 @@ use crate::outcome::OutcomeHandler;
 use crate::prompt::{BuiltPrompt, PromptBuilder};
 use crate::rate_limit::RateLimiter;
 use crate::registry::{Registry, WorkerEntry};
+use crate::routing;
 use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{AgentOutcome, Bead, BeadId, ClaimResult, IdleAction, Outcome, WorkerState};
@@ -120,9 +121,9 @@ unsafe fn install_unix_signal_handlers() {
         } else {
             // Log the error but don't fail - the async handlers provide a fallback.
             #[cfg(target_os = "linux")]
-            let errno = *libc::__errno_location();
+            let errno = unsafe { *libc::__errno_location() };
             #[cfg(target_os = "macos")]
-            let errno = *libc::__error();
+            let errno = unsafe { *libc::__error() };
             tracing::warn!(
                 signal = sig,
                 errno = errno,
@@ -3361,20 +3362,18 @@ impl Worker {
         // Apply routing rules if configured.
         let (chosen_adapter_name, matched_rule) = self.apply_routing_rules(&default_adapter)?;
 
-        // Emit routing decision telemetry (only if routing happened).
-        if chosen_adapter_name != *default_adapter_name || matched_rule != "default" {
-            if let Some(id) = bead_id {
-                let model = default_adapter
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string());
-                self.telemetry.emit(EventKind::RoutingDecision {
-                    bead_id: id,
-                    model,
-                    matched_rule: matched_rule.clone(),
-                    chosen_adapter: chosen_adapter_name.clone(),
-                })?;
-            }
+        // Emit routing decision telemetry on every routing decision.
+        if let Some(id) = bead_id {
+            let model = default_adapter
+                .model
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            self.telemetry.emit(EventKind::RoutingDecision {
+                bead_id: id,
+                model,
+                matched_rule: matched_rule.clone(),
+                chosen_adapter: chosen_adapter_name.clone(),
+            })?;
         }
 
         // Resolve the chosen adapter.
@@ -3407,55 +3406,81 @@ impl Worker {
 
         let model_name = default_adapter.model.as_deref().unwrap_or("");
 
-        // Evaluate rules in order (first match wins).
-        for rule in &routing_config.rules {
-            // Match the pattern against the model name using regex.
-            match regex::Regex::new(&rule.match_model) {
-                Ok(re) => {
-                    if re.is_match(model_name) {
-                        tracing::debug!(
-                            model = %model_name,
-                            pattern = %rule.match_model,
-                            adapter = %rule.adapter,
-                            "routing rule matched"
+        // Determine the default adapter name to use.
+        let default_adapter_name = routing_config
+            .default_adapter
+            .as_ref()
+            .unwrap_or(&default_adapter.name);
+
+        // Use the routing module's match_adapter_with_pattern function to get both adapter and pattern.
+        match routing::match_adapter_with_pattern(model_name, &routing_config.rules, default_adapter_name) {
+            Some((adapter_name, matched_pattern)) => {
+                // Determine if this was a rule match or default fallback.
+                // If matched_pattern is "default", it means no rule matched.
+                let final_pattern = if matched_pattern == "default" {
+                    // No rule matched - using default adapter.
+                    // Check if strict mode is enabled - if so, fail.
+                    if routing_config.strict {
+                        let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
+                        if let Some(id) = bead_id {
+                            // Emit RoutingFailed telemetry event.
+                            let _ = self.telemetry.emit(EventKind::RoutingFailed {
+                                bead_id: id,
+                                model: model_name.to_string(),
+                                rules_tried: routing_config.rules.len() as u32,
+                            });
+                        }
+                        bail!(
+                            "no routing rule matched model '{}' — add a rule to agent.routing.rules or set routing.strict: false to fall back to the default adapter",
+                            model_name
                         );
-                        return Ok((rule.adapter.clone(), rule.match_model.clone()));
                     }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        pattern = %rule.match_model,
-                        error = %e,
-                        "invalid regex in routing rule, skipping"
+
+                    // Strict mode disabled - distinguish between routing default and original default.
+                    if routing_config.default_adapter.is_some() {
+                        "routing-default"
+                    } else {
+                        "default"
+                    }
+                } else {
+                    // A rule actually matched - use the pattern from the rule.
+                    &matched_pattern
+                };
+
+                tracing::debug!(
+                    model = %model_name,
+                    pattern = %final_pattern,
+                    adapter = %adapter_name,
+                    "routing decision completed"
+                );
+                Ok((adapter_name, final_pattern.to_string()))
+            }
+            None => {
+                // No rule matched and no default adapter available.
+                // If strict mode is enabled, fail with a clear error.
+                if routing_config.strict {
+                    let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
+                    if let Some(id) = bead_id {
+                        // Emit RoutingFailed telemetry event.
+                        let _ = self.telemetry.emit(EventKind::RoutingFailed {
+                            bead_id: id,
+                            model: model_name.to_string(),
+                            rules_tried: routing_config.rules.len() as u32,
+                        });
+                    }
+                    bail!(
+                        "no routing rule matched model '{}' and no default adapter available — add a rule to agent.routing.rules or set routing.strict: false to fall back to the default adapter",
+                        model_name
                     );
-                    // Continue to next rule instead of failing.
                 }
-            }
-        }
 
-        // No rules matched.
-        // If strict mode is enabled, fail with a clear error.
-        if routing_config.strict {
-            let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
-            if let Some(id) = bead_id {
-                // Emit RoutingFailed telemetry event.
-                let _ = self.telemetry.emit(EventKind::RoutingFailed {
-                    bead_id: id,
-                    model: model_name.to_string(),
-                    rules_tried: routing_config.rules.len() as u32,
-                });
+                // Strict mode disabled but no default adapter - this shouldn't happen with valid config.
+                tracing::warn!(
+                    model = %model_name,
+                    "no routing rule matched and no default adapter available, but strict mode is disabled"
+                );
+                Ok((default_adapter_name.to_string(), "default".to_string()))
             }
-            bail!(
-                "no routing rule matched model '{}' — add a rule to agent.routing.rules or set routing.strict: false to fall back to the default adapter",
-                model_name
-            );
-        }
-
-        // Strict mode disabled - use routing default or fall back to the configured default.
-        if let Some(ref default_adapter_name) = routing_config.default_adapter {
-            Ok((default_adapter_name.clone(), "routing-default".to_string()))
-        } else {
-            Ok((default_adapter.name.clone(), "default".to_string()))
         }
     }
 

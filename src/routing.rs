@@ -261,6 +261,49 @@ pub fn match_adapter(model: &str, rules: &[RoutingRule], default: &str) -> Optio
     }
 }
 
+/// Match a model name against routing rules, returning adapter and pattern.
+///
+/// Similar to `match_adapter`, but returns both the adapter name and the
+/// matched pattern, so callers can distinguish between rule matches and
+/// default fallbacks.
+///
+/// # Returns
+///
+/// * `Some((adapter, pattern))` - Adapter name and the pattern that matched.
+/// * `None` - No rule matched and default is empty/invalid.
+pub fn match_adapter_with_pattern(
+    model: &str,
+    rules: &[RoutingRule],
+    default: &str,
+) -> Option<(String, String)> {
+    // Compile rules and test in order (first match wins).
+    for rule in rules {
+        match CompiledRule::from_rule(rule) {
+            Ok(compiled) => {
+                if compiled.matches(model) {
+                    return Some((rule.adapter.clone(), rule.match_model.clone()));
+                }
+            }
+            Err(e) => {
+                // Log the error but continue with other rules.
+                // Invalid patterns are skipped rather than failing the entire dispatch.
+                tracing::warn!(
+                    pattern = %rule.match_model,
+                    error = %e,
+                    "invalid routing pattern — skipping rule"
+                );
+            }
+        }
+    }
+
+    // No rule matched — use default if provided.
+    if default.is_empty() {
+        None
+    } else {
+        Some((default.to_string(), "default".to_string()))
+    }
+}
+
 /// Match a model name against a single glob pattern using the glob crate.
 ///
 /// This is a lower-level function that tests if a glob pattern matches a model name.
