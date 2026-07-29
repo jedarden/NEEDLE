@@ -2196,6 +2196,123 @@ mod tests {
         assert!(!path.exists(), "heartbeat file should be removed");
     }
 
+    /// Test that cleanup_heartbeat_file returns Err when permission is denied.
+    ///
+    /// This test creates a file and removes write permissions from the parent
+    /// directory, then attempts to remove the file. It verifies that permission
+    /// denied errors are properly propagated.
+    ///
+    /// Note: This test is skipped when running as root since root can delete
+    /// files even without write permissions on the parent directory.
+    #[test]
+    fn cleanup_heartbeat_file_errs_on_permission_denied() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let parent_dir = dir.path().join("no-write-dir");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+
+        let path = parent_dir.join("test-heartbeat.json");
+        std::fs::write(&path, b"test data").unwrap();
+        assert!(path.exists(), "file should exist before cleanup");
+
+        // Remove write permissions from the parent directory
+        std::fs::set_permissions(&parent_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Verify the directory is actually unwritable. When running as root
+        // (e.g., in CI containers), 0o555 doesn't block writes and we should
+        // skip this test since permission checks won't work as expected.
+        let probe = parent_dir.join(".write-probe");
+        let unwritable = std::fs::write(&probe, b"x").is_err();
+        let _ = std::fs::remove_file(&probe);
+
+        if !unwritable {
+            // Root bypasses permission checks — skip this test
+            let _ = std::fs::set_permissions(&parent_dir, std::fs::Permissions::from_mode(0o755));
+            return;
+        }
+
+        // Attempting to cleanup when we lack write permissions should fail
+        let result = cleanup_heartbeat_file(&path);
+        assert!(
+            result.is_err(),
+            "cleanup should return Err when permission is denied"
+        );
+
+        // Verify the error contains information about the failure
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("failed to remove heartbeat file") || err_msg.contains("permission") || err_msg.contains("denied"),
+            "error message should indicate removal failure or permission issue, got: {}",
+            err
+        );
+
+        // Restore permissions so the tempdir can be cleaned up
+        let _ = std::fs::set_permissions(&parent_dir, std::fs::Permissions::from_mode(0o755));
+
+        // The file should still exist since removal failed
+        assert!(path.exists(), "file should still exist after failed cleanup");
+    }
+
+    /// Test that cleanup_heartbeat_file returns Err for other IO errors.
+    ///
+    /// This test verifies that various IO errors (beyond NotFound and
+    /// PermissionDenied) are properly propagated. It tests the case where
+    /// attempting to remove a file with an excessively long path fails.
+    #[test]
+    fn cleanup_heartbeat_file_errs_on_other_io_errors() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Create a path that's likely to be too long for the filesystem
+        // Most filesystems have a limit of 255 characters per path component
+        let long_name = "a".repeat(300);
+        let path = dir.path().join(long_name);
+
+        // Attempting to cleanup a file with an invalid path should fail
+        let result = cleanup_heartbeat_file(&path);
+
+        // The result should be an error (either NotFound for the parent dir
+        // or an InvalidInput/Other error for the path being too long)
+        assert!(
+            result.is_err(),
+            "cleanup should return Err for invalid path"
+        );
+
+        // Verify we get a meaningful error message
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            !err_msg.is_empty(),
+            "error message should not be empty"
+        );
+    }
+
+    /// Test that cleanup_heartbeat_file handles symlinks correctly.
+    ///
+    /// This test verifies that cleanup_heartbeat_file can remove a symlink
+    /// to a file even if the target file doesn't exist (broken symlink).
+    #[test]
+    fn cleanup_heartbeat_file_removes_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-heartbeat.json");
+        let target = dir.path().join("nonexistent-target.json");
+
+        // Create a symlink to a non-existent file (broken symlink)
+        symlink(&target, &path).unwrap();
+
+        // Check that the symlink exists (using metadata since exists() returns false for broken symlinks)
+        assert!(path.symlink_metadata().is_ok(), "symlink should exist");
+
+        // Cleanup should remove the symlink even though target doesn't exist
+        cleanup_heartbeat_file(&path).unwrap();
+
+        // Verify the symlink was removed
+        assert!(path.symlink_metadata().is_err(), "symlink should be removed");
+    }
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Supervisor Presence Detection Tests
     // ──────────────────────────────────────────────────────────────────────────────
