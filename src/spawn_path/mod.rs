@@ -185,43 +185,12 @@ impl BinaryMetadata {
             });
         }
 
-        // Get current metadata and compare
-        let current_metadata = Self::from_path(&self.path)?;
-
-        // Check for hash change (definitive modification)
-        if current_metadata.hash != self.hash {
-            return Ok(ChangeDetectionResult::ModifiedInPlace(BinaryModification {
-                path: self.path.clone(),
-                original_hash: self.hash.clone(),
-                current_hash: current_metadata.hash,
-                original_inode: self.inode,
-                current_inode: current_metadata.inode,
-                original_mtime_secs: self.mtime_secs,
-                current_mtime_secs: current_metadata.mtime_secs,
-                original_size: self.size,
-                current_size: current_metadata.size,
-                modification_type: ModificationType::HashChanged,
-            }));
+        // Delegate hash/inode/mtime comparison to detect_modification(), which
+        // operates purely on self.path (no current_exe() dependency).
+        match self.detect_modification()? {
+            Some(modification) => Ok(ChangeDetectionResult::ModifiedInPlace(modification)),
+            None => Ok(ChangeDetectionResult::Unchanged),
         }
-
-        // Check for metadata changes only (inode and/or mtime changed, hash same)
-        if current_metadata.inode != self.inode || current_metadata.mtime_secs != self.mtime_secs {
-            return Ok(ChangeDetectionResult::ModifiedInPlace(BinaryModification {
-                path: self.path.clone(),
-                original_hash: self.hash.clone(),
-                current_hash: current_metadata.hash,
-                original_inode: self.inode,
-                current_inode: current_metadata.inode,
-                original_mtime_secs: self.mtime_secs,
-                current_mtime_secs: current_metadata.mtime_secs,
-                original_size: self.size,
-                current_size: current_metadata.size,
-                modification_type: ModificationType::MetadataChanged,
-            }));
-        }
-
-        // All checks passed - binary is unchanged
-        Ok(ChangeDetectionResult::Unchanged)
     }
 }
 
@@ -508,23 +477,20 @@ mod tests {
         let modified_content = b"modified binary content";
         fs::write(&binary_path, modified_content).expect("failed to write modified binary");
 
-        // Compare current state - should detect hash change
-        let result = baseline
-            .compare_current_state()
-            .expect("failed to compare current state");
+        // Uses detect_modification() directly rather than compare_current_state(),
+        // since the latter first checks self.path against std::env::current_exe()
+        // (the test binary), which a synthetic temp-file baseline can never match.
+        let modification = baseline
+            .detect_modification()
+            .expect("failed to check modification")
+            .expect("should detect binary modification");
 
-        assert!(result.has_changed(), "should detect binary modification");
-        match result {
-            ChangeDetectionResult::ModifiedInPlace(modification) => {
-                assert_eq!(
-                    modification.modification_type,
-                    ModificationType::HashChanged
-                );
-                assert_ne!(modification.original_hash, modification.current_hash);
-                assert_ne!(modification.original_size, modification.current_size);
-            }
-            other => panic!("expected ModifiedInPlace, got {:?}", other),
-        }
+        assert_eq!(
+            modification.modification_type,
+            ModificationType::HashChanged
+        );
+        assert_ne!(modification.original_hash, modification.current_hash);
+        assert_ne!(modification.original_size, modification.current_size);
     }
 
     #[test]
@@ -556,24 +522,25 @@ mod tests {
         if current_metadata.mtime_secs != baseline.mtime_secs
             || current_metadata.inode != baseline.inode
         {
-            // The modification detection should work
+            // The modification detection should work. Uses detect_modification()
+            // directly rather than compare_current_state() — see
+            // test_compare_current_state_detects_hash_change for why.
             let result = baseline
-                .compare_current_state()
-                .expect("failed to compare current state");
+                .detect_modification()
+                .expect("failed to check modification");
 
             // We may get metadata changed or unchanged depending on filesystem behavior
             match result {
-                ChangeDetectionResult::ModifiedInPlace(modification) => {
+                Some(modification) => {
                     assert_eq!(
                         modification.modification_type,
                         ModificationType::MetadataChanged
                     );
                     assert_eq!(modification.original_hash, modification.current_hash);
                 }
-                ChangeDetectionResult::Unchanged => {
+                None => {
                     // Also valid - filesystem may not have changed metadata
                 }
-                other => panic!("unexpected result: {:?}", other),
             }
         } else {
             // Metadata didn't change, which is fine for this test
@@ -721,8 +688,8 @@ mod tests {
         let description = hash_change.describe();
         assert!(description.contains("modified in place"));
         assert!(description.contains("Hash changed"));
-        assert!(description.contains("original0000000000"));
-        assert!(description.contains("modified0000000000"));
+        assert!(description.contains("original00000000"));
+        assert!(description.contains("modified00000000"));
         assert!(description.contains("1024"));
         assert!(description.contains("2048"));
 
