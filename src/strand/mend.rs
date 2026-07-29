@@ -8,6 +8,7 @@
 //! Depends on: `bead_store`, `config`, `health`, `peer`, `registry`,
 //!             `telemetry`, `types`, `trace`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -22,7 +23,7 @@ use crate::peer::PeerMonitor;
 use crate::registry::Registry;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::trace::cleanup_traces;
-use crate::types::{BeadStatus, StrandError, StrandResult};
+use crate::types::{BeadId, BeadStatus, StrandError, StrandResult};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Store-scoped orphan cleanup (shared between Mend and Explore)
@@ -1350,7 +1351,7 @@ impl super::Strand for MendStrand {
             needle.strand.duration_ms = tracing::field::Empty,
         )
     )]
-    async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
         let start = std::time::Instant::now();
         let mut summary = MendSummary::default();
 
@@ -1920,7 +1921,7 @@ mod tests {
         let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::WorkCreated),
             "expected WorkCreated after releasing crashed peer's bead, got: {result:?}"
@@ -1937,7 +1938,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork when nothing to clean, got: {result:?}"
@@ -1958,7 +1959,7 @@ mod tests {
         let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::WorkCreated),
             "expected WorkCreated after releasing orphaned in-progress bead, got: {result:?}"
@@ -2010,7 +2011,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork when assignee is a live worker, got: {result:?}"
@@ -2030,7 +2031,7 @@ mod tests {
         let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork when bead is assigned to ourselves, got: {result:?}"
@@ -2082,7 +2083,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::WorkCreated),
             "expected WorkCreated after releasing bead from dead registered worker, got: {result:?}"
@@ -2105,7 +2106,7 @@ mod tests {
         let (store, _release_count, clear_count) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::WorkCreated),
             "expected WorkCreated after clearing stale assignee from open bead, got: {result:?}"
@@ -2158,7 +2159,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork when assignee is a live worker, got: {result:?}"
@@ -2179,7 +2180,7 @@ mod tests {
         let (store, _release_count, clear_count) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork when bead is assigned to ourselves, got: {result:?}"
@@ -2232,7 +2233,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::WorkCreated),
             "expected WorkCreated after clearing assignee from dead registered worker, got: {result:?}"
@@ -2267,7 +2268,7 @@ mod tests {
         let (store, _release_count, clear_count) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork when bead has no assignee, got: {result:?}"
@@ -2342,7 +2343,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork — bead assigned to glm-5-foxtrot should NOT be orphaned, got: {result:?}"
@@ -2417,7 +2418,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::WorkCreated),
             "expected WorkCreated — bead assigned to dead glm-5-foxtrot should be orphaned, got: {result:?}"
@@ -2463,7 +2464,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         // Lock file removal is maintenance, not work creation — it doesn't add
         // claimable beads to the queue, so it should return NoWork.
         assert!(
@@ -2506,7 +2507,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
         assert!(path.exists(), "non-needle lock file should NOT be removed");
     }
@@ -2529,7 +2530,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         // Stale dependency links are removed, which creates work.
         assert!(
             matches!(result, StrandResult::WorkCreated),
@@ -2553,7 +2554,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork when blocker is still open, got: {result:?}"
@@ -2576,7 +2577,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -2596,7 +2597,7 @@ mod tests {
         let store = store.with_doctor_report(report);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork after db repair (maintenance doesn't add claimable beads), got: {result:?}"
@@ -2612,7 +2613,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -2629,7 +2630,7 @@ mod tests {
         // in dependency cleanup.
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&FailingStore).await;
+        let result = mend.evaluate(&FailingStore, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::Error(StrandError::StoreError(_))),
             "expected StrandError::StoreError, got: {result:?}"
@@ -2674,7 +2675,7 @@ mod tests {
         let (store, release_count, _) = MockBeadStore::new(vec![orphan_bead, blocked_bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::WorkCreated),
             "expected WorkCreated after combined cleanup, got: {result:?}"
@@ -2738,7 +2739,7 @@ mod tests {
         let store = store.with_doctor_report(report);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         // DB repair is maintenance, not work creation — it doesn't add claimable
         // beads to the queue, so it should return NoWork.
         assert!(
@@ -2758,7 +2759,7 @@ mod tests {
         let store = store.with_repair_failure();
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         // DB rebuild is maintenance, not work creation — it doesn't add claimable
         // beads to the queue, so it should return NoWork.
         assert!(
@@ -2778,7 +2779,7 @@ mod tests {
         let store = store.with_all_recovery_failure();
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         // DB check failure is non-fatal — continues with NoWork.
         assert!(
             matches!(result, StrandResult::NoWork),
@@ -2796,7 +2797,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork when db is clean, got: {result:?}"
@@ -2877,7 +2878,7 @@ mod tests {
             1,
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork after cleaning old agent log (maintenance, not work creation), got: {result:?}"
@@ -2925,7 +2926,7 @@ mod tests {
             Some(registry),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork for recent log, got: {result:?}"
@@ -2958,7 +2959,7 @@ mod tests {
             1,
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         // The in-progress bead is also "orphaned" by our mock (some-worker isn't
         // registered), so mend will release it. The log must survive though.
         assert!(
@@ -2989,7 +2990,7 @@ mod tests {
             0, // disabled
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork when retention is disabled, got: {result:?}"
@@ -3021,7 +3022,7 @@ mod tests {
             1,
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork when no agent log files present, got: {result:?}"
@@ -3070,7 +3071,7 @@ mod tests {
             7, // 7-day retention, but zero-activity logs are deleted immediately
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork after cleaning zero-activity log, got: {result:?}"
@@ -3120,7 +3121,7 @@ mod tests {
             Some(registry),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
         assert!(
             log_path.exists(),
@@ -3152,7 +3153,7 @@ mod tests {
             7,
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork after cleaning unregistered worker log, got: {result:?}"
@@ -3180,7 +3181,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         // Orphaned heartbeat cleanup is maintenance, not work creation.
         assert!(
             matches!(result, StrandResult::NoWork),
@@ -3246,7 +3247,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
 
         // Heartbeat file should NOT be removed (worker is registered).
@@ -3285,7 +3286,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
 
         // Fresh orphaned heartbeat should NOT be removed (only stale ones).
@@ -3319,7 +3320,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
 
         // All orphaned heartbeat files should be removed.
@@ -3356,7 +3357,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
 
         // Heartbeat file keyed by qualified ID should be removed.
@@ -3383,7 +3384,7 @@ mod tests {
         // Run as claude-test-worker (matches heartbeat qualified_id).
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
 
         // Our own heartbeat should NOT be removed even if it appears orphaned.
@@ -3438,7 +3439,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "expected NoWork after registry cleanup (maintenance), got: {result:?}"
@@ -3495,7 +3496,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
 
         // Verify the live worker is still in the registry.
@@ -3546,7 +3547,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
 
         // Verify our own entry is still in the registry.
@@ -3613,7 +3614,7 @@ mod tests {
             LimitsConfig::default(),
         );
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
 
         // Verify only the live worker remains.
@@ -3633,7 +3634,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         // Should not error — missing registry file is handled gracefully.
         assert!(matches!(result, StrandResult::NoWork));
     }
@@ -3651,7 +3652,7 @@ mod tests {
         let (store, _, _) = MockBeadStore::new(vec![]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
 
-        let result = mend.evaluate(&store).await;
+        let result = mend.evaluate(&store, &HashSet::new()).await;
         // Should not error — corrupt registry file is handled gracefully.
         assert!(matches!(result, StrandResult::NoWork));
     }

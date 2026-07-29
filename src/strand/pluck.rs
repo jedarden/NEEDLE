@@ -9,7 +9,7 @@
 use crate::bead_store::{BeadStore, Filters};
 use crate::mitosis::detects_needle_internal_config;
 use crate::telemetry::Telemetry;
-use crate::types::{Bead, StrandError, StrandResult};
+use crate::types::{Bead, BeadId, StrandError, StrandResult};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -275,7 +275,7 @@ impl super::Strand for PluckStrand {
             split_threshold = self.split_after_failures,
         )
     )]
-    async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
         tracing::debug!(
             exclude_labels = ?self.exclude_labels,
             split_threshold = self.split_after_failures,
@@ -507,7 +507,7 @@ impl super::Strand for PluckStrand {
                         // Continue with remaining candidates - do not trigger split.
                         // Jump to stats storage and return the next valid candidate.
                         // (Skip the rest of the split trigger logic for this iteration.)
-                        return self.evaluate(store).await;
+                        return self.evaluate(store, exclusions).await;
                     }
 
                     tracing::info!(
@@ -940,7 +940,7 @@ mod tests {
         };
 
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::BeadFound(beads) => {
@@ -963,7 +963,7 @@ mod tests {
         };
 
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::BeadFound(beads) => {
@@ -990,7 +990,7 @@ mod tests {
         };
 
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string())); // Uses default excludes
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::BeadFound(beads) => {
@@ -1016,7 +1016,7 @@ mod tests {
             vec!["wip".to_string()],
             Telemetry::new("test-worker".to_string()),
         );
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::BeadFound(beads) => {
@@ -1045,7 +1045,7 @@ mod tests {
         };
 
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::BeadFound(beads) => {
@@ -1070,7 +1070,7 @@ mod tests {
         };
 
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::NoWork => {}
@@ -1091,7 +1091,7 @@ mod tests {
         };
 
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::BeadFound(beads) => {
@@ -1114,7 +1114,7 @@ mod tests {
     async fn empty_queue_returns_no_work() {
         let store = MemoryStore { beads: vec![] };
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::NoWork => {}
@@ -1126,7 +1126,7 @@ mod tests {
     async fn store_error_returns_error_not_no_work() {
         let store = FailingStore;
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::Error(StrandError::StoreError(_)) => {}
@@ -1155,8 +1155,8 @@ mod tests {
         };
         let store2 = MemoryStore { beads };
 
-        let r1 = strand.evaluate(&store1).await;
-        let r2 = strand.evaluate(&store2).await;
+        let r1 = strand.evaluate(&store1, &HashSet::new()).await;
+        let r2 = strand.evaluate(&store2, &HashSet::new()).await;
 
         let ids1: Vec<String> = match r1 {
             StrandResult::BeadFound(b) => b.iter().map(|b| b.id.to_string()).collect(),
@@ -1213,7 +1213,7 @@ mod tests {
 
         let strand =
             PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::Split(bead, failure_count) => {
@@ -1233,7 +1233,7 @@ mod tests {
 
         let strand =
             PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::BeadFound(beads) => {
@@ -1252,7 +1252,7 @@ mod tests {
 
         let strand =
             PluckStrand::with_split_threshold(vec![], 0, Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::BeadFound(beads) => {
@@ -1304,7 +1304,7 @@ mod tests {
 
         let strand =
             PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Should NOT trigger split - should return NoWork because the bead is filtered out
         match result {
@@ -1333,7 +1333,7 @@ mod tests {
 
         let strand =
             PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Should NOT trigger split
         match result {
@@ -1358,7 +1358,7 @@ mod tests {
 
         let strand =
             PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Should trigger split normally for non-NEEDLE-internal beads
         match result {
@@ -1391,7 +1391,7 @@ mod tests {
 
         let strand = PluckStrand::new(vec![], helper.telemetry().clone());
 
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Should return NoWork since all beads are excluded
         match result {
@@ -1474,7 +1474,7 @@ mod tests {
 
         let strand = PluckStrand::new(vec![], helper.telemetry().clone());
 
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Should return NoWork since all beads have stale assignees
         match result {
@@ -1545,7 +1545,7 @@ mod tests {
 
         let strand = PluckStrand::new(vec![], helper.telemetry().clone());
 
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Should return NoWork since queue is empty
         match result {
@@ -1621,7 +1621,7 @@ mod tests {
 
         let strand = PluckStrand::new(vec![], helper.telemetry().clone());
 
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Should return NoWork since all beads are excluded
         match result {
@@ -1707,7 +1707,7 @@ mod tests {
             true, // Enable persistent records
         );
 
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Should return NoWork since all beads are excluded
         match result {
@@ -1803,7 +1803,7 @@ mod tests {
             false, // Disable persistent records
         );
 
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Should return NoWork since all beads are excluded
         match result {
@@ -1855,7 +1855,7 @@ mod tests {
             true, // Enable persistent records
         );
 
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Should return NoWork since all beads are excluded
         match result {

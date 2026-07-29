@@ -14,7 +14,7 @@
 //!
 //! Depends on: `bead_store`, `config`, `telemetry`, `types`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -243,7 +243,7 @@ impl super::Strand for UnravelStrand {
         "unravel"
     }
 
-    async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
         // Guard: disabled.
         if !self.config.enabled {
             tracing::debug!("unravel strand disabled");
@@ -786,7 +786,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -802,7 +802,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::new(vec![make_bead("nd-1", "Normal task", &[])]);
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -827,7 +827,7 @@ mod tests {
 
         let human_bead = make_bead("nd-human", "Needs human review", &["human"]);
         let store = MockStore::new(vec![human_bead]);
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(
             matches!(result, StrandResult::WorkCreated),
@@ -871,7 +871,7 @@ mod tests {
         let bead1 = make_bead("nd-h1", "Human bead 1", &["human"]);
         let bead2 = make_bead("nd-h2", "Human bead 2", &["human"]);
         let store = MockStore::new(vec![bead1, bead2]);
-        let _ = strand.evaluate(&store).await;
+        let _ = strand.evaluate(&store, &HashSet::new()).await;
 
         let created = store.created_beads();
         assert_eq!(created.len(), 1, "should only process 1 bead");
@@ -902,7 +902,7 @@ mod tests {
 
         let human_bead = make_bead("nd-human", "Needs review", &["human"]);
         let store = MockStore::new(vec![human_bead]);
-        let _ = strand.evaluate(&store).await;
+        let _ = strand.evaluate(&store, &HashSet::new()).await;
 
         let created = store.created_beads();
         assert_eq!(created.len(), 1, "should only create 1 alternative");
@@ -936,7 +936,7 @@ mod tests {
 
         let human_bead = make_bead("nd-cooldown", "In cooldown", &["human"]);
         let store = MockStore::new(vec![human_bead]);
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(
             matches!(result, StrandResult::NoWork),
@@ -977,7 +977,7 @@ mod tests {
 
         let human_bead = make_bead("nd-expired", "Cooldown expired", &["human"]);
         let store = MockStore::new(vec![human_bead]);
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(
             matches!(result, StrandResult::WorkCreated),
@@ -1000,7 +1000,7 @@ mod tests {
 
         let human_bead = make_bead("nd-noalt", "No alts possible", &["human"]);
         let store = MockStore::new(vec![human_bead]);
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(matches!(result, StrandResult::NoWork));
         assert!(store.created_beads().is_empty());
@@ -1021,7 +1021,7 @@ mod tests {
 
         let human_bead = make_bead("nd-fail", "Agent fails", &["human"]);
         let store = MockStore::new(vec![human_bead]);
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(matches!(result, StrandResult::NoWork));
         assert!(store.created_beads().is_empty());
@@ -1043,7 +1043,7 @@ mod tests {
 
         let human_bead = make_bead("nd-original", "Original human bead", &["human"]);
         let store = MockStore::new(vec![human_bead]);
-        let _ = strand.evaluate(&store).await;
+        let _ = strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify no modifications to the original bead (no labels changed, etc.)
         // The MockStore only tracks creates and deps — no modifications to existing beads.
@@ -1068,7 +1068,7 @@ mod tests {
 
         let human_bead = make_bead("nd-state", "State test", &["human"]);
         let store = MockStore::new(vec![human_bead]);
-        let _ = strand.evaluate(&store).await;
+        let _ = strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify state was saved.
         let hash = workspace_hash(Path::new("/tmp/test"));

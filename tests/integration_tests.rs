@@ -854,8 +854,8 @@ async fn deterministic_ordering_same_beads_same_order() {
     let pluck = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
 
     // Evaluate both — should return the same top candidate.
-    let result1 = pluck.evaluate(store1.as_ref()).await;
-    let result2 = pluck.evaluate(store2.as_ref()).await;
+    let result1 = pluck.evaluate(store1.as_ref(), &HashSet::new()).await;
+    let result2 = pluck.evaluate(store2.as_ref(), &HashSet::new()).await;
 
     // Extract candidate IDs.
     let id1 = match result1 {
@@ -909,7 +909,7 @@ async fn deterministic_ordering_tiebreak_by_id() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(beads));
     let pluck = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
 
-    let result = pluck.evaluate(store.as_ref()).await;
+    let result = pluck.evaluate(store.as_ref(), &HashSet::new()).await;
 
     let top_id = match result {
         needle::types::StrandResult::BeadFound(beads) => beads.first().map(|b| b.id.clone()),
@@ -1500,7 +1500,7 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     );
 
     // Evaluate ExploreStrand — it should run cross-workspace mend.
-    let result = explore.evaluate(home_store.as_ref()).await;
+    let result = explore.evaluate(home_store.as_ref(), &HashSet::new()).await;
 
     // After cross-workspace mend, ExploreStrand should return BeadFound with the tagged bead.
     match result {
@@ -1637,7 +1637,7 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     );
 
     // Evaluate — the live worker's bead should NOT be released.
-    let result = explore.evaluate(home_store.as_ref()).await;
+    let result = explore.evaluate(home_store.as_ref(), &HashSet::new()).await;
 
     // Since the bead has a live assignee, it should not be released.
     // The result should be NoWork since there are no ready beads.
@@ -1747,7 +1747,7 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     );
 
     // Evaluate — our own bead should NOT be released.
-    let result = explore.evaluate(home_store.as_ref()).await;
+    let result = explore.evaluate(home_store.as_ref(), &HashSet::new()).await;
 
     // Since the bead is assigned to us, it should not be released.
     match result {
@@ -1930,7 +1930,7 @@ async fn mend_removes_stale_dependency_links() {
         needle::config::LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(&store).await;
+    let result = mend.evaluate(&store, &HashSet::new()).await;
 
     // Mend should have returned WorkCreated because it removed a stale dependency.
     assert!(
@@ -2060,7 +2060,7 @@ async fn idle_worker_flagging_detects_stuck_workers() {
         LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(&store).await;
+    let result = mend.evaluate(&store, &HashSet::new()).await;
 
     // Mend should return NoWork since idle worker flagging doesn't create work.
     assert!(

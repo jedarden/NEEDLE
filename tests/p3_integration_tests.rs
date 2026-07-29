@@ -11,6 +11,7 @@
 //!
 //! Each test uses isolated temporary workspaces for parallel safety.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -227,7 +228,7 @@ async fn weave_creates_beads_from_agent_response() {
         telemetry,
     );
 
-    let result = strand.evaluate(store.as_ref()).await;
+    let result = strand.evaluate(store.as_ref(), &HashSet::new()).await;
     assert!(
         matches!(result, StrandResult::WorkCreated),
         "weave should create work from agent findings, got {:?}",
@@ -288,7 +289,7 @@ async fn weave_respects_max_beads_guardrail() {
         telemetry,
     );
 
-    strand.evaluate(store.as_ref()).await;
+    strand.evaluate(store.as_ref(), &HashSet::new()).await;
 
     let all_beads = store.list_all().await.unwrap();
     assert!(
@@ -318,7 +319,7 @@ async fn weave_disabled_returns_no_work() {
         telemetry,
     );
 
-    let result = strand.evaluate(store.as_ref()).await;
+    let result = strand.evaluate(store.as_ref(), &HashSet::new()).await;
     assert!(
         matches!(result, StrandResult::NoWork),
         "disabled weave should return NoWork"
@@ -364,7 +365,7 @@ async fn unravel_creates_alternatives_without_modifying_original() {
         telemetry,
     );
 
-    let result = strand.evaluate(store.as_ref()).await;
+    let result = strand.evaluate(store.as_ref(), &HashSet::new()).await;
     assert!(
         matches!(result, StrandResult::WorkCreated),
         "unravel should create alternative beads, got {:?}",
@@ -411,7 +412,7 @@ async fn unravel_disabled_returns_no_work() {
         telemetry,
     );
 
-    let result = strand.evaluate(store.as_ref()).await;
+    let result = strand.evaluate(store.as_ref(), &HashSet::new()).await;
     assert!(
         matches!(result, StrandResult::NoWork),
         "disabled unravel should return NoWork"
@@ -449,7 +450,7 @@ async fn pulse_detects_scanner_findings_and_creates_beads() {
         telemetry,
     );
 
-    let result = strand.evaluate(store.as_ref()).await;
+    let result = strand.evaluate(store.as_ref(), &HashSet::new()).await;
     assert!(
         matches!(result, StrandResult::WorkCreated),
         "pulse should create beads from scanner findings, got {:?}",
@@ -494,7 +495,7 @@ async fn pulse_deduplicates_across_scans() {
         state_dir.path().to_path_buf(),
         telemetry1,
     );
-    let result1 = strand1.evaluate(store.as_ref()).await;
+    let result1 = strand1.evaluate(store.as_ref(), &HashSet::new()).await;
     assert!(matches!(result1, StrandResult::WorkCreated));
 
     let beads_after_first = store.list_all().await.unwrap().len();
@@ -507,7 +508,7 @@ async fn pulse_deduplicates_across_scans() {
         state_dir.path().to_path_buf(),
         telemetry2,
     );
-    let result2 = strand2.evaluate(store.as_ref()).await;
+    let result2 = strand2.evaluate(store.as_ref(), &HashSet::new()).await;
     assert!(
         matches!(result2, StrandResult::NoWork),
         "second scan should return NoWork (dedup), got {:?}",

@@ -26,6 +26,7 @@
 //!
 //! Depends on: `config`, `learning`, `telemetry`, `types`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -1359,7 +1360,7 @@ impl super::Strand for ReflectStrand {
         "reflect"
     }
 
-    async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
+    async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
         if !self.config.enabled {
             return StrandResult::NoWork;
         }
@@ -1594,7 +1595,7 @@ mod tests {
             None,
         );
         // When disabled, evaluate returns NoWork without touching the store.
-        let result = strand.evaluate(&NoOpStore).await;
+        let result = strand.evaluate(&NoOpStore, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 

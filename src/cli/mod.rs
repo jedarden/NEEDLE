@@ -6239,7 +6239,21 @@ mod tests {
         live_pids.insert(1002);
         live_pids.insert(1003); // All sessions are live
 
-        let targets = filter_sessions_for_cleanup(&sessions, &live_pids, false, &None);
+        // Set up mock: every pane_pid maps to itself as the live needle_pid.
+        // (Using the real `filter_sessions_for_cleanup` here — as this test
+        // did previously — walks the *actual* /proc tree for PIDs 1001-1003,
+        // which are essentially never real live processes in any test
+        // environment, so every session was always misclassified as
+        // orphaned. This is the same synthetic-PID + real-inspector mismatch
+        // `cleanup_no_flags_filters_orphaned_sessions` above avoids by using
+        // MockProcessInspector.)
+        let mut pane_to_needle = std::collections::HashMap::new();
+        pane_to_needle.insert(1001, 1001);
+        pane_to_needle.insert(1002, 1002);
+        pane_to_needle.insert(1003, 1003);
+        let inspector = MockProcessInspector { pane_to_needle };
+
+        let targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, &live_pids, false, &None);
 
         // Should remove nothing when all sessions are live
         assert_eq!(

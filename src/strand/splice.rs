@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use crate::bead_store::{BeadStore, BrCliBeadStore};
 use crate::config::SpliceConfig;
 use crate::telemetry::Telemetry;
-use crate::types::StrandResult;
+use crate::types::{BeadId, StrandResult};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // TelemetryEventLike (minimal subset for JSONL scanning)
@@ -1046,7 +1046,7 @@ impl super::Strand for SpliceStrand {
         "splice"
     }
 
-    async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
+    async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
         if !self.config.enabled {
             return StrandResult::NoWork;
         }
@@ -1257,7 +1257,7 @@ mod tests {
             PathBuf::from("/tmp/state"),
             tel,
         );
-        let result = strand.evaluate(&NoOpStore).await;
+        let result = strand.evaluate(&NoOpStore, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -1290,7 +1290,7 @@ mod tests {
 
         let strand = SpliceStrand::new(config, heartbeat_dir, temp_dir.path().join("state"), tel);
 
-        let result = strand.evaluate(&NoOpStore).await;
+        let result = strand.evaluate(&NoOpStore, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 

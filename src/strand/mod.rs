@@ -290,7 +290,7 @@ impl StrandRunner {
                 let strand_enter = strand_span.entered();
 
                 let start = Instant::now();
-                let result = strand.evaluate(store).await;
+                let result = strand.evaluate(store, exclusions).await;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
 
                 // Record strand evaluation result as span attribute.
@@ -621,7 +621,7 @@ mod tests {
             self.name
         }
 
-        async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
+        async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
             self.result
                 .lock()
                 .unwrap()
@@ -793,7 +793,7 @@ mod tests {
         fn name(&self) -> &str {
             "always-creates"
         }
-        async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
+        async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
             StrandResult::WorkCreated
         }
     }
@@ -871,7 +871,7 @@ mod tests {
             self.name
         }
 
-        async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
+        async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.returns_work_created {
                 StrandResult::WorkCreated

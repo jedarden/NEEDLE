@@ -40,6 +40,7 @@
 //! - If `config.workspaces` is non-empty → uses the explicit list directly
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -50,7 +51,7 @@ use crate::bead_store::{BeadStore, BrCliBeadStore, Filters};
 use crate::config::ExploreConfig;
 use crate::registry::Registry;
 use crate::telemetry::Telemetry;
-use crate::types::StrandResult;
+use crate::types::{BeadId, StrandResult};
 
 /// Factory for creating bead stores for workspaces.
 ///
@@ -463,8 +464,7 @@ impl super::Strand for ExploreStrand {
         "explore"
     }
 
-    async fn evaluate(&self, _store: &dyn BeadStore) -> StrandResult {
-        use std::collections::HashSet;
+    async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
         use std::time::Instant;
 
         // If disabled, nothing to explore.
@@ -944,7 +944,7 @@ mod tests {
             PathBuf::from("/home/test"),
         );
         let store = DummyStore;
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -954,7 +954,7 @@ mod tests {
         // which doesn't exist or has no .beads/ dirs, so NoWork is returned.
         let strand = make_test_explore_strand(true, vec![], PathBuf::from("/home/test"));
         let store = DummyStore;
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -963,7 +963,7 @@ mod tests {
         let home = PathBuf::from("/home/test/project");
         let strand = make_test_explore_strand(true, vec![home.clone()], home);
         let store = DummyStore;
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -975,7 +975,7 @@ mod tests {
         let strand =
             make_test_explore_strand(true, vec![workspace], PathBuf::from("/some/other/home"));
         let store = DummyStore;
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -1014,7 +1014,7 @@ mod tests {
             PathBuf::from("/home/test"),
         );
         let store = DummyStore;
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -1447,7 +1447,7 @@ mod tests {
         );
 
         let store = DummyStore;
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify that workspace 2's candidate was returned
         match result {
@@ -1544,7 +1544,7 @@ mod tests {
         );
 
         let store = DummyStore;
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify that both workspaces were queried
         let call_count = mock_factory.call_count();
@@ -1627,7 +1627,7 @@ mod tests {
         );
 
         let store = DummyStore;
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify that workspace 2's candidate was returned
         match result {
@@ -1710,7 +1710,7 @@ mod tests {
         );
 
         let store = DummyStore;
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify that both workspaces were queried
         let call_count = mock_factory.call_count();
@@ -3178,7 +3178,7 @@ mod tests {
 
         // Cycle 1: no rediscovery yet (we need 2 cycles)
         let store = DummyStore;
-        let _ = strand.evaluate(&store).await;
+        let _ = strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify we haven't done rediscovery yet (still 1 workspace)
         assert_eq!(
@@ -3193,7 +3193,7 @@ mod tests {
         fs::create_dir(ws2.join(".beads")).unwrap();
 
         // Cycle 2: this should trigger rediscovery and pick up the new workspace
-        let _ = strand.evaluate(&store).await;
+        let _ = strand.evaluate(&store, &HashSet::new()).await;
 
         // After rediscovery, we should have both workspaces
         assert_eq!(
@@ -3261,8 +3261,8 @@ mod tests {
 
         // Run through 2 cycles (enough to trigger rediscovery in auto-discovery mode)
         let store = DummyStore;
-        let _ = strand.evaluate(&store).await; // Cycle 1
-        let _ = strand.evaluate(&store).await; // Cycle 2 - would trigger rediscovery in auto mode
+        let _ = strand.evaluate(&store, &HashSet::new()).await; // Cycle 1
+        let _ = strand.evaluate(&store, &HashSet::new()).await; // Cycle 2 - would trigger rediscovery in auto mode
 
         // In pinned mode, the workspace list should NOT change
         // (unlisted_ws should NOT be discovered)
@@ -3331,7 +3331,7 @@ mod tests {
         // Run multiple cycles (rediscovery is disabled)
         let store = DummyStore;
         for _ in 0..5 {
-            let _ = strand.evaluate(&store).await;
+            let _ = strand.evaluate(&store, &HashSet::new()).await;
         }
 
         // With rediscovery disabled, new workspace should NOT be discovered

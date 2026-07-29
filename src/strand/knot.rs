@@ -11,6 +11,7 @@
 //! The verification query uses `list_all()` — a DIFFERENT code path from
 //! Pluck's `ready()` — to avoid v1's 100% false positive rate.
 
+use std::collections::HashSet;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
@@ -18,7 +19,7 @@ use chrono::{DateTime, Utc};
 use crate::bead_store::BeadStore;
 use crate::config::KnotConfig;
 use crate::telemetry::Telemetry;
-use crate::types::{BeadStatus, StrandError, StrandResult};
+use crate::types::{BeadId, BeadStatus, StrandError, StrandResult};
 
 /// Diagnosis from the three-state verification check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,7 +165,7 @@ impl super::Strand for KnotStrand {
         "knot"
     }
 
-    async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
         let cycle = self.increment_exhaustion();
 
         // Check if the home bead store exists. If not, skip this strand.
@@ -505,7 +506,7 @@ mod tests {
 
         // Run past threshold to ensure no alert for empty queue.
         for _ in 0..5 {
-            let result = knot.evaluate(&store).await;
+            let result = knot.evaluate(&store, &HashSet::new()).await;
             assert!(matches!(result, StrandResult::NoWork));
         }
         assert_eq!(
@@ -524,7 +525,7 @@ mod tests {
         let knot = make_test_knot(default_knot_config());
 
         for _ in 0..5 {
-            let result = knot.evaluate(&store).await;
+            let result = knot.evaluate(&store, &HashSet::new()).await;
             assert!(matches!(result, StrandResult::NoWork));
         }
         assert_eq!(
@@ -551,7 +552,7 @@ mod tests {
 
         // First two cycles: below threshold, no telemetry.
         for _ in 0..2 {
-            let result = knot.evaluate(&store).await;
+            let result = knot.evaluate(&store, &HashSet::new()).await;
             assert!(matches!(result, StrandResult::NoWork));
         }
         assert_eq!(
@@ -562,7 +563,7 @@ mod tests {
         assert_eq!(store.created_count(), 0, "no beads created below threshold");
 
         // Third cycle: hits threshold, telemetry emitted.
-        let result = knot.evaluate(&store).await;
+        let result = knot.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
         assert_eq!(store.created_count(), 0, "no beads created at threshold");
 
@@ -590,7 +591,7 @@ mod tests {
         let (knot, events) = make_test_knot_with_events(config);
 
         // First cycle: emits telemetry.
-        knot.evaluate(&store).await;
+        knot.evaluate(&store, &HashSet::new()).await;
         assert_eq!(store.created_count(), 0, "no beads created on first cycle");
 
         // Allow time for background telemetry task to process the event.
@@ -603,7 +604,7 @@ mod tests {
         );
 
         // Second cycle: within cooldown, no new telemetry.
-        knot.evaluate(&store).await;
+        knot.evaluate(&store, &HashSet::new()).await;
         assert_eq!(store.created_count(), 0, "no beads created on second cycle");
         assert_eq!(
             events.lock().unwrap().len(),
@@ -612,7 +613,7 @@ mod tests {
         );
 
         // Third cycle: still within cooldown.
-        knot.evaluate(&store).await;
+        knot.evaluate(&store, &HashSet::new()).await;
         assert_eq!(store.created_count(), 0, "no beads created on third cycle");
         assert_eq!(events.lock().unwrap().len(), 1, "still rate limited");
     }
@@ -632,7 +633,7 @@ mod tests {
         };
         let (knot, events) = make_test_knot_with_events(config);
 
-        knot.evaluate(&store).await;
+        knot.evaluate(&store, &HashSet::new()).await;
 
         // Verify no bead was written to the target workspace
         assert_eq!(
@@ -673,7 +674,7 @@ mod tests {
         let knot = make_test_knot(default_knot_config());
 
         for _ in 0..5 {
-            let result = knot.evaluate(&store).await;
+            let result = knot.evaluate(&store, &HashSet::new()).await;
             assert!(matches!(result, StrandResult::NoWork));
         }
         assert_eq!(
@@ -688,7 +689,7 @@ mod tests {
         let store = FailingStore;
         let knot = make_test_knot(default_knot_config());
 
-        let result = knot.evaluate(&store).await;
+        let result = knot.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::Error(StrandError::StoreError(_))),
             "expected StrandError::StoreError, got: {result:?}"
@@ -792,7 +793,7 @@ mod tests {
         };
         let knot = make_test_knot(config);
 
-        let result = knot.evaluate(&store).await;
+        let result = knot.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
             "knot always returns NoWork"
@@ -899,7 +900,7 @@ mod tests {
         let store = NoHomeStoreMock;
         let knot = make_test_knot(default_knot_config());
 
-        let result = knot.evaluate(&store).await;
+        let result = knot.evaluate(&store, &HashSet::new()).await;
 
         assert!(
             matches!(result, StrandResult::Skipped { ref reason } if reason == "no_home_store"),

@@ -413,7 +413,7 @@ async fn real_br_explore_discovers_remote_workspace() {
     );
 
     // Home workspace is empty, so Explore should find the remote bead.
-    let result = explore.evaluate(&home_store).await;
+    let result = explore.evaluate(&home_store, &HashSet::new()).await;
 
     match result {
         StrandResult::BeadFound(beads) => {
@@ -456,7 +456,7 @@ async fn real_br_explore_skips_home_workspace() {
     );
 
     // Explore should skip home and return NoWork.
-    let result = explore.evaluate(&home_store).await;
+    let result = explore.evaluate(&home_store, &HashSet::new()).await;
     assert!(
         matches!(result, StrandResult::NoWork),
         "Explore should skip home workspace; got {:?}",
@@ -489,7 +489,7 @@ async fn real_br_explore_disabled_returns_no_work() {
         "test-worker".to_string(),
     );
 
-    let result = explore.evaluate(&home_store).await;
+    let result = explore.evaluate(&home_store, &HashSet::new()).await;
     assert!(
         matches!(result, StrandResult::NoWork),
         "Disabled Explore should return NoWork; got {:?}",
@@ -557,7 +557,7 @@ async fn real_br_mend_cleans_crashed_peer() {
         needle::config::LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(store.as_ref()).await;
+    let result = mend.evaluate(store.as_ref(), &HashSet::new()).await;
 
     assert!(
         matches!(result, StrandResult::WorkCreated),
@@ -632,7 +632,7 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
         needle::config::LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(store.as_ref()).await;
+    let result = mend.evaluate(store.as_ref(), &HashSet::new()).await;
 
     // With fresh heartbeat and no stale locks, we should get NoWork.
     // (br doctor may find issues but those are non-fatal and shouldn't
@@ -696,7 +696,7 @@ async fn real_br_mend_removes_orphaned_heartbeat() {
         needle::config::LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(store.as_ref()).await;
+    let result = mend.evaluate(store.as_ref(), &HashSet::new()).await;
 
     // Orphaned heartbeat cleanup is maintenance, not work creation.
     assert!(
@@ -778,7 +778,7 @@ async fn real_br_mend_keeps_registered_heartbeat() {
         needle::config::LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(store.as_ref()).await;
+    let result = mend.evaluate(store.as_ref(), &HashSet::new()).await;
 
     // No work should be created.
     assert!(
@@ -830,6 +830,7 @@ async fn real_br_mitosis_precondition_checks() {
 
     let result = evaluator
         .evaluate(
+
             store.as_ref(),
             &bead,
             workspace.path(),
@@ -865,6 +866,7 @@ async fn real_br_mitosis_precondition_checks() {
     let bead2 = store.show(&bead_id).await.unwrap();
     let result2 = evaluator2
         .evaluate(
+
             store.as_ref(),
             &bead2,
             workspace.path(),
@@ -977,6 +979,7 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
 
             evaluator
                 .evaluate(
+
                     store.as_ref(),
                     &parent,
                     &workspace_path,

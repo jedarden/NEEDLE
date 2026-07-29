@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use crate::bead_store::BeadStore;
 use crate::config::PulseConfig;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::StrandResult;
+use crate::types::{BeadId, StrandResult};
 
 // ─── Scanner finding (parsed from scanner output) ─────────────────────────────
 
@@ -263,7 +263,7 @@ impl super::Strand for PulseStrand {
         "pulse"
     }
 
-    async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+    async fn evaluate(&self, store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
         // Guard: disabled.
         if !self.config.enabled {
             tracing::debug!("pulse strand disabled");
@@ -680,7 +680,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::new();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -699,7 +699,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::new();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -733,7 +733,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::new();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(matches!(result, StrandResult::NoWork));
         assert!(store.created_beads().is_empty());
@@ -865,7 +865,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::new();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(matches!(result, StrandResult::WorkCreated));
         let beads = store.created_beads();
@@ -904,7 +904,7 @@ mod tests {
             telemetry,
         );
         let store1 = MockStore::new();
-        let result1 = strand.evaluate(&store1).await;
+        let result1 = strand.evaluate(&store1, &HashSet::new()).await;
         assert!(matches!(result1, StrandResult::WorkCreated));
         assert_eq!(store1.created_beads().len(), 1);
 
@@ -912,7 +912,7 @@ mod tests {
         let telemetry2 = Telemetry::new("test".to_string());
         let strand2 = PulseStrand::new(config, ws, state_dir.path().to_path_buf(), telemetry2);
         let store2 = MockStore::new();
-        let result2 = strand2.evaluate(&store2).await;
+        let result2 = strand2.evaluate(&store2, &HashSet::new()).await;
         assert!(matches!(result2, StrandResult::NoWork));
         assert!(store2.created_beads().is_empty());
     }
@@ -945,7 +945,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::new();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(matches!(result, StrandResult::WorkCreated));
         assert_eq!(store.created_beads().len(), 2);
@@ -977,7 +977,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::new();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(matches!(result, StrandResult::NoWork));
         assert!(store.created_beads().is_empty());
@@ -1009,7 +1009,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::new();
-        strand.evaluate(&store).await;
+        strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify state was persisted
         let state_path = strand.state_file_path();

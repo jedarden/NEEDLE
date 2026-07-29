@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use crate::bead_store::BeadStore;
 use crate::config::WeaveConfig;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::StrandResult;
+use crate::types::{BeadId, StrandResult};
 
 // ─── WeaveAgent trait ────────────────────────────────────────────────────────
 
@@ -542,7 +542,7 @@ impl super::Strand for WeaveStrand {
         "weave"
     }
 
-    async fn evaluate(&self, store: &dyn BeadStore) -> StrandResult {
+    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
         // Apply strand-level timeout to prevent a single weave from stalling
         // the entire SELECTING cycle for minutes. See: needle-bf-5hlhn
         let timeout_duration = std::time::Duration::from_secs(WEAVE_STRAND_TIMEOUT_SECS);
@@ -855,7 +855,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -877,7 +877,7 @@ mod tests {
             telemetry,
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -903,7 +903,7 @@ mod tests {
             Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -920,7 +920,7 @@ mod tests {
             Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -936,7 +936,7 @@ mod tests {
             Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -958,7 +958,7 @@ mod tests {
             Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(
             matches!(result, StrandResult::WorkCreated),
@@ -995,7 +995,7 @@ mod tests {
             Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(matches!(result, StrandResult::WorkCreated));
         assert_eq!(store.created_beads().len(), 2, "should only create 2 beads");
@@ -1030,7 +1030,7 @@ mod tests {
             Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(matches!(result, StrandResult::WorkCreated));
         let created = store.created_beads();
@@ -1056,7 +1056,7 @@ mod tests {
             Telemetry::new("test".to_string()),
         );
         let store = MockStore::new(vec![make_bead("bead-1", "existing task")]);
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(matches!(result, StrandResult::WorkCreated));
         let created = store.created_beads();
@@ -1076,7 +1076,7 @@ mod tests {
             Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::Error(_)),
             "agent failure should return Error; got {:?}",
@@ -1098,7 +1098,7 @@ mod tests {
             Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
-        let _ = strand.evaluate(&store).await;
+        let _ = strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify state was saved.
         let hash = workspace_hash(&workspace);
@@ -1125,7 +1125,7 @@ mod tests {
             Telemetry::new("test".to_string()),
         );
         let store = MockStore::empty();
-        let result = strand.evaluate(&store).await;
+        let result = strand.evaluate(&store, &HashSet::new()).await;
 
         assert!(matches!(result, StrandResult::WorkCreated));
         assert_eq!(store.created_beads()[0].0, "Fenced Gap");

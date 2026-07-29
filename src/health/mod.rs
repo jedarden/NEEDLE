@@ -2064,45 +2064,51 @@ mod tests {
         assert!(!path.exists(), "file should not exist after cleanup");
     }
 
-    /// Test that cleanup_heartbeat_file returns Ok when file doesn't exist.
+    /// Test that cleanup_heartbeat_file returns the underlying NotFound error
+    /// when the file doesn't exist.
+    ///
+    /// Updated for bf-547k: `cleanup_heartbeat_file` now returns
+    /// `std::fs::remove_file`'s raw `Result` instead of swallowing errors, so
+    /// a missing file is propagated as `Err`, not silently mapped to `Ok`.
     #[test]
-    fn cleanup_heartbeat_file_ok_when_file_missing() {
+    fn cleanup_heartbeat_file_errs_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent-heartbeat.json");
 
         assert!(!path.exists(), "file should not exist");
 
-        // Cleanup should succeed even when file doesn't exist
         let result = cleanup_heartbeat_file(&path);
         assert!(
-            result.is_ok(),
-            "cleanup should succeed when file doesn't exist"
+            result.is_err(),
+            "cleanup should propagate NotFound when the file doesn't exist"
+        );
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
         );
     }
 
-    /// Test that cleanup_heartbeat_file logs errors but doesn't fail when removal fails.
+    /// Test that cleanup_heartbeat_file propagates an error when removal fails.
     ///
-    /// This test verifies the acceptance criteria:
-    /// - Log errors when file removal fails
-    /// - Ensure the function doesn't panic on cleanup failure
-    /// - Continue execution even if cleanup fails
+    /// Updated for bf-547k: the function now returns the raw
+    /// `std::fs::remove_file` `Result` — removal failures (e.g. the path is a
+    /// directory, which `remove_file` cannot remove) are propagated as `Err`
+    /// rather than logged-and-swallowed.
     #[test]
-    fn cleanup_heartbeat_file_logs_errors_on_failure() {
+    fn cleanup_heartbeat_file_errs_on_removal_failure() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test-heartbeat.json");
 
-        // Create a directory at the path (removing a directory will fail)
+        // Create a directory at the path (removing a directory will fail).
         std::fs::create_dir(&path).unwrap();
 
-        // Attempting to cleanup a directory instead of a file should succeed
-        // (errors are logged but not returned)
         let result = cleanup_heartbeat_file(&path);
         assert!(
-            result.is_ok(),
-            "cleanup should succeed even when removal fails (errors are logged, not returned)"
+            result.is_err(),
+            "cleanup should propagate the error when removal fails"
         );
 
-        // The directory should still exist (removal failed, but execution continued)
+        // The directory should still exist (removal failed, nothing to clean up).
         assert!(
             path.exists(),
             "directory should still exist after failed cleanup"

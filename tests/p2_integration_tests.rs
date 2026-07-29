@@ -513,7 +513,7 @@ async fn mend_strand_cleans_crashed_peer_returns_work_created() {
         LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(store.as_ref()).await;
+    let result = mend.evaluate(store.as_ref(), &HashSet::new()).await;
 
     // Mend should detect the crashed peer and return WorkCreated.
     assert!(
@@ -564,7 +564,7 @@ async fn mend_strand_no_stale_peers_returns_no_work() {
         LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(store.as_ref()).await;
+    let result = mend.evaluate(store.as_ref(), &HashSet::new()).await;
 
     assert!(
         matches!(result, StrandResult::NoWork),
@@ -612,7 +612,7 @@ async fn mend_strand_removes_orphaned_lock_files() {
         LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(store.as_ref()).await;
+    let result = mend.evaluate(store.as_ref(), &HashSet::new()).await;
 
     // The lock file should have been removed (if the Mend strand handles it).
     // If the lock file was removed, the strand returns WorkCreated.
@@ -678,7 +678,7 @@ async fn mend_strand_cleans_zero_activity_worker_logs_immediately() {
         needle::config::LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(store.as_ref()).await;
+    let result = mend.evaluate(store.as_ref(), &HashSet::new()).await;
 
     assert!(
         matches!(result, StrandResult::NoWork),
@@ -740,7 +740,7 @@ async fn mend_strand_preserves_active_worker_logs() {
         needle::config::LimitsConfig::default(),
     );
 
-    let result = mend.evaluate(store.as_ref()).await;
+    let result = mend.evaluate(store.as_ref(), &HashSet::new()).await;
 
     assert!(
         matches!(result, StrandResult::NoWork),
@@ -967,6 +967,7 @@ async fn mitosis_creates_children_on_first_failure() {
 
     let result = disabled_evaluator
         .evaluate(
+
             store.as_ref(),
             &parent,
             Path::new("/tmp/test"),
@@ -1009,6 +1010,7 @@ async fn mitosis_skips_non_first_failure() {
 
     let result = evaluator
         .evaluate(
+
             store.as_ref(),
             &parent,
             Path::new("/tmp/test"),
@@ -1059,6 +1061,7 @@ async fn mitosis_evaluator_adapter_not_found_skips() {
     // Use an adapter name that doesn't exist in the dispatcher.
     let result = evaluator
         .evaluate(
+
             store.as_ref(),
             &parent,
             Path::new("/tmp/test"),
@@ -1425,7 +1428,7 @@ async fn explore_discovers_work_in_other_workspace() {
 
     // ExploreStrand ignores the passed store; use a minimal empty mock.
     let dummy_store = ConcurrentMockStore::new(vec![]);
-    let result = strand.evaluate(&dummy_store).await;
+    let result = strand.evaluate(&dummy_store, &HashSet::new()).await;
 
     assert!(
         matches!(result, StrandResult::BeadFound(_)),
@@ -1463,6 +1466,7 @@ async fn mitosis_splits_multitask_bead_creates_children() {
 
     let result = evaluator
         .evaluate(
+
             store.as_ref(),
             &parent,
             ws.path(),
@@ -1524,6 +1528,7 @@ async fn mitosis_duplicate_split_creates_zero_new_children() {
     );
     let result1 = evaluator1
         .evaluate(
+
             store.as_ref(),
             &parent,
             ws.path(),
@@ -1549,6 +1554,7 @@ async fn mitosis_duplicate_split_creates_zero_new_children() {
     );
     let result2 = evaluator2
         .evaluate(
+
             store.as_ref(),
             &parent,
             ws.path(),
@@ -1610,6 +1616,7 @@ async fn mitosis_concurrent_workers_flock_serializes() {
             let evaluator = MitosisEvaluator::new(config, telemetry, lock_dir);
             evaluator
                 .evaluate(
+
                     store.as_ref(),
                     &parent,
                     &ws,
