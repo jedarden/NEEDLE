@@ -72,7 +72,6 @@ pub fn token_set_without_stopwords(title: &str) -> HashSet<String> {
                 .collect::<Vec<_>>()
         })
         .filter(|word| !STOPWORDS.contains(&word.as_str()))
-        .filter(|word| word.len() > 1) // Skip single-character words
         .collect()
 }
 
@@ -1233,11 +1232,17 @@ End of response."#;
     }
 
     #[test]
-    fn token_set_without_stopwords_single_char_words_filtered() {
+    fn token_set_without_stopwords_single_char_non_stopwords_retained() {
+        // "a" is a stopword and is filtered regardless of length; "b"/"c" are
+        // not stopwords and, like the "x"/"y" placeholders in
+        // token_set_without_stopwords_basic, must survive — dropping all
+        // single-character tokens would make titles differing only in a short
+        // identifier compare as duplicates, defeating the purpose of this
+        // function (see the module doc-comment's own worked example).
         let tokens = token_set_without_stopwords("verify a b c test");
         assert!(!tokens.contains("a"));
-        assert!(!tokens.contains("b"));
-        assert!(!tokens.contains("c"));
+        assert!(tokens.contains("b"));
+        assert!(tokens.contains("c"));
         assert!(tokens.contains("test"));
     }
 
