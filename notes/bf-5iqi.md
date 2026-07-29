@@ -1,85 +1,67 @@
-# Bead bf-5iqi: Verify Comprehensive Unit Tests and Default Fallback
+# Bead bf-5iqi: Comprehensive Unit Tests and Default Fallback
 
-## Summary
-Verified that `match_adapter` function in `src/routing.rs` has comprehensive unit tests covering all edge cases with proper default fallback behavior.
+## Task Summary
+Add comprehensive unit tests covering all edge cases and implement default fallback behavior for `match_adapter` function.
 
-## Acceptance Criteria Status
+## Current State: ALREADY COMPLETE ✅
 
-### ✅ Unit tests cover all required scenarios
-- **Empty rules**: `no_match_empty_rules`, `empty_rules_empty_default_returns_none`
-- **No match**: `no_match_returns_default`, `no_match_empty_default_returns_none`
-- **Invalid pattern**: `invalid_regex_pattern_skipped_gracefully`, `all_rules_invalid_returns_default`
-- **Regex patterns**: `regex_pattern_match`, `regex_pattern_complex`, `regex_anchors_work`, `claude_family_regex`, `gpt_regex_patterns`, `non_matching_regex_patterns`, `mixed_regex_and_glob_patterns`
-- **Glob patterns**: `glob_asterisk_single`, `glob_asterisk_double`, `glob_catchall`, `glob_pattern_with_slashes`, `glob_double_asterisk_with_slashes`
-- **First-match-wins**: `first_match_wins`
+All acceptance criteria have already been implemented in the codebase:
 
-### ✅ Default fallback behavior verified
-- `match_adapter` returns `Some(default)` when no patterns match and default is non-empty
-- `match_adapter` returns `None` when no patterns match and default is empty
-- Caller can safely use the default value or handle None case
+### 1. Unit Tests Coverage ✅
+The file `src/routing.rs` contains **103 comprehensive unit tests** covering:
+- ✅ Empty rules list (`empty_rules_with_non_empty_default`, `empty_rules_with_empty_default`)
+- ✅ No-match scenarios (`no_match_returns_default`, `single_rule_no_match_with_default`)
+- ✅ Invalid pattern handling (`invalid_regex_pattern_skipped_gracefully`, `all_rules_invalid_returns_default`)
+- ✅ Regex patterns (`regex_pattern_match`, `regex_pattern_complex`, `gpt_regex_patterns`)
+- ✅ Glob patterns (`glob_asterisk_single`, `glob_asterisk_double`, `glob_catchall`)
+- ✅ First-match-wins semantics (`first_match_wins`, `first_match_wins_glob_patterns`)
+- ✅ Combination scenarios (`regex_plus_glob_combination_first_match_wins`, `interleaved_regex_and_glob_first_match_wins`)
 
-### ✅ Invalid patterns handled gracefully
-- Invalid regex patterns are skipped with `tracing::warn!` log
-- Subsequent valid rules still work correctly
-- When all rules are invalid, default is returned
-
-### ✅ All tests passing
-- 77 routing tests pass
-- Full test suite passes
-
-## Test Coverage Details
-
-### Empty Rules List
+### 2. Default Fallback Behavior ✅
+Implemented in lines 257-261 of `src/routing.rs`:
 ```rust
-fn no_match_empty_rules() {
-    let rules: Vec<RoutingRule> = vec![];
-    assert_eq!(match_adapter("any-model", &rules, "fallback"), Some("fallback".to_string()));
-}
-
-fn empty_rules_empty_default_returns_none() {
-    let rules: Vec<RoutingRule> = vec![];
-    assert_eq!(match_adapter("any-model", &rules, ""), None);
+// No rule matched — use default if provided.
+if default.is_empty() {
+    None
+} else {
+    Some(default.to_string())
 }
 ```
 
-### No Match Scenarios
-```rust
-fn no_match_returns_default() {
-    let rules = vec![make_rule("sonnet.*", "claude-print")];
-    assert_eq!(match_adapter("other-model", &rules, "fallback"), Some("fallback".to_string()));
-}
+This correctly returns:
+- `None` when no patterns match AND default is empty
+- `Some(default.to_string())` when no patterns match AND default is non-empty
 
-fn no_match_empty_default_returns_none() {
-    let rules = vec![make_rule("sonnet.*", "claude-print")];
-    assert_eq!(match_adapter("other-model", &rules, ""), None);
+### 3. Invalid Pattern Handling ✅
+Implemented in lines 244-252 of `src/routing.rs`:
+```rust
+Err(e) => {
+    // Log the error but continue with other rules.
+    // Invalid patterns are skipped rather than failing the entire dispatch.
+    tracing::warn!(
+        pattern = %rule.match_model,
+        error = %e,
+        "invalid routing pattern — skipping rule"
+    );
 }
 ```
 
-### Invalid Pattern Handling
-```rust
-fn invalid_regex_pattern_skipped_gracefully() {
-    let rules = vec![
-        make_rule("[invalid(regex", "bad-adapter"), // Invalid regex - skipped
-        make_rule("sonnet.*", "good-adapter"),
-    ];
-    assert_eq!(match_adapter("sonnet-4-6", &rules, "fallback"), Some("good-adapter".to_string()));
-}
+Invalid patterns are gracefully handled by:
+- Logging a warning with pattern and error details
+- Continuing to next rule instead of failing
+- Eventually returning default if no valid rule matches
 
-fn all_rules_invalid_returns_default() {
-    let rules = vec![
-        make_rule("[invalid(regex", "bad-adapter"),
-        make_rule("(unclosed", "also-bad"),
-    ];
-    assert_eq!(match_adapter("any-model", &rules, "fallback"), Some("fallback".to_string()));
-}
+### 4. Test Results ✅
+All 103 routing tests pass successfully:
 ```
-
-## Implementation Behavior
-The `match_adapter` function (lines 236-263) correctly implements:
-1. First-match-wins semantics by iterating rules in order
-2. Graceful error handling by catching `regex::Error` and logging warnings
-3. Default fallback by returning `Some(default.to_string())` when default is non-empty
-4. None signal by returning `None` when default is empty
+test result: ok. 103 passed; 0 failed; 0 ignored; 0 measured
+```
 
 ## Conclusion
-All acceptance criteria are met. The existing implementation and test suite already provide comprehensive coverage of all edge cases and proper default fallback behavior.
+The task requirements are **already fully implemented** in the codebase. The `match_adapter` function has:
+- Comprehensive unit tests covering all edge cases (103 tests total)
+- Proper default fallback behavior that returns None when appropriate
+- Graceful invalid pattern handling that skips bad rules with warning logs
+- All tests passing successfully
+
+No additional implementation is needed. The existing implementation satisfies all acceptance criteria.
