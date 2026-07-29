@@ -870,8 +870,8 @@ impl Drop for HealthMonitor {
 
 /// Clean up a heartbeat file by removing it from disk.
 ///
-/// This function removes the heartbeat file at the given path. It returns
-/// the raw result from `std::fs::remove_file` without error handling.
+/// This function removes the heartbeat file at the given path. It handles
+/// both file-not-found (success) and unexpected error (failure) cases.
 ///
 /// # Arguments
 ///
@@ -879,8 +879,8 @@ impl Drop for HealthMonitor {
 ///
 /// # Returns
 ///
-/// * `Ok(())` - If the file was removed successfully
-/// * `Err(e)` - If removal fails (including if the file doesn't exist)
+/// * `Ok(())` - If the file was removed successfully or doesn't exist
+/// * `Err(e)` - If removal fails for reasons other than NotFound
 ///
 /// # Example
 ///
@@ -890,10 +890,29 @@ impl Drop for HealthMonitor {
 ///
 /// let path = Path::new("/tmp/heartbeat.json");
 /// cleanup_heartbeat_file(path)?;
-/// # Ok::<(), std::io::Error>(())
+/// # Ok::<(), anyhow::Error>(())
 /// ```
-pub fn cleanup_heartbeat_file(path: &Path) -> Result<(), std::io::Error> {
-    std::fs::remove_file(path)
+pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File doesn't exist - this is success (idempotent cleanup)
+            tracing::debug!(
+                path = %path.display(),
+                "heartbeat file does not exist, skipping cleanup"
+            );
+            Ok(())
+        }
+        Err(e) => {
+            // Unexpected error - return with context
+            Err(e).with_context(|| {
+                format!(
+                    "failed to remove heartbeat file: {}",
+                    path.display()
+                )
+            })
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2097,14 +2116,12 @@ mod tests {
         assert!(!path.exists(), "file should not exist after cleanup");
     }
 
-    /// Test that cleanup_heartbeat_file returns the underlying NotFound error
-    /// when the file doesn't exist.
+    /// Test that cleanup_heartbeat_file returns Ok when the file doesn't exist.
     ///
-    /// Updated for bf-547k: `cleanup_heartbeat_file` now returns
-    /// `std::fs::remove_file`'s raw `Result` instead of swallowing errors, so
-    /// a missing file is propagated as `Err`, not silently mapped to `Ok`.
+    /// Updated for bf-5izm: `cleanup_heartbeat_file` now returns `Ok(())` when
+    /// the file doesn't exist (NotFound is treated as success for idempotent cleanup).
     #[test]
-    fn cleanup_heartbeat_file_errs_when_file_missing() {
+    fn cleanup_heartbeat_file_ok_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent-heartbeat.json");
 
@@ -2112,13 +2129,10 @@ mod tests {
 
         let result = cleanup_heartbeat_file(&path);
         assert!(
-            result.is_err(),
-            "cleanup should propagate NotFound when the file doesn't exist"
+            result.is_ok(),
+            "cleanup should return Ok(()) when the file doesn't exist"
         );
-        assert_eq!(
-            result.unwrap_err().kind(),
-            std::io::ErrorKind::NotFound
-        );
+        assert!(!path.exists(), "file should still not exist after cleanup");
     }
 
     /// Test that cleanup_heartbeat_file propagates an error when removal fails.
