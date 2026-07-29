@@ -118,8 +118,7 @@ fn routing_anthropic_sonnet_to_claude_print() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
 
@@ -158,8 +157,7 @@ fn routing_anthropic_opus_to_claude_print() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
 
@@ -195,8 +193,7 @@ fn routing_anthropic_fable_to_claude_print() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
 
@@ -232,8 +229,7 @@ fn routing_anthropic_haiku_to_claude_print() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
 
@@ -286,8 +282,7 @@ fn routing_anthropic_all_claude_models_together() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
 
@@ -332,8 +327,7 @@ fn routing_glm_47_to_claude_code_glm_47() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
 
@@ -373,8 +367,7 @@ fn routing_glm_47_flash_to_claude_code_glm_47() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
 
@@ -412,8 +405,7 @@ fn routing_glm_to_default_adapter() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
 
@@ -462,8 +454,7 @@ fn routing_non_claude_to_default_adapter() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
 
@@ -611,8 +602,7 @@ fn routing_workspace_override_changes_defaults() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(global_result, Some("claude-print".to_string()));
@@ -627,8 +617,7 @@ fn routing_workspace_override_changes_defaults() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(
@@ -646,8 +635,7 @@ fn routing_workspace_override_changes_defaults() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     let workspace_opus = match_adapter(
@@ -659,8 +647,7 @@ fn routing_workspace_override_changes_defaults() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(global_opus, Some("claude-print".to_string()));
@@ -703,8 +690,7 @@ fn routing_workspace_specific_glm_rules_override_global() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(global_result, Some("claude-code-glm-4.7".to_string()));
@@ -719,8 +705,7 @@ fn routing_workspace_specific_glm_rules_override_global() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(workspace_result, Some("workspace-glm-custom".to_string()));
@@ -734,7 +719,7 @@ fn routing_workspace_patterns_take_precedence_over_global() {
     // for the same model family, and the workspace rule should win.
 
     // Global config: All Claude models -> global-adapter
-    let global_routing = RoutingConfig {
+    let _global_routing = RoutingConfig {
         rules: vec![make_rule("claude-.*", "global-adapter")],
         default_adapter: Some("global-default".to_string()),
         strict: false,
@@ -757,8 +742,7 @@ fn routing_workspace_patterns_take_precedence_over_global() {
         &workspace_routing.rules,
         workspace_routing
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(sonnet_result, Some("workspace-sonnet".to_string()));
@@ -768,8 +752,7 @@ fn routing_workspace_patterns_take_precedence_over_global() {
         &workspace_routing.rules,
         workspace_routing
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(opus_result, Some("workspace-opus".to_string()));
@@ -779,8 +762,7 @@ fn routing_workspace_patterns_take_precedence_over_global() {
         &workspace_routing.rules,
         workspace_routing
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(fable_result, Some("workspace-other-claude".to_string()));
@@ -794,7 +776,7 @@ fn routing_workspace_can_restrict_global_patterns() {
     // routing policy than the global config.
 
     // Global config: Permissive - routes all Claude models
-    let global_routing = RoutingConfig {
+    let _global_routing = RoutingConfig {
         rules: vec![make_rule("claude-.*", "claude-print")],
         default_adapter: Some("claude-code-glm-4.7".to_string()),
         strict: false,
@@ -813,8 +795,7 @@ fn routing_workspace_can_restrict_global_patterns() {
         &workspace_routing.rules,
         workspace_routing
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(sonnet_result, Some("claude-print".to_string()));
@@ -825,8 +806,7 @@ fn routing_workspace_can_restrict_global_patterns() {
         &workspace_routing.rules,
         workspace_routing
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(opus_result, Some("restricted-default".to_string()));
@@ -862,8 +842,7 @@ fn routing_workspace_override_default_adapter() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(global_result, Some("global-default".to_string()));
@@ -878,8 +857,7 @@ fn routing_workspace_override_default_adapter() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(workspace_result, Some("workspace-default".to_string()));
@@ -906,8 +884,7 @@ fn routing_workspace_empty_rules_inherits_default() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(result, Some("workspace-only-default".to_string()));
@@ -937,8 +914,7 @@ fn routing_strict_mode_no_match_fails_loudly() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
 
@@ -970,8 +946,7 @@ fn routing_strict_mode_no_default_returns_none() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
 
@@ -1002,8 +977,7 @@ fn routing_non_strict_mode_graceful_fallback() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
 
@@ -1054,8 +1028,7 @@ fn routing_strict_mode_with_matching_rule_succeeds() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
 
@@ -1107,8 +1080,7 @@ fn routing_first_match_wins_with_overlapping_patterns() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
 
@@ -1149,8 +1121,7 @@ fn routing_first_match_wins_reversed_order() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
 
@@ -1190,8 +1161,7 @@ fn routing_first_match_wins_with_specific_patterns() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(
@@ -1210,8 +1180,7 @@ fn routing_first_match_wins_with_specific_patterns() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(
@@ -1230,8 +1199,7 @@ fn routing_first_match_wins_with_specific_patterns() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
     assert_eq!(
@@ -1280,8 +1248,7 @@ fn routing_real_world_anthropic_subscription_policy() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-print".to_string())
@@ -1296,8 +1263,7 @@ fn routing_real_world_anthropic_subscription_policy() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-print".to_string())
@@ -1312,8 +1278,7 @@ fn routing_real_world_anthropic_subscription_policy() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-print".to_string())
@@ -1328,8 +1293,7 @@ fn routing_real_world_anthropic_subscription_policy() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-print".to_string())
@@ -1346,8 +1310,7 @@ fn routing_real_world_anthropic_subscription_policy() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-code-glm-4.7".to_string())
@@ -1362,8 +1325,7 @@ fn routing_real_world_anthropic_subscription_policy() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-code-glm-4.7".to_string())
@@ -1413,8 +1375,7 @@ fn routing_june_15_deadline_rationale() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
         assert_eq!(
@@ -1438,8 +1399,7 @@ fn routing_june_15_deadline_rationale() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
         assert_eq!(
@@ -1504,8 +1464,7 @@ fn routing_config_example_documentation() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-print".to_string())
@@ -1520,8 +1479,7 @@ fn routing_config_example_documentation() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-print".to_string())
@@ -1538,8 +1496,7 @@ fn routing_config_example_documentation() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-print".to_string())
@@ -1554,8 +1511,7 @@ fn routing_config_example_documentation() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-print".to_string())
@@ -1572,8 +1528,7 @@ fn routing_config_example_documentation() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-code-glm-4.7".to_string())
@@ -1590,8 +1545,7 @@ fn routing_config_example_documentation() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or("")
         ),
         Some("claude-code-glm-4.7".to_string())
@@ -1736,8 +1690,7 @@ fn routing_invalid_regex_pattern_skipped_with_warning() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
 
@@ -1776,8 +1729,7 @@ fn routing_all_invalid_patterns_returns_default() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
 
@@ -1814,8 +1766,7 @@ fn routing_empty_rules_returns_default() {
                 .as_ref()
                 .unwrap()
                 .default_adapter
-                .as_ref()
-                .map(|s| s.as_str())
+                .as_deref()
                 .unwrap_or(""),
         );
 
@@ -1859,8 +1810,7 @@ fn routing_invalid_glob_syntax_handled() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
 
@@ -1895,8 +1845,7 @@ fn routing_strict_mode_missing_adapter_loud_failure() {
             .as_ref()
             .unwrap()
             .default_adapter
-            .as_ref()
-            .map(|s| s.as_str())
+            .as_deref()
             .unwrap_or(""),
     );
 
@@ -1907,7 +1856,7 @@ fn routing_strict_mode_missing_adapter_loud_failure() {
     );
 
     // Even the dispatcher adapter lookup should fail
-    let dispatcher = make_test_dispatcher(vec![make_test_adapter(
+    let _dispatcher = make_test_dispatcher(vec![make_test_adapter(
         "claude-print",
         "claude",
         "claude --print < {prompt_file}",

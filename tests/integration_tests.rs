@@ -2373,19 +2373,18 @@ fn heartbeat_cleanup_on_signal_integration() {
                 // We're in the integration test binary, find the needle binary
                 Some(
                     p.parent()
-                        .and_then(|grandparent| {
+                        .map(|grandparent| {
                             let needle_path = grandparent.join("needle");
                             if needle_path.exists() {
-                                Some(needle_path)
+                                needle_path
                             } else {
                                 // Try in debug target directory
                                 let debug_path = grandparent.join("debug").join("needle");
                                 if debug_path.exists() {
-                                    Some(debug_path)
+                                    debug_path
                                 } else {
                                     // Try release target directory
-                                    let release_path = grandparent.join("release").join("needle");
-                                    Some(release_path)
+                                    grandparent.join("release").join("needle")
                                 }
                             }
                         })
@@ -2512,14 +2511,13 @@ fn heartbeat_cleanup_on_signal_integration() {
 
     #[cfg(unix)]
     {
-        use std::process::id;
 
         // SAFETY: We're sending signal 0 (for existence check) and SIGTERM to a known PID
         // that we just spawned. This is safe as long as the process is still running.
         unsafe {
             // Verify the process is still alive before sending SIGTERM
             if libc::kill(worker_pid as libc::pid_t, 0) != 0 {
-                let errno = (*libc::__errno_location());
+                let errno = *libc::__errno_location();
                 println!(
                     "Worker process {} died unexpectedly (errno: {})",
                     worker_pid, errno
@@ -2529,7 +2527,7 @@ fn heartbeat_cleanup_on_signal_integration() {
 
             // Send SIGTERM to trigger graceful shutdown
             if libc::kill(worker_pid as libc::pid_t, libc::SIGTERM) != 0 {
-                let errno = (*libc::__errno_location());
+                let errno = *libc::__errno_location();
                 println!(
                     "Failed to send SIGTERM to worker {} (errno: {})",
                     worker_pid, errno
