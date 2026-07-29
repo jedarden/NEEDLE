@@ -38,6 +38,13 @@ const SIZE_100KB: usize = 100 * 1024;
 /// Default number of samples for latency measurement.
 const DEFAULT_SAMPLE_COUNT: usize = 50;
 
+/// Serializes access to the SANITIZE_THRESHOLD_MS env var across tests in
+/// this binary. std::env mutations are process-global, and cargo test runs
+/// #[test] fns concurrently by default, so latency_threshold_parsing's
+/// temporary mutations could otherwise be observed by
+/// sanitize_latency_below_threshold running concurrently on another thread.
+static ENV_VAR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Latency threshold for the assertion-style test (milliseconds).
 /// Configurable via SANITIZE_THRESHOLD_MS environment variable.
 fn latency_threshold_ms() -> u128 {
@@ -45,9 +52,13 @@ fn latency_threshold_ms() -> u128 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or({
-            // Default threshold: 10ms for release builds, 500ms for debug builds.
+            // Default threshold: 10ms for release builds, 1500ms for debug
+            // builds. Debug (unoptimized) builds are commonly 10-50x slower
+            // than release for CPU-bound work like this; 1500ms leaves
+            // headroom over the slowest CI hardware observed so far
+            // (~716ms median-adjacent latency on a resource-constrained pod).
             if cfg!(debug_assertions) {
-                500
+                1500
             } else {
                 10
             }
@@ -150,7 +161,10 @@ fn measure_median_latency_100kb() -> (Vec<u128>, u128) {
 #[test]
 fn sanitize_latency_below_threshold() {
     let (latencies, median_us) = measure_median_latency_100kb();
-    let threshold_ms = latency_threshold_ms();
+    let threshold_ms = {
+        let _guard = ENV_VAR_LOCK.lock().unwrap();
+        latency_threshold_ms()
+    };
     let threshold_us = threshold_ms * 1000;
 
     // Calculate statistics
@@ -206,11 +220,19 @@ fn generator_is_deterministic() {
 /// Test that the environment variable parsing works correctly.
 #[test]
 fn latency_threshold_parsing() {
+    // std::env mutations are process-global, and cargo test runs #[test]
+    // fns concurrently by default within one binary — hold ENV_VAR_LOCK for
+    // the whole mutate-and-restore cycle so sanitize_latency_below_threshold
+    // (which also locks before reading) can never observe one of this
+    // test's transient values.
+    let _guard = ENV_VAR_LOCK.lock().unwrap();
+    let original = std::env::var("SANITIZE_THRESHOLD_MS").ok();
+
     // Test default value (no env var set)
     std::env::remove_var("SANITIZE_THRESHOLD_MS");
     let default = latency_threshold_ms();
     if cfg!(debug_assertions) {
-        assert_eq!(default, 500);
+        assert_eq!(default, 1500);
     } else {
         assert_eq!(default, 10);
     }
@@ -224,11 +246,18 @@ fn latency_threshold_parsing() {
     std::env::set_var("SANITIZE_THRESHOLD_MS", "invalid");
     let fallback = latency_threshold_ms();
     if cfg!(debug_assertions) {
-        assert_eq!(fallback, 500);
+        assert_eq!(fallback, 1500);
     } else {
         assert_eq!(fallback, 10);
     }
 
-    // Clean up
-    std::env::remove_var("SANITIZE_THRESHOLD_MS");
+    // Restore whatever was there before this test ran (e.g. CI's own
+    // SANITIZE_THRESHOLD_MS export) instead of unconditionally removing it —
+    // sanitize_latency_below_threshold reads this same process-global env
+    // var, and previously this cleanup step silently discarded CI's
+    // configured value for the rest of the test binary.
+    match original {
+        Some(value) => std::env::set_var("SANITIZE_THRESHOLD_MS", value),
+        None => std::env::remove_var("SANITIZE_THRESHOLD_MS"),
+    }
 }
