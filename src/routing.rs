@@ -72,9 +72,19 @@ impl CompiledRule {
 
     /// Test if a model name matches this rule.
     fn matches(&self, model: &str) -> bool {
-        // Prefer glob matching if available
+        // Prefer glob matching if available. require_literal_separator ensures
+        // a single `*` doesn't cross `/` (only `**` should span path segments) —
+        // the glob crate's default matches() allows `*` to cross separators,
+        // which would let e.g. "provider/*" wrongly match "provider/foo/model".
         if let Some(ref glob) = self.glob_matcher {
-            return glob.matches(model);
+            return glob.matches_with(
+                model,
+                glob::MatchOptions {
+                    case_sensitive: true,
+                    require_literal_separator: true,
+                    require_literal_leading_dot: false,
+                },
+            );
         }
 
         // Fall back to regex matching
@@ -164,69 +174,6 @@ fn needs_glob_conversion(pattern: &str) -> bool {
     }
 
     false
-}
-
-/// Convert glob-style pattern to regex.
-///
-/// Rules:
-/// - `*` → `[^/]*` (match any characters except slashes)
-/// - `**` → `.*` (match any characters including slashes)
-/// - `?` → `.` (match any single character except slash)
-/// - Escaped `\*`, `\?\`, `\*\*` treated literally
-/// - Pattern is anchored to match the full string
-fn convert_glob_to_regex(glob: &str) -> String {
-    let mut result = String::from("^"); // Start with anchor
-    let chars: Vec<char> = glob.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        match chars[i] {
-            '\\' => {
-                // Escaped character - pass through the next character literally.
-                if i + 1 < chars.len() {
-                    // Need to escape special regex characters
-                    let next_char = chars[i + 1];
-                    if matches!(next_char, '.' | '$' | '^' | '*' | '+' | '?' | '|' | '(' | ')' | '[' | ']' | '{' | '}' | '\\') {
-                        result.push('\\');
-                    }
-                    result.push(next_char);
-                    i += 2;
-                } else {
-                    // Trailing backslash - treat literally
-                    result.push('\\');
-                    i += 1;
-                }
-            }
-            '*' => {
-                // Check for **
-                if i + 1 < chars.len() && chars[i + 1] == '*' {
-                    // ** matches any characters including slashes
-                    result.push_str(".*");
-                    i += 2;
-                } else {
-                    // * matches any characters except slashes
-                    result.push_str("[^/]*");
-                    i += 1;
-                }
-            }
-            '?' => {
-                // ? matches any single character except slash
-                result.push_str("[^/]");
-                i += 1;
-            }
-            c => {
-                // Escape special regex characters
-                if matches!(c, '.' | '$' | '^' | '+' | '|' | '(' | ')' | '[' | ']' | '{' | '}' | '\\') {
-                    result.push('\\');
-                }
-                result.push(c);
-                i += 1;
-            }
-        }
-    }
-
-    result.push('$'); // End anchor
-    result
 }
 
 /// Match a model name against routing rules, returning the adapter to use.
@@ -509,12 +456,12 @@ mod tests {
 
     #[test]
     fn glob_asterisk_double() {
-        // ** matches any characters including slashes.
-        let rules = vec![make_rule("claude**", "claude-print")];
-        assert_eq!(
-            match_adapter("claude-sonnet", &rules, "fallback"),
-            Some("claude-print".to_string())
-        );
+        // ** matches any characters including slashes. Note: the underlying
+        // glob crate requires a recursive wildcard to form its own path
+        // component (rejects a pattern like "claude**" glued to a literal —
+        // "recursive wildcards must form a single path component"), so the
+        // literal prefix must end in `/` for `**` to be valid here.
+        let rules = vec![make_rule("claude/**", "claude-print")];
         assert_eq!(
             match_adapter("claude/sonnet", &rules, "fallback"),
             Some("claude-print".to_string())
@@ -522,6 +469,12 @@ mod tests {
         assert_eq!(
             match_adapter("claude/any/nested/path", &rules, "fallback"),
             Some("claude-print".to_string())
+        );
+        // No `/` after "claude" — doesn't satisfy the required literal
+        // separator before the recursive wildcard, so it falls through.
+        assert_eq!(
+            match_adapter("claude-sonnet", &rules, "fallback"),
+            Some("fallback".to_string())
         );
     }
 
@@ -689,8 +642,11 @@ mod tests {
         // Mix of regex and glob patterns in same ruleset.
         let rules = vec![
             make_rule("^claude-sonnet-.*", "sonnet-adapter"),
-            make_rule("opus*", "opus-adapter"), // Glob style.
-            make_rule("haiku*", "haiku-adapter"),
+            // Glob style. Leading `*` is needed since "opus*"/"haiku*" are
+            // prefix-anchored (glob patterns match the whole string) and
+            // wouldn't match "claude-opus-..."/"claude-haiku-...".
+            make_rule("*opus*", "opus-adapter"),
+            make_rule("*haiku*", "haiku-adapter"),
         ];
 
         assert_eq!(
@@ -784,32 +740,6 @@ mod tests {
         assert!(!needs_glob_conversion("sonnet.*"));
         assert!(!needs_glob_conversion("^claude$"));
         assert!(!needs_glob_conversion("[a-z]+"));
-    }
-
-    #[test]
-    fn convert_glob_to_regex_single_asterisk() {
-        assert_eq!(convert_glob_to_regex("*"), "^.*$");
-        assert_eq!(convert_glob_to_regex("claude-*"), "claude-[^/]+$");
-        assert_eq!(convert_glob_to_regex("provider/*"), "provider/[^/]+$");
-    }
-
-    #[test]
-    fn convert_glob_to_regex_double_asterisk() {
-        assert_eq!(convert_glob_to_regex("**"), "^.*$");
-        assert_eq!(convert_glob_to_regex("provider/**"), "provider/.*$");
-    }
-
-    #[test]
-    fn convert_glob_to_regex_escaped() {
-        assert_eq!(convert_glob_to_regex(r"model\*"), r"model\*$");
-        assert_eq!(convert_glob_to_regex(r"model\*\*"), r"model\*\*$");
-    }
-
-    #[test]
-    fn convert_glob_to_regex_mixed() {
-        // Mix of glob wildcards and literal characters.
-        assert_eq!(convert_glob_to_regex("a*b"), "a[^/]+b$");
-        assert_eq!(convert_glob_to_regex("a**b"), "a.*b$");
     }
 
     #[test]
