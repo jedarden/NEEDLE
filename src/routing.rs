@@ -11,6 +11,9 @@ use std::sync::Arc;
 struct CompiledRule {
     /// Compiled glob pattern matcher.
     glob_matcher: Option<Arc<glob::Pattern>>,
+    /// Raw glob source, needed at match time to special-case a bare `*`/`**`
+    /// (see `matches()`).
+    glob_source: Option<String>,
     /// Fallback regex matcher for patterns that aren't valid globs.
     regex_matcher: Option<Arc<regex::Regex>>,
     /// Adapter to use on match.
@@ -44,6 +47,7 @@ impl CompiledRule {
                 Ok(regex) => {
                     return Ok(CompiledRule {
                         glob_matcher: None,
+                        glob_source: None,
                         regex_matcher: Some(Arc::new(regex)),
                         adapter,
                     })
@@ -59,6 +63,7 @@ impl CompiledRule {
             Ok(glob_pattern) => {
                 Ok(CompiledRule {
                     glob_matcher: Some(Arc::new(glob_pattern)),
+                    glob_source: Some(pattern.clone()),
                     regex_matcher: None,
                     adapter,
                 })
@@ -76,12 +81,18 @@ impl CompiledRule {
         // a single `*` doesn't cross `/` (only `**` should span path segments) —
         // the glob crate's default matches() allows `*` to cross separators,
         // which would let e.g. "provider/*" wrongly match "provider/foo/model".
+        //
+        // Exception: a *bare* "*" or "**" (the whole pattern, no literal
+        // segments) is a full catch-all by convention — it's meant to match
+        // any model name at all, slashes included, the same way a default
+        // fallback rule would.
         if let Some(ref glob) = self.glob_matcher {
+            let is_bare_wildcard = matches!(self.glob_source.as_deref(), Some("*") | Some("**"));
             return glob.matches_with(
                 model,
                 glob::MatchOptions {
                     case_sensitive: true,
-                    require_literal_separator: true,
+                    require_literal_separator: !is_bare_wildcard,
                     require_literal_leading_dot: false,
                 },
             );
@@ -1497,6 +1508,493 @@ mod tests {
         assert_eq!(
             match_adapter("claude-sonnet-4-6", &rules, "fallback"),
             Some("general-adapter".to_string())
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Additional comprehensive edge case tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_rules_with_non_empty_default() {
+        // Empty rules list should return default adapter when provided
+        let rules: Vec<RoutingRule> = vec![];
+        assert_eq!(
+            match_adapter("any-model", &rules, "default-adapter"),
+            Some("default-adapter".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_rules_with_empty_default() {
+        // Empty rules list with empty default should return None
+        let rules: Vec<RoutingRule> = vec![];
+        assert_eq!(match_adapter("any-model", &rules, ""), None);
+    }
+
+    #[test]
+    fn single_rule_no_match_with_default() {
+        // Single rule that doesn't match should return default
+        let rules = vec![make_rule("sonnet.*", "sonnet-adapter")];
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "default-adapter"),
+            Some("default-adapter".to_string())
+        );
+    }
+
+    #[test]
+    fn single_rule_no_match_empty_default() {
+        // Single rule that doesn't match with empty default should return None
+        let rules = vec![make_rule("sonnet.*", "sonnet-adapter")];
+        assert_eq!(match_adapter("gpt-4", &rules, ""), None);
+    }
+
+    #[test]
+    fn all_rules_invalid_empty_default() {
+        // All invalid patterns with empty default should return None
+        let rules = vec![
+            make_rule("[invalid(regex", "bad-adapter"),
+            make_rule("(unclosed", "also-bad"),
+        ];
+        assert_eq!(match_adapter("any-model", &rules, ""), None);
+    }
+
+    #[test]
+    fn all_rules_invalid_with_default() {
+        // All invalid patterns with default should return default
+        let rules = vec![
+            make_rule("[invalid(regex", "bad-adapter"),
+            make_rule("(unclosed", "also-bad"),
+        ];
+        assert_eq!(
+            match_adapter("any-model", &rules, "default-adapter"),
+            Some("default-adapter".to_string())
+        );
+    }
+
+    #[test]
+    fn regex_plus_glob_combination_first_match_wins() {
+        // Test combination of regex and glob patterns with first-match-wins
+        let rules = vec![
+            make_rule("^claude-sonnet", "regex-adapter"),
+            make_rule("claude-*", "glob-adapter"),
+            make_rule("*", "catchall"),
+        ];
+
+        // Both regex and glob would match, but regex (first) wins
+        assert_eq!(
+            match_adapter("claude-sonnet", &rules, "fallback"),
+            Some("regex-adapter".to_string())
+        );
+
+        // "^claude-sonnet" has no trailing `$`, so it's a prefix match, not
+        // an exact match — it still matches "claude-sonnet-4-6", and since
+        // the regex rule is listed first, it wins over the glob rule.
+        assert_eq!(
+            match_adapter("claude-sonnet-4-6", &rules, "fallback"),
+            Some("regex-adapter".to_string())
+        );
+
+        // Only catchall matches
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("catchall".to_string())
+        );
+    }
+
+    #[test]
+    fn glob_plus_regex_combination_first_match_wins() {
+        // Test combination where glob comes first
+        let rules = vec![
+            make_rule("claude-*", "glob-adapter"),
+            make_rule("^claude-sonnet", "regex-adapter"),
+            make_rule("*", "catchall"),
+        ];
+
+        // Both glob and regex would match "claude-sonnet", but glob (first) wins
+        assert_eq!(
+            match_adapter("claude-sonnet", &rules, "fallback"),
+            Some("glob-adapter".to_string())
+        );
+
+        // Only glob matches
+        assert_eq!(
+            match_adapter("claude-opus", &rules, "fallback"),
+            Some("glob-adapter".to_string())
+        );
+
+        // Only catchall matches
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("catchall".to_string())
+        );
+    }
+
+    #[test]
+    fn multiple_regex_patterns_first_match_wins() {
+        // Multiple regex patterns where more than one could match
+        let rules = vec![
+            make_rule("claude.*", "first-regex"),
+            make_rule("claude-sonnet.*", "second-regex"),
+            make_rule(".*", "catchall-regex"),
+        ];
+
+        // First regex matches and wins (even though second also matches)
+        assert_eq!(
+            match_adapter("claude-sonnet-4-6", &rules, "fallback"),
+            Some("first-regex".to_string())
+        );
+
+        // Third regex matches
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("catchall-regex".to_string())
+        );
+    }
+
+    #[test]
+    fn multiple_glob_patterns_first_match_wins() {
+        // Multiple glob patterns where more than one could match
+        let rules = vec![
+            make_rule("*", "catchall"),
+            make_rule("claude-*", "claude-adapter"),
+            make_rule("*sonnet*", "sonnet-adapter"),
+        ];
+
+        // First glob matches and wins (even though others would also match)
+        assert_eq!(
+            match_adapter("claude-sonnet-4-6", &rules, "fallback"),
+            Some("catchall".to_string())
+        );
+    }
+
+    #[test]
+    fn invalid_glob_pattern_returns_none_on_empty_default() {
+        // Invalid glob pattern should skip rule and eventually return None
+        let rules = vec![make_rule("**invalid**", "bad-adapter")];
+        assert_eq!(match_adapter("any-model", &rules, ""), None);
+    }
+
+    #[test]
+    fn invalid_regex_pattern_continues_to_next_rule() {
+        // Invalid regex should be skipped and continue to next valid rule
+        let rules = vec![
+            make_rule("[unclosed", "bad-adapter"),
+            make_rule("gpt-.*", "good-adapter"),
+        ];
+
+        // First rule is invalid and skipped, second matches
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("good-adapter".to_string())
+        );
+    }
+
+    #[test]
+    fn mixed_valid_and_invalid_patterns() {
+        // Mix of valid and invalid patterns throughout the list
+        let rules = vec![
+            make_rule("[invalid1", "bad1"),
+            make_rule("claude-.*", "claude-adapter"),
+            make_rule("[invalid2", "bad2"),
+            make_rule("gpt-.*", "gpt-adapter"),
+            make_rule("[invalid3", "bad3"),
+        ];
+
+        // Should skip invalid and match claude
+        assert_eq!(
+            match_adapter("claude-sonnet", &rules, "fallback"),
+            Some("claude-adapter".to_string())
+        );
+
+        // Should skip invalid and match gpt
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("gpt-adapter".to_string())
+        );
+
+        // Should skip all invalid and return default
+        assert_eq!(
+            match_adapter("other", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn default_adapter_with_special_characters() {
+        // Test that default adapter with special characters is preserved
+        let rules: Vec<RoutingRule> = vec![];
+        let default = "adapter-with_special.chars/123";
+        assert_eq!(
+            match_adapter("any-model", &rules, default),
+            Some(default.to_string())
+        );
+    }
+
+    #[test]
+    fn default_adapter_with_unicode() {
+        // Test that default adapter with unicode is preserved
+        let rules: Vec<RoutingRule> = vec![];
+        let default = "adapter-🎯-中文-テスト";
+        assert_eq!(
+            match_adapter("any-model", &rules, default),
+            Some(default.to_string())
+        );
+    }
+
+    #[test]
+    fn empty_default_with_whitespace() {
+        // Test that whitespace-only default is treated as non-empty
+        let rules: Vec<RoutingRule> = vec![];
+        assert_eq!(
+            match_adapter("any-model", &rules, "   "),
+            Some("   ".to_string())
+        );
+    }
+
+    #[test]
+    fn no_match_empty_vs_whitespace_default() {
+        // Distinguish between empty and whitespace-only defaults
+        let rules = vec![make_rule("sonnet.*", "adapter")];
+
+        // Empty default returns None
+        assert_eq!(match_adapter("gpt-4", &rules, ""), None);
+
+        // Whitespace default returns Some with whitespace
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "  "),
+            Some("  ".to_string())
+        );
+    }
+
+    #[test]
+    fn complex_regex_pattern_with_alternation() {
+        // Test regex with alternation (|)
+        let rules = vec![make_rule("(sonnet|opus|haiku)-.*", "claude-adapter")];
+
+        assert_eq!(
+            match_adapter("sonnet-4-6", &rules, "fallback"),
+            Some("claude-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("opus-4-6", &rules, "fallback"),
+            Some("claude-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("haiku-4-5", &rules, "fallback"),
+            Some("claude-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("fable-5", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn complex_glob_pattern_with_character_class() {
+        // Test glob with character class ranges
+        let rules = vec![make_rule("model-[0-9]-*", "numeric-adapter")];
+
+        assert_eq!(
+            match_adapter("model-4-xyz", &rules, "fallback"),
+            Some("numeric-adapter".to_string())
+        );
+        assert_eq!(
+            match_adapter("model-9-abc", &rules, "fallback"),
+            Some("numeric-adapter".to_string())
+        );
+        // 'a' is not in [0-9]
+        assert_eq!(
+            match_adapter("model-a-xyz", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn regex_anchors_with_catchall() {
+        // Test that anchored regex doesn't match partial matches
+        let rules = vec![
+            make_rule("^sonnet$", "exact"),
+            make_rule("*", "catchall"),
+        ];
+
+        // Exact match
+        assert_eq!(
+            match_adapter("sonnet", &rules, "fallback"),
+            Some("exact".to_string())
+        );
+
+        // Partial match - regex doesn't match, catchall does
+        assert_eq!(
+            match_adapter("sonnet-4-6", &rules, "fallback"),
+            Some("catchall".to_string())
+        );
+    }
+
+    #[test]
+    fn interleaved_regex_and_glob_first_match_wins() {
+        // Interleave regex and glob patterns to test first-match semantics
+        let rules = vec![
+            make_rule("claude.*", "regex1"),
+            make_rule("gpt-*", "glob1"),
+            make_rule("sonnet.*", "regex2"),
+            make_rule("*", "glob2"),
+        ];
+
+        // First regex matches
+        assert_eq!(
+            match_adapter("claude-sonnet", &rules, "fallback"),
+            Some("regex1".to_string())
+        );
+
+        // First glob matches (regex1 and regex2 don't)
+        assert_eq!(
+            match_adapter("gpt-4", &rules, "fallback"),
+            Some("glob1".to_string())
+        );
+
+        // Second regex matches
+        assert_eq!(
+            match_adapter("sonnet-4-6", &rules, "fallback"),
+            Some("regex2".to_string())
+        );
+
+        // Last glob matches everything else
+        assert_eq!(
+            match_adapter("gemini-pro", &rules, "fallback"),
+            Some("glob2".to_string())
+        );
+    }
+
+    #[test]
+    fn stress_test_many_rules_first_match_wins() {
+        // Test with many rules to ensure early exit works correctly
+        let rules = vec![
+            make_rule("aaa", "adapter-1"),
+            make_rule("bbb", "adapter-2"),
+            make_rule("ccc", "adapter-3"),
+            make_rule("ddd", "adapter-4"),
+            make_rule("eee", "adapter-5"),
+            make_rule("fff", "adapter-6"),
+            make_rule("ggg", "adapter-7"),
+            make_rule("hhh", "adapter-8"),
+            make_rule("iii", "adapter-9"),
+            make_rule("jjj", "adapter-10"),
+        ];
+
+        // First rule matches
+        assert_eq!(
+            match_adapter("aaa", &rules, "fallback"),
+            Some("adapter-1".to_string())
+        );
+
+        // Middle rule matches
+        assert_eq!(
+            match_adapter("eee", &rules, "fallback"),
+            Some("adapter-5".to_string())
+        );
+
+        // Last rule matches
+        assert_eq!(
+            match_adapter("jjj", &rules, "fallback"),
+            Some("adapter-10".to_string())
+        );
+
+        // No match, use default
+        assert_eq!(
+            match_adapter("zzz", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn case_sensitive_matching_respected() {
+        // Ensure matching is case-sensitive for both regex and glob
+        let rules = vec![
+            make_rule("Claude-Sonnet", "exact-case"),
+            make_rule("claude-*", "glob-lowercase"),
+        ];
+
+        // Exact case match
+        assert_eq!(
+            match_adapter("Claude-Sonnet", &rules, "fallback"),
+            Some("exact-case".to_string())
+        );
+
+        // Glob matches lowercase only
+        assert_eq!(
+            match_adapter("claude-sonnet", &rules, "fallback"),
+            Some("glob-lowercase".to_string())
+        );
+
+        // Uppercase doesn't match lowercase glob
+        assert_eq!(
+            match_adapter("CLAUDE-SONNET", &rules, "fallback"),
+            Some("fallback".to_string())
+        );
+    }
+
+    #[test]
+    fn default_parameter_used_correctly_on_none_return() {
+        // Verify that when match_adapter returns None, the caller can use default
+        // This tests the contract: None means "use your own default"
+        let rules = vec![make_rule("sonnet.*", "adapter")];
+
+        // When we pass empty default, we get None
+        let result = match_adapter("gpt-4", &rules, "");
+        assert!(result.is_none());
+
+        // Caller's responsibility to handle None and use their own default
+        let final_adapter = result.unwrap_or_else(|| "caller-default".to_string());
+        assert_eq!(final_adapter, "caller-default");
+
+        // When we pass a non-empty default, we get Some(default)
+        let result2 = match_adapter("gpt-4", &rules, "fallback");
+        assert_eq!(result2, Some("fallback".to_string()));
+    }
+
+    #[test]
+    fn empty_model_with_empty_rules_empty_default() {
+        // Edge case: empty model name, empty rules, empty default
+        let rules: Vec<RoutingRule> = vec![];
+        assert_eq!(match_adapter("", &rules, ""), None);
+    }
+
+    #[test]
+    fn empty_model_with_empty_rules_non_empty_default() {
+        // Edge case: empty model name, empty rules, non-empty default
+        let rules: Vec<RoutingRule> = vec![];
+        assert_eq!(
+            match_adapter("", &rules, "default"),
+            Some("default".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_model_with_catchall_rule() {
+        // Empty model name should match catchall pattern
+        let rules = vec![make_rule("*", "catchall")];
+        assert_eq!(
+            match_adapter("", &rules, "fallback"),
+            Some("catchall".to_string())
+        );
+    }
+
+    #[test]
+    fn escaped_regex_special_chars() {
+        // Test escaped regex special characters are treated literally
+        let rules = vec![make_rule(r"model\.x", "exact-match")];
+
+        // Should match exact "model.x"
+        assert_eq!(
+            match_adapter("model.x", &rules, "fallback"),
+            Some("exact-match".to_string())
+        );
+
+        // Should NOT match "model-x" (dot is literal, not wildcard)
+        assert_eq!(
+            match_adapter("model-x", &rules, "fallback"),
+            Some("fallback".to_string())
         );
     }
 }
