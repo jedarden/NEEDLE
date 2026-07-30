@@ -1,2 +1,0 @@
-{"schema_version":1,"ts":1785363983.7974448,"type":"agent_message","role":"assistant","content":"API Error: 503 no available server\n. This is a server-side issue, usually temporary — try again in a moment. If it persists, check your inference gateway (zai-proxy-mcp-apexalgo-iad-ts.ardenone.com:8444)."}
-{"schema_version":1,"ts":1785363983.7974684,"type":"error","message":"success","recoverable":false,"code":"success"}
