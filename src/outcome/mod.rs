@@ -18,7 +18,7 @@ use crate::telemetry::{EventKind, Telemetry};
 #[cfg(test)]
 use crate::types::BeadStatus;
 use crate::types::{AgentOutcome, Bead, BeadAction, HandlerResult, Outcome};
-use crate::validation::{GateConfig, ValidationGate};
+use crate::validation::{verify_shipped_work, GateConfig, GateReport, ValidationGate};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // classify (convenience re-export)
@@ -440,6 +440,28 @@ impl OutcomeHandler {
         // Use timeout for show() to prevent indefinite hang in HANDLING state.
         match self.timeout_op(|| store.show(&bead.id), "show").await {
             Ok(Some(current)) if current.status.is_done() => {
+                if self.config.worker.enforce_shipped_work {
+                    match verify_shipped_work(bead, &current, &bead.workspace).await {
+                        Ok(crate::validation::GateResult::Fail(reason)) => {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                reason = %reason,
+                                "bead closed but shipped-work check failed — reopening and releasing"
+                            );
+                            let report = GateReport::single_failure("shipped_work", reason);
+                            return self.handle_gate_failure(store, bead, &report).await;
+                        }
+                        Ok(crate::validation::GateResult::Pass) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                error = %e,
+                                "shipped-work check errored — failing open"
+                            );
+                        }
+                    }
+                }
+
                 tracing::info!(bead_id = %bead.id, "bead confirmed closed by agent");
                 events.push(EventKind::BeadCompleted {
                     bead_id: bead.id.clone(),
