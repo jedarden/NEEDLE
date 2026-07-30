@@ -542,7 +542,7 @@ impl super::Strand for WeaveStrand {
         "weave"
     }
 
-    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
+    async fn evaluate(&self, store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
         // Apply strand-level timeout to prevent a single weave from stalling
         // the entire SELECTING cycle for minutes. See: needle-bf-5hlhn
         let timeout_duration = std::time::Duration::from_secs(WEAVE_STRAND_TIMEOUT_SECS);

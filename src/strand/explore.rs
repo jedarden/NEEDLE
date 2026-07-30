@@ -96,7 +96,12 @@ pub struct ExploreStrand {
     store_factory: Arc<dyn StoreFactory>,
     /// Cycles since last workspace re-discovery (for periodic refresh).
     cycles_since_rediscovery: std::sync::atomic::AtomicU32,
-    /// Re-discovery interval (0 = disabled, from config.rediscovery_cycles).
+    /// Re-discovery interval, still parsed from config for backward
+    /// compatibility with existing `.needle.yaml` files, but no longer read:
+    /// re-discovery runs unconditionally every cycle as of bf-6anj4 (the
+    /// legacy throttle this gated is documented, not applied, at the call
+    /// site below).
+    #[allow(dead_code)]
     rediscovery_cycles: u32,
     /// Workspace root for re-discovery (from config.workspace_root).
     workspace_root: PathBuf,

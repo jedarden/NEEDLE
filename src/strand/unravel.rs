@@ -243,7 +243,7 @@ impl super::Strand for UnravelStrand {
         "unravel"
     }
 
-    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
+    async fn evaluate(&self, store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
         // Guard: disabled.
         if !self.config.enabled {
             tracing::debug!("unravel strand disabled");

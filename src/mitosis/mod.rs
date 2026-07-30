@@ -67,7 +67,7 @@ pub fn token_set_without_stopwords(title: &str) -> HashSet<String> {
         .split_whitespace()
         .flat_map(|word| {
             // Split on hyphens and underscores to handle compound words
-            word.split(|c: char| c == '-' || c == '_')
+            word.split(['-', '_'])
                 .map(|part| part.to_string())
                 .collect::<Vec<_>>()
         })
@@ -815,8 +815,8 @@ fn titles_match(existing: &str, proposed: &str) -> bool {
             .flat_map(|word| {
                 // Split on hyphens and underscores to handle compound words
                 // e.g., "model-agnostic" -> ["model", "agnostic"]
-                word.split(|c: char| c == '-' || c == '_')
-                    .map(|part| normalize_token(part))
+                word.split(['-', '_'])
+                    .map(normalize_token)
                     .collect::<Vec<_>>()
             })
             .filter(|word| !stopwords.contains(&word.as_str()))

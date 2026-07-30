@@ -165,7 +165,7 @@ impl super::Strand for KnotStrand {
         "knot"
     }
 
-    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
+    async fn evaluate(&self, store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
         let cycle = self.increment_exhaustion();
 
         // Check if the home bead store exists. If not, skip this strand.
