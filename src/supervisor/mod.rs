@@ -306,6 +306,8 @@ impl Supervisor {
     ///
     /// Returns true if a worker was spawned, false otherwise.
     async fn tick(&mut self) -> Result<bool> {
+        reap_zombie_children();
+
         // Get active workers
         let active_workers = self.registry.list().unwrap_or_default();
         let active_count = active_workers.len() as u32;
@@ -529,6 +531,35 @@ impl Supervisor {
     }
 }
 
+/// Reap any exited direct children of this process (workers spawned by
+/// `Supervisor::spawn_worker`) so they don't accumulate as `<defunct>`
+/// zombies for the lifetime of the supervisor daemon.
+///
+/// Safe to call unconditionally every tick: `needle supervise` only ever
+/// directly spawns worker processes — gate commands and dispatch
+/// subprocesses are spawned by the *worker* process, a separate PID tree —
+/// so a blind `waitpid(-1, ...)` here cannot race with `.wait()` calls
+/// elsewhere in the codebase (`dispatch`/`telemetry`/`canary`), which all
+/// run in different processes. See ADR-010 / GH #12.
+#[cfg(unix)]
+fn reap_zombie_children() {
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: waitpid(-1, &mut status, WNOHANG) reaps any already-exited
+        // direct child without blocking; `status` is a valid stack-local out
+        // parameter for the duration of the call.
+        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        match pid {
+            0 => break,          // No exited children ready to reap right now.
+            n if n < 0 => break, // ECHILD (no children) or another errno; stop for this tick.
+            n => tracing::debug!(reaped_pid = n, "reaped exited worker child"),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn reap_zombie_children() {}
+
 /// Run the supervisor from the CLI.
 ///
 /// This is the entry point for `needle supervise`.
@@ -615,5 +646,63 @@ mod tests {
     #[test]
     fn supervisor_config_default_has_no_worker_binary_override() {
         assert_eq!(SupervisorConfig::default().worker_binary_path, None);
+    }
+
+    // ── reap_zombie_children tests (ADR-010 / GitHub issue jedarden/NEEDLE#12) ──
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_zombie_children_reaps_an_exited_child() {
+        // Spawn a real short-lived child directly (no setsid/detach — this
+        // test process is its real parent, matching what reap_zombie_children
+        // assumes: it reaps ITS OWN direct children).
+        let child = std::process::Command::new("true")
+            .spawn()
+            .expect("failed to spawn `true`");
+        let pid = child.id();
+
+        // Wait for it to actually exit (without reaping it — do not call
+        // child.wait() here, that would reap it ourselves and defeat the test).
+        let stat_path = format!("/proc/{pid}/stat");
+        let mut became_zombie = false;
+        for _ in 0..200 {
+            if let Ok(stat) = std::fs::read_to_string(&stat_path) {
+                if let Some(after_comm) = stat.rfind(')') {
+                    if stat[after_comm + 1..].trim_start().starts_with('Z') {
+                        became_zombie = true;
+                        break;
+                    }
+                }
+            } else {
+                // Already reaped by something else, or /proc entry gone —
+                // can't validate the pre-condition; skip rather than false-fail.
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            became_zombie,
+            "child did not reach zombie state before timeout — test precondition not met"
+        );
+
+        reap_zombie_children();
+
+        // After reaping, /proc/<pid> should no longer exist.
+        assert!(
+            !std::path::Path::new(&stat_path).exists(),
+            "child was not reaped: {stat_path} still exists"
+        );
+
+        // Prevent a double-wait/drop warning: the child is already reaped by
+        // our sweep, so explicitly forget rather than calling child.wait().
+        std::mem::forget(child);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_zombie_children_is_a_noop_with_no_exited_children() {
+        // No children spawned by this test — should return immediately
+        // without panicking or blocking, regardless of ECHILD vs pid==0.
+        reap_zombie_children();
     }
 }
