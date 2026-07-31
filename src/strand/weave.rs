@@ -17,11 +17,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use libc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::bead_store::BeadStore;
 use crate::config::WeaveConfig;
+use crate::process_guard::ProcessGroupKillGuard;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{BeadId, StrandResult};
 
@@ -617,12 +619,36 @@ impl WeaveAgent for CliWeaveAgent {
             tmp_file.display(),
         );
 
-        let output = tokio::process::Command::new("bash")
-            .arg("-c")
-            .arg(&cmd)
-            .output()
+        // Own process group (setpgid) so the kill guard below can target this
+        // child and anything *it* forks (e.g. the CLI agent process, if the
+        // shell doesn't exec-replace into it) without touching NEEDLE's own
+        // process group. Spawn-then-wait (rather than the `.output()`
+        // shorthand) so a PID is available to arm the guard before awaiting —
+        // WeaveStrand::evaluate wraps this whole call in its own
+        // WEAVE_STRAND_TIMEOUT_SECS timeout; if that fires while the agent is
+        // still running, dropping this future must not silently orphan it.
+        // See bf-653n7.
+        let child = unsafe {
+            tokio::process::Command::new("bash")
+                .arg("-c")
+                .arg(&cmd)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .pre_exec(|| {
+                    libc::setpgid(0, 0);
+                    Ok(())
+                })
+                .spawn()
+                .with_context(|| format!("failed to spawn weave agent: {}", self.agent_cmd))?
+        };
+        let pid = child.id().unwrap_or(0);
+        let mut kill_guard = ProcessGroupKillGuard::new(pid);
+
+        let output = child
+            .wait_with_output()
             .await
-            .with_context(|| format!("failed to spawn weave agent: {}", self.agent_cmd))?;
+            .with_context(|| format!("failed to wait for weave agent: {}", self.agent_cmd))?;
+        kill_guard.disarm();
 
         // Always clean up the temp file.
         let _ = std::fs::remove_file(&tmp_file);

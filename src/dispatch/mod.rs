@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::config::Config;
+use crate::process_guard::ProcessGroupKillGuard;
 use crate::prompt::BuiltPrompt;
 use crate::sanitize::{CustomPattern, Sanitizer};
 use crate::telemetry::{EventKind, Telemetry};
@@ -807,6 +808,11 @@ impl Dispatcher {
         tracing::Span::current().record("needle.agent.pid", pid);
         let start = Instant::now();
 
+        // Guards against the caller (e.g. Worker's mitosis-evaluation step)
+        // dropping this whole async call before the timeout match below ever
+        // runs — see ProcessGroupKillGuard's docs and bf-653n7.
+        let mut kill_guard = ProcessGroupKillGuard::new(pid);
+
         // Read stdout/stderr concurrently to avoid pipe buffer deadlock.
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
@@ -981,11 +987,18 @@ impl Dispatcher {
                 .wait()
                 .await
                 .context("failed to wait for agent process")?;
+            kill_guard.disarm();
             status.code().unwrap_or(-1)
         } else {
             match tokio::time::timeout(timeout_dur, child.wait()).await {
-                Ok(Ok(status)) => status.code().unwrap_or(-1),
-                Ok(Err(e)) => return Err(e).context("failed to wait for agent process"),
+                Ok(Ok(status)) => {
+                    kill_guard.disarm();
+                    status.code().unwrap_or(-1)
+                }
+                Ok(Err(e)) => {
+                    kill_guard.disarm();
+                    return Err(e).context("failed to wait for agent process");
+                }
                 Err(_) => {
                     // Timeout: kill the entire process group so subprocesses
                     // spawned by the agent (subshells, background jobs) are
@@ -997,6 +1010,7 @@ impl Dispatcher {
                     }
                     let _ = child.start_kill();
                     let _ = child.wait().await;
+                    kill_guard.disarm();
                     124
                 }
             }
@@ -2654,6 +2668,82 @@ output_transform: "needle-transform-custom"
         assert!(
             dead,
             "grandchild sleep (pid {grandchild_pid}) should be dead within 3s after killpg"
+        );
+
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    #[tokio::test]
+    async fn e2e_outer_cancellation_still_kills_process_group() {
+        // Regression test for bf-653n7 (the mitosis-evaluation-timeout leak).
+        //
+        // Worker's mitosis-evaluation step wraps the *entire* dispatch() call
+        // in its own, much shorter, `tokio::time::timeout` — separate from
+        // and unrelated to the agent's own configured timeout exercised by
+        // `e2e_timeout_kills_entire_process_group` above. Before
+        // ProcessGroupKillGuard, that outer timeout firing dropped the
+        // in-flight dispatch() future before its *internal* timeout-kill
+        // match ever ran, silently orphaning the agent process and any
+        // process-group children it had spawned — indefinitely, since
+        // nothing ever reaped them.
+        //
+        // Here the adapter's own timeout is set effectively unreachable
+        // within the test's window, so the only thing that can kill the
+        // process is the guard reacting to the *outer* future being dropped.
+        let pid_file =
+            std::env::temp_dir().join(format!("needle-outercancel-{}.pid", std::process::id()));
+        let pid_file_str = pid_file.display().to_string();
+
+        let cmd = format!("sleep 1000 & echo $! > {pid_file_str}; sleep 1000");
+        let mut adapter = test_adapter("outercancel", &cmd);
+        adapter.timeout_secs = 3600;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("outercancel".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("outercancel").unwrap().clone();
+
+        // Mimic Worker's mitosis-evaluation wrapper: an outer timeout, far
+        // shorter than the agent's own, wrapping the whole dispatch call.
+        let outer = tokio::time::timeout(
+            Duration::from_millis(500),
+            dispatcher.dispatch(
+                &BeadId::from("nd-outercancel"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            ),
+        )
+        .await;
+        assert!(
+            outer.is_err(),
+            "outer timeout should fire well before the adapter's own 3600s timeout"
+        );
+
+        let pid_str = std::fs::read_to_string(&pid_file)
+            .expect("grandchild PID file should have been written before the outer timeout fired");
+        let grandchild_pid: libc::pid_t = pid_str
+            .trim()
+            .parse()
+            .expect("PID file should contain a valid integer PID");
+
+        // Poll until the grandchild is dead or we give up waiting.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let dead = loop {
+            let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+            if !alive {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert!(
+            dead,
+            "grandchild sleep (pid {grandchild_pid}) should be dead within 3s of the *outer* \
+             future being dropped, even though dispatch()'s own internal timeout never fired \
+             — this is what ProcessGroupKillGuard exists to guarantee"
         );
 
         let _ = std::fs::remove_file(&pid_file);
