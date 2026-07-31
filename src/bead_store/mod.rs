@@ -8,8 +8,8 @@
 //!
 //! Depends on: `types`.
 
-use std::path::{Path, PathBuf};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -342,6 +342,14 @@ pub trait BeadStore: Send + Sync {
 
     /// Release a claimed bead back to open (e.g., after agent failure).
     async fn release(&self, id: &BeadId) -> Result<()>;
+
+    /// Quarantine a bead by setting status=blocked (e.g., after it exceeds the
+    /// consecutive-failure threshold in `OutcomeConfig::quarantine_after_failures`).
+    ///
+    /// Unlike `release`, this deliberately does NOT clear the assignee or return
+    /// the bead to a claimable state — the whole point is to stop Pluck from
+    /// re-selecting it until a human (or a future auto-split) intervenes.
+    async fn block(&self, id: &BeadId) -> Result<()>;
 
     /// Clear the assignee on a bead without changing its status.
     ///
@@ -1115,6 +1123,14 @@ impl BeadStore for BrCliBeadStore {
         Ok(())
     }
 
+    async fn block(&self, id: &BeadId) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_br(&["update", id_str, "--status", "blocked"])
+            .await
+            .with_context(|| format!("br block {id_str} failed"))?;
+        Ok(())
+    }
+
     async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
         let id_str = id.as_ref();
         self.run_br(&["update", id_str, "--assignee", ""])
@@ -1795,6 +1811,14 @@ impl BeadStore for BfCliBeadStore {
         Ok(())
     }
 
+    async fn block(&self, id: &BeadId) -> Result<()> {
+        let id_str = id.as_ref();
+        self.run_bf(&["update", id_str, "--status", "blocked"])
+            .await
+            .with_context(|| format!("bf block {id_str} failed"))?;
+        Ok(())
+    }
+
     async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
         let id_str = id.as_ref();
         self.run_bf(&["update", id_str, "--assignee", ""])
@@ -1963,7 +1987,9 @@ mod tests {
         };
 
         // Verify the exclude_ids contains the expected bead ID
-        assert!(filters.exclude_ids.contains(&BeadId::from("bf-abc".to_string())));
+        assert!(filters
+            .exclude_ids
+            .contains(&BeadId::from("bf-abc".to_string())));
         assert_eq!(filters.exclude_ids.len(), 1);
     }
 
@@ -2532,7 +2558,11 @@ echo '[{"id":"bf-abc","title":"Test bead ABC","description":"desc","priority":2,
         // Test 1: No exclude_ids filtering - both beads returned
         let filters = Filters::default();
         let beads = store.ready(&filters).await.unwrap();
-        assert_eq!(beads.len(), 2, "should return both beads when no exclude_ids");
+        assert_eq!(
+            beads.len(),
+            2,
+            "should return both beads when no exclude_ids"
+        );
 
         // Test 2: Exclude one bead by ID
         let mut exclude_ids = HashSet::new();
@@ -2545,7 +2575,11 @@ echo '[{"id":"bf-abc","title":"Test bead ABC","description":"desc","priority":2,
         };
 
         let filtered_beads = store.ready(&filters_with_exclude).await.unwrap();
-        assert_eq!(filtered_beads.len(), 1, "should return only one bead after exclude_ids filtering");
+        assert_eq!(
+            filtered_beads.len(),
+            1,
+            "should return only one bead after exclude_ids filtering"
+        );
         assert_eq!(
             filtered_beads[0].id.as_ref(),
             "bf-def",
@@ -2587,7 +2621,11 @@ echo '[{"id":"bf-abc","title":"Test bead ABC","description":"desc","priority":2,
         // Test 1: No exclude_ids filtering - both beads returned
         let filters = Filters::default();
         let beads = store.ready(&filters).await.unwrap();
-        assert_eq!(beads.len(), 2, "should return both beads when no exclude_ids");
+        assert_eq!(
+            beads.len(),
+            2,
+            "should return both beads when no exclude_ids"
+        );
 
         // Test 2: Exclude one bead by ID
         let mut exclude_ids = HashSet::new();
@@ -2600,7 +2638,11 @@ echo '[{"id":"bf-abc","title":"Test bead ABC","description":"desc","priority":2,
         };
 
         let filtered_beads = store.ready(&filters_with_exclude).await.unwrap();
-        assert_eq!(filtered_beads.len(), 1, "should return only one bead after exclude_ids filtering");
+        assert_eq!(
+            filtered_beads.len(),
+            1,
+            "should return only one bead after exclude_ids filtering"
+        );
         assert_eq!(
             filtered_beads[0].id.as_ref(),
             "bf-def",
