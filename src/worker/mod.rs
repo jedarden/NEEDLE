@@ -335,6 +335,10 @@ pub struct Worker {
     built_prompt: Option<BuiltPrompt>,
     current_strand: Option<String>,
     exec_output: Option<(AgentOutcome, bool)>,
+    /// When agent execution began — used only to compute `duration_ms` for
+    /// the HOOP event tap (Hook 2). Set in `do_execute`, consumed in
+    /// `do_handle`.
+    exec_started_at: Option<Instant>,
     /// Effort tracking data for the current bead cycle.
     last_effort: Option<EffortData>,
     /// HEAD SHA captured just before agent dispatch; used to detect new commits.
@@ -518,6 +522,7 @@ impl Worker {
             built_prompt: None,
             current_strand: None,
             exec_output: None,
+            exec_started_at: None,
             last_effort: None,
             pre_dispatch_head: None,
             current_workspace: default_workspace,
@@ -1108,6 +1113,7 @@ impl Worker {
         self.race_lost_this_cycle.clear();
         self.current_bead = None;
         self.current_strand = None;
+        self.health.update_strand(None);
 
         // Restore home store if it was swapped for a remote workspace.
         self.restore_home_store();
@@ -1130,8 +1136,17 @@ impl Worker {
         match claim {
             Ok(ClaimResult::Claimed(bead)) => {
                 tracing::info!(bead_id = %bead.id, "atomically claimed bead via claim_auto");
+                crate::hoop_hooks::emit_needle_event(
+                    &self.current_workspace,
+                    &self.worker_name,
+                    Some(bead.id.as_ref()),
+                    Some(strand),
+                    "claim",
+                    serde_json::json!({}),
+                );
                 self.current_bead = Some(bead);
                 self.current_strand = Some(strand.to_string());
+                self.health.update_strand(Some(strand));
                 self.consecutive_race_lost = 0;
                 self.set_state(WorkerState::Building)?;
                 return Ok(());
@@ -1199,6 +1214,15 @@ impl Worker {
                     self.current_workspace = bead_ws.clone();
                 }
 
+                crate::hoop_hooks::emit_needle_event(
+                    &self.current_workspace,
+                    &self.worker_name,
+                    Some(bead.id.as_ref()),
+                    Some(strand_name.as_str()),
+                    "claim",
+                    serde_json::json!({}),
+                );
+                self.health.update_strand(Some(strand_name.as_str()));
                 self.current_bead = Some(bead);
                 self.current_strand = Some(strand_name);
 
@@ -1793,6 +1817,14 @@ impl Worker {
                     bead_id: bead_id.clone(),
                     timeout_secs,
                 });
+                crate::hoop_hooks::emit_needle_event(
+                    &self.current_workspace,
+                    &self.worker_name,
+                    Some(bead_id.as_ref()),
+                    self.current_strand.as_deref(),
+                    "timeout",
+                    serde_json::json!({}),
+                );
 
                 // Release the bead with timeout protection.
                 let _ = tokio::time::timeout(
@@ -1806,6 +1838,14 @@ impl Worker {
                     bead_id: bead_id.clone(),
                     reason: "build_timeout".to_string(),
                 });
+                crate::hoop_hooks::emit_needle_event(
+                    &self.current_workspace,
+                    &self.worker_name,
+                    Some(bead_id.as_ref()),
+                    self.current_strand.as_deref(),
+                    "release",
+                    serde_json::json!({}),
+                );
 
                 // Clear current bead and transition to RETRYING.
                 self.current_bead = None;
@@ -1845,9 +1885,18 @@ impl Worker {
         let adapter = self.resolve_adapter()?;
         let provider = adapter.provider.as_deref();
         let model = adapter.model.as_deref();
+        self.health.update_adapter(Some(&adapter.name));
 
         // Enter the agent.dispatch span for the dispatching phase.
         let _bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
+        crate::hoop_hooks::emit_needle_event(
+            &self.current_workspace,
+            &self.worker_name,
+            _bead_id.as_ref().map(|id| id.as_ref()),
+            self.current_strand.as_deref(),
+            "dispatch",
+            serde_json::json!({"adapter": adapter.name, "model": model}),
+        );
         let dispatch_span = tracing::info_span!(
             "agent.dispatch",
             gen_ai.system = %provider.unwrap_or("unknown"),
@@ -1962,6 +2011,7 @@ impl Worker {
                 );
                 let _execution_enter = execution_span.enter();
 
+                self.exec_started_at = Some(Instant::now());
                 let result = self
                     .dispatcher
                     .dispatch(&bead.id, &prompt, &adapter, dispatch_ws)
@@ -2323,6 +2373,38 @@ impl Worker {
             cancelled.store(true, Ordering::Release);
             heartbeat_task.abort();
             return Ok(());
+        }
+
+        // HOOP Hook 2 (event tap): emit the outcome as a single terminal
+        // event on the bead. Best-effort — see hoop_hooks module docs.
+        {
+            let duration_ms = self
+                .exec_started_at
+                .take()
+                .map(|start| start.elapsed().as_millis() as u64);
+            let outcome_str = handler_result.outcome.as_str();
+            let event_name = match &handler_result.outcome {
+                crate::types::Outcome::Success => "complete",
+                crate::types::Outcome::Failure | crate::types::Outcome::AgentNotFound => "fail",
+                crate::types::Outcome::Timeout => "timeout",
+                crate::types::Outcome::Crash(_) => "crash",
+                crate::types::Outcome::Interrupted => "release",
+            };
+            let mut extra = serde_json::json!({
+                "outcome": outcome_str,
+                "exit_code": output.exit_code,
+            });
+            if let Some(ms) = duration_ms {
+                extra["duration_ms"] = serde_json::json!(ms);
+            }
+            crate::hoop_hooks::emit_needle_event(
+                &self.current_workspace,
+                &self.worker_name,
+                Some(bead.id.as_ref()),
+                self.current_strand.as_deref(),
+                event_name,
+                extra,
+            );
         }
 
         // Emit a heartbeat after the outcome handler completes to signal we're

@@ -830,6 +830,12 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
     let boot_start = Instant::now();
     let qualified_id = format!("{}-{}", config.agent.default, worker_name);
 
+    // HOOP Hook 5 (spawn ack): prove this worker started, before anything else
+    // can fail silently. Best-effort — a failed write must never abort boot.
+    if let Err(e) = crate::hoop_hooks::write_spawn_ack(&worker_name) {
+        eprintln!("NEEDLE worker boot: spawn-ack write failed (non-fatal): {e}");
+    }
+
     // Phase 0: create tokio runtime + telemetry, emit worker.booting immediately.
     // Emit eprintln diagnostics before each step so hangs are visible even if telemetry fails.
     eprintln!("NEEDLE worker boot: creating tokio runtime...");
