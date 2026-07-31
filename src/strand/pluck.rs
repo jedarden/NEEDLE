@@ -1034,7 +1034,10 @@ mod tests {
         // bead at a less urgent priority.
         let store = MemoryStore {
             beads: vec![
-                make_bead_with_labels("urgent-but-struggling", 1, vec!["failure-count:10"]),
+                // failure-count:2 stays below the default split_after_failures
+                // threshold (3) — this test is about sort order, not the
+                // separate split-trigger path (see split_triggered_when_failure_count_exceeds_threshold).
+                make_bead_with_labels("urgent-but-struggling", 1, vec!["failure-count:2"]),
                 make_bead_with_labels("healthy-but-low-priority", 2, vec![]),
             ],
         };
