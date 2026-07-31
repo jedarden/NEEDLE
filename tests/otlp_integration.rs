@@ -519,6 +519,10 @@ impl BeadStore for MockStore {
         Ok(())
     }
 
+    async fn block(&self, _id: &BeadId) -> anyhow::Result<()> {
+        Ok(())
+    }
+
     async fn flush(&self) -> anyhow::Result<()> {
         Ok(())
     }

@@ -1470,6 +1470,9 @@ pub enum BeadAction {
     Deferred,
     /// An alert bead was created.
     Alerted,
+    /// Bead was quarantined (status=blocked, labeled `cycling`) after
+    /// exceeding the consecutive-failure threshold.
+    Quarantined,
     /// No action taken (e.g., success with bead already closed).
     None,
 }
@@ -1480,6 +1483,7 @@ impl fmt::Display for BeadAction {
             BeadAction::Released => write!(f, "released"),
             BeadAction::Deferred => write!(f, "deferred"),
             BeadAction::Alerted => write!(f, "alerted"),
+            BeadAction::Quarantined => write!(f, "quarantined"),
             BeadAction::None => write!(f, "none"),
         }
     }

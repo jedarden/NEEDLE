@@ -666,18 +666,48 @@ impl OutcomeHandler {
 
         let mut events = self.release_bead(store, bead).await?;
 
-        // If release succeeded, increment failure count.
-        // Check if the last event is BeadReleased (success) or BeadReleaseFailed (failure).
+        // If release succeeded, increment failure count and check the
+        // quarantine threshold. A bead that has exceeded
+        // `outcome.quarantine_after_failures` consecutive failures is
+        // quarantined (status=blocked) instead of being left released-to-open
+        // for the next cycle to re-claim and fail again indefinitely. This
+        // also closes the mitosis `NotSplittable` fallthrough (worker/mod.rs):
+        // that verdict no longer matters for beads at or past the ceiling,
+        // since this check already ran before mitosis evaluation this cycle.
         let release_succeeded = events
             .iter()
             .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+        let mut action = BeadAction::Released;
         if release_succeeded {
-            if let Err(e) = self.increment_failure_count(store, bead).await {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    error = %e,
-                    "failed to increment failure count after release"
-                );
+            match self.increment_failure_count(store, bead).await {
+                Ok(new_count) => {
+                    let threshold = self.config.outcome.quarantine_after_failures;
+                    if threshold > 0 && new_count >= threshold {
+                        match self
+                            .quarantine_bead(store, bead, new_count, threshold)
+                            .await
+                        {
+                            Ok(quarantine_events) => {
+                                events.extend(quarantine_events);
+                                action = BeadAction::Quarantined;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    bead_id = %bead.id,
+                                    error = %e,
+                                    "failed to quarantine bead after exceeding failure threshold"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "failed to increment failure count after release"
+                    );
+                }
             }
         }
 
@@ -694,7 +724,7 @@ impl OutcomeHandler {
             });
         }
 
-        Ok((BeadAction::Released, events))
+        Ok((action, events))
     }
 
     /// Timeout: release bead and add `deferred` label.
@@ -1039,7 +1069,6 @@ impl OutcomeHandler {
     ///
     /// All `br` calls are wrapped in timeouts to prevent indefinite hang in
     /// HANDLING state. Failures are non-fatal — we log and continue.
-    #[expect(dead_code)]
     async fn quarantine_bead(
         &self,
         store: &dyn BeadStore,
@@ -1055,6 +1084,41 @@ impl OutcomeHandler {
             threshold,
             "quarantining bead after exceeding failure threshold"
         );
+
+        // Set status=blocked with timeout. This is what actually stops Pluck
+        // from re-selecting the bead — the 'cycling' label below is a
+        // human-facing marker, not the enforcement mechanism.
+        match tokio::time::timeout(std::time::Duration::from_secs(30), store.block(&bead.id)).await
+        {
+            Ok(Ok(())) => {
+                tracing::debug!(bead_id = %bead.id, "set status=blocked");
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to set status=blocked during quarantine"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "quarantine".to_string(),
+                    operation: "block".to_string(),
+                    error: e.to_string(),
+                });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "block timed out after 30s during quarantine"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "quarantine".to_string(),
+                    operation: "block".to_string(),
+                    error: "timeout after 30s".to_string(),
+                });
+            }
+        }
 
         // Add the 'cycling' label with timeout.
         match tokio::time::timeout(
@@ -1146,6 +1210,7 @@ mod tests {
     #[allow(dead_code)] // Fields read via pattern matching in test assertions
     enum StoreAction {
         Release(String),
+        Block(String),
         Reopen(String),
         AddLabel(String, String),
         RemoveLabel(String, String),
@@ -1228,6 +1293,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(StoreAction::Release(id.to_string()));
+            Ok(())
+        }
+        async fn block(&self, id: &BeadId) -> Result<()> {
+            self.actions
+                .lock()
+                .unwrap()
+                .push(StoreAction::Block(id.to_string()));
             Ok(())
         }
         async fn flush(&self) -> Result<()> {
@@ -1461,6 +1533,95 @@ mod tests {
                 |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:3")
             ),
             "should add failure-count:3"
+        );
+    }
+
+    // ── ADR-012: failure-quarantine circuit breaker ──
+
+    #[tokio::test]
+    async fn handle_failure_quarantines_bead_at_threshold() {
+        // Default quarantine_after_failures is 5. A bead already at
+        // failure-count:4 crosses the threshold on this attempt.
+        let handler = test_handler();
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:4".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bead_action, BeadAction::Quarantined);
+        let actions = store.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::Block(id) if id == "needle-test")),
+            "5th consecutive failure must set status=blocked"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "cycling")),
+            "quarantine must add the cycling label"
+        );
+        assert!(
+            result.telemetry_events.iter().any(|e| matches!(
+                e,
+                EventKind::BeadQuarantined {
+                    failure_count: 5,
+                    threshold: 5,
+                    ..
+                }
+            )),
+            "must emit BeadQuarantined with the crossing count and configured threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_failure_below_threshold_does_not_quarantine() {
+        // Same setup as the threshold test, one failure count lower — this is
+        // the regression case for the mitosis NotSplittable fallthrough
+        // (ADR-006 Context point 2): a bead below the ceiling still just
+        // releases normally, it does not get blocked prematurely.
+        let handler = test_handler();
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:3".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bead_action, BeadAction::Released);
+        let actions = store.actions();
+        assert!(
+            !actions.iter().any(|a| matches!(a, StoreAction::Block(_))),
+            "4th consecutive failure must not yet quarantine"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_failure_quarantine_disabled_when_threshold_zero() {
+        let mut config = Config::default();
+        config.outcome.quarantine_after_failures = 0;
+        let handler = test_handler_with_config(config);
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:99".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bead_action, BeadAction::Released);
+        let actions = store.actions();
+        assert!(
+            !actions.iter().any(|a| matches!(a, StoreAction::Block(_))),
+            "threshold=0 must disable quarantine entirely, regardless of failure count"
         );
     }
 
@@ -1816,6 +1977,9 @@ mod tests {
             async fn release(&self, id: &BeadId) -> Result<()> {
                 self.inner.release(id).await
             }
+            async fn block(&self, id: &BeadId) -> Result<()> {
+                self.inner.block(id).await
+            }
             async fn flush(&self) -> Result<()> {
                 // Simulate a slow flush that times out.
                 tokio::time::sleep(std::time::Duration::from_secs(35)).await;
@@ -1922,6 +2086,9 @@ mod tests {
                 // Simulate a slow release that times out.
                 tokio::time::sleep(std::time::Duration::from_secs(35)).await;
                 Ok(())
+            }
+            async fn block(&self, id: &BeadId) -> Result<()> {
+                self.inner.block(id).await
             }
             async fn flush(&self) -> Result<()> {
                 self.inner.flush().await
@@ -2083,6 +2250,9 @@ mod tests {
             }
             async fn release(&self, id: &BeadId) -> Result<()> {
                 self.inner.release(id).await
+            }
+            async fn block(&self, id: &BeadId) -> Result<()> {
+                self.inner.block(id).await
             }
             async fn flush(&self) -> Result<()> {
                 self.inner.flush().await

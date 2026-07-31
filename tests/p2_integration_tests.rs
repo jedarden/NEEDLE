@@ -158,6 +158,10 @@ impl BeadStore for ConcurrentMockStore {
         Ok(())
     }
 
+    async fn block(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
     async fn flush(&self) -> Result<()> {
         Ok(())
     }
@@ -1789,6 +1793,10 @@ impl BeadStore for MitosisDedupeStore {
     }
 
     async fn release(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
+    async fn block(&self, _id: &BeadId) -> Result<()> {
         Ok(())
     }
 
