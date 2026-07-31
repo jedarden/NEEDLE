@@ -4,6 +4,22 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.15] - 2026-07-31
+
+### Fixed
+
+- **Supervisor zombie-child reaping** — `Supervisor::tick()` now sweeps
+  `waitpid(-1, WNOHANG)` at the top of every tick, reaping exited worker
+  children so `needle supervise` no longer leaks `<defunct>` zombies for
+  the lifetime of the daemon (GH #12, ADR-010).
+- **Zombie-aware `is_pid_alive`** — `registry::is_pid_alive` now additionally
+  checks `/proc/<pid>/stat`'s process-state field on Linux and treats a
+  zombie (state `Z`) as not-alive, so an unreaped worker can no longer
+  inflate `Supervisor::tick()`'s `alive_count` and falsely block new spawns
+  at `max_workers` capacity. Falls back to the existing `kill(pid, 0)`-only
+  behavior on non-Linux platforms and whenever `/proc/<pid>/stat` is
+  unreadable (GH #12, ADR-010).
+
 ## [0.2.14] - 2026-07-30
 
 Note: entries for 0.2.9-0.2.13 were not recorded at the time (this file
