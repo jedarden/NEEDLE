@@ -543,12 +543,29 @@ impl Supervisor {
 /// run in different processes. See ADR-010 / GH #12.
 #[cfg(unix)]
 fn reap_zombie_children() {
+    reap_children_matching(-1);
+}
+
+#[cfg(not(unix))]
+fn reap_zombie_children() {}
+
+/// Shared implementation of the `WNOHANG` reap loop, parameterized by which
+/// PID to wait on (`-1` in production, meaning "any direct child" — see
+/// `reap_zombie_children`). Split out so tests can exercise the exact same
+/// loop scoped to a single PID they spawned themselves, instead of calling
+/// the crate-wide `-1` sweep from inside the shared `cargo test --lib`
+/// process, where it could reap an unrelated concurrently-running test's own
+/// child (unit tests across the whole crate share one process/many threads,
+/// unlike separate integration-test binaries).
+#[cfg(unix)]
+fn reap_children_matching(target_pid: libc::pid_t) {
     loop {
         let mut status: libc::c_int = 0;
-        // SAFETY: waitpid(-1, &mut status, WNOHANG) reaps any already-exited
-        // direct child without blocking; `status` is a valid stack-local out
-        // parameter for the duration of the call.
-        let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+        // SAFETY: waitpid(target_pid, &mut status, WNOHANG) reaps an
+        // already-exited child (any direct child, if target_pid == -1)
+        // without blocking; `status` is a valid stack-local out parameter
+        // for the duration of the call.
+        let pid = unsafe { libc::waitpid(target_pid, &mut status, libc::WNOHANG) };
         match pid {
             0 => break,          // No exited children ready to reap right now.
             n if n < 0 => break, // ECHILD (no children) or another errno; stop for this tick.
@@ -556,9 +573,6 @@ fn reap_zombie_children() {
         }
     }
 }
-
-#[cfg(not(unix))]
-fn reap_zombie_children() {}
 
 /// Run the supervisor from the CLI.
 ///
@@ -653,9 +667,17 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reap_zombie_children_reaps_an_exited_child() {
+        // Exercises reap_children_matching (the exact loop reap_zombie_children
+        // wraps) scoped to a PID we spawned ourselves — NOT the real
+        // reap_zombie_children()'s `-1` (any child) target. Unit tests across
+        // the whole crate share one process/many threads under `cargo test
+        // --lib`; calling the `-1` sweep here could reap an unrelated,
+        // concurrently-running test's own child out from under it. Scoping to
+        // our own PID exercises the identical waitpid/WNOHANG logic with none
+        // of that collision risk.
+        //
         // Spawn a real short-lived child directly (no setsid/detach — this
-        // test process is its real parent, matching what reap_zombie_children
-        // assumes: it reaps ITS OWN direct children).
+        // test process is its real parent).
         let child = std::process::Command::new("true")
             .spawn()
             .expect("failed to spawn `true`");
@@ -685,7 +707,7 @@ mod tests {
             "child did not reach zombie state before timeout — test precondition not met"
         );
 
-        reap_zombie_children();
+        reap_children_matching(pid as libc::pid_t);
 
         // After reaping, /proc/<pid> should no longer exist.
         assert!(
@@ -696,13 +718,5 @@ mod tests {
         // Prevent a double-wait/drop warning: the child is already reaped by
         // our sweep, so explicitly forget rather than calling child.wait().
         std::mem::forget(child);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reap_zombie_children_is_a_noop_with_no_exited_children() {
-        // No children spawned by this test — should return immediately
-        // without panicking or blocking, regardless of ECHILD vs pid==0.
-        reap_zombie_children();
     }
 }
