@@ -437,6 +437,13 @@ impl BeadStore for MockCandidateStore {
         Ok(())
     }
 
+    async fn block(&self, _id: &BeadId) -> Result<()> {
+        if self.should_fail {
+            anyhow::bail!(self.error_message.clone());
+        }
+        Ok(())
+    }
+
     async fn flush(&self) -> Result<()> {
         if self.should_fail {
             anyhow::bail!(self.error_message.clone());

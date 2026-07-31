@@ -170,12 +170,22 @@ impl PluckStrand {
 
     /// Sort candidates in deterministic priority order.
     ///
-    /// Sort key: `(priority ASC, created_at ASC, id ASC)`.
+    /// Sort key: `(priority ASC, failure_count ASC, created_at ASC, id ASC)`.
+    ///
+    /// `failure_count` sits ahead of `created_at` deliberately: without it, a
+    /// bead that keeps failing is (by construction) always at least as old as
+    /// its ready siblings, so it sorts to slot 1 every single cycle and the
+    /// worker never even tries the other ready work sitting behind it. This
+    /// does not by itself stop the retry loop — `split_after_failures` /
+    /// `OutcomeConfig::quarantine_after_failures` own that — it just stops a
+    /// struggling bead from starving healthier ready beads at the same
+    /// priority while it climbs toward the quarantine threshold.
     /// The id tie-breaker ensures identical ordering across platforms.
     fn sort_candidates(candidates: &mut [Bead]) {
         candidates.sort_by(|a, b| {
             a.priority
                 .cmp(&b.priority)
+                .then_with(|| Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b)))
                 .then_with(|| a.created_at.cmp(&b.created_at))
                 .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
         });
@@ -649,6 +659,10 @@ mod tests {
             Ok(())
         }
 
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
         async fn flush(&self) -> Result<()> {
             Ok(())
         }
@@ -741,6 +755,10 @@ mod tests {
             Ok(())
         }
 
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
         async fn flush(&self) -> Result<()> {
             Ok(())
         }
@@ -820,6 +838,10 @@ mod tests {
         }
 
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("store connection failed")
+        }
+
+        async fn block(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store connection failed")
         }
 
@@ -969,6 +991,67 @@ mod tests {
             StrandResult::BeadFound(beads) => {
                 let ids: Vec<&str> = beads.iter().map(|b| b.id.as_ref()).collect();
                 assert_eq!(ids, vec!["aaa", "bbb", "ccc"]);
+            }
+            other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn candidates_sorted_by_failure_count_within_same_priority() {
+        // ADR-012: a struggling bead must not monopolize slot 1 forever just
+        // because it's the oldest ready bead at its priority. Both beads
+        // share priority and created_at (make_bead_with_labels hardcodes the
+        // latter) so only the failure-count component of the sort key can
+        // explain the ordering.
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_labels("struggling", 1, vec!["failure-count:60"]),
+                make_bead_with_labels("healthy", 1, vec![]),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                let ids: Vec<&str> = beads.iter().map(|b| b.id.as_ref()).collect();
+                assert_eq!(
+                    ids,
+                    vec!["healthy", "struggling"],
+                    "lower failure-count must sort ahead at the same priority"
+                );
+            }
+            other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn priority_still_wins_over_failure_count() {
+        // failure_count is the second sort key, not the first — a healthy
+        // low-priority-number... i.e. HIGHER-priority (lower number = more
+        // urgent) struggling bead must still be preferred over a healthy
+        // bead at a less urgent priority.
+        let store = MemoryStore {
+            beads: vec![
+                // failure-count:2 stays below the default split_after_failures
+                // threshold (3) — this test is about sort order, not the
+                // separate split-trigger path (see split_triggered_when_failure_count_exceeds_threshold).
+                make_bead_with_labels("urgent-but-struggling", 1, vec!["failure-count:2"]),
+                make_bead_with_labels("healthy-but-low-priority", 2, vec![]),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                let ids: Vec<&str> = beads.iter().map(|b| b.id.as_ref()).collect();
+                assert_eq!(
+                    ids,
+                    vec!["urgent-but-struggling", "healthy-but-low-priority"]
+                );
             }
             other => panic!("expected BeadFound, got: {other:?}"),
         }

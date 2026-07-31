@@ -20,6 +20,7 @@ pub mod learning;
 pub mod mitosis;
 pub mod outcome;
 pub mod peer;
+pub mod process_guard;
 pub mod prompt;
 pub mod rate_limit;
 pub mod registry;

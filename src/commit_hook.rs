@@ -116,6 +116,7 @@ pub async fn inject_bead_id_trailer(
                 "--trailer",
                 &trailer_arg,
             ])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -148,6 +149,7 @@ pub(crate) async fn git_head(workspace: &str) -> Result<String> {
         std::time::Duration::from_secs(10),
         Command::new("git")
             .args(["-C", workspace, "rev-parse", "HEAD"])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -168,6 +170,7 @@ async fn git_head_subject(workspace: &str) -> Result<String> {
         std::time::Duration::from_secs(10),
         Command::new("git")
             .args(["-C", workspace, "log", "-1", "--format=%s"])
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -239,6 +242,7 @@ async fn already_has_trailer(workspace: &str, bead_id: &BeadId) -> Result<bool> 
                 "-1",
                 "--format=%(trailers:key=Bead-Id,valueonly,separator=,)",
             ])
+            .kill_on_drop(true)
             .output(),
     )
     .await

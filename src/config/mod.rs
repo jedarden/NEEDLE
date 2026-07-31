@@ -167,6 +167,11 @@ pub struct WorkerConfig {
     #[serde(default = "WorkerConfig::default_cpu_load_warn")]
     pub cpu_load_warn: f64,
 
+    /// Require shipped (committed + pushed) work, or an explicit bead update,
+    /// before accepting a bead's closure (bf-1i9). See `validation::verify_shipped_work`.
+    #[serde(default = "WorkerConfig::default_enforce_shipped_work")]
+    pub enforce_shipped_work: bool,
+
     /// Warn when available memory falls below this threshold (MB).
     #[serde(default = "WorkerConfig::default_memory_free_warn_mb")]
     pub memory_free_warn_mb: u64,
@@ -220,6 +225,7 @@ impl Default for WorkerConfig {
             claim_race_lost_skip: Self::default_claim_race_lost_skip(),
             identifier_scheme: IdentifierScheme::default(),
             cpu_load_warn: Self::default_cpu_load_warn(),
+            enforce_shipped_work: Self::default_enforce_shipped_work(),
             memory_free_warn_mb: Self::default_memory_free_warn_mb(),
             adaptive_stagger_max_wait_secs: Self::default_adaptive_stagger_max_wait_secs(),
             adaptive_stagger_check_interval_secs:
@@ -251,6 +257,9 @@ impl WorkerConfig {
     }
     fn default_cpu_load_warn() -> f64 {
         0.8
+    }
+    fn default_enforce_shipped_work() -> bool {
+        true
     }
     fn default_memory_free_warn_mb() -> u64 {
         512

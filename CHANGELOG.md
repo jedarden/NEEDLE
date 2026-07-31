@@ -4,33 +4,38 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
-### Phase 2
+## [0.2.14] - 2026-07-30
 
-#### Added
+Note: entries for 0.2.9-0.2.13 were not recorded at the time (this file
+lagged behind actual releases); the OTLP Sink work previously listed under
+`[Unreleased]` shipped in one of those versions and is not re-described
+here — see `git log` for the full history in that range.
 
-- **OTLP Sink** - OpenTelemetry telemetry export
-  - Export traces, metrics, and logs to any OTLP-compatible backend
-  - Supports gRPC and HTTP/protobuf transports
-  - Non-blocking batch processor with graceful shutdown
-  - Follows OpenTelemetry `gen_ai.*` semantic conventions for LLM telemetry
-  - Configure via `.needle.yaml` under `telemetry.otlp_sink`
-  - See `docs/examples/otel-collector/` for a working docker-compose example
+### Added
 
-#### Documentation
+- **Shipped-work enforcement** — new `worker.enforce_shipped_work` config
+  toggle (default: enabled). A bead's closure is now only accepted if
+  either a substantial commit (touching at least one file outside
+  `notes/`, `.beads/`) has been made and pushed since dispatch started, or
+  the bead itself was explicitly updated during the dispatch (e.g. `bf
+  update --notes` recording why no code change was needed). Closes the gap
+  where a worker stuck on an uncompletable bead could satisfy a bare
+  "must have a commit" rule by committing a trivial doc file every retry
+  (bf-1i9).
+- **Adapter routing wired into dispatch** — routing decisions now flow
+  through to dispatch with full telemetry (needle-3h0r).
 
-- **Observability section** in README.md
-  - Overview of exported signals (traces, metrics, logs)
-  - Minimal OTLP configuration example
-  - Link to semantic mapping in `docs/plan/plan.md`
+### Fixed
 
-- **AGENTS.md** - Telemetry contract for AI workers
-  - GenAI semantic conventions (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.*`)
-  - Resource attributes carried by all exported signals
-
-- **OTLP Collector example** (`docs/examples/otel-collector/`)
-  - docker-compose setup with OpenTelemetry Collector, Jaeger, Prometheus, Loki, and Grafana
-  - Quick start guide for local testing
-  - Config files for collector, Prometheus, and Loki
+- **Explore strand roam-rotation starvation** — per-worker scan order is
+  now reshuffled and the workspace list re-discovered every cycle, instead
+  of a static hash-derived rotation that could permanently strand some
+  workspaces outside every live worker's reachable window (bf-6anj4).
+- **Bead-store contamination repair** — recovered store state after
+  contamination from a stuck integration-test process.
+- Pre-existing clippy lints (unused parameters, a dead field, manual
+  char-comparison patterns, a redundant closure) cleaned up across the
+  strand and mitosis modules.
 
 ## [0.2.8] - 2026-06-14
 

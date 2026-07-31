@@ -165,7 +165,7 @@ impl super::Strand for KnotStrand {
         "knot"
     }
 
-    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
+    async fn evaluate(&self, store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
         let cycle = self.increment_exhaustion();
 
         // Check if the home bead store exists. If not, skip this strand.
@@ -328,6 +328,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn flush(&self) -> Result<()> {
             Ok(())
         }
@@ -402,6 +405,9 @@ mod tests {
         }
 
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("store connection failed")
+        }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store connection failed")
         }
         async fn flush(&self) -> Result<()> {
@@ -846,6 +852,9 @@ mod tests {
             anyhow::bail!("no .beads/ directory")
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("no .beads/ directory")
+        }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("no .beads/ directory")
         }
         async fn flush(&self) -> Result<()> {

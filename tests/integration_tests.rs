@@ -127,6 +127,11 @@ impl BeadStore for IntegrationMockStore {
         Ok(())
     }
 
+    async fn block(&self, id: &BeadId) -> Result<()> {
+        self.record(&format!("block:{id}"));
+        Ok(())
+    }
+
     async fn flush(&self) -> Result<()> {
         Ok(())
     }
@@ -634,6 +639,10 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
             claimed.retain(|b| b.id != *id);
             // Mark that the bead has been released - worker should exit on next cycle.
             self.bead_released.store(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn block(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
 
@@ -1224,6 +1233,10 @@ impl BeadStore for ZombieMockStore {
         Ok(())
     }
 
+    async fn block(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
     async fn flush(&self) -> Result<()> {
         Ok(())
     }
@@ -1325,6 +1338,10 @@ impl BeadStore for MultiWorkspaceStore {
 
     async fn release(&self, id: &BeadId) -> Result<()> {
         self.home_store.release(id).await
+    }
+
+    async fn block(&self, id: &BeadId) -> Result<()> {
+        self.home_store.block(id).await
     }
 
     async fn flush(&self) -> Result<()> {

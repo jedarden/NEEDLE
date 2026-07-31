@@ -331,6 +331,9 @@ mod tests {
             self.release_count.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn flush(&self) -> Result<()> {
             Ok(())
         }
