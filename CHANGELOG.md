@@ -25,6 +25,10 @@ here — see `git log` for the full history in that range.
 - **Adapter routing wired into dispatch** — routing decisions now flow
   through to dispatch with full telemetry (needle-3h0r).
 
+- **Failure-quarantine circuit breaker** — Pluck now orders candidates with
+  failure-awareness and wires in a quarantine breaker for beads that keep
+  failing dispatch (ADR-012).
+
 ### Fixed
 
 - **Explore strand roam-rotation starvation** — per-worker scan order is
@@ -33,6 +37,13 @@ here — see `git log` for the full history in that range.
   workspaces outside every live worker's reachable window (bf-6anj4).
 - **Bead-store contamination repair** — recovered store state after
   contamination from a stuck integration-test process.
+- **Mitosis timeout child-process leak** — child processes spawned by a
+  mitosis split are now reaped instead of leaking when the split itself
+  times out (bf-653n7, ADR-011).
+- **Orphaned dispatch children on outer-timeout cancellation** — the
+  process group is now killed (not just the direct child) when an agent
+  dispatch is cancelled by the outer timeout, so descendants no longer
+  keep running after NEEDLE gives up on them (GH #13).
 - Pre-existing clippy lints (unused parameters, a dead field, manual
   char-comparison patterns, a redundant closure) cleaned up across the
   strand and mitosis modules.
