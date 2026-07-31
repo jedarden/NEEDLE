@@ -442,12 +442,17 @@ impl MitosisEvaluator {
         // split share the same label set.
         let parent_label = format!("parent-{}", parent.id);
         let depth_label = format!("mitosis-depth:{}", child_depth);
-        let labels: Vec<&str> = vec![
+        // HOOP Hook 4 (Stitch Label Inheritance): children of a mitosis split
+        // must keep the parent's stitch:* labels or they orphan from the
+        // Stitch that spawned the split.
+        let stitch_labels = crate::types::extract_stitch_prefixed_labels(&parent.labels);
+        let mut labels: Vec<&str> = vec![
             "mitosis-child",
             &depth_label,
             &parent_label,
             &root_label,
         ];
+        labels.extend(stitch_labels.iter().map(|s| s.as_str()));
 
         // Dedup first, then build the list of children to create.
         let mut to_create: Vec<NewChild> = Vec::new();

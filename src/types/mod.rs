@@ -1775,3 +1775,18 @@ pub fn extract_stitch_labels(labels: &[String]) -> Vec<String> {
         .cloned()
         .collect()
 }
+
+/// Extract only `stitch:`-prefixed labels for propagation to a derived bead
+/// (HOOP Hook 4 — Stitch Label Inheritance, docs/needle-hooks.md in the HOOP repo).
+///
+/// Unlike `extract_stitch_labels` (a blocklist that passes through nearly
+/// everything), this is a strict allowlist — it exists specifically so a
+/// follow-up bead inherits its parent's Stitch lineage without also picking
+/// up unrelated project/domain labels the parent happened to carry.
+pub fn extract_stitch_prefixed_labels(labels: &[String]) -> Vec<String> {
+    labels
+        .iter()
+        .filter(|l| l.starts_with("stitch:"))
+        .cloned()
+        .collect()
+}
