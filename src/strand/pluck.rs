@@ -2072,4 +2072,239 @@ mod tests {
             "record should reference the target workspace, not the NEEDLE workspace"
         );
     }
+
+    // ─── Starvation Scenario Tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn starvation_when_all_beads_excluded_by_labels() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // Create a workspace with beads that all have excluded labels
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_path = workspace.path().to_str().unwrap();
+
+        // Use UnfilteredStore to bypass store-level label filtering, testing the strand's filtering logic
+        let store = UnfilteredStore {
+            beads: vec![
+                make_bead_with_workspace_and_labels("deferred-1", 1, workspace_path, vec!["deferred"]),
+                make_bead_with_workspace_and_labels("human-1", 2, workspace_path, vec!["human"]),
+                make_bead_with_workspace_and_labels("blocked-1", 3, workspace_path, vec!["blocked"]),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        // Should return NoWork since all beads are excluded by labels
+        match result {
+            StrandResult::NoWork => {
+                // Expected - all beads excluded by labels
+            }
+            other => panic!("expected NoWork when all beads excluded by labels, got: {other:?}"),
+        }
+
+        helper.sync().await;
+
+        // Verify PluckStarvationDetected event was emitted
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+        // Verify the event contains correct starvation data
+        let starvation_event = helper.find_event("strand.pluck.starvation_detected").unwrap();
+        assert_eq!(starvation_event.data["open_count"], 3);
+        assert_eq!(starvation_event.data["excluded_count"], 3);
+
+        // Verify exclusion reasons contain label exclusions
+        let reasons = starvation_event.data["candidate_exclusion_reasons"]
+            .as_array()
+            .expect("exclusion reasons should be an array");
+        assert!(!reasons.is_empty(), "should have exclusion reasons");
+
+        // Verify all reasons are label-based
+        for reason in reasons {
+            let reason_str = reason.as_str().unwrap();
+            assert!(
+                reason_str.starts_with("label:"),
+                "exclusion reason should start with 'label:': {}",
+                reason_str
+            );
+        }
+
+        // Verify workspace field is set correctly
+        assert!(starvation_event.data["workspace"].is_string());
+    }
+
+    #[tokio::test]
+    async fn starvation_when_all_beads_have_stale_assignees() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // Create a workspace with beads that all have stale assignees
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_path = workspace.path().to_str().unwrap();
+
+        let mut bead1 = make_bead_with_workspace_and_labels("assigned-1", 1, workspace_path, vec![]);
+        bead1.assignee = Some("worker-old-1".to_string());
+        bead1.status = BeadStatus::Open;
+
+        let mut bead2 = make_bead_with_workspace_and_labels("assigned-2", 2, workspace_path, vec![]);
+        bead2.assignee = Some("worker-old-2".to_string());
+        bead2.status = BeadStatus::Open;
+
+        let mut bead3 = make_bead_with_workspace_and_labels("in-progress-1", 3, workspace_path, vec![]);
+        bead3.status = BeadStatus::InProgress;
+        bead3.assignee = Some("worker-active".to_string());
+
+        // Use UnfilteredStore to bypass store-level label filtering
+        let store = UnfilteredStore {
+            beads: vec![bead1, bead2, bead3],
+        };
+
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        // Should return NoWork since all beads have stale assignees or are in progress
+        match result {
+            StrandResult::NoWork => {
+                // Expected - all beads excluded by stale assignees or in-progress status
+            }
+            other => panic!("expected NoWork when all beads have stale assignees, got: {other:?}"),
+        }
+
+        helper.sync().await;
+
+        // Verify PluckStarvationDetected event was emitted
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+        // Verify the event contains correct starvation data
+        let starvation_event = helper.find_event("strand.pluck.starvation_detected").unwrap();
+        assert_eq!(starvation_event.data["open_count"], 3);
+        assert_eq!(starvation_event.data["excluded_count"], 3);
+
+        // Verify exclusion reasons contain assignee and status exclusions
+        let reasons = starvation_event.data["candidate_exclusion_reasons"]
+            .as_array()
+            .expect("exclusion reasons should be an array");
+        assert!(!reasons.is_empty(), "should have exclusion reasons");
+
+        // Verify reasons are either assignee-based or status-based
+        for reason in reasons {
+            let reason_str = reason.as_str().unwrap();
+            assert!(
+                reason_str.starts_with("assignee:") || reason_str.starts_with("status:"),
+                "exclusion reason should start with 'assignee:' or 'status:': {}",
+                reason_str
+            );
+        }
+
+        // Verify workspace field is set correctly
+        assert!(starvation_event.data["workspace"].is_string());
+    }
+
+    #[tokio::test]
+    async fn starvation_when_queue_is_genuinely_empty() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // Create a workspace with an empty queue (no beads at all)
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_path = workspace.path().to_str().unwrap();
+
+        // Use UnfilteredStore to bypass store-level label filtering
+        let store = UnfilteredStore {
+            beads: vec![],
+        };
+
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        // Should return NoWork since the queue is empty
+        match result {
+            StrandResult::NoWork => {
+                // Expected - queue is empty
+            }
+            other => panic!("expected NoWork when queue is empty, got: {other:?}"),
+        }
+
+        helper.sync().await;
+
+        // Verify PluckStarvationDetected event was emitted
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+        // Verify the event contains correct starvation data (all zeros)
+        let starvation_event = helper.find_event("strand.pluck.starvation_detected").unwrap();
+        assert_eq!(starvation_event.data["open_count"], 0);
+        assert_eq!(starvation_event.data["excluded_count"], 0);
+
+        // Verify exclusion reasons is an empty array
+        let reasons = starvation_event.data["candidate_exclusion_reasons"]
+            .as_array()
+            .expect("exclusion reasons should be an array");
+        assert!(
+            reasons.is_empty(),
+            "exclusion reasons should be empty when queue is genuinely empty"
+        );
+
+        // Verify workspace field is set (even if empty, it should be present)
+        assert!(starvation_event.data["workspace"].is_string());
+    }
+
+    #[tokio::test]
+    async fn starvation_emits_no_workspace_modifications() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // Create a workspace to monitor for modifications
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_path = workspace.path().to_str().unwrap();
+
+        // Record initial state
+        let initial_files = std::fs::read_dir(workspace.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+
+        // Use UnfilteredStore to bypass store-level label filtering
+        let store = UnfilteredStore {
+            beads: vec![make_bead_with_workspace_and_labels(
+                "deferred-bead",
+                1,
+                workspace_path,
+                vec!["deferred"],
+            )],
+        };
+
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+        let _result = strand.evaluate(&store, &HashSet::new()).await;
+
+        helper.sync().await;
+
+        // Verify no files were created in the workspace
+        let final_files = std::fs::read_dir(workspace.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            initial_files.len(),
+            final_files.len(),
+            "starvation detection should not create files in workspace"
+        );
+
+        // Verify no state directory was created in the workspace
+        let state_dir = workspace.path().join("state");
+        assert!(
+            !state_dir.exists(),
+            "state directory should not exist in workspace after starvation"
+        );
+
+        // Verify telemetry was still emitted (event went to telemetry, not workspace)
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
+    }
 }
