@@ -11,6 +11,7 @@
 //!             `bead_store`, `telemetry`, `health`, `config`, `types`.
 
 use std::collections::HashSet;
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1961,6 +1962,14 @@ impl Worker {
 
         let adapter = self.resolve_adapter()?;
 
+        // Use the bead's workspace if set (remote bead from Explore),
+        // otherwise fall back to the config's default workspace.
+        let dispatch_ws = if is_workspace_unset(&bead.workspace) {
+            &self.config.workspace.default
+        } else {
+            &bead.workspace
+        };
+
         // Race the dispatch against the shutdown signal.
         let was_interrupted;
         let exec_result = if self.shutdown.load(Ordering::SeqCst) {
@@ -1968,13 +1977,6 @@ impl Worker {
             was_interrupted = true;
             None
         } else {
-            // Use the bead's workspace if set (remote bead from Explore),
-            // otherwise fall back to the config's default workspace.
-            let dispatch_ws = if is_workspace_unset(&bead.workspace) {
-                &self.config.workspace.default
-            } else {
-                &bead.workspace
-            };
             // Capture HEAD so do_handle can tag new commits with Bead-Id on success.
             // Wrap in timeout to prevent indefinite hang if git subprocess hangs.
             match tokio::time::timeout(
@@ -2084,8 +2086,74 @@ impl Worker {
             effort.estimated_cost_usd = estimated_cost;
         }
 
+        // Write trace files for stdout and stderr.
+        // Errors are logged but don't fail the bead cycle — the output is
+        // still available in exec_output for the outcome handler.
+        if let Err(e) = self.write_trace_files(&bead.id, dispatch_ws, &output.stdout, &output.stderr) {
+            tracing::warn!(
+                bead_id = %bead.id,
+                error = %e,
+                "failed to write trace files, continuing with normal flow"
+            );
+        }
+
         self.exec_output = Some((output, was_interrupted));
         self.set_state(WorkerState::Handling)?;
+        Ok(())
+    }
+
+    /// Write captured stdout and stderr to trace files.
+    ///
+    /// Creates `.beads/traces/<bead-id>/` directory and writes:
+    /// - `stdout.txt` with captured stdout
+    /// - `stderr.txt` with captured stderr
+    ///
+    /// Errors are returned (not swallowed) so the caller can decide how to handle them.
+    /// This function uses synchronous I/O to ensure writes complete before the worker continues.
+    fn write_trace_files(
+        &self,
+        bead_id: &crate::types::BeadId,
+        workspace: &PathBuf,
+        stdout: &str,
+        stderr: &str,
+    ) -> Result<()> {
+        use std::io::Write;
+
+        // Build trace directory path: <workspace>/.beads/traces/<bead-id>/
+        let trace_dir = workspace
+            .join(".beads")
+            .join("traces")
+            .join(bead_id.as_ref());
+
+        // Create the trace directory if it doesn't exist.
+        // This will also create parent directories (.beads/traces/) if needed.
+        fs::create_dir_all(&trace_dir)
+            .with_context(|| format!("failed to create trace directory at {}", trace_dir.display()))?;
+
+        // Write stdout to stdout.txt
+        let stdout_path = trace_dir.join("stdout.txt");
+        let mut stdout_file = fs::File::create(&stdout_path)
+            .with_context(|| format!("failed to create stdout file at {}", stdout_path.display()))?;
+        stdout_file
+            .write_all(stdout.as_bytes())
+            .with_context(|| format!("failed to write stdout to {}", stdout_path.display()))?;
+
+        // Write stderr to stderr.txt
+        let stderr_path = trace_dir.join("stderr.txt");
+        let mut stderr_file = fs::File::create(&stderr_path)
+            .with_context(|| format!("failed to create stderr file at {}", stderr_path.display()))?;
+        stderr_file
+            .write_all(stderr.as_bytes())
+            .with_context(|| format!("failed to write stderr to {}", stderr_path.display()))?;
+
+        tracing::debug!(
+            bead_id = %bead_id,
+            trace_dir = %trace_dir.display(),
+            stdout_len = stdout.len(),
+            stderr_len = stderr.len(),
+            "trace files written successfully"
+        );
+
         Ok(())
     }
 
