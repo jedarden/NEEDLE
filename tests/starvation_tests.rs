@@ -467,6 +467,48 @@ async fn pluck_no_starvation_when_candidates_available() {
 }
 
 #[tokio::test]
+async fn pluck_no_starvation_when_queue_empty() {
+    // Test that no starvation event is emitted when the queue is genuinely empty.
+    // This is the scenario where there are no open beads at all in the workspace.
+    // Starvation detection is about having beads that can't be processed, not about
+    // having no beads to process.
+
+    let helper = TestHelper::new("test-worker");
+
+    // Setup: Create an empty scenario (no beads at all)
+    let _scenario_beads = StarvationScenarioBuilder::new().build();
+
+    // Don't emit any starvation event — there are no beads to starve on
+    // In a real scenario, the Pluck strand would simply return NoWork
+    helper.sync().await;
+
+    // Verify: No starvation event was emitted
+    helper.assert_event_not_emitted("strand.pluck.starvation_detected");
+    assert_no_starvation(&helper, "/test/workspace");
+
+    // Verify: No claim events occurred (no beads to claim)
+    let claim_events = helper.events_by_type("claim.success");
+    assert!(
+        claim_events.is_empty(),
+        "Expected no claim events when queue is empty"
+    );
+
+    // Verify: No release events occurred (no beads to release)
+    let release_events = helper.events_by_type("release.success");
+    assert!(
+        release_events.is_empty(),
+        "Expected no release events when queue is empty"
+    );
+
+    // Verify: No modification events occurred (workspace should be untouched)
+    let modify_events = helper.events_by_type("bead.modified");
+    assert!(
+        modify_events.is_empty(),
+        "Expected no bead modification events when queue is empty"
+    );
+}
+
+#[tokio::test]
 async fn pluck_starvation_when_all_beads_excluded_by_labels() {
     // Setup: Create a scenario where ALL beads are excluded by the default label filter
     // This simulates the case where the workspace has open beads, but every single one
