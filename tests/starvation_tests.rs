@@ -88,6 +88,10 @@ pub struct StarvationScenarioBuilder {
     human_count: usize,
     /// Number of beads with unsatisfied dependencies
     dependency_blocked_count: usize,
+    /// Number of beads with stale assignees
+    stale_assignee_count: usize,
+    /// Assignee IDs to use for stale-assignee beads
+    stale_assignees: Vec<String>,
     /// Workspace path for the scenario
     workspace: PathBuf,
 }
@@ -101,6 +105,8 @@ impl StarvationScenarioBuilder {
             deferred_count: 0,
             human_count: 0,
             dependency_blocked_count: 0,
+            stale_assignee_count: 0,
+            stale_assignees: Vec::new(),
             workspace: PathBuf::from("/test/workspace"),
         }
     }
@@ -132,6 +138,13 @@ impl StarvationScenarioBuilder {
     /// Set the number of beads blocked by dependencies.
     pub fn with_dependency_blocked_beads(mut self, count: usize) -> Self {
         self.dependency_blocked_count = count;
+        self
+    }
+
+    /// Set the number of beads with stale assignees and the assignee IDs.
+    pub fn with_stale_assignee_beads(mut self, count: usize, assignees: Vec<String>) -> Self {
+        self.stale_assignee_count = count;
+        self.stale_assignees = assignees;
         self
     }
 
@@ -175,6 +188,21 @@ impl StarvationScenarioBuilder {
                 priority: 5,
                 dependency_type: "blocks".to_string(),
             });
+            beads.push(bead);
+            total += 1;
+        }
+
+        // Create stale-assignee beads
+        for i in 0..self.stale_assignee_count {
+            let assignee = if !self.stale_assignees.is_empty() {
+                // Cycle through the provided assignee IDs
+                self.stale_assignees[i % self.stale_assignees.len()].clone()
+            } else {
+                // Default assignee ID if none provided
+                format!("stale-worker-{}", i)
+            };
+            let mut bead = self.create_bead(total, "", &format!("stale-assigned-{}", i));
+            bead.assignee = Some(assignee);
             beads.push(bead);
             total += 1;
         }
@@ -571,6 +599,131 @@ async fn pluck_starvation_excluded_count_matches_reasons_length() {
     assert_eq!(excluded_count, reasons.len() as u64);
 }
 
+#[tokio::test]
+async fn pluck_starvation_when_all_beads_have_stale_assignees() {
+    // Test that starvation is detected when all open beads have stale assignees.
+    // This simulates the scenario where workers have crashed or been terminated,
+    // leaving their assigned beads in an unclaimable state.
+
+    let helper = TestHelper::new("test-worker");
+
+    // Setup: Create a scenario where all beads have stale assignees
+    let stale_workers = vec![
+        "dead-worker-1".to_string(),
+        "dead-worker-2".to_string(),
+        "terminated-worker-3".to_string(),
+    ];
+
+    let _scenario_beads = StarvationScenarioBuilder::new()
+        .with_open_beads(3)
+        .with_stale_assignee_beads(3, stale_workers.clone())
+        .build();
+
+    // Simulate starvation event when all beads have stale assignees
+    // In a real scenario, the Pluck strand would emit this after filtering
+    helper
+        .telemetry()
+        .emit(EventKind::PluckStarvationDetected {
+            workspace: "/test/workspace".to_string(),
+            open_count: 3,
+            excluded_count: 3, // ALL beads excluded due to stale assignees
+            candidate_exclusion_reasons: vec![
+                "assignee:dead-worker-1".to_string(),
+                "assignee:dead-worker-2".to_string(),
+                "assignee:terminated-worker-3".to_string(),
+            ],
+        })
+        .unwrap();
+
+    helper.sync().await;
+
+    // Verify: Starvation event was emitted
+    assert_starvation_detected(&helper, "/test/workspace");
+    helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+    // Verify: Exclusion reasons contain stale assignee information
+    assert_exclusion_reasons(
+        &helper,
+        &["assignee:dead-worker-1", "assignee:dead-worker-2"],
+    );
+
+    // Verify: No claim or modification events occurred (workspace is read-only in starvation)
+    let claim_events = helper.events_by_type("claim.success");
+    assert!(
+        claim_events.is_empty(),
+        "Expected no claim events when all beads have stale assignees"
+    );
+
+    let release_events = helper.events_by_type("release.success");
+    assert!(
+        release_events.is_empty(),
+        "Expected no release events when all beads have stale assignees"
+    );
+
+    // Verify: The excluded count matches the open count (all beads were filtered)
+    let event = helper
+        .find_event("strand.pluck.starvation_detected")
+        .expect("Expected starvation event");
+
+    let open_count = event
+        .data
+        .get("open_count")
+        .and_then(|v| v.as_u64())
+        .expect("open_count should be a number");
+
+    let excluded_count = event
+        .data
+        .get("excluded_count")
+        .and_then(|v| v.as_u64())
+        .expect("excluded_count should be a number");
+
+    assert_eq!(
+        open_count, excluded_count,
+        "When all beads have stale assignees, excluded_count must equal open_count"
+    );
+
+    // Verify: All exclusion reasons are assignee-based
+    let reasons = event
+        .data
+        .get("candidate_exclusion_reasons")
+        .and_then(|v| v.as_array())
+        .expect("exclusion reasons should be an array");
+
+    for reason in reasons {
+        let reason_str = reason.as_str().unwrap();
+        assert!(
+            reason_str.starts_with("assignee:"),
+            "Exclusion reason should be assignee-based: {}",
+            reason_str
+        );
+    }
+}
+
+#[tokio::test]
+async fn pluck_starvation_with_mixed_stale_and_active_assignees() {
+    // Test that starvation is NOT detected when some beads have active assignees.
+    // This verifies that the strand can still make progress on other beads.
+
+    let helper = TestHelper::new("test-worker");
+
+    // Setup: Create a scenario with mixed stale and active assignees
+    // Only emit starvation if ALL beads are excluded (worst-case scenario)
+    // This test verifies the scenario is NOT considered starving when candidates exist
+    let _scenario_beads = StarvationScenarioBuilder::new()
+        .with_open_beads(5)
+        .with_stale_assignee_beads(2, vec!["dead-worker".to_string()])
+        .build();
+
+    // In this scenario, we DON'T emit starvation because there are still
+    // 3 beads available (5 total - 2 stale-assigned = 3 workable)
+    // No starvation event should be emitted when candidates exist
+    helper.sync().await;
+
+    // Verify: No starvation event was emitted (candidates are available)
+    helper.assert_event_not_emitted("strand.pluck.starvation_detected");
+    assert_no_starvation(&helper, "/test/workspace");
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Explore Strand Starvation Tests
 // ═════════════════════════════════════════════════════════════════════════════
@@ -658,6 +811,41 @@ async fn scenario_builder_creates_expected_bead_counts() {
     assert_eq!(deferred_count, 2);
     assert_eq!(human_count, 1);
     assert_eq!(unlabeled_count, 4); // Remaining beads are unlabeled (regular open)
+}
+
+#[tokio::test]
+async fn scenario_builder_creates_stale_assignee_beads() {
+    // Test that the scenario builder creates beads with stale assignees correctly
+    let stale_assignees = vec!["dead-worker-1".to_string(), "dead-worker-2".to_string()];
+
+    let beads = StarvationScenarioBuilder::new()
+        .with_open_beads(5)
+        .with_stale_assignee_beads(2, stale_assignees.clone())
+        .build();
+
+    // Total should be 5: 2 stale-assigned + 3 regular open beads
+    assert_eq!(beads.len(), 5);
+
+    let stale_assigned_count = beads.iter().filter(|b| b.assignee.is_some()).count();
+
+    let regular_open_count = beads
+        .iter()
+        .filter(|b| b.assignee.is_none() && b.labels.is_empty())
+        .count();
+
+    assert_eq!(stale_assigned_count, 2);
+    assert_eq!(regular_open_count, 3);
+
+    // Verify the assignee IDs are set correctly
+    let beads_with_assignees: Vec<_> = beads.iter().filter(|b| b.assignee.is_some()).collect();
+
+    assert_eq!(beads_with_assignees.len(), 2);
+
+    // Check that the assignees match the provided list
+    for (i, bead) in beads_with_assignees.iter().enumerate() {
+        let expected_assignee = &stale_assignees[i % stale_assignees.len()];
+        assert_eq!(bead.assignee.as_ref(), Some(expected_assignee));
+    }
 }
 
 #[tokio::test]
