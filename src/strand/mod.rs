@@ -621,7 +621,11 @@ mod tests {
             self.name
         }
 
-        async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
+        async fn evaluate(
+            &self,
+            _store: &dyn BeadStore,
+            _exclusions: &HashSet<BeadId>,
+        ) -> StrandResult {
             self.result
                 .lock()
                 .unwrap()
@@ -796,7 +800,11 @@ mod tests {
         fn name(&self) -> &str {
             "always-creates"
         }
-        async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
+        async fn evaluate(
+            &self,
+            _store: &dyn BeadStore,
+            _exclusions: &HashSet<BeadId>,
+        ) -> StrandResult {
             StrandResult::WorkCreated
         }
     }
@@ -874,7 +882,11 @@ mod tests {
             self.name
         }
 
-        async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
+        async fn evaluate(
+            &self,
+            _store: &dyn BeadStore,
+            _exclusions: &HashSet<BeadId>,
+        ) -> StrandResult {
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.returns_work_created {
                 StrandResult::WorkCreated

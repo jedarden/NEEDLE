@@ -113,7 +113,9 @@ impl WorkerIdentity {
     fn hostname(worker_id: &WorkerId, bead_id: &BeadId) -> String {
         // Sanitize worker_id and bead_id to be valid hostname components
         let worker = worker_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
-        let bead = bead_id.as_ref().replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
+        let bead = bead_id
+            .as_ref()
+            .replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
 
         // Use a stable format: needle-{worker}-{bead}
         format!("needle-{}-{}", worker, bead)
@@ -261,7 +263,10 @@ pub fn inject_identity_env(
     config: &TsnetConfig,
     base_env: &mut HashMap<String, String>,
 ) {
-    base_env.insert("NEEDLE_TSNET_HOSTNAME".to_string(), identity.hostname.clone());
+    base_env.insert(
+        "NEEDLE_TSNET_HOSTNAME".to_string(),
+        identity.hostname.clone(),
+    );
     base_env.insert(
         "NEEDLE_TSNET_AUTH_KEY".to_string(),
         identity.auth_key.clone(),
@@ -407,11 +412,26 @@ mod tests {
 
         inject_identity_env(&identity, &config, &mut env);
 
-        assert_eq!(env.get("NEEDLE_TSNET_HOSTNAME"), Some(&"needle-worker-test".to_string()));
-        assert_eq!(env.get("NEEDLE_TSNET_AUTH_KEY"), Some(&"tskey-auth-test".to_string()));
-        assert_eq!(env.get("NEEDLE_TSNET_CONTROL_URL"), Some(&"https://control.tailscale.com".to_string()));
-        assert_eq!(env.get("NEEDLE_TSNET_TAG"), Some(&"tag:needle-worker".to_string()));
-        assert_eq!(env.get("NEEDLE_TSNET_FUNNEL_URL"), Some(&"https://funnel.tailscale.com".to_string()));
+        assert_eq!(
+            env.get("NEEDLE_TSNET_HOSTNAME"),
+            Some(&"needle-worker-test".to_string())
+        );
+        assert_eq!(
+            env.get("NEEDLE_TSNET_AUTH_KEY"),
+            Some(&"tskey-auth-test".to_string())
+        );
+        assert_eq!(
+            env.get("NEEDLE_TSNET_CONTROL_URL"),
+            Some(&"https://control.tailscale.com".to_string())
+        );
+        assert_eq!(
+            env.get("NEEDLE_TSNET_TAG"),
+            Some(&"tag:needle-worker".to_string())
+        );
+        assert_eq!(
+            env.get("NEEDLE_TSNET_FUNNEL_URL"),
+            Some(&"https://funnel.tailscale.com".to_string())
+        );
         assert_eq!(env.get("EXISTING_VAR"), Some(&"value".to_string())); // preserved
     }
 

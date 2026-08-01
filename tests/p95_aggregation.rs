@@ -76,7 +76,9 @@ fn test_p95_collector_with_realistic_benchmark_pattern() {
     assert!(
         p95 >= median && p95 <= max,
         "P95 ({}) should be between median ({}) and max ({})",
-        p95, median, max
+        p95,
+        median,
+        max
     );
 
     // Verify stats are consistent
@@ -153,7 +155,10 @@ fn test_p95_collector_clear_and_reuse() {
     assert_eq!(collector.count(), 3);
 
     // Results should be different
-    assert_ne!(p95_run1, p95_run2, "Different runs should produce different p95");
+    assert_ne!(
+        p95_run1, p95_run2,
+        "Different runs should produce different p95"
+    );
 }
 
 #[test]

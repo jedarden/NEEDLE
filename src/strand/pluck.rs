@@ -1697,7 +1697,10 @@ mod tests {
 
                 // Should exclude all 3 beads by InProgress status
                 assert_eq!(
-                    reason_strings.iter().filter(|r| **r == "status:in_progress").count(),
+                    reason_strings
+                        .iter()
+                        .filter(|r| **r == "status:in_progress")
+                        .count(),
                     3,
                     "all 3 beads should be excluded with status:in_progress reason"
                 );
@@ -2088,9 +2091,19 @@ mod tests {
         // Use UnfilteredStore to bypass store-level label filtering, testing the strand's filtering logic
         let store = UnfilteredStore {
             beads: vec![
-                make_bead_with_workspace_and_labels("deferred-1", 1, workspace_path, vec!["deferred"]),
+                make_bead_with_workspace_and_labels(
+                    "deferred-1",
+                    1,
+                    workspace_path,
+                    vec!["deferred"],
+                ),
                 make_bead_with_workspace_and_labels("human-1", 2, workspace_path, vec!["human"]),
-                make_bead_with_workspace_and_labels("blocked-1", 3, workspace_path, vec!["blocked"]),
+                make_bead_with_workspace_and_labels(
+                    "blocked-1",
+                    3,
+                    workspace_path,
+                    vec!["blocked"],
+                ),
             ],
         };
 
@@ -2111,7 +2124,9 @@ mod tests {
         helper.assert_event_emitted("strand.pluck.starvation_detected");
 
         // Verify the event contains correct starvation data
-        let starvation_event = helper.find_event("strand.pluck.starvation_detected").unwrap();
+        let starvation_event = helper
+            .find_event("strand.pluck.starvation_detected")
+            .unwrap();
         assert_eq!(starvation_event.data["open_count"], 3);
         assert_eq!(starvation_event.data["excluded_count"], 3);
 
@@ -2145,15 +2160,18 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let workspace_path = workspace.path().to_str().unwrap();
 
-        let mut bead1 = make_bead_with_workspace_and_labels("assigned-1", 1, workspace_path, vec![]);
+        let mut bead1 =
+            make_bead_with_workspace_and_labels("assigned-1", 1, workspace_path, vec![]);
         bead1.assignee = Some("worker-old-1".to_string());
         bead1.status = BeadStatus::Open;
 
-        let mut bead2 = make_bead_with_workspace_and_labels("assigned-2", 2, workspace_path, vec![]);
+        let mut bead2 =
+            make_bead_with_workspace_and_labels("assigned-2", 2, workspace_path, vec![]);
         bead2.assignee = Some("worker-old-2".to_string());
         bead2.status = BeadStatus::Open;
 
-        let mut bead3 = make_bead_with_workspace_and_labels("in-progress-1", 3, workspace_path, vec![]);
+        let mut bead3 =
+            make_bead_with_workspace_and_labels("in-progress-1", 3, workspace_path, vec![]);
         bead3.status = BeadStatus::InProgress;
         bead3.assignee = Some("worker-active".to_string());
 
@@ -2179,7 +2197,9 @@ mod tests {
         helper.assert_event_emitted("strand.pluck.starvation_detected");
 
         // Verify the event contains correct starvation data
-        let starvation_event = helper.find_event("strand.pluck.starvation_detected").unwrap();
+        let starvation_event = helper
+            .find_event("strand.pluck.starvation_detected")
+            .unwrap();
         assert_eq!(starvation_event.data["open_count"], 3);
         assert_eq!(starvation_event.data["excluded_count"], 3);
 
@@ -2214,9 +2234,7 @@ mod tests {
         let workspace_path = workspace.path().to_str().unwrap();
 
         // Use UnfilteredStore to bypass store-level label filtering
-        let store = UnfilteredStore {
-            beads: vec![],
-        };
+        let store = UnfilteredStore { beads: vec![] };
 
         let strand = PluckStrand::new(vec![], helper.telemetry().clone());
         let result = strand.evaluate(&store, &HashSet::new()).await;
@@ -2235,7 +2253,9 @@ mod tests {
         helper.assert_event_emitted("strand.pluck.starvation_detected");
 
         // Verify the event contains correct starvation data (all zeros)
-        let starvation_event = helper.find_event("strand.pluck.starvation_detected").unwrap();
+        let starvation_event = helper
+            .find_event("strand.pluck.starvation_detected")
+            .unwrap();
         assert_eq!(starvation_event.data["open_count"], 0);
         assert_eq!(starvation_event.data["excluded_count"], 0);
 

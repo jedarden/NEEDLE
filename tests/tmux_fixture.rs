@@ -108,12 +108,10 @@ impl TmuxSession {
     /// ```
     pub async fn spawn(base_name: &str) -> Result<Self> {
         // Generate unique session name
-        let random_suffix: String = std::iter::repeat_with(
-            || {
-                use rand::Rng;
-                rand::thread_rng().sample(rand::distributions::Alphanumeric)
-            }
-        )
+        let random_suffix: String = std::iter::repeat_with(|| {
+            use rand::Rng;
+            rand::thread_rng().sample(rand::distributions::Alphanumeric)
+        })
         .take(6)
         .map(char::from)
         .collect();
@@ -122,28 +120,18 @@ impl TmuxSession {
         // Create log directory
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         let logs_dir = PathBuf::from(format!("{}/.needle/logs", home));
-        std::fs::create_dir_all(&logs_dir)
-            .context("failed to create logs directory")?;
+        std::fs::create_dir_all(&logs_dir).context("failed to create logs directory")?;
 
         // Build stderr log path
         let log_path = logs_dir.join(format!("{}.stderr.log", session_name));
 
         // Build the shell command that mimics production launch_in_tmux()
         // This creates the pane_pid-vs-child-PID split via bash -c wrapper
-        let shell_cmd = format!(
-            "NEEDLE_INNER=1 sleep 3600 2>> {}",
-            log_path.display()
-        );
+        let shell_cmd = format!("NEEDLE_INNER=1 sleep 3600 2>> {}", log_path.display());
 
         // Spawn the tmux session
         let status = tmux()
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                &session_name,
-                &shell_cmd,
-            ])
+            .args(["new-session", "-d", "-s", &session_name, &shell_cmd])
             .status()
             .context("failed to launch tmux — is tmux installed?")?;
 
@@ -175,21 +163,12 @@ impl TmuxSession {
     /// the output to extract the pane PID.
     fn capture_pane_pid(session_name: &str) -> Result<u32> {
         let output = tmux()
-            .args([
-                "list-panes",
-                "-t",
-                session_name,
-                "-F",
-                "#{pane_pid}",
-            ])
+            .args(["list-panes", "-t", session_name, "-F", "#{pane_pid}"])
             .output()
             .context("failed to list tmux panes")?;
 
         if !output.status.success() {
-            anyhow::bail!(
-                "tmux list-panes exited with status {}",
-                output.status
-            );
+            anyhow::bail!("tmux list-panes exited with status {}", output.status);
         }
 
         let pane_str = String::from_utf8_lossy(&output.stdout);
@@ -206,11 +185,7 @@ impl TmuxSession {
     /// Returns true if the session exists in tmux, false otherwise.
     pub fn is_alive(&self) -> bool {
         tmux()
-            .args([
-                "has-session",
-                "-t",
-                &self.session_name,
-            ])
+            .args(["has-session", "-t", &self.session_name])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
@@ -237,19 +212,12 @@ impl TmuxSession {
         }
 
         let status = tmux()
-            .args([
-                "kill-session",
-                "-t",
-                &self.session_name,
-            ])
+            .args(["kill-session", "-t", &self.session_name])
             .status()
             .context("failed to kill tmux session")?;
 
         if !status.success() {
-            anyhow::bail!(
-                "tmux kill-session exited with status {}",
-                status
-            );
+            anyhow::bail!("tmux kill-session exited with status {}", status);
         }
 
         Ok(())
@@ -458,7 +426,10 @@ mod tests {
 
         // Verify log path contains session name
         assert!(
-            session.log_path.to_string_lossy().contains(&session.session_name),
+            session
+                .log_path
+                .to_string_lossy()
+                .contains(&session.session_name),
             "log path should contain session name"
         );
 
@@ -485,9 +456,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Verify session is dead
-        let output = tmux()
-            .args(["has-session", "-t", &session_name])
-            .output();
+        let output = tmux().args(["has-session", "-t", &session_name]).output();
         assert!(
             output.map(|o| !o.status.success()).unwrap_or(true),
             "session should be dead after drop"
@@ -530,8 +499,7 @@ mod tests {
         );
 
         // Kill all sessions with the prefix
-        let killed = kill_sessions_with_prefix(base_name)
-            .expect("failed to kill sessions");
+        let killed = kill_sessions_with_prefix(base_name).expect("failed to kill sessions");
 
         assert_eq!(killed, 3, "should have killed 3 sessions");
 

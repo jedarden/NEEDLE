@@ -35,8 +35,7 @@ pub fn write_spawn_ack(worker_name: &str) -> Result<()> {
 }
 
 fn write_spawn_ack_in(dir: &Path, worker_name: &str) -> Result<()> {
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let body = format!(
         "{}\n",
         serde_json::json!({
@@ -146,10 +145,7 @@ fn append_jsonl_line(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let mut obj = serde_json::Map::new();
-    obj.insert(
-        "ts".to_string(),
-        Value::String(Utc::now().to_rfc3339()),
-    );
+    obj.insert("ts".to_string(), Value::String(Utc::now().to_rfc3339()));
     populate(&mut obj);
     let line = serde_json::to_string(&Value::Object(obj))?;
     let file = std::fs::OpenOptions::new()
@@ -267,7 +263,14 @@ mod tests {
         unsafe {
             std::env::remove_var("NEEDLE_EVENTS");
         }
-        emit_needle_event(&bogus_workspace, "alpha", None, None, "claim", serde_json::json!({}));
+        emit_needle_event(
+            &bogus_workspace,
+            "alpha",
+            None,
+            None,
+            "claim",
+            serde_json::json!({}),
+        );
         // No panic = pass.
     }
 

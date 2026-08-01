@@ -54,10 +54,10 @@
 
 use std::path::PathBuf;
 
+use chrono::Utc;
 use needle::telemetry::test_utils::TestHelper;
 use needle::telemetry::EventKind;
 use needle::types::{Bead, BeadId, BeadStatus};
-use chrono::Utc;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Test Infrastructure
@@ -439,6 +439,75 @@ async fn pluck_no_starvation_when_candidates_available() {
 }
 
 #[tokio::test]
+async fn pluck_starvation_when_all_beads_excluded_by_labels() {
+    // Setup: Create a scenario where ALL beads are excluded by the default label filter
+    // This simulates the case where the workspace has open beads, but every single one
+    // has a label in the exclude set (deferred, human, blocked)
+    let _scenario_beads = StarvationScenarioBuilder::new()
+        .with_open_beads(10)
+        .with_blocked_beads(4)
+        .with_deferred_beads(3)
+        .with_human_beads(3)
+        .build();
+
+    let helper = TestHelper::new("test-worker");
+
+    // Simulate starvation event when all beads are label-excluded
+    // In a real scenario, the Pluck strand would emit this after filtering
+    helper
+        .telemetry()
+        .emit(EventKind::PluckStarvationDetected {
+            workspace: "/test/workspace".to_string(),
+            open_count: 10,
+            excluded_count: 10, // ALL beads excluded
+            candidate_exclusion_reasons: vec![
+                "blocked:manual_block".to_string(),
+                "deferred:future_work".to_string(),
+                "human:intervention_required".to_string(),
+            ],
+        })
+        .unwrap();
+
+    helper.sync().await;
+
+    // Verify: Starvation event was emitted
+    assert_starvation_detected(&helper, "/test/workspace");
+    helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+    // Verify: All expected exclusion reasons are present
+    assert_exclusion_reasons(&helper, &["blocked", "deferred", "human"]);
+
+    // Verify: No claim or modification events occurred (workspace is read-only in starvation)
+    let claim_events = helper.events_by_type("claim.success");
+    assert!(
+        claim_events.is_empty(),
+        "Expected no claim events when all beads are label-excluded"
+    );
+
+    // Verify: The excluded count matches the open count (all beads were filtered)
+    let event = helper
+        .find_event("strand.pluck.starvation_detected")
+        .expect("Expected starvation event");
+
+    let open_count = event
+        .data
+        .get("open_count")
+        .and_then(|v| v.as_u64())
+        .expect("open_count should be a number");
+
+    let excluded_count = event
+        .data
+        .get("excluded_count")
+        .and_then(|v| v.as_u64())
+        .expect("excluded_count should be a number");
+
+    assert_eq!(
+        open_count, excluded_count,
+        "When all beads are excluded, excluded_count must equal open_count"
+    );
+}
+
+#[tokio::test]
 async fn pluck_starvation_telemetry_includes_workspace() {
     // Verify that starvation telemetry includes the workspace path
     let helper = TestHelper::new("test-worker");
@@ -583,10 +652,7 @@ async fn scenario_builder_creates_expected_bead_counts() {
         .filter(|b| b.labels.iter().any(|l| l == "human"))
         .count();
 
-    let unlabeled_count = beads
-        .iter()
-        .filter(|b| b.labels.is_empty())
-        .count();
+    let unlabeled_count = beads.iter().filter(|b| b.labels.is_empty()).count();
 
     assert_eq!(blocked_count, 3);
     assert_eq!(deferred_count, 2);
@@ -597,9 +663,7 @@ async fn scenario_builder_creates_expected_bead_counts() {
 #[tokio::test]
 async fn scenario_builder_default_workspace() {
     // Test that the default workspace is set correctly
-    let beads = StarvationScenarioBuilder::new()
-        .with_open_beads(1)
-        .build();
+    let beads = StarvationScenarioBuilder::new().with_open_beads(1).build();
 
     assert_eq!(beads.len(), 1);
     assert_eq!(beads[0].workspace, PathBuf::from("/test/workspace"));

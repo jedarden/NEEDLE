@@ -1046,7 +1046,11 @@ impl super::Strand for SpliceStrand {
         "splice"
     }
 
-    async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
+    async fn evaluate(
+        &self,
+        _store: &dyn BeadStore,
+        _exclusions: &HashSet<BeadId>,
+    ) -> StrandResult {
         if !self.config.enabled {
             return StrandResult::NoWork;
         }

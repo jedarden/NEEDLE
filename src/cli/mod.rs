@@ -4422,8 +4422,12 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
             && !cmdline.contains("needle-worker")
             && !cmdline.contains("NEEDLE_INNER")
             && !has_needle_inner
-            && !std::env::var("CARGO_BIN_EXE_needle").is_ok_and(|bin_name| cmdline.contains(&format!("{} run", bin_name)))
-            && !cmdline.split_whitespace().next().is_some_and(|first| first.ends_with("needle") || first.contains("/needle"))
+            && !std::env::var("CARGO_BIN_EXE_needle")
+                .is_ok_and(|bin_name| cmdline.contains(&format!("{} run", bin_name)))
+            && !cmdline
+                .split_whitespace()
+                .next()
+                .is_some_and(|first| first.ends_with("needle") || first.contains("/needle"))
         {
             continue;
         }
@@ -6204,7 +6208,8 @@ mod tests {
         // 9999 is not in the map, so find_needle_process_in_tree returns None
         let inspector = MockProcessInspector { pane_to_needle };
 
-        let targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, &live_pids, false, &None);
+        let targets =
+            filter_sessions_for_cleanup_impl(&sessions, &inspector, &live_pids, false, &None);
 
         // Should only remove bravo (dead session), not alpha (live)
         assert_eq!(targets.len(), 1, "should remove exactly one session");
@@ -6265,7 +6270,8 @@ mod tests {
         pane_to_needle.insert(1003, 1003);
         let inspector = MockProcessInspector { pane_to_needle };
 
-        let targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, &live_pids, false, &None);
+        let targets =
+            filter_sessions_for_cleanup_impl(&sessions, &inspector, &live_pids, false, &None);
 
         // Should remove nothing when all sessions are live
         assert_eq!(
@@ -6419,7 +6425,8 @@ mod tests {
         pane_to_needle.insert(1001, 1001);
         let inspector = MockProcessInspector { pane_to_needle };
 
-        let targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, &live_pids, false, &None);
+        let targets =
+            filter_sessions_for_cleanup_impl(&sessions, &inspector, &live_pids, false, &None);
 
         // Should remove the orphan with no PID
         assert_eq!(targets.len(), 1, "should remove sessions with no PID");

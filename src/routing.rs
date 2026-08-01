@@ -60,17 +60,18 @@ impl CompiledRule {
 
         // Try glob pattern compilation using the glob crate
         match glob::Pattern::new(pattern) {
-            Ok(glob_pattern) => {
-                Ok(CompiledRule {
-                    glob_matcher: Some(Arc::new(glob_pattern)),
-                    glob_source: Some(pattern.clone()),
-                    regex_matcher: None,
-                    adapter,
-                })
-            }
+            Ok(glob_pattern) => Ok(CompiledRule {
+                glob_matcher: Some(Arc::new(glob_pattern)),
+                glob_source: Some(pattern.clone()),
+                regex_matcher: None,
+                adapter,
+            }),
             Err(e) => {
                 // Glob compilation failed, return error
-                Err(format!("Failed to compile glob pattern '{}': {}", pattern, e))
+                Err(format!(
+                    "Failed to compile glob pattern '{}': {}",
+                    pattern, e
+                ))
             }
         }
     }
@@ -1804,10 +1805,7 @@ mod tests {
         assert_eq!(match_adapter("gpt-4", &rules, ""), None);
 
         // Whitespace default returns Some with whitespace
-        assert_eq!(
-            match_adapter("gpt-4", &rules, "  "),
-            Some("  ".to_string())
-        );
+        assert_eq!(match_adapter("gpt-4", &rules, "  "), Some("  ".to_string()));
     }
 
     #[test]
@@ -1856,10 +1854,7 @@ mod tests {
     #[test]
     fn regex_anchors_with_catchall() {
         // Test that anchored regex doesn't match partial matches
-        let rules = vec![
-            make_rule("^sonnet$", "exact"),
-            make_rule("*", "catchall"),
-        ];
+        let rules = vec![make_rule("^sonnet$", "exact"), make_rule("*", "catchall")];
 
         // Exact match
         assert_eq!(

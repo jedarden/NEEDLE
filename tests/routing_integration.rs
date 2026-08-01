@@ -740,30 +740,21 @@ fn routing_workspace_patterns_take_precedence_over_global() {
     let sonnet_result = match_adapter(
         "claude-sonnet-4-6",
         &workspace_routing.rules,
-        workspace_routing
-            .default_adapter
-            .as_deref()
-            .unwrap_or(""),
+        workspace_routing.default_adapter.as_deref().unwrap_or(""),
     );
     assert_eq!(sonnet_result, Some("workspace-sonnet".to_string()));
 
     let opus_result = match_adapter(
         "claude-opus-4-6",
         &workspace_routing.rules,
-        workspace_routing
-            .default_adapter
-            .as_deref()
-            .unwrap_or(""),
+        workspace_routing.default_adapter.as_deref().unwrap_or(""),
     );
     assert_eq!(opus_result, Some("workspace-opus".to_string()));
 
     let fable_result = match_adapter(
         "claude-fable-5",
         &workspace_routing.rules,
-        workspace_routing
-            .default_adapter
-            .as_deref()
-            .unwrap_or(""),
+        workspace_routing.default_adapter.as_deref().unwrap_or(""),
     );
     assert_eq!(fable_result, Some("workspace-other-claude".to_string()));
 }
@@ -793,10 +784,7 @@ fn routing_workspace_can_restrict_global_patterns() {
     let sonnet_result = match_adapter(
         "claude-sonnet-4-6",
         &workspace_routing.rules,
-        workspace_routing
-            .default_adapter
-            .as_deref()
-            .unwrap_or(""),
+        workspace_routing.default_adapter.as_deref().unwrap_or(""),
     );
     assert_eq!(sonnet_result, Some("claude-print".to_string()));
 
@@ -804,10 +792,7 @@ fn routing_workspace_can_restrict_global_patterns() {
     let opus_result = match_adapter(
         "claude-opus-4-6",
         &workspace_routing.rules,
-        workspace_routing
-            .default_adapter
-            .as_deref()
-            .unwrap_or(""),
+        workspace_routing.default_adapter.as_deref().unwrap_or(""),
     );
     assert_eq!(opus_result, Some("restricted-default".to_string()));
 }

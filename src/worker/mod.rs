@@ -3495,7 +3495,11 @@ impl Worker {
             .unwrap_or(&default_adapter.name);
 
         // Use the routing module's match_adapter_with_pattern function to get both adapter and pattern.
-        match routing::match_adapter_with_pattern(model_name, &routing_config.rules, default_adapter_name) {
+        match routing::match_adapter_with_pattern(
+            model_name,
+            &routing_config.rules,
+            default_adapter_name,
+        ) {
             Some((adapter_name, matched_pattern)) => {
                 // Determine if this was a rule match or default fallback.
                 // If matched_pattern is "default", it means no rule matched.

@@ -959,12 +959,7 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
         }
         Err(e) => {
             // Unexpected error - return with context
-            Err(e).with_context(|| {
-                format!(
-                    "failed to remove heartbeat file: {}",
-                    path.display()
-                )
-            })
+            Err(e).with_context(|| format!("failed to remove heartbeat file: {}", path.display()))
         }
     }
 }
@@ -2299,7 +2294,9 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = err.to_string();
         assert!(
-            err_msg.contains("failed to remove heartbeat file") || err_msg.contains("permission") || err_msg.contains("denied"),
+            err_msg.contains("failed to remove heartbeat file")
+                || err_msg.contains("permission")
+                || err_msg.contains("denied"),
             "error message should indicate removal failure or permission issue, got: {}",
             err
         );
@@ -2308,7 +2305,10 @@ mod tests {
         let _ = std::fs::set_permissions(&parent_dir, std::fs::Permissions::from_mode(0o755));
 
         // The file should still exist since removal failed
-        assert!(path.exists(), "file should still exist after failed cleanup");
+        assert!(
+            path.exists(),
+            "file should still exist after failed cleanup"
+        );
     }
 
     /// Test that cleanup_heartbeat_file returns Err for other IO errors.
@@ -2338,10 +2338,7 @@ mod tests {
         // Verify we get a meaningful error message
         let err = result.unwrap_err();
         let err_msg = err.to_string();
-        assert!(
-            !err_msg.is_empty(),
-            "error message should not be empty"
-        );
+        assert!(!err_msg.is_empty(), "error message should not be empty");
     }
 
     /// Test that cleanup_heartbeat_file handles symlinks correctly.
@@ -2366,7 +2363,10 @@ mod tests {
         cleanup_heartbeat_file(&path).unwrap();
 
         // Verify the symlink was removed
-        assert!(path.symlink_metadata().is_err(), "symlink should be removed");
+        assert!(
+            path.symlink_metadata().is_err(),
+            "symlink should be removed"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────────────────

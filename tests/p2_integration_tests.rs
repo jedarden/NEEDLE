@@ -971,7 +971,6 @@ async fn mitosis_creates_children_on_first_failure() {
 
     let result = disabled_evaluator
         .evaluate(
-
             store.as_ref(),
             &parent,
             Path::new("/tmp/test"),
@@ -1014,7 +1013,6 @@ async fn mitosis_skips_non_first_failure() {
 
     let result = evaluator
         .evaluate(
-
             store.as_ref(),
             &parent,
             Path::new("/tmp/test"),
@@ -1065,7 +1063,6 @@ async fn mitosis_evaluator_adapter_not_found_skips() {
     // Use an adapter name that doesn't exist in the dispatcher.
     let result = evaluator
         .evaluate(
-
             store.as_ref(),
             &parent,
             Path::new("/tmp/test"),
@@ -1470,7 +1467,6 @@ async fn mitosis_splits_multitask_bead_creates_children() {
 
     let result = evaluator
         .evaluate(
-
             store.as_ref(),
             &parent,
             ws.path(),
@@ -1532,7 +1528,6 @@ async fn mitosis_duplicate_split_creates_zero_new_children() {
     );
     let result1 = evaluator1
         .evaluate(
-
             store.as_ref(),
             &parent,
             ws.path(),
@@ -1558,7 +1553,6 @@ async fn mitosis_duplicate_split_creates_zero_new_children() {
     );
     let result2 = evaluator2
         .evaluate(
-
             store.as_ref(),
             &parent,
             ws.path(),
@@ -1620,7 +1614,6 @@ async fn mitosis_concurrent_workers_flock_serializes() {
             let evaluator = MitosisEvaluator::new(config, telemetry, lock_dir);
             evaluator
                 .evaluate(
-
                     store.as_ref(),
                     &parent,
                     &ws,

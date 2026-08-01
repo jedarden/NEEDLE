@@ -33,10 +33,8 @@ use crate::types::{Bead, BeadId};
 /// vs "confirm X uses Y not Z").
 const STOPWORDS: &[&str] = &[
     // Common verification verbs (semantically equivalent in this context)
-    "verify", "confirm", "validate", "check", "ensure",
-    // Articles and demonstratives
-    "the", "a", "that",
-    // Common task words
+    "verify", "confirm", "validate", "check", "ensure", // Articles and demonstratives
+    "the", "a", "that", // Common task words
     "uses", "not",
 ];
 
@@ -446,12 +444,7 @@ impl MitosisEvaluator {
         // must keep the parent's stitch:* labels or they orphan from the
         // Stitch that spawned the split.
         let stitch_labels = crate::types::extract_stitch_prefixed_labels(&parent.labels);
-        let mut labels: Vec<&str> = vec![
-            "mitosis-child",
-            &depth_label,
-            &parent_label,
-            &root_label,
-        ];
+        let mut labels: Vec<&str> = vec!["mitosis-child", &depth_label, &parent_label, &root_label];
         labels.extend(stitch_labels.iter().map(|s| s.as_str()));
 
         // Dedup first, then build the list of children to create.
@@ -780,24 +773,81 @@ fn titles_match(existing: &str, proposed: &str) -> bool {
     // Strip stopwords and common verbs first, then compare token sets
     let stopwords = [
         // Common verification verbs (semantically equivalent in this context)
-        "verify", "confirm", "validate", "check", "ensure", "test", "assert", "inspect",
+        "verify",
+        "confirm",
+        "validate",
+        "check",
+        "ensure",
+        "test",
+        "assert",
+        "inspect",
         // Articles and conjunctions
-        "the", "a", "an", "and", "or", "but",
+        "the",
+        "a",
+        "an",
+        "and",
+        "or",
+        "but",
         // Prepositions
-        "for", "to", "in", "on", "at", "by", "with", "from", "of", "about",
+        "for",
+        "to",
+        "in",
+        "on",
+        "at",
+        "by",
+        "with",
+        "from",
+        "of",
+        "about",
         // Pronouns and demonstratives
-        "that", "this", "these", "those", "it", "its",
+        "that",
+        "this",
+        "these",
+        "those",
+        "it",
+        "its",
         // Common task words
-        "uses", "use", "used", "not", "no", "should", "will", "can", "may",
+        "uses",
+        "use",
+        "used",
+        "not",
+        "no",
+        "should",
+        "will",
+        "can",
+        "may",
         // Data access verbs (often interchangeable)
-        "get", "fetch", "retrieve", "read", "reads", "load", "pull",
+        "get",
+        "fetch",
+        "retrieve",
+        "read",
+        "reads",
+        "load",
+        "pull",
         // Action verbs (often interchangeable)
-        "add", "create", "make", "build", "implement",
-        "update", "change", "modify", "adjust", "fix",
-        "remove", "delete", "clear",
-        "set", "configure", "adjust",
+        "add",
+        "create",
+        "make",
+        "build",
+        "implement",
+        "update",
+        "change",
+        "modify",
+        "adjust",
+        "fix",
+        "remove",
+        "delete",
+        "clear",
+        "set",
+        "configure",
+        "adjust",
         // Adjectives (often interchangeable in task titles)
-        "correctly", "correct", "properly", "proper", "accurately", "accurate",
+        "correctly",
+        "correct",
+        "properly",
+        "proper",
+        "accurately",
+        "accurate",
     ];
 
     // Token normalization map for abbreviations and common synonyms
@@ -806,11 +856,11 @@ fn titles_match(existing: &str, proposed: &str) -> bool {
             // Percentage abbreviations
             "pct" | "pct." | "percent" | "perc" => "percentage".to_string(),
             // Model-related terms
-            "agnostic" => "model".to_string(),  // "model-agnostic" ~ "rotated model"
-            "rotated" => "scoped".to_string(),  // "rotated model" = "scoped model" in NEEDLE context
+            "agnostic" => "model".to_string(), // "model-agnostic" ~ "rotated model"
+            "rotated" => "scoped".to_string(), // "rotated model" = "scoped model" in NEEDLE context
             // Calculation-related
             "calc" => "calculation".to_string(),
-            "feeds" | "feed" => "uses".to_string(),  // "feeds EMA" ~ "uses"
+            "feeds" | "feed" => "uses".to_string(), // "feeds EMA" ~ "uses"
             w => w.to_lowercase(),
         }
     };
@@ -1204,7 +1254,9 @@ End of response."#;
 
         // Neither should contain stopwords
         assert!(!tokens1.contains("verify") && !tokens1.contains("uses"));
-        assert!(!tokens2.contains("confirm") && !tokens2.contains("uses") && !tokens2.contains("not"));
+        assert!(
+            !tokens2.contains("confirm") && !tokens2.contains("uses") && !tokens2.contains("not")
+        );
 
         // They should both have X and Y in common
         let intersection: HashSet<_> = tokens1.intersection(&tokens2).collect();
@@ -1236,7 +1288,9 @@ End of response."#;
 
         // Neither should contain stopwords
         assert!(!tokens1.contains("verify") && !tokens1.contains("uses"));
-        assert!(!tokens2.contains("confirm") && !tokens2.contains("uses") && !tokens2.contains("not"));
+        assert!(
+            !tokens2.contains("confirm") && !tokens2.contains("uses") && !tokens2.contains("not")
+        );
     }
 
     #[test]
@@ -1258,14 +1312,8 @@ End of response."#;
 
     #[test]
     fn jaccard_identical_sets() {
-        let set1: HashSet<String> = ["a", "b", "c"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let set2: HashSet<String> = ["a", "b", "c"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let set1: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let set2: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
 
         // Identical sets should have Jaccard similarity of 1.0
         assert_eq!(jaccard_similarity(&set1, &set2), 1.0);
@@ -1282,10 +1330,7 @@ End of response."#;
 
     #[test]
     fn jaccard_one_empty() {
-        let set1: HashSet<String> = ["a", "b", "c"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let set1: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
         let set2: HashSet<String> = HashSet::new();
 
         // One empty, one non-empty should have 0.0 similarity
@@ -1294,14 +1339,8 @@ End of response."#;
 
     #[test]
     fn jaccard_no_overlap() {
-        let set1: HashSet<String> = ["a", "b", "c"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let set2: HashSet<String> = ["x", "y", "z"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let set1: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let set2: HashSet<String> = ["x", "y", "z"].iter().map(|s| s.to_string()).collect();
 
         // No overlap should have 0.0 similarity
         assert_eq!(jaccard_similarity(&set1, &set2), 0.0);
@@ -1309,14 +1348,8 @@ End of response."#;
 
     #[test]
     fn jaccard_partial_overlap() {
-        let set1: HashSet<String> = ["a", "b", "c"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let set2: HashSet<String> = ["a", "b", "d"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let set1: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let set2: HashSet<String> = ["a", "b", "d"].iter().map(|s| s.to_string()).collect();
 
         // Intersection: {a, b} (2 elements)
         // Union: {a, b, c, d} (4 elements)
@@ -1326,14 +1359,8 @@ End of response."#;
 
     #[test]
     fn jaccard_subset() {
-        let set1: HashSet<String> = ["a", "b", "c"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let set2: HashSet<String> = ["a", "b"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let set1: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let set2: HashSet<String> = ["a", "b"].iter().map(|s| s.to_string()).collect();
 
         // set2 is a subset of set1
         // Intersection: {a, b} (2 elements)
@@ -1363,10 +1390,7 @@ End of response."#;
 
     #[test]
     fn jaccard_completely_different_sizes() {
-        let set1: HashSet<String> = ["a"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let set1: HashSet<String> = ["a"].iter().map(|s| s.to_string()).collect();
         let set2: HashSet<String> = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]
             .iter()
             .map(|s| s.to_string())
@@ -1380,14 +1404,8 @@ End of response."#;
 
     #[test]
     fn jaccard_symmetric() {
-        let set1: HashSet<String> = ["a", "b", "c"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let set2: HashSet<String> = ["a", "b", "d"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let set1: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let set2: HashSet<String> = ["a", "b", "d"].iter().map(|s| s.to_string()).collect();
 
         // Jaccard similarity should be symmetric
         assert_eq!(
@@ -1398,14 +1416,8 @@ End of response."#;
 
     #[test]
     fn jaccard_single_element_match() {
-        let set1: HashSet<String> = ["a", "b", "c"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let set2: HashSet<String> = ["a"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let set1: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
+        let set2: HashSet<String> = ["a"].iter().map(|s| s.to_string()).collect();
 
         // Intersection: {a} (1 element)
         // Union: {a, b, c} (3 elements)
@@ -1461,12 +1473,21 @@ End of response."#;
         let title2 = "Confirm EMA calculation uses weekly_scoped_pct not sonnet_pct";
 
         // Should be recognized as duplicates
-        assert!(titles_match(title1, title2), "title1 and title2 should match");
+        assert!(
+            titles_match(title1, title2),
+            "title1 and title2 should match"
+        );
 
         // Additional example with similar semantic meaning
         let title3 = "EMA calculation reads weekly_scoped_pct not sonnet_pct";
-        assert!(titles_match(title1, title3), "title1 and title3 should match");
-        assert!(titles_match(title2, title3), "title2 and title3 should match");
+        assert!(
+            titles_match(title1, title3),
+            "title1 and title3 should match"
+        );
+        assert!(
+            titles_match(title2, title3),
+            "title2 and title3 should match"
+        );
     }
 
     #[test]
@@ -1490,11 +1511,17 @@ End of response."#;
         let title1 = "Update documentation and close parent bead";
         let title2 = "Run cargo test to verify no regressions";
 
-        assert!(!titles_match(title1, title2), "unrelated titles should not match");
+        assert!(
+            !titles_match(title1, title2),
+            "unrelated titles should not match"
+        );
 
         // Additional unrelated pairs
         assert!(!titles_match("fix authentication bug", "add new feature"));
-        assert!(!titles_match("update database schema", "refactor UI components"));
+        assert!(!titles_match(
+            "update database schema",
+            "refactor UI components"
+        ));
     }
 
     #[test]
@@ -2193,7 +2220,11 @@ End of response."#;
         // Should skip with depth limit reason
         match result {
             MitosisResult::Skipped { reason } => {
-                assert!(reason.contains("exceeds maximum depth"), "wrong skip reason: {}", reason);
+                assert!(
+                    reason.contains("exceeds maximum depth"),
+                    "wrong skip reason: {}",
+                    reason
+                );
             }
             other => panic!("expected Skipped, got {:?}", other),
         }
@@ -2401,10 +2432,7 @@ End of response."#;
 
         // Simulate creating a generation 1 child with depth 1.
         let mut gen1_child = test_bead();
-        gen1_child.labels = vec![
-            "failure-count:1".to_string(),
-            "mitosis-depth:1".to_string(),
-        ];
+        gen1_child.labels = vec!["failure-count:1".to_string(), "mitosis-depth:1".to_string()];
 
         // Create children from gen1 (should be depth 2).
         let proposed_gen2 = vec![ProposedChild {
@@ -2421,10 +2449,7 @@ End of response."#;
 
         // Simulate creating a generation 2 child with depth 2.
         let mut gen2_child = test_bead();
-        gen2_child.labels = vec![
-            "failure-count:1".to_string(),
-            "mitosis-depth:2".to_string(),
-        ];
+        gen2_child.labels = vec!["failure-count:1".to_string(), "mitosis-depth:2".to_string()];
 
         // Create children from gen2 (should be depth 3).
         let proposed_gen3 = vec![ProposedChild {
@@ -2468,12 +2493,16 @@ End of response."#;
         let gen2_child = existing_child_with_depth("Add endpoint", "parent-001", 2);
         // Add the root label to simulate lineage tracking
         let mut gen2_child_with_root = gen2_child.clone();
-        gen2_child_with_root.labels.push("root-parent-001".to_string());
+        gen2_child_with_root
+            .labels
+            .push("root-parent-001".to_string());
 
         // Generation 3 child (also has root-* label)
         let gen3_child = existing_child_with_depth("Some other task", "parent-002", 3);
         let mut gen3_child_with_root = gen3_child.clone();
-        gen3_child_with_root.labels.push("root-parent-001".to_string());
+        gen3_child_with_root
+            .labels
+            .push("root-parent-001".to_string());
 
         let store = MockStore::new().with_existing_children(vec![
             gen2_child_with_root.clone(),
@@ -2503,7 +2532,11 @@ End of response."#;
         // Should skip the duplicate (no children created)
         match result {
             MitosisResult::Skipped { reason } => {
-                assert!(reason.contains("all children already exist"), "wrong skip reason: {}", reason);
+                assert!(
+                    reason.contains("all children already exist"),
+                    "wrong skip reason: {}",
+                    reason
+                );
             }
             other => panic!(
                 "expected Skipped for duplicate across generations, got: {:?}",
@@ -2537,7 +2570,9 @@ End of response."#;
         // Bead from a DIFFERENT lineage (root-parent-999)
         let other_lineage_bead = existing_child_with_depth("Add endpoint", "parent-999", 2);
         let mut other_lineage_with_root = other_lineage_bead.clone();
-        other_lineage_with_root.labels.push("root-parent-999".to_string());
+        other_lineage_with_root
+            .labels
+            .push("root-parent-999".to_string());
 
         let store = MockStore::new().with_existing_children(vec![other_lineage_with_root]);
 

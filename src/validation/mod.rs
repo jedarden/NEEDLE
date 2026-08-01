@@ -758,10 +758,7 @@ mod tests {
 
         // Writes the marker file only after a 3s sleep — if the process is
         // truly killed before then, the marker must never appear.
-        let gate = CommandGate::new(vec![format!(
-            "sleep 3 && touch {}",
-            marker_path.display()
-        )]);
+        let gate = CommandGate::new(vec![format!("sleep 3 && touch {}", marker_path.display())]);
         let bead = test_bead();
 
         let result = tokio::time::timeout(

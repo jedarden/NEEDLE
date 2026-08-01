@@ -119,9 +119,7 @@ fn create_live_session(session_name: &str) -> Result<std::process::Child, std::i
 /// Test helper to kill a tmux session.
 #[cfg(unix)]
 fn kill_session(session_name: &str) -> Result<(), std::io::Error> {
-    let status = tmux()
-        .args(["kill-session", "-t", session_name])
-        .status()?;
+    let status = tmux().args(["kill-session", "-t", session_name]).status()?;
 
     if !status.success() {
         return Err(std::io::Error::other(format!(

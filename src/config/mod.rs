@@ -3841,7 +3841,10 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_both_paths() {
-        std::env::set_var("SUPERVISOR_HEARTBEAT_PATH", "/var/lib/needle/heartbeat.json");
+        std::env::set_var(
+            "SUPERVISOR_HEARTBEAT_PATH",
+            "/var/lib/needle/heartbeat.json",
+        );
         std::env::set_var("SUPERVISOR_SOCKET_PATH", "/var/run/needle/supervisor.sock");
 
         let config = SupervisorConfig::from_env().unwrap();
@@ -3868,7 +3871,10 @@ worker:
         assert!(config.heartbeat_path.is_some());
         assert!(config.socket_path.is_some());
         // Paths should not contain literal "~" after expansion
-        assert_ne!(config.heartbeat_path, Some(PathBuf::from("~/heartbeat.json")));
+        assert_ne!(
+            config.heartbeat_path,
+            Some(PathBuf::from("~/heartbeat.json"))
+        );
         assert_ne!(config.socket_path, Some(PathBuf::from("~/supervisor.sock")));
 
         std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
@@ -4767,7 +4773,11 @@ agent:
         };
         config.expand_tildes();
         let expanded = config.worker.worker_binary_path.unwrap();
-        assert!(!expanded.starts_with("~"), "tilde was not expanded: {:?}", expanded);
+        assert!(
+            !expanded.starts_with("~"),
+            "tilde was not expanded: {:?}",
+            expanded
+        );
         assert!(expanded.ends_with("bin/needle"));
     }
 }

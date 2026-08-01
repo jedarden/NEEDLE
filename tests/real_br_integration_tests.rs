@@ -830,7 +830,6 @@ async fn real_br_mitosis_precondition_checks() {
 
     let result = evaluator
         .evaluate(
-
             store.as_ref(),
             &bead,
             workspace.path(),
@@ -866,7 +865,6 @@ async fn real_br_mitosis_precondition_checks() {
     let bead2 = store.show(&bead_id).await.unwrap();
     let result2 = evaluator2
         .evaluate(
-
             store.as_ref(),
             &bead2,
             workspace.path(),
@@ -979,7 +977,6 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
 
             evaluator
                 .evaluate(
-
                     store.as_ref(),
                     &parent,
                     &workspace_path,

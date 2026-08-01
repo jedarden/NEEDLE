@@ -23,10 +23,7 @@ async fn test_helper_captures_telemetry_events() {
         })
         .unwrap();
 
-    helper
-        .telemetry()
-        .emit(EventKind::QueueEmpty)
-        .unwrap();
+    helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
 
     helper
         .telemetry()
@@ -105,10 +102,7 @@ async fn test_helper_clears_events_properly() {
     let helper = TestHelper::new("clear-test-worker");
 
     // Emit some events
-    helper
-        .telemetry()
-        .emit(EventKind::QueueEmpty)
-        .unwrap();
+    helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
     helper.sync().await;
 
     assert_eq!(helper.event_count(), 1);

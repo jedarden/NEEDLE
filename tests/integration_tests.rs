@@ -2415,7 +2415,10 @@ fn heartbeat_cleanup_on_signal_integration() {
 
     // Verify the needle binary exists
     if !needle_binary.exists() {
-        println!("Skipping test: needle binary not found at {}", needle_binary.display());
+        println!(
+            "Skipping test: needle binary not found at {}",
+            needle_binary.display()
+        );
         return;
     }
 
@@ -2496,22 +2499,24 @@ fn heartbeat_cleanup_on_signal_integration() {
         // Kill the child process before failing
         let _ = child.kill();
         let _ = child.wait();
-        panic!("Heartbeat file not found after {:?}, test failed", heartbeat_timeout);
+        panic!(
+            "Heartbeat file not found after {:?}, test failed",
+            heartbeat_timeout
+        );
     }
 
     // Verify the heartbeat file contains valid data
-    let heartbeat_content = std::fs::read_to_string(&heartbeat_file)
-        .expect("failed to read heartbeat file");
+    let heartbeat_content =
+        std::fs::read_to_string(&heartbeat_file).expect("failed to read heartbeat file");
 
     println!("Heartbeat content: {}", heartbeat_content);
 
     // Parse as JSON to verify it's valid
-    let heartbeat: serde_json::Value = serde_json::from_str(&heartbeat_content)
-        .expect("heartbeat file should contain valid JSON");
+    let heartbeat: serde_json::Value =
+        serde_json::from_str(&heartbeat_content).expect("heartbeat file should contain valid JSON");
 
     assert_eq!(
-        heartbeat["worker_id"],
-        "signal-test-worker",
+        heartbeat["worker_id"], "signal-test-worker",
         "heartbeat should have correct worker_id"
     );
 
@@ -2528,7 +2533,6 @@ fn heartbeat_cleanup_on_signal_integration() {
 
     #[cfg(unix)]
     {
-
         // SAFETY: We're sending signal 0 (for existence check) and SIGTERM to a known PID
         // that we just spawned. This is safe as long as the process is still running.
         unsafe {
@@ -2579,10 +2583,16 @@ fn heartbeat_cleanup_on_signal_integration() {
                     std::thread::sleep(Duration::from_millis(100));
                 } else {
                     // Worker didn't exit in time, kill it forcefully
-                    println!("Worker did not exit within {:?}, killing forcefully", shutdown_timeout);
+                    println!(
+                        "Worker did not exit within {:?}, killing forcefully",
+                        shutdown_timeout
+                    );
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("Worker did not exit gracefully within {:?}, test failed", shutdown_timeout);
+                    panic!(
+                        "Worker did not exit gracefully within {:?}, test failed",
+                        shutdown_timeout
+                    );
                 }
             }
             Err(e) => {
@@ -2603,7 +2613,10 @@ fn heartbeat_cleanup_on_signal_integration() {
     // Give a small buffer for the file system to sync
     while cleanup_check_start.elapsed() < cleanup_timeout {
         if !heartbeat_file.exists() {
-            println!("✓ Heartbeat file cleaned up after {:?}", cleanup_check_start.elapsed());
+            println!(
+                "✓ Heartbeat file cleaned up after {:?}",
+                cleanup_check_start.elapsed()
+            );
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
