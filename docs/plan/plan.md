@@ -4239,7 +4239,7 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 
 # Phase 10: Bead Lifecycle Reliability — Test Isolation, Failure Quarantine, and Liveness-Independent Reclamation
 
-**Status:** planned (ADR-006).
+**Status:** 10.2 implemented (ADR-012, 2026-07-30); 10.1/10.3/10.4 planned (ADR-006).
 
 **Goal:** stop beads from getting stuck in states NEEDLE has no mechanism to recover from, and stop NEEDLE's own test suite from being the thing that puts them there. Driven by a 2026-07-21 lab fleet audit that found the fleet wasn't resource-starved (load 3.0/12 cores, 42G RAM free) but *data-quality-starved*: ~284 phantom `in_progress`/stale-assigned beads across ~22 real repos, six roaming workers permanently `EXHAUSTED` behind stale-assignee-only candidate pools despite real ready work existing elsewhere, and — reviewed in the same pass — a long-standing, still-open gap where a bead too large for one turn can fail hundreds of times with no automatic stop (a prior incident: 310 failures/24h on one bead, ~$500). All three root causes trace back to the same weakness: nothing in NEEDLE notices and corrects a bead stuck in a state it shouldn't be able to stay in indefinitely. Full evidence and rationale in [ADR-006](../adr/006-bead-lifecycle-reliability.md).
 
@@ -4250,11 +4250,12 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 - Audit the rest of the real-binary-spawning test suite (any `Command::new(CARGO_BIN_EXE_needle)` call) for the same gap — this is the second time this exact mechanism has produced real contamination (the first, 2026-07-20, left ~284 phantom beads under fixture worker identifiers across ~22 repos).
 - Document the policy explicitly in this repo's CLAUDE.md Testing section: any test spawning the compiled binary as a real subprocess must isolate `$HOME` and Explore's scan root.
 
-### 10.2 Failure circuit-breaker
-- After K consecutive failures on a bead (new config `outcome.quarantine_after_failures`, default 5 — above Pluck's existing `split_after_failures` default of 3, so mitosis gets first crack at splitting), `handle_failure` (`src/outcome/mod.rs`) sets `status: blocked`, adds a `cycling` label, and emits a `bead.quarantined` telemetry event so the `auto`/Pluck strand stops re-claiming it.
-- Mitosis's `NotSplittable` verdict (`src/worker/mod.rs:2097-2100`, currently a silent fallthrough) must count toward the same failure ceiling instead of being invisible to it.
-- Quarantine, not auto-split — this is the safe MVP. Auto-splitting on threshold via mitosis is a larger, separately-decidable follow-on.
-- `needle status`/`needle logs` should make `cycling`-labeled beads easy to find (a filter or summary count) — otherwise quarantine just becomes a second, quieter kind of stuck state instead of a visible one.
+### 10.2 Failure circuit-breaker — IMPLEMENTED (ADR-012, 2026-07-30)
+- After K consecutive failures on a bead (config `outcome.quarantine_after_failures`, default 5 — above Pluck's existing `split_after_failures` default of 3, so mitosis gets first crack at splitting), `handle_failure` (`src/outcome/mod.rs`) sets `status: blocked` (new `BeadStore::block` primitive), adds a `cycling` label, and emits a `bead.quarantined` telemetry event so the `auto`/Pluck strand stops re-claiming it.
+- Mitosis's `NotSplittable` verdict (`src/worker/mod.rs`, previously a silent fallthrough) no longer needs its own check — the quarantine ceiling in `handle_failure` runs before mitosis evaluation every cycle, so a bead at/past the threshold is already `Blocked` by the time mitosis would have fallen through on it again.
+- Quarantine, not auto-split — shipped as the safe MVP, per plan. Auto-splitting on threshold via mitosis remains a larger, separately-decidable follow-on, not done.
+- Bonus, not in the original §10.2 scope: `PluckStrand::sort_candidates` now also weighs `failure_count` into its ordering (priority ASC, failure_count ASC, created_at ASC, id ASC), so a struggling bead stops monopolizing the queue even before it reaches the quarantine threshold. See ADR-012.
+- Still open, not done here: `needle status`/`needle logs` do not yet have a dedicated view for `cycling`-labeled beads (a filter or summary count) — quarantine is currently only visible via `bf`/`br` label queries, not surfaced in the fleet's own tooling.
 
 ### 10.3 Mend releases stale assignees on Open beads
 - This is Phase 5.2's original promise ("Mend releases stale assignees on open beads"), never implemented — `cleanup_orphaned_in_progress` (`src/strand/mend.rs`) only handles `status == InProgress`. Add a sibling function (or extend it) that releases the assignee on any `Open` bead whose assignee has no live heartbeat/registry entry, using the same staleness definition already applied to `in_progress` claims.
@@ -4277,7 +4278,7 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 
 ## Exit criteria
 - No test in this repo's suite can write to a real, non-fixture `.beads/` directory under a developer or CI `$HOME`.
-- A bead that fails K consecutive times stops being redispatched automatically — no manual split-and-block intervention required to halt the loop.
+- A bead that fails K consecutive times stops being redispatched automatically — no manual split-and-block intervention required to halt the loop. **Met (ADR-012).**
 - An `Open` bead with a stale assignee is reclaimed and becomes claimable again without any worker restart or manual `bf`/`br` intervention.
 - A fully idle fleet (zero live workers, only stale claims) recovers to a claimable ready queue via `needle supervise` alone, with no worker needing to be manually launched first to "kick" reclamation.
 

@@ -4,33 +4,65 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
-### Phase 2
+## [0.2.15] - 2026-07-31
 
-#### Added
+### Fixed
 
-- **OTLP Sink** - OpenTelemetry telemetry export
-  - Export traces, metrics, and logs to any OTLP-compatible backend
-  - Supports gRPC and HTTP/protobuf transports
-  - Non-blocking batch processor with graceful shutdown
-  - Follows OpenTelemetry `gen_ai.*` semantic conventions for LLM telemetry
-  - Configure via `.needle.yaml` under `telemetry.otlp_sink`
-  - See `docs/examples/otel-collector/` for a working docker-compose example
+- **Supervisor zombie-child reaping** — `Supervisor::tick()` now sweeps
+  `waitpid(-1, WNOHANG)` at the top of every tick, reaping exited worker
+  children so `needle supervise` no longer leaks `<defunct>` zombies for
+  the lifetime of the daemon (GH #12, ADR-010).
+- **Zombie-aware `is_pid_alive`** — `registry::is_pid_alive` now additionally
+  checks `/proc/<pid>/stat`'s process-state field on Linux and treats a
+  zombie (state `Z`) as not-alive, so an unreaped worker can no longer
+  inflate `Supervisor::tick()`'s `alive_count` and falsely block new spawns
+  at `max_workers` capacity. Falls back to the existing `kill(pid, 0)`-only
+  behavior on non-Linux platforms and whenever `/proc/<pid>/stat` is
+  unreadable (GH #12, ADR-010).
 
-#### Documentation
+## [0.2.14] - 2026-07-30
 
-- **Observability section** in README.md
-  - Overview of exported signals (traces, metrics, logs)
-  - Minimal OTLP configuration example
-  - Link to semantic mapping in `docs/plan/plan.md`
+Note: entries for 0.2.9-0.2.13 were not recorded at the time (this file
+lagged behind actual releases); the OTLP Sink work previously listed under
+`[Unreleased]` shipped in one of those versions and is not re-described
+here — see `git log` for the full history in that range.
 
-- **AGENTS.md** - Telemetry contract for AI workers
-  - GenAI semantic conventions (`gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.*`)
-  - Resource attributes carried by all exported signals
+### Added
 
-- **OTLP Collector example** (`docs/examples/otel-collector/`)
-  - docker-compose setup with OpenTelemetry Collector, Jaeger, Prometheus, Loki, and Grafana
-  - Quick start guide for local testing
-  - Config files for collector, Prometheus, and Loki
+- **Shipped-work enforcement** — new `worker.enforce_shipped_work` config
+  toggle (default: enabled). A bead's closure is now only accepted if
+  either a substantial commit (touching at least one file outside
+  `notes/`, `.beads/`) has been made and pushed since dispatch started, or
+  the bead itself was explicitly updated during the dispatch (e.g. `bf
+  update --notes` recording why no code change was needed). Closes the gap
+  where a worker stuck on an uncompletable bead could satisfy a bare
+  "must have a commit" rule by committing a trivial doc file every retry
+  (bf-1i9).
+- **Adapter routing wired into dispatch** — routing decisions now flow
+  through to dispatch with full telemetry (needle-3h0r).
+
+- **Failure-quarantine circuit breaker** — Pluck now orders candidates with
+  failure-awareness and wires in a quarantine breaker for beads that keep
+  failing dispatch (ADR-012).
+
+### Fixed
+
+- **Explore strand roam-rotation starvation** — per-worker scan order is
+  now reshuffled and the workspace list re-discovered every cycle, instead
+  of a static hash-derived rotation that could permanently strand some
+  workspaces outside every live worker's reachable window (bf-6anj4).
+- **Bead-store contamination repair** — recovered store state after
+  contamination from a stuck integration-test process.
+- **Mitosis timeout child-process leak** — child processes spawned by a
+  mitosis split are now reaped instead of leaking when the split itself
+  times out (bf-653n7, ADR-011).
+- **Orphaned dispatch children on outer-timeout cancellation** — the
+  process group is now killed (not just the direct child) when an agent
+  dispatch is cancelled by the outer timeout, so descendants no longer
+  keep running after NEEDLE gives up on them (GH #13).
+- Pre-existing clippy lints (unused parameters, a dead field, manual
+  char-comparison patterns, a redundant closure) cleaned up across the
+  strand and mitosis modules.
 
 ## [0.2.8] - 2026-06-14
 

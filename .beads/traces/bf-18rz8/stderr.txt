@@ -1,1 +1,0 @@
-bash: line 1: nonexistent-binary-xyz-999: command not found

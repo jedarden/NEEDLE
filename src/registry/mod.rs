@@ -34,6 +34,14 @@ pub fn is_pid_alive(pid: u32) -> bool {
             let ret = libc::kill(pid as i32, 0);
             if ret == 0 {
                 // kill succeeded: process exists and we have permission to signal it.
+                // On Linux, kill(pid, 0) also succeeds for a zombie (state Z) — it
+                // still holds a PID table entry, it has just already exited and is
+                // awaiting reaping. Treat zombies as not-alive so callers (supervisor
+                // capacity accounting, mend's liveness check) don't count a dead
+                // worker as live. See ADR-010 / GH #12.
+                if is_zombie_linux(pid) == Some(true) {
+                    return false;
+                }
                 return true;
             }
             // kill failed: check errno to distinguish EPERM from ESRCH.
@@ -68,6 +76,30 @@ pub fn is_pid_alive(pid: u32) -> bool {
         // TODO: Implement Windows liveness check via OpenProcess if needed.
         false
     }
+}
+
+/// Check `/proc/<pid>/stat` for zombie state (`Z`) on Linux.
+///
+/// Returns `None` if the check can't be performed (non-Linux, unreadable
+/// `/proc` entry — e.g. a race with the process exiting, or an unexpected
+/// format) — callers must treat `None` as "undetermined", not "not a
+/// zombie", and fall back to the `kill(pid, 0)` result.
+///
+/// `/proc/<pid>/stat` format is `pid (comm) state ...`; `comm` can itself
+/// contain spaces or parentheses (it's the raw, possibly-truncated process
+/// name), so the state field is located via the *last* `)` in the line
+/// rather than by splitting on whitespace.
+#[cfg(target_os = "linux")]
+fn is_zombie_linux(pid: u32) -> Option<bool> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rfind(')')?;
+    let state = stat.get(after_comm + 1..)?.trim_start().chars().next()?;
+    Some(state == 'Z')
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_zombie_linux(_pid: u32) -> Option<bool> {
+    None
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -562,5 +594,51 @@ mod tests {
         // A PID that's unlikely to exist should be dead.
         // DEAD_PID is well beyond any valid PID on real systems.
         assert!(!is_pid_alive(DEAD_PID));
+    }
+
+    // ── zombie-state tests (ADR-010 / GitHub issue jedarden/NEEDLE#12) ──
+    //
+    // kill(pid, 0) succeeds for a zombie exactly as it does for a live
+    // process — these tests confirm is_pid_alive additionally treats a
+    // zombie (state Z) as not-alive on Linux, rather than inheriting that
+    // false positive.
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn is_pid_alive_returns_false_for_a_zombie() {
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("failed to spawn `true`");
+        let pid = child.id();
+
+        let mut became_zombie = false;
+        for _ in 0..200 {
+            if let Some(true) = is_zombie_linux(pid) {
+                became_zombie = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            became_zombie,
+            "child did not reach zombie state before timeout — test precondition not met"
+        );
+
+        // kill(pid, 0) alone would say "alive" here — the whole point of the fix.
+        assert!(
+            !is_pid_alive(pid),
+            "zombie PID must be treated as not-alive, not just kill(0)-reachable"
+        );
+
+        // Clean up: reap for real so we don't leak a zombie from the test run.
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn is_zombie_linux_returns_none_for_nonexistent_pid() {
+        // Can't read /proc/<pid>/stat for a PID that doesn't exist — must
+        // return None (undetermined), never Some(false) which callers could
+        // misread as a confirmed non-zombie.
+        assert_eq!(is_zombie_linux(DEAD_PID), None);
     }
 }

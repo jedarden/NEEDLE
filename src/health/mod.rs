@@ -115,6 +115,10 @@ struct SharedHeartbeatState {
     current_workspace: Option<PathBuf>,
     /// Model being used (from adapter configuration).
     model: String,
+    /// Most recently active strand — for HOOP Hook 3's `idle` heartbeat state.
+    last_strand: Option<String>,
+    /// Resolved adapter name — for HOOP Hook 3's `executing` heartbeat state.
+    adapter: Option<String>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -185,6 +189,8 @@ impl HealthMonitor {
                 beads_processed: 0,
                 current_workspace: None,
                 model: config.agent.default.clone(),
+                last_strand: None,
+                adapter: None,
             })),
             shutdown: shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             emitter_handle: None,
@@ -290,6 +296,22 @@ impl HealthMonitor {
             guard.state = state.clone();
             guard.current_bead = current_bead.cloned();
             guard.current_workspace = workspace.map(|p| p.to_path_buf());
+        }
+    }
+
+    /// Update the strand last seen active — read by the HOOP Hook 3 heartbeat
+    /// (`idle` state's `last_strand` field).
+    pub fn update_strand(&self, strand: Option<&str>) {
+        if let Ok(mut guard) = self.shared_state.lock() {
+            guard.last_strand = strand.map(|s| s.to_string());
+        }
+    }
+
+    /// Update the resolved adapter name — read by the HOOP Hook 3 heartbeat
+    /// (`executing` state's `adapter` field).
+    pub fn update_adapter(&self, adapter: Option<&str>) {
+        if let Ok(mut guard) = self.shared_state.lock() {
+            guard.adapter = adapter.map(|s| s.to_string());
         }
     }
 
@@ -791,7 +813,7 @@ impl HealthMonitor {
 
     /// Write a heartbeat file atomically (write temp, then rename).
     fn write_heartbeat(&self) -> Result<()> {
-        let (state, current_bead, beads_processed, current_workspace, model) = {
+        let (state, current_bead, beads_processed, current_workspace, model, last_strand, adapter) = {
             let guard = self
                 .shared_state
                 .lock()
@@ -802,6 +824,8 @@ impl HealthMonitor {
                 guard.beads_processed,
                 guard.current_workspace.clone(),
                 guard.model.clone(),
+                guard.last_strand.clone(),
+                guard.adapter.clone(),
             )
         };
 
@@ -810,6 +834,36 @@ impl HealthMonitor {
 
         let is_idle = state == WorkerState::Exhausted || current_bead.is_none();
         let current_task = current_bead.as_ref().map(|b| b.to_string());
+
+        // HOOP Hook 3 (heartbeat): append a JSONL line in HOOP's three-state
+        // format alongside the existing per-worker JSON file below. Best
+        // effort — see hoop_hooks module docs.
+        if state == WorkerState::Exhausted {
+            crate::hoop_hooks::emit_needle_heartbeat(
+                &effective_workspace,
+                &self.worker_id,
+                "knot",
+                serde_json::json!({"reason": "strands exhausted"}),
+            );
+        } else if let Some(ref bead_id) = current_bead {
+            crate::hoop_hooks::emit_needle_heartbeat(
+                &effective_workspace,
+                &self.worker_id,
+                "executing",
+                serde_json::json!({
+                    "bead": bead_id.to_string(),
+                    "pid": std::process::id(),
+                    "adapter": adapter,
+                }),
+            );
+        } else {
+            crate::hoop_hooks::emit_needle_heartbeat(
+                &effective_workspace,
+                &self.worker_id,
+                "idle",
+                serde_json::json!({"last_strand": last_strand}),
+            );
+        }
 
         let data = HeartbeatData {
             worker_id: self.worker_id.clone(),
@@ -1451,6 +1505,8 @@ mod tests {
             beads_processed: 0,
             current_workspace: None,
             model: "claude-sonnet-4".to_string(),
+            last_strand: None,
+            adapter: None,
         }));
         let shutdown = Arc::new(AtomicBool::new(false));
 

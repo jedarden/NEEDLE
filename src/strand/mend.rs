@@ -1630,6 +1630,9 @@ mod tests {
                 anyhow::bail!("bead not found: {}", id)
             }
         }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn flush(&self) -> Result<()> {
             Ok(())
         }
@@ -1720,6 +1723,9 @@ mod tests {
         }
 
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("store error")
+        }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("store error")
         }
         async fn flush(&self) -> Result<()> {
@@ -4365,6 +4371,9 @@ mod tests {
         }
 
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("not implemented in mock")
+        }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
             anyhow::bail!("not implemented in mock")
         }
         async fn flush(&self) -> Result<()> {

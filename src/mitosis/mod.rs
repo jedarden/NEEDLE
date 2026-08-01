@@ -67,7 +67,7 @@ pub fn token_set_without_stopwords(title: &str) -> HashSet<String> {
         .split_whitespace()
         .flat_map(|word| {
             // Split on hyphens and underscores to handle compound words
-            word.split(|c: char| c == '-' || c == '_')
+            word.split(['-', '_'])
                 .map(|part| part.to_string())
                 .collect::<Vec<_>>()
         })
@@ -442,12 +442,17 @@ impl MitosisEvaluator {
         // split share the same label set.
         let parent_label = format!("parent-{}", parent.id);
         let depth_label = format!("mitosis-depth:{}", child_depth);
-        let labels: Vec<&str> = vec![
+        // HOOP Hook 4 (Stitch Label Inheritance): children of a mitosis split
+        // must keep the parent's stitch:* labels or they orphan from the
+        // Stitch that spawned the split.
+        let stitch_labels = crate::types::extract_stitch_prefixed_labels(&parent.labels);
+        let mut labels: Vec<&str> = vec![
             "mitosis-child",
             &depth_label,
             &parent_label,
             &root_label,
         ];
+        labels.extend(stitch_labels.iter().map(|s| s.as_str()));
 
         // Dedup first, then build the list of children to create.
         let mut to_create: Vec<NewChild> = Vec::new();
@@ -815,8 +820,8 @@ fn titles_match(existing: &str, proposed: &str) -> bool {
             .flat_map(|word| {
                 // Split on hyphens and underscores to handle compound words
                 // e.g., "model-agnostic" -> ["model", "agnostic"]
-                word.split(|c: char| c == '-' || c == '_')
-                    .map(|part| normalize_token(part))
+                word.split(['-', '_'])
+                    .map(normalize_token)
                     .collect::<Vec<_>>()
             })
             .filter(|word| !stopwords.contains(&word.as_str()))
@@ -997,6 +1002,9 @@ mod tests {
         }
 
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
         async fn flush(&self) -> Result<()> {

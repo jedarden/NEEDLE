@@ -432,6 +432,10 @@ impl BeadStore for MockBeadStore {
         Ok(())
     }
 
+    async fn block(&self, _id: &BeadId) -> Result<()> {
+        Ok(())
+    }
+
     async fn flush(&self) -> Result<()> {
         Ok(())
     }

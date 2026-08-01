@@ -1470,6 +1470,9 @@ pub enum BeadAction {
     Deferred,
     /// An alert bead was created.
     Alerted,
+    /// Bead was quarantined (status=blocked, labeled `cycling`) after
+    /// exceeding the consecutive-failure threshold.
+    Quarantined,
     /// No action taken (e.g., success with bead already closed).
     None,
 }
@@ -1480,6 +1483,7 @@ impl fmt::Display for BeadAction {
             BeadAction::Released => write!(f, "released"),
             BeadAction::Deferred => write!(f, "deferred"),
             BeadAction::Alerted => write!(f, "alerted"),
+            BeadAction::Quarantined => write!(f, "quarantined"),
             BeadAction::None => write!(f, "none"),
         }
     }
@@ -1768,6 +1772,21 @@ pub fn extract_stitch_labels(labels: &[String]) -> Vec<String> {
             let lower = l.to_lowercase();
             !EXCLUDED.contains(&lower.as_str()) && !lower.starts_with("signal-")
         })
+        .cloned()
+        .collect()
+}
+
+/// Extract only `stitch:`-prefixed labels for propagation to a derived bead
+/// (HOOP Hook 4 — Stitch Label Inheritance, docs/needle-hooks.md in the HOOP repo).
+///
+/// Unlike `extract_stitch_labels` (a blocklist that passes through nearly
+/// everything), this is a strict allowlist — it exists specifically so a
+/// follow-up bead inherits its parent's Stitch lineage without also picking
+/// up unrelated project/domain labels the parent happened to carry.
+pub fn extract_stitch_prefixed_labels(labels: &[String]) -> Vec<String> {
+    labels
+        .iter()
+        .filter(|l| l.starts_with("stitch:"))
         .cloned()
         .collect()
 }

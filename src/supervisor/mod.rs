@@ -306,6 +306,8 @@ impl Supervisor {
     ///
     /// Returns true if a worker was spawned, false otherwise.
     async fn tick(&mut self) -> Result<bool> {
+        reap_zombie_children();
+
         // Get active workers
         let active_workers = self.registry.list().unwrap_or_default();
         let active_count = active_workers.len() as u32;
@@ -529,6 +531,49 @@ impl Supervisor {
     }
 }
 
+/// Reap any exited direct children of this process (workers spawned by
+/// `Supervisor::spawn_worker`) so they don't accumulate as `<defunct>`
+/// zombies for the lifetime of the supervisor daemon.
+///
+/// Safe to call unconditionally every tick: `needle supervise` only ever
+/// directly spawns worker processes — gate commands and dispatch
+/// subprocesses are spawned by the *worker* process, a separate PID tree —
+/// so a blind `waitpid(-1, ...)` here cannot race with `.wait()` calls
+/// elsewhere in the codebase (`dispatch`/`telemetry`/`canary`), which all
+/// run in different processes. See ADR-010 / GH #12.
+#[cfg(unix)]
+fn reap_zombie_children() {
+    reap_children_matching(-1);
+}
+
+#[cfg(not(unix))]
+fn reap_zombie_children() {}
+
+/// Shared implementation of the `WNOHANG` reap loop, parameterized by which
+/// PID to wait on (`-1` in production, meaning "any direct child" — see
+/// `reap_zombie_children`). Split out so tests can exercise the exact same
+/// loop scoped to a single PID they spawned themselves, instead of calling
+/// the crate-wide `-1` sweep from inside the shared `cargo test --lib`
+/// process, where it could reap an unrelated concurrently-running test's own
+/// child (unit tests across the whole crate share one process/many threads,
+/// unlike separate integration-test binaries).
+#[cfg(unix)]
+fn reap_children_matching(target_pid: libc::pid_t) {
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: waitpid(target_pid, &mut status, WNOHANG) reaps an
+        // already-exited child (any direct child, if target_pid == -1)
+        // without blocking; `status` is a valid stack-local out parameter
+        // for the duration of the call.
+        let pid = unsafe { libc::waitpid(target_pid, &mut status, libc::WNOHANG) };
+        match pid {
+            0 => break,          // No exited children ready to reap right now.
+            n if n < 0 => break, // ECHILD (no children) or another errno; stop for this tick.
+            n => tracing::debug!(reaped_pid = n, "reaped exited worker child"),
+        }
+    }
+}
+
 /// Run the supervisor from the CLI.
 ///
 /// This is the entry point for `needle supervise`.
@@ -615,5 +660,63 @@ mod tests {
     #[test]
     fn supervisor_config_default_has_no_worker_binary_override() {
         assert_eq!(SupervisorConfig::default().worker_binary_path, None);
+    }
+
+    // ── reap_zombie_children tests (ADR-010 / GitHub issue jedarden/NEEDLE#12) ──
+
+    #[cfg(unix)]
+    #[test]
+    fn reap_zombie_children_reaps_an_exited_child() {
+        // Exercises reap_children_matching (the exact loop reap_zombie_children
+        // wraps) scoped to a PID we spawned ourselves — NOT the real
+        // reap_zombie_children()'s `-1` (any child) target. Unit tests across
+        // the whole crate share one process/many threads under `cargo test
+        // --lib`; calling the `-1` sweep here could reap an unrelated,
+        // concurrently-running test's own child out from under it. Scoping to
+        // our own PID exercises the identical waitpid/WNOHANG logic with none
+        // of that collision risk.
+        //
+        // Spawn a real short-lived child directly (no setsid/detach — this
+        // test process is its real parent).
+        let child = std::process::Command::new("true")
+            .spawn()
+            .expect("failed to spawn `true`");
+        let pid = child.id();
+
+        // Wait for it to actually exit (without reaping it — do not call
+        // child.wait() here, that would reap it ourselves and defeat the test).
+        let stat_path = format!("/proc/{pid}/stat");
+        let mut became_zombie = false;
+        for _ in 0..200 {
+            if let Ok(stat) = std::fs::read_to_string(&stat_path) {
+                if let Some(after_comm) = stat.rfind(')') {
+                    if stat[after_comm + 1..].trim_start().starts_with('Z') {
+                        became_zombie = true;
+                        break;
+                    }
+                }
+            } else {
+                // Already reaped by something else, or /proc entry gone —
+                // can't validate the pre-condition; skip rather than false-fail.
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            became_zombie,
+            "child did not reach zombie state before timeout — test precondition not met"
+        );
+
+        reap_children_matching(pid as libc::pid_t);
+
+        // After reaping, /proc/<pid> should no longer exist.
+        assert!(
+            !std::path::Path::new(&stat_path).exists(),
+            "child was not reaped: {stat_path} still exists"
+        );
+
+        // Prevent a double-wait/drop warning: the child is already reaped by
+        // our sweep, so explicitly forget rather than calling child.wait().
+        std::mem::forget(child);
     }
 }

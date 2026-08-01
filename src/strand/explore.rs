@@ -96,7 +96,12 @@ pub struct ExploreStrand {
     store_factory: Arc<dyn StoreFactory>,
     /// Cycles since last workspace re-discovery (for periodic refresh).
     cycles_since_rediscovery: std::sync::atomic::AtomicU32,
-    /// Re-discovery interval (0 = disabled, from config.rediscovery_cycles).
+    /// Re-discovery interval, still parsed from config for backward
+    /// compatibility with existing `.needle.yaml` files, but no longer read:
+    /// re-discovery runs unconditionally every cycle as of bf-6anj4 (the
+    /// legacy throttle this gated is documented, not applied, at the call
+    /// site below).
+    #[allow(dead_code)]
     rediscovery_cycles: u32,
     /// Workspace root for re-discovery (from config.workspace_root).
     workspace_root: PathBuf,
@@ -163,13 +168,15 @@ impl ExploreStrand {
             );
         }
 
-        // Log periodic re-discovery setting (only in auto-discovery mode).
-        if auto_discovery_mode && config.rediscovery_cycles > 0 {
+        // Auto-discovery mode re-discovers workspaces every cycle (bf-6anj4). The
+        // legacy `rediscovery_cycles` throttle is no longer applied; it is logged
+        // here for visibility only.
+        if auto_discovery_mode {
             tracing::info!(
                 worker = %qualified_id,
-                rediscovery_cycles = config.rediscovery_cycles,
-                "Explore will re-discover workspaces every {} cycles",
-                config.rediscovery_cycles
+                configured_rediscovery_cycles = config.rediscovery_cycles,
+                "Explore auto-discovery: workspaces re-discovered every cycle \
+                 (rediscovery_cycles throttle no longer applied)"
             );
         }
 
@@ -326,15 +333,9 @@ impl ExploreStrand {
             return 0;
         }
 
-        // Skip re-discovery if disabled (rediscovery_cycles == 0).
-        if self.rediscovery_cycles == 0 {
-            tracing::debug!(
-                worker = %self.qualified_id,
-                "skipping workspace re-discovery: disabled (rediscovery_cycles = 0)"
-            );
-            return 0;
-        }
-
+        // NOTE: re-discovery is now run every cycle (bf-6anj4). The historical
+        // `rediscovery_cycles == 0` disable path was removed; the only skip that
+        // remains is pinned mode (handled above).
         let previous_count = {
             let workspaces = self.workspaces.lock().unwrap();
             workspaces.len()
@@ -378,6 +379,11 @@ impl ExploreStrand {
     /// they start at different positions in the workspace list.
     ///
     /// Returns 0 if there are no workspaces (defensive, should be handled earlier).
+    ///
+    /// Superseded in production by the per-cycle shuffle in `evaluate()` (bf-6anj4);
+    /// retained (and exercised by unit tests) as documentation of the prior
+    /// static-rotation de-herd model.
+    #[allow(dead_code)]
     fn compute_start_index(&self) -> usize {
         let workspaces = self.workspaces.lock().unwrap();
         if workspaces.is_empty() {
@@ -400,6 +406,10 @@ impl ExploreStrand {
     /// The iterator starts at this worker's computed start index and wraps around,
     /// covering all workspaces exactly once. Each worker with a different qualified_id
     /// will visit workspaces in a different rotation.
+    ///
+    /// Superseded in production by the per-cycle shuffle in `evaluate()` (bf-6anj4);
+    /// retained (and exercised by unit tests) as documentation of the prior model.
+    #[allow(dead_code)]
     fn rotated_workspace_order(&self) -> Vec<PathBuf> {
         // Compute the start index *before* taking the lock below:
         // `compute_start_index()` acquires `self.workspaces` itself, and
@@ -464,7 +474,11 @@ impl super::Strand for ExploreStrand {
         "explore"
     }
 
-    async fn evaluate(&self, _store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
+    async fn evaluate(
+        &self,
+        _store: &dyn BeadStore,
+        _exclusions: &HashSet<BeadId>,
+    ) -> StrandResult {
         use std::time::Instant;
 
         // If disabled, nothing to explore.
@@ -478,25 +492,23 @@ impl super::Strand for ExploreStrand {
             return StrandResult::NoWork;
         }
 
-        // Increment cycle counter and check if re-discovery is due.
-        let cycles = self
+        // Re-discover workspaces every cycle (bf-3peh4 / bf-6anj4). The workspace
+        // list was captured at boot and only refreshed on a throttle, so a newly
+        // created store needed a worker restart to be seen. A plain read_dir over
+        // ~40 entries is cheap, so we refresh unconditionally each cycle;
+        // `rediscover_workspaces` is a no-op in pinned mode. The cycle counter is
+        // still advanced so telemetry/consumers that read it stay meaningful.
+        let _cycle = self
             .cycles_since_rediscovery
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        if self.rediscovery_cycles > 0 && cycles >= self.rediscovery_cycles {
-            // Reset the counter first (in case rediscovery takes time or errors).
-            self.cycles_since_rediscovery
-                .store(0, std::sync::atomic::Ordering::Relaxed);
-
-            // Re-discover workspaces.
-            let added = self.rediscover_workspaces();
-            if added > 0 {
-                tracing::info!(
-                    worker = %self.qualified_id,
-                    added,
-                    "periodic workspace re-discovery found new workspaces"
-                );
-            }
+        let added = self.rediscover_workspaces();
+        if added > 0 {
+            tracing::info!(
+                worker = %self.qualified_id,
+                added,
+                "workspace re-discovery found new workspaces"
+            );
         }
 
         // Empty workspaces (after discovery attempt) means no workspaces found.
@@ -523,21 +535,27 @@ impl super::Strand for ExploreStrand {
             exclude_ids: HashSet::new(),
         };
 
-        // Get this worker's rotated workspace order to de-herd workers
-        let workspaces = self.rotated_workspace_order();
-        let start_index = self.compute_start_index();
-
-        let total_workspaces = {
+        // Shuffle this worker's workspace scan order fresh every cycle (bf-6anj4).
+        // The previous static `compute_start_index` (hash(qualified_id) % N) was
+        // constant for a worker's whole session, so a worker whose fixed index
+        // landed near an always-non-empty (or always-excluded) workspace could
+        // permanently starve later workspaces. A fresh shuffle each cycle de-herds
+        // workers without pinning coverage to a static, identity-derived value.
+        let mut workspaces = {
             let workspaces = self.workspaces.lock().unwrap();
-            workspaces.len()
+            workspaces.clone()
         };
+        {
+            use rand::seq::SliceRandom;
+            workspaces.shuffle(&mut rand::thread_rng());
+        }
+        let total_workspaces = workspaces.len();
 
         tracing::debug!(
             qualified_id = %self.qualified_id,
             total_workspaces,
-            start_index,
-            "worker scan rotation: starting at workspace index {}",
-            start_index
+            "worker scan: shuffled order over {} workspaces this cycle",
+            total_workspaces
         );
 
         // Track scan summary information for telemetry
@@ -546,6 +564,15 @@ impl super::Strand for ExploreStrand {
         let mut workspaces_with_candidates: Vec<String> = Vec::new();
         let mut total_candidates = 0usize;
         let mut exclusion_reasons: HashSet<String> = HashSet::new();
+
+        // Aggregate candidates across ALL workspaces rather than returning on the
+        // first non-empty one (bf-4df1e / bf-47bfm). Previously a single stale or
+        // excluded bead in an early workspace caused an early return; the outer
+        // waterfall then filtered it out and fell through to the next strand,
+        // never scanning the remaining workspaces — silently starving the fleet.
+        // We now scan every workspace, collect all candidates, and rank them
+        // globally before returning.
+        let mut all_candidates: Vec<crate::types::Bead> = Vec::new();
 
         for workspace in &workspaces {
             // Track this workspace as visited
@@ -647,34 +674,14 @@ impl super::Strand for ExploreStrand {
 
                                         if !retry_candidates.is_empty() {
                                             // Found candidates after releasing orphans.
-                                            // Sort and tag them.
-                                            retry_candidates.sort_by(|a, b| {
-                                                a.priority
-                                                    .cmp(&b.priority)
-                                                    .then_with(|| a.created_at.cmp(&b.created_at))
-                                                    .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
-                                            });
-
+                                            // Tag them with their workspace; the global
+                                            // rank happens once, after the full scan.
                                             for bead in &mut retry_candidates {
                                                 bead.workspace = workspace.clone();
                                             }
 
-                                            // Track scan results before returning
-                                            workspaces_with_candidates.push(workspace_str);
+                                            workspaces_with_candidates.push(workspace_str.clone());
                                             total_candidates += retry_candidates.len();
-                                            let duration_ms =
-                                                scan_start.elapsed().as_millis() as u64;
-                                            let _ = self.telemetry.emit(
-                                                crate::telemetry::EventKind::ExploreScanSummary {
-                                                    workspaces_visited,
-                                                    workspaces_with_candidates,
-                                                    total_candidates,
-                                                    exclusion_reasons: exclusion_reasons
-                                                        .into_iter()
-                                                        .collect(),
-                                                    duration_ms,
-                                                },
-                                            );
 
                                             tracing::info!(
                                                 workspace = %workspace.display(),
@@ -682,21 +689,24 @@ impl super::Strand for ExploreStrand {
                                                 "explore found candidates in remote workspace after cross-workspace mend"
                                             );
 
-                                            return StrandResult::BeadFound(retry_candidates);
+                                            // Accumulate instead of returning early (bf-4df1e):
+                                            // keep scanning the remaining workspaces this cycle.
+                                            all_candidates.append(&mut retry_candidates);
+                                        } else {
+                                            // Orphans were released but re-query found no candidates.
+                                            // Do NOT return WorkCreated — the beads will become available
+                                            // in the next natural selection cycle when Pluck re-scans the
+                                            // ready queue. Returning WorkCreated here causes restart loops
+                                            // when released beads don't pass filters (e.g., still blocked).
+                                            tracing::info!(
+                                                workspace = %workspace.display(),
+                                                released,
+                                                "cross-workspace mend released orphans but re-query found no candidates (beads may not pass filters), continuing to next workspace"
+                                            );
+                                            exclusion_reasons.insert(
+                                                "orphans_released_no_candidates".to_string(),
+                                            );
                                         }
-
-                                        // Orphans were released but re-query found no candidates.
-                                        // Do NOT return WorkCreated — the beads will become available
-                                        // in the next natural selection cycle when Pluck re-scans the
-                                        // ready queue. Returning WorkCreated here causes restart loops
-                                        // when released beads don't pass filters (e.g., still blocked).
-                                        tracing::info!(
-                                            workspace = %workspace.display(),
-                                            released,
-                                            "cross-workspace mend released orphans but re-query found no candidates (beads may not pass filters), continuing to next workspace"
-                                        );
-                                        exclusion_reasons
-                                            .insert("orphans_released_no_candidates".to_string());
                                     }
                                     Err(e) => {
                                         tracing::warn!(
@@ -730,34 +740,16 @@ impl super::Strand for ExploreStrand {
                         continue;
                     }
 
-                    // Sort deterministically: priority ASC, created_at ASC, id ASC.
-                    candidates.sort_by(|a, b| {
-                        a.priority
-                            .cmp(&b.priority)
-                            .then_with(|| a.created_at.cmp(&b.created_at))
-                            .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
-                    });
-
-                    // Tag each candidate with the workspace it came from
-                    // so the worker can create the correct bead store.
+                    // Tag each candidate with the workspace it came from so the
+                    // worker can create the correct bead store; the global rank
+                    // happens once, after every workspace has been scanned.
                     for bead in &mut candidates {
                         bead.workspace = workspace.clone();
                     }
 
-                    // Track successful workspace scan
-                    workspaces_with_candidates.push(workspace_str);
+                    // Track successful workspace scan.
+                    workspaces_with_candidates.push(workspace_str.clone());
                     total_candidates += candidates.len();
-                    let duration_ms = scan_start.elapsed().as_millis() as u64;
-
-                    let _ = self
-                        .telemetry
-                        .emit(crate::telemetry::EventKind::ExploreScanSummary {
-                            workspaces_visited,
-                            workspaces_with_candidates,
-                            total_candidates,
-                            exclusion_reasons: exclusion_reasons.into_iter().collect(),
-                            duration_ms,
-                        });
 
                     tracing::info!(
                         workspace = %workspace.display(),
@@ -765,7 +757,9 @@ impl super::Strand for ExploreStrand {
                         "explore found candidates in remote workspace"
                     );
 
-                    return StrandResult::BeadFound(candidates);
+                    // Accumulate instead of returning early (bf-4df1e / bf-47bfm):
+                    // continue scanning all remaining workspaces this cycle.
+                    all_candidates.append(&mut candidates);
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -779,7 +773,7 @@ impl super::Strand for ExploreStrand {
             }
         }
 
-        // No candidates found in any workspace - emit scan summary
+        // Emit the scan summary once, covering every workspace visited this cycle.
         let duration_ms = scan_start.elapsed().as_millis() as u64;
         let _ = self
             .telemetry
@@ -791,13 +785,35 @@ impl super::Strand for ExploreStrand {
                 duration_ms,
             });
 
-        let _ = self
-            .telemetry
-            .emit(crate::telemetry::EventKind::StrandSkipped {
-                strand_name: "explore".to_string(),
-                reason: "no_candidates_in_any_workspace".to_string(),
-            });
-        StrandResult::NoWork
+        if all_candidates.is_empty() {
+            let _ = self
+                .telemetry
+                .emit(crate::telemetry::EventKind::StrandSkipped {
+                    strand_name: "explore".to_string(),
+                    reason: "no_candidates_in_any_workspace".to_string(),
+                });
+            return StrandResult::NoWork;
+        }
+
+        // Rank the aggregated candidates globally: priority ASC, created_at ASC,
+        // id ASC. Returning the full cross-workspace list lets the outer waterfall
+        // skip any race-lost/excluded bead and still pick another, so a single bad
+        // bead in one workspace can no longer block the whole fleet (bf-4df1e).
+        all_candidates.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
+        });
+
+        tracing::info!(
+            worker = %self.qualified_id,
+            candidates = all_candidates.len(),
+            workspaces = total_workspaces,
+            "explore aggregated candidates across all workspaces this cycle"
+        );
+
+        StrandResult::BeadFound(all_candidates)
     }
 }
 
@@ -882,6 +898,9 @@ mod tests {
         }
 
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
         async fn flush(&self) -> Result<()> {
@@ -1495,6 +1514,85 @@ mod tests {
         }
     }
 
+    /// Mock factory returning a valid, claimable candidate for BOTH workspaces,
+    /// used to prove explore aggregates across all workspaces.
+    struct BothValidMockFactory {
+        workspace1: PathBuf,
+        workspace2: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for BothValidMockFactory {
+        async fn create_store(
+            &self,
+            workspace: &Path,
+        ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            if workspace == self.workspace1 || workspace == self.workspace2 {
+                Ok(Arc::new(ValidBeadStore::new(workspace.to_path_buf())))
+            } else {
+                Err(anyhow::anyhow!(
+                    "unexpected workspace: {}",
+                    workspace.display()
+                ))
+            }
+        }
+    }
+
+    /// Regression for bf-4df1e / bf-47bfm: when several workspaces each have a
+    /// claimable candidate, explore must return candidates from ALL of them in a
+    /// single cycle (aggregate) rather than returning on the first non-empty
+    /// workspace. Previously a first-match return let a race-lost/excluded early
+    /// bead (caught by the outer waterfall but not by explore's own filter) stall
+    /// the whole fleet, since the remaining workspaces were never scanned.
+    #[tokio::test]
+    async fn aggregates_candidates_across_all_workspaces() {
+        let temp_root = tempfile::tempdir().unwrap();
+        let workspace1 = temp_root.path().join("workspace1");
+        let workspace2 = temp_root.path().join("workspace2");
+        let home = PathBuf::from("/home/test");
+
+        fs::create_dir_all(&workspace1).unwrap();
+        fs::create_dir_all(&workspace2).unwrap();
+        fs::create_dir(workspace1.join(".beads")).unwrap();
+        fs::create_dir(workspace2.join(".beads")).unwrap();
+
+        let factory = Arc::new(BothValidMockFactory {
+            workspace1: workspace1.clone(),
+            workspace2: workspace2.clone(),
+        });
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new_with_store_factory(
+            vec![workspace1.clone(), workspace2.clone()],
+            home,
+            registry,
+            telemetry,
+            "test-worker".to_string(),
+            factory,
+        );
+
+        let store = DummyStore;
+        let StrandResult::BeadFound(candidates) = strand.evaluate(&store, &HashSet::new()).await
+        else {
+            panic!("expected BeadFound with aggregated candidates from both workspaces");
+        };
+
+        assert_eq!(
+            candidates.len(),
+            2,
+            "explore must aggregate the candidate from BOTH workspaces, not stop at the first"
+        );
+        let scanned: HashSet<PathBuf> = candidates.iter().map(|b| b.workspace.clone()).collect();
+        assert!(
+            scanned.contains(&workspace1) && scanned.contains(&workspace2),
+            "aggregated candidates should include both workspace1 and workspace2, got {:?}",
+            scanned
+        );
+    }
+
     /// Unit test proving the explore strand deadlock scenario.
     ///
     /// DEADLOCK SCENARIO (from bf-1d64q):
@@ -2038,6 +2136,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn flush(&self) -> Result<()> {
             Ok(())
         }
@@ -2158,6 +2259,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn flush(&self) -> Result<()> {
             Ok(())
         }
@@ -2260,6 +2364,9 @@ mod tests {
             anyhow::bail!("not implemented")
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
         async fn flush(&self) -> Result<()> {
@@ -2404,6 +2511,9 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
         async fn flush(&self) -> Result<()> {
             Ok(())
         }
@@ -2492,6 +2602,9 @@ mod tests {
             anyhow::bail!("not implemented")
         }
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
         async fn flush(&self) -> Result<()> {
@@ -3281,12 +3394,12 @@ mod tests {
         );
     }
 
-    /// Test: Re-discovery with rediscovery_cycles = 0 is disabled.
-    ///
-    /// When rediscovery_cycles is 0, periodic re-discovery should never run,
-    /// even in auto-discovery mode.
+    /// Test: Re-discovery runs every cycle regardless of `rediscovery_cycles`
+    /// (bf-6anj4). The legacy throttle — including the `rediscovery_cycles == 0`
+    /// disable path — was removed, so a workspace created after boot is picked up
+    /// on the next cycle even when the config value is 0.
     #[tokio::test]
-    async fn rediscovery_disabled_when_cycles_is_zero() {
+    async fn rediscovery_runs_every_cycle_regardless_of_config() {
         let root = tempfile::tempdir().unwrap();
 
         // Create initial workspace
@@ -3294,12 +3407,12 @@ mod tests {
         fs::create_dir(&ws1).unwrap();
         fs::create_dir(ws1.join(".beads")).unwrap();
 
-        // Configure with rediscovery_cycles = 0 (disabled)
+        // rediscovery_cycles = 0 used to DISABLE re-discovery; it is now ignored.
         let config = ExploreConfig {
             enabled: true,
             workspaces: vec![], // Auto-discovery mode
             workspace_root: root.path().to_path_buf(),
-            rediscovery_cycles: 0, // DISABLED
+            rediscovery_cycles: 0,
             starvation_threshold_minutes: 15,
         };
 
@@ -3313,7 +3426,7 @@ mod tests {
             home,
             registry,
             telemetry,
-            "test-worker-norediscovery".to_string(),
+            "test-worker-everycycle".to_string(),
         );
 
         // Initial state
@@ -3323,30 +3436,27 @@ mod tests {
             "initial discovery should find 1 workspace"
         );
 
-        // Create a second workspace
+        // A new repo appears after construction.
         let ws2 = root.path().join("workspace2");
         fs::create_dir(&ws2).unwrap();
         fs::create_dir(ws2.join(".beads")).unwrap();
 
-        // Run multiple cycles (rediscovery is disabled)
+        // One cycle is enough — re-discovery runs unconditionally now.
         let store = DummyStore;
-        for _ in 0..5 {
-            let _ = strand.evaluate(&store, &HashSet::new()).await;
-        }
+        let _ = strand.evaluate(&store, &HashSet::new()).await;
 
-        // With rediscovery disabled, new workspace should NOT be discovered
         assert_eq!(
             strand.workspaces.lock().unwrap().len(),
-            1,
-            "with rediscovery disabled, new workspace should not be discovered"
+            2,
+            "new workspace should be discovered every cycle even with rediscovery_cycles = 0"
         );
         assert!(
             strand.workspaces.lock().unwrap().contains(&ws1),
             "original workspace should still be in list"
         );
         assert!(
-            !strand.workspaces.lock().unwrap().contains(&ws2),
-            "new workspace should NOT be discovered when rediscovery is disabled"
+            strand.workspaces.lock().unwrap().contains(&ws2),
+            "new workspace should be discovered when rediscovery_cycles = 0 (throttle removed)"
         );
     }
 }
