@@ -945,6 +945,12 @@ mod tests {
         bead
     }
 
+    fn make_bead_with_status(id: &str, priority: u8, status: BeadStatus) -> Bead {
+        let mut bead = make_bead(id, priority, "2026-01-01 00:00:00");
+        bead.status = status;
+        bead
+    }
+
     use super::super::Strand;
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -1609,6 +1615,92 @@ mod tests {
                 assert!(reason_strings.contains(&"assignee:worker-1"));
                 assert!(reason_strings.contains(&"assignee:worker-2"));
                 assert!(reason_strings.contains(&"assignee:worker-3"));
+            } else {
+                panic!("candidate_exclusion_reasons should be an array");
+            }
+        } else {
+            panic!("candidate_exclusion_reasons field missing from starvation event");
+        }
+    }
+
+    #[tokio::test]
+    async fn starvation_when_all_beads_in_progress_emits_telemetry() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+
+        // All beads are InProgress - being processed by other workers (no executor available)
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_status("in-progress-1", 1, BeadStatus::InProgress),
+                make_bead_with_status("in-progress-2", 2, BeadStatus::InProgress),
+                make_bead_with_status("in-progress-3", 3, BeadStatus::InProgress),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        // Should return NoWork since all beads are InProgress
+        match result {
+            StrandResult::NoWork => {
+                // Expected - all beads are InProgress
+            }
+            other => panic!("expected NoWork when all beads are InProgress, got: {other:?}"),
+        }
+
+        // Wait for telemetry events to be flushed
+        helper.sync().await;
+
+        // Verify starvation event was emitted
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+        // Get the starvation event and verify its contents
+        let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
+        assert_eq!(
+            starvation_events.len(),
+            1,
+            "should emit exactly one starvation event"
+        );
+
+        let event = &starvation_events[0];
+
+        // Verify workspace - should be "/tmp/test"
+        if let Some(workspace) = event.data.get("workspace") {
+            assert_eq!(workspace.as_str(), Some("/tmp/test"));
+        } else {
+            panic!("workspace field missing from starvation event");
+        }
+
+        // Verify open_count - should be 3 (all beads returned by store)
+        if let Some(open_count) = event.data.get("open_count") {
+            assert_eq!(open_count.as_u64(), Some(3));
+        } else {
+            panic!("open_count field missing from starvation event");
+        }
+
+        // Verify excluded_count - should be 3 (all excluded due to InProgress status)
+        if let Some(excluded_count) = event.data.get("excluded_count") {
+            assert_eq!(excluded_count.as_u64(), Some(3));
+        } else {
+            panic!("excluded_count field missing from starvation event");
+        }
+
+        // Verify exclusion reasons - should include status:in_progress for each bead
+        if let Some(reasons) = event.data.get("candidate_exclusion_reasons") {
+            if let Some(reasons_array) = reasons.as_array() {
+                assert_eq!(reasons_array.len(), 3, "should have 3 exclusion reasons");
+
+                let reason_strings: Vec<&str> =
+                    reasons_array.iter().filter_map(|r| r.as_str()).collect();
+
+                // Should exclude all 3 beads by InProgress status
+                assert_eq!(
+                    reason_strings.iter().filter(|r| **r == "status:in_progress").count(),
+                    3,
+                    "all 3 beads should be excluded with status:in_progress reason"
+                );
             } else {
                 panic!("candidate_exclusion_reasons should be an array");
             }
