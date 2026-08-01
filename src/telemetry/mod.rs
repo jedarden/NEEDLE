@@ -33,7 +33,10 @@ pub use otlp::{create_tracing_layer, OtlpSink};
 
 // ─── Test Utilities ────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+/// Test helper infrastructure for capturing and inspecting telemetry events.
+///
+/// This module provides `MemorySink` for collecting events in memory and
+/// `TestHelper` for convenient event querying and assertions in tests.
 pub mod test_utils;
 
 // ─── TelemetryEvent ──────────────────────────────────────────────────────────

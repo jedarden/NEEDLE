@@ -1,13 +1,16 @@
 //! Test utilities for the telemetry module.
 
+#[cfg(any(test, feature = "integration"))]
 use crate::telemetry::{Result, Sink, Telemetry, TelemetryEvent};
 use std::sync::{Arc, Mutex};
 
 /// In-memory sink for testing — collects events via a shared Vec.
+#[cfg(any(test, feature = "integration"))]
 pub struct MemorySink {
     events: Arc<Mutex<Vec<TelemetryEvent>>>,
 }
 
+#[cfg(any(test, feature = "integration"))]
 impl MemorySink {
     pub fn new() -> (Self, Arc<Mutex<Vec<TelemetryEvent>>>) {
         let events = Arc::new(Mutex::new(Vec::new()));
@@ -20,6 +23,7 @@ impl MemorySink {
     }
 }
 
+#[cfg(any(test, feature = "integration"))]
 impl Sink for MemorySink {
     fn accept(&self, event: &TelemetryEvent) -> Result<()> {
         self.events.lock().unwrap().push(event.clone());
@@ -55,6 +59,7 @@ impl Sink for MemorySink {
 /// helper.assert_event_emitted("worker.started");
 /// helper.assert_event_count("worker.started", 1);
 /// ```
+#[cfg(any(test, feature = "integration"))]
 pub struct TestHelper {
     /// The telemetry emitter configured with a memory sink.
     telemetry: Telemetry,
@@ -62,6 +67,7 @@ pub struct TestHelper {
     events: Arc<Mutex<Vec<TelemetryEvent>>>,
 }
 
+#[cfg(any(test, feature = "integration"))]
 impl TestHelper {
     /// Create a new test helper with a memory-backed telemetry emitter.
     ///
