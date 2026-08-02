@@ -70,3 +70,5 @@
 {"last_strand":null,"state":"idle","ts":"2026-08-01T23:55:29.786264735+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-08-01T23:55:29.798832151+00:00","worker":"state-test"}
 {"last_strand":null,"state":"idle","ts":"2026-08-01T23:55:31.353258113+00:00","worker":"cross-ws-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-02T00:58:13.451956599+00:00","worker":"test-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-08-02T00:58:23.658148972+00:00","worker":"test-worker"}
