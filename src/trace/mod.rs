@@ -159,14 +159,24 @@ impl TraceCapture {
     /// Write stdout to `stdout.txt`.
     ///
     /// Content is sanitized before writing if a sanitizer is configured.
+    /// Write errors are logged with tracing::warn and returned in the Result.
     pub fn write_stdout(&self, stdout: &str) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
         let content = self.sanitize(stdout);
         let path = self.trace_dir.join(STDOUT_FILE);
-        std::fs::write(&path, content.as_bytes())
-            .with_context(|| format!("failed to write stdout trace: {}", path.display()))
+        match std::fs::write(&path, content.as_bytes()) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to write stdout trace"
+                );
+                Err(e).with_context(|| format!("failed to write stdout trace: {}", path.display()))
+            }
+        }
     }
 
     /// Write stderr to `stderr.txt`.
@@ -667,6 +677,35 @@ mod tests {
 
         capture.delete().unwrap();
         assert!(!capture.trace_dir().exists());
+    }
+
+    #[test]
+    fn trace_capture_write_stdout_handles_errors_gracefully() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+
+        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+
+        // Make the trace directory read-only to simulate a write error.
+        let mut perms = std::fs::metadata(capture.trace_dir())
+            .unwrap()
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(capture.trace_dir(), perms.clone()).unwrap();
+
+        // Attempting to write stdout should return an error gracefully.
+        let result = capture.write_stdout("test stdout");
+
+        // Verify that an error is returned (not a panic).
+        assert!(result.is_err());
+
+        // Verify the error has appropriate context.
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("failed to write stdout trace"));
+
+        // Clean up: restore write permissions for directory removal.
+        perms.set_readonly(false);
+        std::fs::set_permissions(capture.trace_dir(), perms).unwrap();
     }
 
     #[test]
