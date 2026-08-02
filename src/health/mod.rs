@@ -1169,6 +1169,24 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// Serialises the tests that mutate `NEEDLE_SUPERVISOR_SOCKET`.
+    ///
+    /// `std::env::set_var`/`remove_var` mutate process-global state while the
+    /// test harness runs tests on parallel threads, so one test's `remove_var`
+    /// could land between another's `set_var` and its assertion. Five tests
+    /// share this variable — and `check_supervisor_socket_default_path`
+    /// additionally requires it to be *unset* — which made
+    /// `check_supervisor_socket_exists_returns_true` fail intermittently.
+    static SUPERVISOR_SOCKET_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Take the env lock, tolerating poisoning so one panicking test does not
+    /// cascade into failures in every other test that touches the variable.
+    fn lock_supervisor_socket_env() -> std::sync::MutexGuard<'static, ()> {
+        SUPERVISOR_SOCKET_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn test_config(heartbeat_dir: &Path) -> Config {
         let mut config = Config::default();
         config.workspace.home = heartbeat_dir
@@ -2517,6 +2535,7 @@ mod tests {
     /// Test that check_supervisor_socket returns true when socket exists.
     #[test]
     fn check_supervisor_socket_exists_returns_true() {
+        let _env_guard = lock_supervisor_socket_env();
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("test-supervisor.sock");
 
@@ -2550,6 +2569,7 @@ mod tests {
     /// Test that check_supervisor_socket returns false when socket doesn't exist.
     #[test]
     fn check_supervisor_socket_missing_returns_false() {
+        let _env_guard = lock_supervisor_socket_env();
         // Set environment variable to a non-existent path
         std::env::set_var("NEEDLE_SUPERVISOR_SOCKET", "/nonexistent/socket.sock");
 
@@ -2564,6 +2584,7 @@ mod tests {
     /// Test that check_supervisor_socket uses default path when env var not set.
     #[test]
     fn check_supervisor_socket_default_path() {
+        let _env_guard = lock_supervisor_socket_env();
         // Don't set NEEDLE_SUPERVISOR_SOCKET - should use default /tmp/needle-supervisor.sock
         // This likely won't exist in test environment, so we expect false
         let detected = HealthMonitor::check_supervisor_socket().unwrap();
@@ -2604,6 +2625,7 @@ mod tests {
     /// Test that detect_supervisor_direct returns true when socket is present.
     #[test]
     fn detect_supervisor_direct_with_socket_returns_true() {
+        let _env_guard = lock_supervisor_socket_env();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
@@ -2643,6 +2665,7 @@ mod tests {
     /// Test that detect_supervisor_direct returns false when no supervisor detected.
     #[test]
     fn detect_supervisor_direct_no_supervisor_returns_false() {
+        let _env_guard = lock_supervisor_socket_env();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();

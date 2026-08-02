@@ -3001,7 +3001,12 @@ fn parse_and_classify_integration() {
         ("E0392", ErrorCategory::Generic),
         ("E0276", ErrorCategory::Macro),
         ("E0425", ErrorCategory::DeadCode),
-        ("E9999", ErrorCategory::Unknown),
+        // Must be a well-formed but unmapped code. `parse_error_code` only
+        // accepts the E0xxx form that rustc actually emits — see
+        // `parse_error_code_invalid_format`, which asserts E1000/E2000 are
+        // rejected for exactly that reason. "E9999" therefore cannot parse,
+        // and asserting it does contradicted that test outright.
+        ("E0000", ErrorCategory::Unknown),
     ];
 
     for (code, expected_category) in test_cases {
