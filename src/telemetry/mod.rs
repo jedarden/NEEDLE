@@ -750,6 +750,18 @@ pub enum EventKind {
         flushed_batches: u64,
         remaining_batches: u64,
     },
+
+    // ── Structured logging ──
+    Log {
+        /// Phase identifier (e.g., "dispatch", "claim", "outcome")
+        phase: String,
+        /// Structured context data as JSON value
+        context: serde_json::Value,
+        /// Log level (e.g., "info", "warn", "error", "debug")
+        level: String,
+        /// Optional bead context when relevant
+        bead_id: Option<BeadId>,
+    },
 }
 
 impl EventKind {
@@ -889,6 +901,7 @@ impl EventKind {
             EventKind::SinkError { .. } => "telemetry.sink_error",
             EventKind::OtlpDropped { .. } => "telemetry.otlp.dropped",
             EventKind::OtlpShutdownTimeout { .. } => "telemetry.otlp.shutdown_timeout",
+            EventKind::Log { .. } => "log.entry",
         }
     }
 
@@ -1028,6 +1041,7 @@ impl EventKind {
             EventKind::ExploreStarvationAlarm { .. } => None,
             EventKind::SpawnPathModifiedInPlace { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
+            EventKind::Log { bead_id, .. } => bead_id.clone(),
         }
     }
 
@@ -2097,6 +2111,22 @@ impl EventKind {
                 "modification_type": modification_type,
                 "description": description,
             }),
+            EventKind::Log {
+                phase,
+                context,
+                level,
+                bead_id,
+            } => {
+                let mut data = serde_json::json!({
+                    "phase": phase,
+                    "context": context,
+                    "level": level,
+                });
+                if let Some(bid) = bead_id {
+                    data["bead_id"] = serde_json::Value::String(bid.to_string());
+                }
+                data
+            }
         }
     }
 
@@ -2238,7 +2268,8 @@ impl EventKind {
             | EventKind::MendAssigneeClearFailed { .. }
             | EventKind::WorkerLaunchDeferred { .. }
             | EventKind::BeadQuarantined { .. }
-            | EventKind::SpawnPathModifiedInPlace { .. } => None,
+            | EventKind::SpawnPathModifiedInPlace { .. }
+            | EventKind::Log { .. } => None,
         }
     }
 }
@@ -3789,6 +3820,150 @@ impl Telemetry {
             })
         })
     }
+
+    // ─── Structured logging helpers ───────────────────────────────────────────────
+
+    /// Emit a structured log event.
+    ///
+    /// This is a convenience method for logging with explicit phase, level, and context.
+    /// The event is emitted through the telemetry system as a `log.entry` event.
+    ///
+    /// # Arguments
+    ///
+    /// * `phase` - The phase identifier (e.g., "dispatch", "claim", "outcome")
+    /// * `level` - Log level (e.g., "info", "warn", "error", "debug")
+    /// * `context` - Structured context data as a JSON value
+    /// * `bead_id` - Optional bead context when relevant
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use needle::telemetry::Telemetry;
+    /// use serde_json::json;
+    ///
+    /// # let telemetry: Telemetry = unimplemented!();
+    /// telemetry.log(
+    ///     "dispatch",
+    ///     "info",
+    ///     json!({ "agent": "claude", "prompt_length": 1234 }),
+    ///     Some("needle-123".into()),
+    /// ).ok();
+    /// ```
+    pub fn log(
+        &self,
+        phase: impl Into<String>,
+        level: impl Into<String>,
+        context: serde_json::Value,
+        bead_id: Option<BeadId>,
+    ) -> Result<()> {
+        self.emit(EventKind::Log {
+            phase: phase.into(),
+            level: level.into(),
+            context,
+            bead_id,
+        })
+    }
+
+    /// Emit an info-level log event.
+    ///
+    /// Convenience method for logging at "info" level.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use needle::telemetry::Telemetry;
+    /// # use serde_json::json;
+    /// # let telemetry: Telemetry = unimplemented!();
+    /// telemetry.log_info("dispatch", json!({ "status": "started" })).ok();
+    /// ```
+    pub fn log_info(
+        &self,
+        phase: impl Into<String>,
+        context: serde_json::Value,
+    ) -> Result<()> {
+        self.log(phase, "info", context, None)
+    }
+
+    /// Emit an info-level log event with bead context.
+    ///
+    /// Convenience method for logging at "info" level with bead association.
+    pub fn log_info_with_bead(
+        &self,
+        phase: impl Into<String>,
+        context: serde_json::Value,
+        bead_id: &BeadId,
+    ) -> Result<()> {
+        self.log(phase, "info", context, Some(bead_id.clone()))
+    }
+
+    /// Emit a warn-level log event.
+    ///
+    /// Convenience method for logging at "warn" level.
+    pub fn log_warn(
+        &self,
+        phase: impl Into<String>,
+        context: serde_json::Value,
+    ) -> Result<()> {
+        self.log(phase, "warn", context, None)
+    }
+
+    /// Emit a warn-level log event with bead context.
+    ///
+    /// Convenience method for logging at "warn" level with bead association.
+    pub fn log_warn_with_bead(
+        &self,
+        phase: impl Into<String>,
+        context: serde_json::Value,
+        bead_id: &BeadId,
+    ) -> Result<()> {
+        self.log(phase, "warn", context, Some(bead_id.clone()))
+    }
+
+    /// Emit an error-level log event.
+    ///
+    /// Convenience method for logging at "error" level.
+    pub fn log_error(
+        &self,
+        phase: impl Into<String>,
+        context: serde_json::Value,
+    ) -> Result<()> {
+        self.log(phase, "error", context, None)
+    }
+
+    /// Emit an error-level log event with bead context.
+    ///
+    /// Convenience method for logging at "error" level with bead association.
+    pub fn log_error_with_bead(
+        &self,
+        phase: impl Into<String>,
+        context: serde_json::Value,
+        bead_id: &BeadId,
+    ) -> Result<()> {
+        self.log(phase, "error", context, Some(bead_id.clone()))
+    }
+
+    /// Emit a debug-level log event.
+    ///
+    /// Convenience method for logging at "debug" level.
+    pub fn log_debug(
+        &self,
+        phase: impl Into<String>,
+        context: serde_json::Value,
+    ) -> Result<()> {
+        self.log(phase, "debug", context, None)
+    }
+
+    /// Emit a debug-level log event with bead context.
+    ///
+    /// Convenience method for logging at "debug" level with bead association.
+    pub fn log_debug_with_bead(
+        &self,
+        phase: impl Into<String>,
+        context: serde_json::Value,
+        bead_id: &BeadId,
+    ) -> Result<()> {
+        self.log(phase, "debug", context, Some(bead_id.clone()))
+    }
 }
 
 // ─── Log querying ────────────────────────────────────────────────────────────
@@ -4182,6 +4357,150 @@ pub fn compute_cost_by_workspace(events: &[TelemetryEvent]) -> Vec<WorkspaceCost
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     result
+}
+
+// ─── Structured logging macros ─────────────────────────────────────────────────
+
+/// Emit a structured log event with the specified level.
+///
+/// This macro provides a convenient way to log structured events with the
+/// telemetry system. It automatically serializes the context to JSON and
+/// emits it through the provided telemetry instance.
+///
+/// # Arguments
+///
+/// * `$telemetry` - The telemetry instance to emit through
+/// * `$level` - Log level: "info", "warn", "error", or "debug"
+/// * `$phase` - Phase identifier (e.g., "dispatch", "claim")
+/// * `$context` - JSON object with context data
+/// * `$bead_id` - Optional bead ID
+///
+/// # Example
+///
+/// ```no_run
+/// # use needle::telemetry::Telemetry;
+/// # use needle::log;
+/// # use needle::types::BeadId;
+/// # let telemetry: Telemetry = unimplemented!();
+/// // Basic info log
+/// log!(telemetry, "info", "dispatch", {"status": "started"});
+///
+/// // Log with bead context
+/// let bead_id = BeadId::from("needle-123");
+/// log!(telemetry, "info", "claim", {"attempt": 1}, Some(bead_id));
+///
+/// // Error log with context
+/// log!(telemetry, "error", "outcome", {
+///     "exit_code": 1,
+///     "reason": "timeout"
+/// }, None::<BeadId>);
+/// ```
+#[macro_export]
+macro_rules! log {
+    ($telemetry:expr, $level:expr, $phase:expr, {$($key:ident: $value:expr),* $(,)?}) => {
+        $telemetry.log(
+            $phase,
+            $level,
+            $crate::serde_json::json!({ $($key: $value),* }),
+            None,
+        )
+    };
+    ($telemetry:expr, $level:expr, $phase:expr, {$($key:ident: $value:expr),* $(,)?}, $bead_id:expr) => {
+        $telemetry.log(
+            $phase,
+            $level,
+            $crate::serde_json::json!({ $($key: $value),* }),
+            $bead_id,
+        )
+    };
+}
+
+/// Emit an info-level structured log event.
+///
+/// Convenience macro for logging at "info" level.
+///
+/// # Example
+///
+/// ```no_run
+/// # use needle::telemetry::Telemetry;
+/// # use needle::log_info;
+/// # let telemetry: Telemetry = unimplemented!();
+/// log_info!(telemetry, "dispatch", {"status": "started", "agent": "claude"});
+/// ```
+#[macro_export]
+macro_rules! log_info {
+    ($telemetry:expr, $phase:expr, {$($key:ident: $value:expr),* $(,)?}) => {
+        $telemetry.log_info($phase, $crate::serde_json::json!({ $($key: $value),* }))
+    };
+    ($telemetry:expr, $phase:expr, {$($key:ident: $value:expr),* $(,)?}, $bead_id:expr) => {
+        $telemetry.log_info_with_bead($phase, $crate::serde_json::json!({ $($key: $value),* }), &$bead_id)
+    };
+}
+
+/// Emit a warn-level structured log event.
+///
+/// Convenience macro for logging at "warn" level.
+///
+/// # Example
+///
+/// ```no_run
+/// # use needle::telemetry::Telemetry;
+/// # use needle::log_warn;
+/// # let telemetry: Telemetry = unimplemented!();
+/// log_warn!(telemetry, "claim", {"reason": "race_lost", "attempts": 3});
+/// ```
+#[macro_export]
+macro_rules! log_warn {
+    ($telemetry:expr, $phase:expr, {$($key:ident: $value:expr),* $(,)?}) => {
+        $telemetry.log_warn($phase, $crate::serde_json::json!({ $($key: $value),* }))
+    };
+    ($telemetry:expr, $phase:expr, {$($key:ident: $value:expr),* $(,)?}, $bead_id:expr) => {
+        $telemetry.log_warn_with_bead($phase, $crate::serde_json::json!({ $($key: $value),* }), &$bead_id)
+    };
+}
+
+/// Emit an error-level structured log event.
+///
+/// Convenience macro for logging at "error" level.
+///
+/// # Example
+///
+/// ```no_run
+/// # use needle::telemetry::Telemetry;
+/// # use needle::log_error;
+/// # let telemetry: Telemetry = unimplemented!();
+/// log_error!(telemetry, "outcome", {"exit_code": 1, "error": "timeout"});
+/// ```
+#[macro_export]
+macro_rules! log_error {
+    ($telemetry:expr, $phase:expr, {$($key:ident: $value:expr),* $(,)?}) => {
+        $telemetry.log_error($phase, $crate::serde_json::json!({ $($key: $value),* }))
+    };
+    ($telemetry:expr, $phase:expr, {$($key:ident: $value:expr),* $(,)?}, $bead_id:expr) => {
+        $telemetry.log_error_with_bead($phase, $crate::serde_json::json!({ $($key: $value),* }), &$bead_id)
+    };
+}
+
+/// Emit a debug-level structured log event.
+///
+/// Convenience macro for logging at "debug" level.
+///
+/// # Example
+///
+/// ```no_run
+/// # use needle::telemetry::Telemetry;
+/// # use needle::log_debug;
+/// # let telemetry: Telemetry = unimplemented!();
+/// log_debug!(telemetry, "routing", {"model": "sonnet-4", "confidence": 0.95});
+/// ```
+#[macro_export]
+macro_rules! log_debug {
+    ($telemetry:expr, $phase:expr, {$($key:ident: $value:expr),* $(,)?}) => {
+        $telemetry.log_debug($phase, $crate::serde_json::json!({ $($key: $value),* }))
+    };
+    ($telemetry:expr, $phase:expr, {$($key:ident: $value:expr),* $(,)?}, $bead_id:expr) => {
+        $telemetry.log_debug_with_bead($phase, $crate::serde_json::json!({ $($key: $value),* }), &$bead_id)
+    };
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────
