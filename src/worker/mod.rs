@@ -421,9 +421,25 @@ impl Worker {
         booting_emitted: bool,
     ) -> Self {
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);
+
+        // Phase: Strand setup
+        let _ = telemetry.emit(EventKind::InitStepStarted {
+            step: "strand_setup".to_string(),
+        });
+        let strand_start = Instant::now();
         let strand_registry = Registry::default_location(&config.workspace.home);
         let strands =
             StrandRunner::from_config(&config, &qualified_id, strand_registry, telemetry.clone());
+        let _ = telemetry.emit(EventKind::InitStepCompleted {
+            step: "strand_setup".to_string(),
+            duration_ms: strand_start.elapsed().as_millis() as u64,
+        });
+
+        // Phase: Claimer creation
+        let _ = telemetry.emit(EventKind::InitStepStarted {
+            step: "claimer_creation".to_string(),
+        });
+        let claimer_start = Instant::now();
         let claimer = Claimer::new(
             store.clone(),
             std::path::PathBuf::from("/tmp"),
@@ -431,6 +447,16 @@ impl Worker {
             100,
             telemetry.clone(),
         );
+        let _ = telemetry.emit(EventKind::InitStepCompleted {
+            step: "claimer_creation".to_string(),
+            duration_ms: claimer_start.elapsed().as_millis() as u64,
+        });
+
+        // Phase: PromptBuilder setup
+        let _ = telemetry.emit(EventKind::InitStepStarted {
+            step: "prompt_builder_setup".to_string(),
+        });
+        let prompt_start = Instant::now();
         let prompt_builder = PromptBuilder::with_workspace(
             &config.prompt,
             &config.workspace.default,
@@ -444,6 +470,16 @@ impl Worker {
             &config.workspace.labels,
         )
         .with_global_learnings(&config.strands.learning.global_learnings_file);
+        let _ = telemetry.emit(EventKind::InitStepCompleted {
+            step: "prompt_builder_setup".to_string(),
+            duration_ms: prompt_start.elapsed().as_millis() as u64,
+        });
+
+        // Phase: Dispatcher setup (adapter loading)
+        let _ = telemetry.emit(EventKind::InitStepStarted {
+            step: "dispatcher_setup".to_string(),
+        });
+        let dispatcher_start = Instant::now();
         let dispatcher = match Dispatcher::new(&config, telemetry.clone()) {
             Ok(d) => d,
             Err(e) => {
@@ -455,7 +491,21 @@ impl Worker {
                 Dispatcher::with_adapters(builtins, telemetry.clone(), config.agent.timeout)
             }
         };
+        let _ = telemetry.emit(EventKind::InitStepCompleted {
+            step: "dispatcher_setup".to_string(),
+            duration_ms: dispatcher_start.elapsed().as_millis() as u64,
+        });
+
+        // Phase: OutcomeHandler creation
+        let _ = telemetry.emit(EventKind::InitStepStarted {
+            step: "outcome_handler_creation".to_string(),
+        });
+        let outcome_start = Instant::now();
         let outcome_handler = OutcomeHandler::new(config.clone(), telemetry.clone());
+        let _ = telemetry.emit(EventKind::InitStepCompleted {
+            step: "outcome_handler_creation".to_string(),
+            duration_ms: outcome_start.elapsed().as_millis() as u64,
+        });
 
         // Create the shutdown flag BEFORE creating HealthMonitor so we can share it.
         // This ensures that when the heartbeat emitter's circuit breaker fires,
@@ -463,21 +513,55 @@ impl Worker {
         // the main worker loop to gracefully stop with worker.stopped telemetry.
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        // Phase: HealthMonitor setup
+        let _ = telemetry.emit(EventKind::InitStepStarted {
+            step: "health_monitor_setup".to_string(),
+        });
+        let health_start = Instant::now();
         let health = HealthMonitor::new(
             config.clone(),
             worker_name.clone(),
             telemetry.clone(),
             Some(shutdown.clone()),
         );
+        let _ = telemetry.emit(EventKind::InitStepCompleted {
+            step: "health_monitor_setup".to_string(),
+            duration_ms: health_start.elapsed().as_millis() as u64,
+        });
+
+        // Phase: RateLimiter setup
+        let _ = telemetry.emit(EventKind::InitStepStarted {
+            step: "rate_limiter_setup".to_string(),
+        });
+        let rate_limiter_start = Instant::now();
         let registry = Registry::default_location(&config.workspace.home);
         let rate_limiter =
             RateLimiter::new(config.limits.clone(), &config.workspace.home.join("state"));
+        let _ = telemetry.emit(EventKind::InitStepCompleted {
+            step: "rate_limiter_setup".to_string(),
+            duration_ms: rate_limiter_start.elapsed().as_millis() as u64,
+        });
+
+        // Phase: MitosisEvaluator setup
+        let _ = telemetry.emit(EventKind::InitStepStarted {
+            step: "mitosis_evaluator_setup".to_string(),
+        });
+        let mitosis_start = Instant::now();
         let mitosis_evaluator = MitosisEvaluator::new(
             config.strands.mitosis.clone(),
             telemetry.clone(),
             std::path::PathBuf::from("/tmp"),
         );
+        let _ = telemetry.emit(EventKind::InitStepCompleted {
+            step: "mitosis_evaluator_setup".to_string(),
+            duration_ms: mitosis_start.elapsed().as_millis() as u64,
+        });
 
+        // Phase: Registry state restoration
+        let _ = telemetry.emit(EventKind::InitStepStarted {
+            step: "registry_state_restoration".to_string(),
+        });
+        let registry_start = Instant::now();
         // Restore beads_processed from registry if this worker was previously registered
         // (e.g., hot-reload resume). New workers start at 0.
         // Match by qualified identity ({adapter}-{worker_id}).
@@ -488,6 +572,10 @@ impl Worker {
             .and_then(|workers| workers.into_iter().find(|w| w.id == qualified_id))
             .map(|entry| entry.beads_processed)
             .unwrap_or(0);
+        let _ = telemetry.emit(EventKind::InitStepCompleted {
+            step: "registry_state_restoration".to_string(),
+            duration_ms: registry_start.elapsed().as_millis() as u64,
+        });
 
         let default_workspace = config.workspace.default.clone();
 
