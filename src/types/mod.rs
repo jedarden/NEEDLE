@@ -2153,6 +2153,258 @@ impl fmt::Display for CompilationError {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Error Code Classification
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Category of a Rust compiler error code.
+///
+/// Rust error codes (E0XXX) are categorized by their error type to enable
+/// better error handling and reporting.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCategory {
+    /// Type mismatch errors (E0308, E0309, etc.)
+    TypeMismatch,
+    /// Borrow checker and lifetime errors (E0382, E0502, E0507, etc.)
+    BorrowChecker,
+    /// Missing or incorrect trait implementation (E0038, E0046, etc.)
+    TraitImpl,
+    /// Pattern matching errors (E0002, E0009, etc.)
+    PatternMatching,
+    /// Scope and visibility errors (E0403, E0412, E0603, etc.)
+    ScopeVisibility,
+    /// Syntax errors (E0053, E0063, E0263, etc.)
+    Syntax,
+    /// Generic and const parameter errors (E0207, E0392, E0408, etc.)
+    Generic,
+    /// Macro expansion errors (E0276, E0519, E0704, etc.)
+    Macro,
+    /// Dead code or unused item warnings treated as errors (E0382, E0425, E0526)
+    DeadCode,
+    /// Error code without a standard mapping.
+    Unknown,
+}
+
+impl ErrorCategory {
+    /// Get a human-readable description of the category.
+    pub fn description(&self) -> &'static str {
+        match self {
+            ErrorCategory::TypeMismatch => "type mismatch or conversion error",
+            ErrorCategory::BorrowChecker => "borrow checker or lifetime error",
+            ErrorCategory::TraitImpl => "trait implementation or bound error",
+            ErrorCategory::PatternMatching => "pattern matching error",
+            ErrorCategory::ScopeVisibility => "scope or visibility error",
+            ErrorCategory::Syntax => "syntax error",
+            ErrorCategory::Generic => "generic or const parameter error",
+            ErrorCategory::Macro => "macro expansion error",
+            ErrorCategory::DeadCode => "dead code or unused item",
+            ErrorCategory::Unknown => "unknown error category",
+        }
+    }
+}
+
+impl fmt::Display for ErrorCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorCategory::TypeMismatch => write!(f, "type_mismatch"),
+            ErrorCategory::BorrowChecker => write!(f, "borrow_checker"),
+            ErrorCategory::TraitImpl => write!(f, "trait_impl"),
+            ErrorCategory::PatternMatching => write!(f, "pattern_matching"),
+            ErrorCategory::ScopeVisibility => write!(f, "scope_visibility"),
+            ErrorCategory::Syntax => write!(f, "syntax"),
+            ErrorCategory::Generic => write!(f, "generic"),
+            ErrorCategory::Macro => write!(f, "macro"),
+            ErrorCategory::DeadCode => write!(f, "dead_code"),
+            ErrorCategory::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// Parse and validate a Rust error code from a string.
+///
+/// This function extracts and validates error codes in the format E0XXX
+/// (where XXX are digits). Returns `None` if the format is invalid.
+///
+/// # Arguments
+///
+/// * `input` - String that may contain an error code
+///
+/// # Returns
+///
+/// * `Some(code)` - The extracted error code if valid (e.g., "E0308")
+/// * `None` - If no valid error code is found
+///
+/// # Examples
+///
+/// ```
+/// use needle::types::parse_error_code;
+///
+/// assert_eq!(parse_error_code("E0308"), Some("E0308".to_string()));
+/// assert_eq!(parse_error_code("error[E0308]:"), Some("E0308".to_string()));
+/// assert_eq!(parse_error_code("E12345"), None); // Wrong format
+/// assert_eq!(parse_error_code("E0ABC"), None); // Non-digit characters
+/// ```
+pub fn parse_error_code(input: &str) -> Option<String> {
+    // Find the error code pattern: E followed by exactly 4 digits
+    let re = regex::Regex::new(r"E(\d{4})").ok()?;
+    if let Some(captures) = re.captures(input) {
+        if let Some(code) = captures.get(0) {
+            let code_str = code.as_str();
+            // Verify it's the E0XXX format (first digit should be 0)
+            if code_str.len() == 5 && code_str.starts_with('E') && code_str[1..].chars().next() == Some('0') {
+                return Some(code_str.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Classify a Rust error code into an error category.
+///
+/// Maps known error codes to their semantic categories. Returns
+/// `ErrorCategory::Unknown` for codes without standard mappings.
+///
+/// # Arguments
+///
+/// * `code` - The error code (e.g., "E0308")
+///
+/// # Returns
+///
+/// The corresponding `ErrorCategory` for this error code.
+///
+/// # Examples
+///
+/// ```
+/// use needle::types::{classify_error_code, ErrorCategory};
+///
+/// assert_eq!(classify_error_code("E0308"), ErrorCategory::TypeMismatch);
+/// assert_eq!(classify_error_code("E0382"), ErrorCategory::BorrowChecker);
+/// assert_eq!(classify_error_code("E9999"), ErrorCategory::Unknown);
+/// ```
+pub fn classify_error_code(code: &str) -> ErrorCategory {
+    match code {
+        // Type mismatch errors
+        "E0308" | "E0309" | "E0310" | "E0311" | "E0312" | "E0313" | "E0314" | "E0315"
+        | "E0316" | "E0317" | "E0369" | "E0370" => ErrorCategory::TypeMismatch,
+
+        // Borrow checker and lifetime errors
+        "E0382" | "E0502" | "E0503" | "E0505" | "E0506" | "E0507" | "E0508" | "E0509"
+        | "E0510" | "E0511" | "E0512" | "E0515" | "E0516" | "E0517" | "E0597" | "E0623"
+        | "E0624" | "E0625" | "E0626" | "E0716" | "E0782" | "E0783" | "E0937" | "E0980" => ErrorCategory::BorrowChecker,
+
+        // Trait implementation errors
+        "E0038" | "E0046" | "E0117" | "E0118" | "E0119" | "E0120" | "E0183" | "E0207"
+        | "E0210" | "E0220" | "E0227" | "E0229" | "E0230" | "E0277" | "E0365" | "E0366"
+        | "E0367" | "E0368" | "E0381" | "E0390" | "E0391" | "E0412" | "E0423" | "E0437"
+        | "E0558" | "E0574" | "E0647" | "E0699" | "E0708" | "E0719" | "E0781" => ErrorCategory::TraitImpl,
+
+        // Pattern matching errors
+        "E0002" | "E0009" | "E0007" | "E0010" | "E0011" | "E0012" | "E0013" | "E0014"
+        | "E0015" | "E0016" | "E0017" | "E0018" | "E0019" | "E0022" | "E0023" | "E0024"
+        | "E0025" | "E0026" | "E0031" | "E0033" | "E0034" | "E0035" | "E0039" | "E0040"
+        | "E0044" | "E0052" | "E0054" | "E0055" | "E0162" | "E0163" | "E0164" | "E0165"
+        | "E0302" | "E0409" | "E0422" | "E0424" | "E0513" | "E0529" | "E0616" | "E0617"
+        | "E0618" | "E0639" | "E0640" | "E0641" | "E0642" | "E0643" | "E0644" => ErrorCategory::PatternMatching,
+
+        // Scope and visibility errors
+        "E0403" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0411" | "E0413"
+        | "E0414" | "E0415" | "E0501" | "E0583" | "E0603" | "E0604" | "E0605" | "E0606"
+        | "E0607" | "E0608" | "E0609" | "E0610" | "E0611" | "E0612" | "E0613" | "E0614"
+        | "E0615" | "E0621" | "E0622" | "E0631" | "E0633" | "E0634" | "E0636" | "E0742"
+        | "E0743" | "E0744" | "E0745" | "E0750" | "E0758" | "E0759" | "E0760" | "E0761"
+        | "E0762" | "E0763" | "E0764" | "E0765" | "E0766" | "E0767" | "E0768" | "E0769"
+        | "E0770" | "E0771" | "E0772" | "E0773" | "E0774" | "E0775" | "E0776" | "E0777"
+        | "E0778" | "E0779" | "E0780" | "E0790" | "E0791" | "E0792" | "E0793" | "E0794"
+        | "E0795" | "E0796" | "E0797" | "E0798" | "E0799" => ErrorCategory::ScopeVisibility,
+
+        // Syntax errors
+        "E0053" | "E0060" | "E0061" | "E0062" | "E0063" | "E0066" | "E0070" | "E0071"
+        | "E0072" | "E0073" | "E0075" | "E0076" | "E0077" | "E0078" | "E0079" | "E0080"
+        | "E0081" | "E0082" | "E0085" | "E0087" | "E0106" | "E0116" | "E0124" | "E0131"
+        | "E0133" | "E0161" | "E0175" | "E0201" | "E0204" | "E0205" | "E0206" | "E0211"
+        | "E0214" | "E0225" | "E0226" | "E0231" | "E0254" | "E0255" | "E0256" | "E0257"
+        | "E0258" | "E0259" | "E0260" | "E0261" | "E0262" | "E0263" | "E0264" | "E0267"
+        | "E0268" | "E0275" | "E0281" | "E0282" | "E0301" | "E0306" | "E0324" | "E0328"
+        | "E0378" | "E0379" | "E0401" | "E0402" | "E0428" | "E0430" | "E0433" | "E0434"
+        | "E0435" | "E0436" | "E0438" | "E0439" | "E0440" | "E0441" | "E0442" | "E0443"
+        | "E0444" | "E0445" | "E0446" | "E0447" | "E0448" | "E0449" | "E0450" | "E0451"
+        | "E0452" | "E0453" | "E0454" | "E0455" | "E0456" | "E0457" | "E0458" | "E0459"
+        | "E0460" | "E0461" | "E0462" | "E0463" | "E0464" | "E0465" | "E0466" | "E0467"
+        | "E0468" | "E0469" | "E0470" | "E0471" | "E0472" | "E0473" | "E0474" | "E0475"
+        | "E0476" | "E0477" | "E0478" | "E0479" | "E0480" | "E0481" | "E0482" | "E0483"
+        | "E0484" | "E0485" | "E0486" | "E0487" | "E0488" | "E0489" | "E0490" | "E0491"
+        | "E0492" | "E0493" | "E0494" | "E0495" | "E0496" | "E0497" | "E0498" | "E0499"
+        | "E0518" | "E0524" | "E0525" | "E0527" | "E0528" | "E0531" | "E0534" | "E0536"
+        | "E0537" | "E0539" | "E0545" | "E0546" | "E0547" | "E0548" | "E0550" | "E0551"
+        | "E0552" | "E0553" | "E0554" | "E0556" | "E0557" | "E0559" | "E0560" | "E0561"
+        | "E0562" | "E0565" | "E0566" | "E0567" | "E0568" | "E0569" | "E0570" | "E0571"
+        | "E0572" | "E0573" | "E0575" | "E0576" | "E0577" | "E0578" | "E0579" | "E0580"
+        | "E0581" | "E0582" | "E0584" | "E0585" | "E0586" | "E0587" | "E0588" | "E0589"
+        | "E0590" | "E0591" | "E0592" | "E0593" | "E0594" | "E0595" | "E0596" | "E0598"
+        | "E0599" | "E0601" | "E0619" | "E0620" | "E0628" | "E0629" | "E0630" | "E0632"
+        | "E0635" | "E0637" | "E0638" | "E0645" | "E0646" | "E0648" | "E0649" | "E0650"
+        | "E0651" | "E0652" | "E0653" | "E0654" | "E0655" | "E0656" | "E0657" | "E0658"
+        | "E0659" | "E0660" | "E0661" | "E0662" | "E0663" | "E0664" | "E0665" | "E0666"
+        | "E0667" | "E0668" | "E0669" | "E0670" | "E0671" | "E0672" | "E0673" | "E0674"
+        | "E0675" | "E0676" | "E0677" | "E0678" | "E0679" | "E0680" | "E0681" | "E0682"
+        | "E0683" | "E0684" | "E0685" | "E0686" | "E0687" | "E0688" | "E0689" | "E0690"
+        | "E0691" | "E0692" | "E0693" | "E0694" | "E0695" | "E0696" | "E0697" | "E0698"
+        | "E0701" | "E0702" | "E0703" | "E0705" | "E0706" | "E0707" | "E0709" | "E0710"
+        | "E0712" | "E0713" | "E0714" | "E0715" | "E0717" | "E0718" | "E0720" | "E0721"
+        | "E0722" | "E0723" | "E0724" | "E0725" | "E0726" | "E0727" | "E0728" | "E0729"
+        | "E0730" | "E0731" | "E0732" | "E0733" | "E0734" | "E0735" | "E0736" | "E0737"
+        | "E0738" | "E0739" | "E0740" | "E0741" | "E0746" | "E0747" | "E0748" | "E0749"
+        | "E0751" | "E0752" | "E0753" | "E0754" | "E0755" | "E0756" | "E0757" | "E0800"
+        | "E0801" | "E0802" | "E0803" | "E0804" | "E0805" | "E0806" | "E0807" | "E0808"
+        | "E0809" | "E0810" | "E0811" | "E0812" | "E0813" | "E0814" | "E0815" | "E0816"
+        | "E0817" | "E0818" | "E0819" | "E0820" | "E0821" | "E0822" | "E0823" | "E0824"
+        | "E0825" | "E0826" | "E0827" | "E0828" | "E0829" | "E0830" | "E0831" | "E0832"
+        | "E0833" | "E0834" | "E0835" | "E0836" | "E0837" | "E0838" | "E0839" | "E0840"
+        | "E0841" | "E0842" | "E0843" | "E0844" | "E0845" | "E0846" | "E0847" | "E0848"
+        | "E0849" | "E0850" | "E0851" | "E0852" | "E0853" | "E0854" | "E0855" | "E0856"
+        | "E0857" | "E0858" | "E0859" | "E0860" | "E0861" | "E0862" | "E0863" | "E0864"
+        | "E0865" | "E0866" | "E0867" | "E0868" | "E0869" | "E0870" | "E0871" | "E0872"
+        | "E0873" | "E0874" | "E0875" | "E0876" | "E0877" | "E0878" | "E0879" | "E0880"
+        | "E0881" | "E0882" | "E0883" | "E0884" | "E0885" | "E0886" | "E0887" | "E0888"
+        | "E0889" | "E0890" | "E0891" | "E0892" | "E0893" | "E0894" | "E0895" | "E0896"
+        | "E0897" | "E0898" | "E0899" | "E0900" | "E0901" | "E0902" | "E0903" | "E0904"
+        | "E0905" | "E0906" | "E0907" | "E0908" | "E0909" | "E0910" | "E0911" | "E0912"
+        | "E0913" | "E0914" | "E0915" | "E0916" | "E0917" | "E0918" | "E0919" | "E0920"
+        | "E0921" | "E0922" | "E0923" | "E0924" | "E0925" | "E0926" | "E0927" | "E0928"
+        | "E0929" | "E0930" | "E0931" | "E0932" | "E0933" | "E0934" | "E0935" | "E0936"
+        | "E0938" | "E0939" | "E0940" | "E0941" | "E0942" | "E0943" | "E0944" | "E0945"
+        | "E0946" | "E0947" | "E0948" | "E0949" | "E0950" | "E0951" | "E0952" | "E0953"
+        | "E0954" | "E0955" | "E0956" | "E0957" | "E0958" | "E0959" | "E0960" | "E0961"
+        | "E0962" | "E0963" | "E0964" | "E0965" | "E0966" | "E0967" | "E0968" | "E0969"
+        | "E0970" | "E0971" | "E0972" | "E0973" | "E0974" | "E0975" | "E0976" | "E0977"
+        | "E0978" | "E0979" | "E0981" | "E0982" | "E0983" | "E0984" | "E0985" | "E0986"
+        | "E0987" | "E0988" | "E0989" | "E0990" | "E0991" | "E0992" | "E0993" | "E0994"
+        | "E0995" | "E0996" | "E0997" | "E0998" | "E0999" => ErrorCategory::Syntax,
+
+        // Generic and const parameter errors
+        "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399"
+        | "E0400" | "E0563" | "E0564" => ErrorCategory::Generic,
+
+        // Macro expansion errors
+        "E0276" | "E0519" | "E0520" | "E0521" | "E0522" | "E0523" | "E0704" | "E0748"
+        | "E0749" | "E0750" | "E0751" | "E0752" | "E0753" | "E0754" | "E0755" | "E0756"
+        | "E0757" | "E0758" | "E0759" | "E0760" | "E0761" | "E0762" | "E0763" | "E0764"
+        | "E0765" | "E0766" | "E0767" | "E0768" | "E0769" | "E0770" | "E0771" | "E0772"
+        | "E0773" | "E0774" | "E0775" | "E0776" | "E0777" | "E0778" | "E0779" | "E0780"
+        | "E0781" | "E0782" | "E0783" | "E0784" | "E0785" | "E0786" | "E0787" | "E0788"
+        | "E0789" | "E0790" | "E0791" | "E0792" | "E0793" | "E0794" | "E0795" | "E0796"
+        | "E0797" | "E0798" | "E0799" => ErrorCategory::Macro,
+
+        // Dead code or unused item errors
+        "E0425" | "E0526" => ErrorCategory::DeadCode,
+
+        // Unknown or unmapped error codes
+        _ => ErrorCategory::Unknown,
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Compilation Error Detection
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -2402,4 +2654,377 @@ pub fn extract_stitch_prefixed_labels(labels: &[String]) -> Vec<String> {
         .filter(|l| l.starts_with("stitch:"))
         .cloned()
         .collect()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Error Code Parsing and Classification Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn parse_error_code_valid_format() {
+    // Valid E0XXX codes
+    assert_eq!(parse_error_code("E0308"), Some("E0308".to_string()));
+    assert_eq!(parse_error_code("E0001"), Some("E0001".to_string()));
+    assert_eq!(parse_error_code("E0999"), Some("E0999".to_string()));
+    assert_eq!(parse_error_code("E0382"), Some("E0382".to_string()));
+}
+
+#[test]
+fn parse_error_code_from_error_line() {
+    // Extract from error lines
+    assert_eq!(
+        parse_error_code("error[E0308]: mismatched types"),
+        Some("E0308".to_string())
+    );
+    assert_eq!(
+        parse_error_code("  error[E0382]: use of moved value"),
+        Some("E0382".to_string())
+    );
+}
+
+#[test]
+fn parse_error_code_invalid_format() {
+    // Invalid formats
+    assert_eq!(parse_error_code("E12345"), None); // Too long
+    assert_eq!(parse_error_code("E0ABC"), None); // Non-digit characters
+    assert_eq!(parse_error_code("E012"), None); // Too short
+    assert_eq!(parse_error_code("E001"), None); // Too short
+    assert_eq!(parse_error_code("E000"), None); // No digit after 0
+    assert_eq!(parse_error_code("E1000"), None); // First digit not 0
+    assert_eq!(parse_error_code("E2000"), None); // First digit not 0
+}
+
+#[test]
+fn parse_error_code_case_sensitive() {
+    // Should be case-sensitive - only uppercase E
+    assert_eq!(parse_error_code("e0308"), None); // lowercase e
+    assert_eq!(parse_error_code("E0308"), Some("E0308".to_string())); // uppercase E
+}
+
+#[test]
+fn parse_error_code_with_surrounding_text() {
+    // Extract from within larger strings
+    assert_eq!(
+        parse_error_code("error: aborting due to previous error (E0308)"),
+        Some("E0308".to_string())
+    );
+    assert_eq!(
+        parse_error_code("see https://doc.rust-lang.org/error-index.html#E0382"),
+        Some("E0382".to_string())
+    );
+}
+
+#[test]
+fn parse_error_code_empty_and_invalid() {
+    // Edge cases
+    assert_eq!(parse_error_code(""), None);
+    assert_eq!(parse_error_code("E"), None);
+    assert_eq!(parse_error_code("0308"), None);
+    assert_eq!(parse_error_code("E0"), None);
+    assert_eq!(parse_error_code("E0XXX"), None);
+}
+
+#[test]
+fn classify_error_code_type_mismatch() {
+    // Type mismatch errors
+    assert_eq!(classify_error_code("E0308"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0309"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0310"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0311"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0312"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0313"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0314"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0315"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0316"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0317"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0369"), ErrorCategory::TypeMismatch);
+    assert_eq!(classify_error_code("E0370"), ErrorCategory::TypeMismatch);
+}
+
+#[test]
+fn classify_error_code_borrow_checker() {
+    // Borrow checker errors
+    assert_eq!(classify_error_code("E0382"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0502"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0503"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0505"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0506"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0507"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0508"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0509"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0510"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0511"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0512"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0515"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0516"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0517"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0597"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0623"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0624"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0625"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0626"), ErrorCategory::BorrowChecker);
+    assert_eq!(classify_error_code("E0716"), ErrorCategory::BorrowChecker);
+}
+
+#[test]
+fn classify_error_code_trait_impl() {
+    // Trait implementation errors
+    assert_eq!(classify_error_code("E0038"), ErrorCategory::TraitImpl);
+    assert_eq!(classify_error_code("E0046"), ErrorCategory::TraitImpl);
+    assert_eq!(classify_error_code("E0117"), ErrorCategory::TraitImpl);
+    assert_eq!(classify_error_code("E0118"), ErrorCategory::TraitImpl);
+    assert_eq!(classify_error_code("E0119"), ErrorCategory::TraitImpl);
+    assert_eq!(classify_error_code("E0120"), ErrorCategory::TraitImpl);
+    assert_eq!(classify_error_code("E0183"), ErrorCategory::TraitImpl);
+    assert_eq!(classify_error_code("E0207"), ErrorCategory::TraitImpl);
+    assert_eq!(classify_error_code("E0210"), ErrorCategory::TraitImpl);
+    assert_eq!(classify_error_code("E0277"), ErrorCategory::TraitImpl);
+    assert_eq!(classify_error_code("E0381"), ErrorCategory::TraitImpl);
+}
+
+#[test]
+fn classify_error_code_pattern_matching() {
+    // Pattern matching errors
+    assert_eq!(classify_error_code("E0002"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0009"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0007"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0010"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0011"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0012"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0013"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0014"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0015"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0016"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0017"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0018"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0302"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0409"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0422"), ErrorCategory::PatternMatching);
+    assert_eq!(classify_error_code("E0424"), ErrorCategory::PatternMatching);
+}
+
+#[test]
+fn classify_error_code_scope_visibility() {
+    // Scope and visibility errors
+    assert_eq!(classify_error_code("E0403"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0404"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0405"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0406"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0407"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0408"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0603"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0604"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0605"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0606"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0742"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0743"), ErrorCategory::ScopeVisibility);
+    assert_eq!(classify_error_code("E0750"), ErrorCategory::ScopeVisibility);
+}
+
+#[test]
+fn classify_error_code_syntax() {
+    // Syntax errors
+    assert_eq!(classify_error_code("E0053"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0060"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0061"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0062"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0063"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0066"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0263"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0264"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0267"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0268"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0301"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0306"), ErrorCategory::Syntax);
+    assert_eq!(classify_error_code("E0324"), ErrorCategory::Syntax);
+}
+
+#[test]
+fn classify_error_code_generic() {
+    // Generic and const parameter errors
+    assert_eq!(classify_error_code("E0392"), ErrorCategory::Generic);
+    assert_eq!(classify_error_code("E0393"), ErrorCategory::Generic);
+    assert_eq!(classify_error_code("E0394"), ErrorCategory::Generic);
+    assert_eq!(classify_error_code("E0395"), ErrorCategory::Generic);
+    assert_eq!(classify_error_code("E0396"), ErrorCategory::Generic);
+    assert_eq!(classify_error_code("E0397"), ErrorCategory::Generic);
+    assert_eq!(classify_error_code("E0398"), ErrorCategory::Generic);
+    assert_eq!(classify_error_code("E0399"), ErrorCategory::Generic);
+    assert_eq!(classify_error_code("E0400"), ErrorCategory::Generic);
+    assert_eq!(classify_error_code("E0563"), ErrorCategory::Generic);
+    assert_eq!(classify_error_code("E0564"), ErrorCategory::Generic);
+}
+
+#[test]
+fn classify_error_code_macro() {
+    // Macro expansion errors
+    assert_eq!(classify_error_code("E0276"), ErrorCategory::Macro);
+    assert_eq!(classify_error_code("E0519"), ErrorCategory::Macro);
+    assert_eq!(classify_error_code("E0520"), ErrorCategory::Macro);
+    assert_eq!(classify_error_code("E0521"), ErrorCategory::Macro);
+    assert_eq!(classify_error_code("E0522"), ErrorCategory::Macro);
+    assert_eq!(classify_error_code("E0523"), ErrorCategory::Macro);
+    assert_eq!(classify_error_code("E0704"), ErrorCategory::Macro);
+}
+
+#[test]
+fn classify_error_code_dead_code() {
+    // Dead code or unused item errors (E0382 is primarily borrow checker, E0601/E0602/E0611 are primarily scope visibility)
+    assert_eq!(classify_error_code("E0425"), ErrorCategory::DeadCode);
+    assert_eq!(classify_error_code("E0526"), ErrorCategory::DeadCode);
+}
+
+#[test]
+fn classify_error_code_unknown() {
+    // Unknown or unmapped error codes
+    assert_eq!(classify_error_code("E9999"), ErrorCategory::Unknown);
+    assert_eq!(classify_error_code("E8888"), ErrorCategory::Unknown);
+    assert_eq!(classify_error_code("E1234"), ErrorCategory::Unknown);
+    assert_eq!(classify_error_code("E0050"), ErrorCategory::Unknown);
+    assert_eq!(classify_error_code("E0099"), ErrorCategory::Unknown);
+}
+
+#[test]
+fn error_category_description() {
+    // Test category descriptions
+    assert_eq!(
+        ErrorCategory::TypeMismatch.description(),
+        "type mismatch or conversion error"
+    );
+    assert_eq!(
+        ErrorCategory::BorrowChecker.description(),
+        "borrow checker or lifetime error"
+    );
+    assert_eq!(
+        ErrorCategory::TraitImpl.description(),
+        "trait implementation or bound error"
+    );
+    assert_eq!(
+        ErrorCategory::PatternMatching.description(),
+        "pattern matching error"
+    );
+    assert_eq!(
+        ErrorCategory::ScopeVisibility.description(),
+        "scope or visibility error"
+    );
+    assert_eq!(ErrorCategory::Syntax.description(), "syntax error");
+    assert_eq!(
+        ErrorCategory::Generic.description(),
+        "generic or const parameter error"
+    );
+    assert_eq!(ErrorCategory::Macro.description(), "macro expansion error");
+    assert_eq!(
+        ErrorCategory::DeadCode.description(),
+        "dead code or unused item"
+    );
+    assert_eq!(ErrorCategory::Unknown.description(), "unknown error category");
+}
+
+#[test]
+fn error_category_display() {
+    // Test Display implementation
+    assert_eq!(ErrorCategory::TypeMismatch.to_string(), "type_mismatch");
+    assert_eq!(ErrorCategory::BorrowChecker.to_string(), "borrow_checker");
+    assert_eq!(ErrorCategory::TraitImpl.to_string(), "trait_impl");
+    assert_eq!(
+        ErrorCategory::PatternMatching.to_string(),
+        "pattern_matching"
+    );
+    assert_eq!(
+        ErrorCategory::ScopeVisibility.to_string(),
+        "scope_visibility"
+    );
+    assert_eq!(ErrorCategory::Syntax.to_string(), "syntax");
+    assert_eq!(ErrorCategory::Generic.to_string(), "generic");
+    assert_eq!(ErrorCategory::Macro.to_string(), "macro");
+    assert_eq!(ErrorCategory::DeadCode.to_string(), "dead_code");
+    assert_eq!(ErrorCategory::Unknown.to_string(), "unknown");
+}
+
+#[test]
+fn error_category_all_variants_have_display_impl() {
+    // Verify all variants can be displayed
+    let categories = vec![
+        ErrorCategory::TypeMismatch,
+        ErrorCategory::BorrowChecker,
+        ErrorCategory::TraitImpl,
+        ErrorCategory::PatternMatching,
+        ErrorCategory::ScopeVisibility,
+        ErrorCategory::Syntax,
+        ErrorCategory::Generic,
+        ErrorCategory::Macro,
+        ErrorCategory::DeadCode,
+        ErrorCategory::Unknown,
+    ];
+
+    for category in categories {
+        let display = format!("{}", category);
+        let desc = category.description();
+        assert!(!display.is_empty());
+        assert!(!desc.is_empty());
+    }
+}
+
+#[test]
+fn error_category_serde_roundtrip() {
+    // Test serialization/deserialization
+    let categories = vec![
+        ErrorCategory::TypeMismatch,
+        ErrorCategory::BorrowChecker,
+        ErrorCategory::TraitImpl,
+        ErrorCategory::PatternMatching,
+        ErrorCategory::ScopeVisibility,
+        ErrorCategory::Syntax,
+        ErrorCategory::Generic,
+        ErrorCategory::Macro,
+        ErrorCategory::DeadCode,
+        ErrorCategory::Unknown,
+    ];
+
+    for category in categories {
+        let json = serde_json::to_string(&category).unwrap();
+        let parsed: ErrorCategory = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, category, "roundtrip failed for {:?}", category);
+    }
+}
+
+#[test]
+fn parse_and_classify_integration() {
+    // Integration test: parse and classify common error codes
+    let test_cases = vec![
+        ("E0308", ErrorCategory::TypeMismatch),
+        ("E0382", ErrorCategory::BorrowChecker),
+        ("E0038", ErrorCategory::TraitImpl),
+        ("E0002", ErrorCategory::PatternMatching),
+        ("E0403", ErrorCategory::ScopeVisibility),
+        ("E0053", ErrorCategory::Syntax),
+        ("E0392", ErrorCategory::Generic),
+        ("E0276", ErrorCategory::Macro),
+        ("E0425", ErrorCategory::DeadCode),
+        ("E9999", ErrorCategory::Unknown),
+    ];
+
+    for (code, expected_category) in test_cases {
+        let parsed = parse_error_code(code);
+        assert_eq!(parsed, Some(code.to_string()), "Failed to parse {}", code);
+
+        let category = classify_error_code(code);
+        assert_eq!(
+            category, expected_category,
+            "Wrong category for {}: got {:?}, expected {:?}",
+            code, category, expected_category
+        );
+    }
+}
+
+#[test]
+fn error_category_equality() {
+    // Test equality
+    assert_eq!(ErrorCategory::TypeMismatch, ErrorCategory::TypeMismatch);
+    assert_eq!(ErrorCategory::BorrowChecker, ErrorCategory::BorrowChecker);
+    assert_eq!(ErrorCategory::Unknown, ErrorCategory::Unknown);
+
+    assert_ne!(ErrorCategory::TypeMismatch, ErrorCategory::BorrowChecker);
+    assert_ne!(ErrorCategory::Syntax, ErrorCategory::Macro);
+    assert_ne!(ErrorCategory::DeadCode, ErrorCategory::Unknown);
 }
