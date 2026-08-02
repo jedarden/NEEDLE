@@ -1440,6 +1440,68 @@ mod tests {
             let _ = format!("{}", error); // Should not panic
         }
     }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // ErrorType tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn error_type_display_compile() {
+        assert_eq!(ErrorType::Compile.to_string(), "compile");
+    }
+
+    #[test]
+    fn error_type_display_test() {
+        assert_eq!(ErrorType::Test.to_string(), "test");
+    }
+
+    #[test]
+    fn error_type_display_unknown() {
+        assert_eq!(ErrorType::Unknown.to_string(), "unknown");
+    }
+
+    #[test]
+    fn error_type_all_variants_display() {
+        let types = vec![ErrorType::Compile, ErrorType::Test, ErrorType::Unknown];
+        for error_type in types {
+            let display = format!("{}", error_type);
+            assert!(!display.is_empty());
+        }
+    }
+
+    #[test]
+    fn error_type_serde_compile() {
+        let json = serde_json::to_string(&ErrorType::Compile).unwrap();
+        assert_eq!(json, r#""compile""#);
+        let parsed: ErrorType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ErrorType::Compile);
+    }
+
+    #[test]
+    fn error_type_serde_test() {
+        let json = serde_json::to_string(&ErrorType::Test).unwrap();
+        assert_eq!(json, r#""test""#);
+        let parsed: ErrorType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ErrorType::Test);
+    }
+
+    #[test]
+    fn error_type_serde_unknown() {
+        let json = serde_json::to_string(&ErrorType::Unknown).unwrap();
+        assert_eq!(json, r#""unknown""#);
+        let parsed: ErrorType = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, ErrorType::Unknown);
+    }
+
+    #[test]
+    fn error_type_equality() {
+        assert_eq!(ErrorType::Compile, ErrorType::Compile);
+        assert_eq!(ErrorType::Test, ErrorType::Test);
+        assert_eq!(ErrorType::Unknown, ErrorType::Unknown);
+        assert_ne!(ErrorType::Compile, ErrorType::Test);
+        assert_ne!(ErrorType::Compile, ErrorType::Unknown);
+        assert_ne!(ErrorType::Test, ErrorType::Unknown);
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1636,6 +1698,31 @@ mod serde_duration {
     {
         let millis = u64::deserialize(deserializer)?;
         Ok(Duration::from_millis(millis))
+    }
+}
+
+/// Classification of error types in the build/test pipeline.
+///
+/// Used to categorize errors by their source and recovery path.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorType {
+    /// Error from compiling Rust code (cargo build / cargo test --no-run).
+    Compile,
+    /// Error from running tests (cargo test execution failure).
+    Test,
+    /// Error type could not be determined.
+    Unknown,
+}
+
+impl fmt::Display for ErrorType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ErrorType::Compile => write!(f, "compile"),
+            ErrorType::Test => write!(f, "test"),
+            ErrorType::Unknown => write!(f, "unknown"),
+        }
     }
 }
 
