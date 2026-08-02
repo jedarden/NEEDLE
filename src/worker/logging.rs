@@ -85,6 +85,89 @@ pub fn emit_log(telemetry: &Telemetry, event: &LogEvent) -> anyhow::Result<()> {
     telemetry.log_info(&event.phase, json_context)
 }
 
+/// Emit a structured log event with phase and context.
+///
+/// This is a convenience function that builds a LogEvent internally
+/// with the current timestamp and emits it through the telemetry system.
+///
+/// # Arguments
+///
+/// * `telemetry` - The telemetry instance to emit through
+/// * `phase` - The phase identifier (e.g., "dispatch", "claim", "outcome")
+/// * `context` - Slice of key-value pairs for structured context data
+///
+/// # Example
+///
+/// ```no_run
+/// # use needle::worker::logging::emit_log_event;
+/// # use needle::telemetry::Telemetry;
+/// # let telemetry: Telemetry = unimplemented!();
+/// emit_log_event(&telemetry, "dispatch", &[("status", "started"), ("worker_id", "worker-1")]).ok();
+/// ```
+pub fn emit_log_event(
+    telemetry: &Telemetry,
+    phase: &str,
+    context: &[(&str, &str)],
+) -> anyhow::Result<()> {
+    let context_map = context
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let event = LogEvent {
+        phase: phase.to_string(),
+        timestamp: chrono::Utc::now(),
+        context: context_map,
+    };
+    emit_log(telemetry, &event)
+}
+
+/// Convenience macro for emitting structured log events with key-value syntax.
+///
+/// This macro provides an ergonomic way to log events without manually building
+/// a HashMap or LogEvent struct. It automatically captures the current timestamp
+/// and converts all values to strings.
+///
+/// # Arguments
+///
+/// * `$telemetry` - The telemetry instance to emit through
+/// * `$phase` - The phase identifier (e.g., "dispatch", "claim", "outcome")
+/// * `$($key:expr => $val:expr),*` - Key-value pairs for structured context data
+///
+/// # Example
+///
+/// ```no_run
+/// # use needle::worker::logging::log_event;
+/// # use needle::telemetry::Telemetry;
+/// # let telemetry: Telemetry = unimplemented!();
+/// // Basic usage
+/// log_event!(&telemetry, "dispatch", "status" => "started");
+///
+/// // Multiple context fields
+/// log_event!(&telemetry, "claim",
+///     "attempt" => "1",
+///     "bead_id" => "bf-123",
+///     "result" => "success"
+/// );
+///
+/// // With trailing comma (optional)
+/// log_event!(&telemetry, "outcome", "exit_code" => "0",);
+///
+/// // Values are automatically converted to strings
+/// log_event!(&telemetry, "routing", "model_count" => 5);
+/// ```
+///
+/// The macro returns `anyhow::Result<()>` so you can use `.ok()` or `?` as needed.
+#[macro_export]
+macro_rules! log_event {
+    ($telemetry:expr, $phase:expr, $($key:expr => $val:expr),* $(,)?) => {{
+        let mut context = std::collections::HashMap::new();
+        $(
+            context.insert($key.to_string(), $val.to_string());
+        )*
+        $crate::worker::logging::emit_log_event($telemetry, $phase, &context.into_iter().map(|(k, v)| (k.as_str(), v.as_str())).collect::<Vec<_>>())
+    }};
+}
+
 /// Emit an info-level log with the given phase and context.
 ///
 /// # Example
@@ -388,5 +471,121 @@ mod tests {
         assert_eq!(events[0].event_type, "log.entry");
         // Bead ID should now be in the context
         assert!(events[0].data.get("bead_id").is_some());
+    }
+
+    #[test]
+    fn test_emit_log_event() {
+        let sink = MemorySink::new();
+        let telemetry = Telemetry::new(
+            WorkerId::new("test-worker"),
+            "test-session",
+            std::sync::Arc::new(sink.clone()),
+        );
+
+        emit_log_event(&telemetry, "test_phase", &[("key1", "value1"), ("key2", "value2")])
+            .unwrap();
+
+        let events = sink.collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "log.entry");
+        // Verify context data is present
+        assert!(events[0].data.get("key1").is_some());
+        assert!(events[0].data.get("key2").is_some());
+    }
+
+    #[test]
+    fn test_emit_log_event_empty_context() {
+        let sink = MemorySink::new();
+        let telemetry = Telemetry::new(
+            WorkerId::new("test-worker"),
+            "test-session",
+            std::sync::Arc::new(sink.clone()),
+        );
+
+        emit_log_event(&telemetry, "test_phase", &[])
+            .unwrap();
+
+        let events = sink.collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "log.entry");
+    }
+
+    #[test]
+    fn test_log_event_macro() {
+        let sink = MemorySink::new();
+        let telemetry = Telemetry::new(
+            WorkerId::new("test-worker"),
+            "test-session",
+            std::sync::Arc::new(sink.clone()),
+        );
+
+        log_event!(&telemetry, "dispatch", "status" => "started").unwrap();
+
+        let events = sink.collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "log.entry");
+        assert!(events[0].data.get("status").is_some());
+    }
+
+    #[test]
+    fn test_log_event_macro_multiple_fields() {
+        let sink = MemorySink::new();
+        let telemetry = Telemetry::new(
+            WorkerId::new("test-worker"),
+            "test-session",
+            std::sync::Arc::new(sink.clone()),
+        );
+
+        log_event!(&telemetry, "claim",
+            "attempt" => "1",
+            "bead_id" => "bf-123",
+            "result" => "success"
+        ).unwrap();
+
+        let events = sink.collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "log.entry");
+        assert!(events[0].data.get("attempt").is_some());
+        assert!(events[0].data.get("bead_id").is_some());
+        assert!(events[0].data.get("result").is_some());
+    }
+
+    #[test]
+    fn test_log_event_macro_with_trailing_comma() {
+        let sink = MemorySink::new();
+        let telemetry = Telemetry::new(
+            WorkerId::new("test-worker"),
+            "test-session",
+            std::sync::Arc::new(sink.clone()),
+        );
+
+        log_event!(&telemetry, "outcome", "exit_code" => "0",).unwrap();
+
+        let events = sink.collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "log.entry");
+        assert!(events[0].data.get("exit_code").is_some());
+    }
+
+    #[test]
+    fn test_log_event_macro_auto_string_conversion() {
+        let sink = MemorySink::new();
+        let telemetry = Telemetry::new(
+            WorkerId::new("test-worker"),
+            "test-session",
+            std::sync::Arc::new(sink.clone()),
+        );
+
+        log_event!(&telemetry, "routing",
+            "model_count" => 5,
+            "duration_ms" => 1234
+        ).unwrap();
+
+        let events = sink.collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "log.entry");
+        // Numbers should be converted to strings
+        assert_eq!(events[0].data.get("model_count"), Some(&serde_json::Value::String("5".to_string())));
+        assert_eq!(events[0].data.get("duration_ms"), Some(&serde_json::Value::String("1234".to_string())));
     }
 }
