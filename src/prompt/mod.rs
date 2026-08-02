@@ -51,7 +51,7 @@ Complete the task described above. When finished:
 - **Push commits with `git push` after committing.** Always push to the remote after a successful commit.
 - Close the bead:
 
-`br close {bead_id}`
+`bf close {bead_id}`
 
 If you cannot complete the task OR cannot produce a commit:
 - Do NOT close the bead
@@ -196,9 +196,11 @@ chain of focused, independently achievable tasks.
 
 ### Requirements
 
-1. **Create 3-5 child beads** using the `br create` command:
+1. **Create 3-5 child beads** using the `bf create` command:
    ```bash
-   br create \"Child Title\" \"Child description and acceptance criteria\"
+   bf create --title \"Child Title\" \\
+     --description \"Child description and acceptance criteria\" \\
+     --label split-child
    ```
 
 2. **Each child must:**
@@ -219,8 +221,14 @@ chain of focused, independently achievable tasks.
 
 5. **Verify the setup:**
    ```bash
-   br show {bead_id}  # Should show umbrella label and dependency on last child
-   br show <last-child-id>  # Should show this parent as a dependent
+   bf show {bead_id}  # Should show umbrella label and dependency on last child
+   bf show <last-child-id>  # Should show this parent as a dependent
+   ```
+
+   Chain and label with:
+   ```bash
+   bf dep add <blocker-id> --blocks <blocked-id>
+   bf label add <bead-id> --label split-child
    ```
 
 ### Example
@@ -895,8 +903,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            result.content.contains("br close needle-abc"),
-            "prompt must contain br close instruction"
+            result.content.contains("bf close needle-abc"),
+            "prompt must contain bf close instruction (bead-forge, not the deprecated br alias)"
         );
         assert!(
             result.content.contains("notes/needle-abc.md"),

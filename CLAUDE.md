@@ -3,8 +3,8 @@
 ## Overview
 
 NEEDLE (Navigates Every Enqueued Deliverable, Logs Effort) is a Rust bead worker
-binary. It automates bead processing by running the `br` CLI to select, claim,
-dispatch an AI agent, and handle outcomes.
+binary. It automates bead processing by running the `bf` CLI (bead-forge) to
+select, claim, dispatch an AI agent, and handle outcomes.
 
 ## MSRV
 
@@ -119,9 +119,14 @@ test(needle-XYZ): short description
 
 ## Bead Workflow
 
-Beads are managed with the `br` CLI (beads_rust). Each bead's body contains
-deliverables and acceptance criteria. Close beads with:
+Beads are managed with the `bf` CLI (bead-forge). `br` is a deprecated alias
+that survives only as a shim on some hosts — never invoke it, and never emit it
+from a prompt template or doc. Each bead's body contains deliverables and
+acceptance criteria. Close beads with:
 
 ```bash
-br close BEAD_ID --body "Summary of what was done"
+bf close BEAD_ID --reason "Summary of what was done"
 ```
+
+Note `--reason`, not `--body`: `--body` is not a valid flag and the close will
+fail.

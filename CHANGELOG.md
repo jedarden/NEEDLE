@@ -4,6 +4,37 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.16] - 2026-08-02
+
+### Fixed
+
+- **Dispatch prompt told agents to close beads with `br`** — the built-in
+  template emitted `` `br close {bead_id}` ``. `br` is the deprecated alias for
+  `bf` (bead-forge) and survives only as a shim on hosts that happen to have
+  one. On a host without it the agent's close silently failed with
+  command-not-found and the bead stayed `in_progress` forever, while the worker
+  looked perfectly healthy. Observed on a freshly provisioned host: one worker
+  claimed 4 beads in ~15 minutes and closed zero — telemetry showed 4
+  `bead.claim.succeeded` and no `bead.closed`/`bead.released` events at all.
+  The template now emits `bf close`.
+- **Mitosis template emitted an invalid `br create` invocation** — it used
+  positional arguments (`br create "Title" "body"`), which `bf create` does not
+  accept; it requires `--title` and `--description`. Split children could never
+  have been created on a current bead-forge. The template now uses the correct
+  flags and documents `bf dep add` / `bf label add` for chaining and labelling.
+- **`BrCliBeadStore::discover()` resolved `br` before `bf`** — every internal
+  `ready`/`list`/`update`/`show`/`sync` call preferred the deprecated alias,
+  which is why NEEDLE was effectively its last consumer (19,543 of 19,560
+  entries in one host's `br-deprecation.log`). It now resolves `bf` on PATH,
+  then `~/.local/bin/bf`, and only then falls back to `br` for hosts still
+  carrying the shim. A host with only `bf` installed no longer hard-fails.
+
+### Changed
+
+- `CLAUDE.md` now documents `bf` as the bead CLI and `bf close --reason`
+  (not the invalid `--body`), and states that `br` must never be emitted from a
+  prompt template or doc.
+
 ## [0.2.15] - 2026-07-31
 
 ### Fixed

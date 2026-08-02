@@ -1892,12 +1892,12 @@ async fn mend_removes_stale_dependency_links() {
     );
 
     // Close the blocker bead.
-    let close_output = std::process::Command::new("/home/coding/.local/bin/br")
+    let close_output = std::process::Command::new("/home/coding/.local/bin/bf")
         .args(["close", &blocker_id, "--reason=Blocker completed"])
         .current_dir(workspace)
         .output()
-        .expect("br close failed");
-    assert!(close_output.status.success(), "br close failed");
+        .expect("bf close failed");
+    assert!(close_output.status.success(), "bf close failed");
 
     // Verify the blocker is closed but the dependency still exists (stale link).
     let blocked_bead_after = store

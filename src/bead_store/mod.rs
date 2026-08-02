@@ -497,7 +497,13 @@ impl BrCliBeadStore {
         })
     }
 
-    /// Try to find `br` on PATH or the default install location.
+    /// Try to find the bead CLI on PATH or the default install location.
+    ///
+    /// Resolves `bf` (bead-forge, canonical) first and only falls back to the
+    /// deprecated `br` alias for hosts that still carry the shim. Preferring
+    /// `br` here is what kept NEEDLE its last consumer, and on a host with no
+    /// shim at all it failed outright rather than using the CLI that was
+    /// actually installed.
     ///
     /// `model`/`harness`/`harness_version` are threaded into `bf claim` for
     /// velocity-aware scoring (plan §4B.6). Any may be `None` — `bf claim`
@@ -509,17 +515,26 @@ impl BrCliBeadStore {
         harness: Option<String>,
         harness_version: Option<String>,
     ) -> Result<Self> {
-        let br_path = which::which("br")
+        let home = std::env::var("HOME").unwrap_or_default();
+        let br_path = which::which("bf")
             .or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_default();
+                let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
+                if candidate.exists() {
+                    Ok(candidate)
+                } else {
+                    Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
+                }
+            })
+            .or_else(|_| which::which("br"))
+            .or_else(|_| {
                 let candidate = PathBuf::from(format!("{home}/.local/bin/br"));
                 if candidate.exists() {
                     Ok(candidate)
                 } else {
-                    Err(anyhow!("br not found on PATH or at ~/.local/bin/br"))
+                    Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
                 }
             })
-            .context("br CLI not found; install beads_rust")?;
+            .context("bead CLI not found; install bead-forge (bf)")?;
         Ok(BrCliBeadStore {
             br_path,
             workspace,
