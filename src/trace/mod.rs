@@ -619,12 +619,12 @@ mod tests {
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
 
-        // Make the trace directory read-only to simulate a write error.
-        let mut perms = std::fs::metadata(capture.trace_dir())
-            .unwrap()
-            .permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(capture.trace_dir(), perms.clone()).unwrap();
+        // Remove the trace directory to force a write error. `write_stderr`
+        // does not create parent directories, so the write fails with
+        // NotFound. Do NOT make the directory read-only instead: CI runs the
+        // build container as root, root bypasses DAC permission checks, the
+        // write then succeeds and this test fails only in CI.
+        std::fs::remove_dir_all(capture.trace_dir()).unwrap();
 
         // Attempting to write stderr should return an error gracefully.
         let result = capture.write_stderr("test stderr");
@@ -635,10 +635,6 @@ mod tests {
         // Verify the error has appropriate context.
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("failed to write stderr trace"));
-
-        // Clean up: restore write permissions for directory removal.
-        perms.set_readonly(false);
-        std::fs::set_permissions(capture.trace_dir(), perms).unwrap();
     }
 
     #[test]
@@ -728,12 +724,12 @@ mod tests {
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
 
-        // Make the trace directory read-only to simulate a write error.
-        let mut perms = std::fs::metadata(capture.trace_dir())
-            .unwrap()
-            .permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(capture.trace_dir(), perms.clone()).unwrap();
+        // Remove the trace directory to force a write error. `write_stdout`
+        // does not create parent directories, so the write fails with
+        // NotFound. Do NOT make the directory read-only instead: CI runs the
+        // build container as root, root bypasses DAC permission checks, the
+        // write then succeeds and this test fails only in CI.
+        std::fs::remove_dir_all(capture.trace_dir()).unwrap();
 
         // Attempting to write stdout should return an error gracefully.
         let result = capture.write_stdout("test stdout");
@@ -744,10 +740,6 @@ mod tests {
         // Verify the error has appropriate context.
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("failed to write stdout trace"));
-
-        // Clean up: restore write permissions for directory removal.
-        perms.set_readonly(false);
-        std::fs::set_permissions(capture.trace_dir(), perms).unwrap();
     }
 
     #[test]
