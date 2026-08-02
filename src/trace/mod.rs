@@ -182,14 +182,24 @@ impl TraceCapture {
     /// Write stderr to `stderr.txt`.
     ///
     /// Content is sanitized before writing if a sanitizer is configured.
+    /// Write errors are logged with tracing::warn and returned in the Result.
     pub fn write_stderr(&self, stderr: &str) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
         let content = self.sanitize(stderr);
         let path = self.trace_dir.join(STDERR_FILE);
-        std::fs::write(&path, content.as_bytes())
-            .with_context(|| format!("failed to write stderr trace: {}", path.display()))
+        match std::fs::write(&path, content.as_bytes()) {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to write stderr trace"
+                );
+                Err(e).with_context(|| format!("failed to write stderr trace: {}", path.display()))
+            }
+        }
     }
 
     /// Write test output to `test-output.txt`.
@@ -568,7 +578,10 @@ mod tests {
         // Attempting to create a TraceCapture should return None gracefully.
         let bead_id = BeadId::from("blocked-bead");
         let capture = TraceCapture::new(&bead_id, beads_root);
-        assert!(capture.is_none(), "TraceCapture should return None when directory creation fails");
+        assert!(
+            capture.is_none(),
+            "TraceCapture should return None when directory creation fails"
+        );
     }
 
     #[test]
@@ -597,6 +610,35 @@ mod tests {
         assert!(stderr_path.exists());
         let content = std::fs::read_to_string(stderr_path).unwrap();
         assert_eq!(content, "error output");
+    }
+
+    #[test]
+    fn trace_capture_write_stderr_handles_errors_gracefully() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+
+        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+
+        // Make the trace directory read-only to simulate a write error.
+        let mut perms = std::fs::metadata(capture.trace_dir())
+            .unwrap()
+            .permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(capture.trace_dir(), perms.clone()).unwrap();
+
+        // Attempting to write stderr should return an error gracefully.
+        let result = capture.write_stderr("test stderr");
+
+        // Verify that an error is returned (not a panic).
+        assert!(result.is_err());
+
+        // Verify the error has appropriate context.
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("failed to write stderr trace"));
+
+        // Clean up: restore write permissions for directory removal.
+        perms.set_readonly(false);
+        std::fs::set_permissions(capture.trace_dir(), perms).unwrap();
     }
 
     #[test]
