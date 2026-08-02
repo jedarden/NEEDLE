@@ -29,11 +29,38 @@ All notable changes to NEEDLE are documented in this file.
   then `~/.local/bin/bf`, and only then falls back to `br` for hosts still
   carrying the shim. A host with only `bf` installed no longer hard-fails.
 
+- **Three pre-existing lib-test failures** that blocked this release. `needle-ci`
+  had been wedged since 2026-07-31 (its Argo Events sensor stopped consuming
+  after a NATS JetStream leadership change — declarative-config `bf-2ls`), so
+  ~36 commits merged unverified and several left the suite red:
+  - `types::parse_and_classify_integration` asserted
+    `parse_error_code("E9999") == Some(..)`, which
+    `parse_error_code_invalid_format` simultaneously forbids by asserting
+    `E1000`/`E2000` are rejected. The two tests were mutually unsatisfiable;
+    rustc only emits `E0xxx`, so the strict parser is right and the integration
+    case now uses `E0000` — well-formed and genuinely unmapped.
+  - `health::tests::check_supervisor_socket_exists_returns_true` raced: five
+    tests mutate the process-global `NEEDLE_SUPERVISOR_SOCKET` on parallel
+    threads. Now serialised behind a poison-tolerant mutex.
+  - `trace::tests::trace_capture_write_std{out,err}_handles_errors_gracefully`
+    forced a write failure with a read-only directory, which root ignores — so
+    they failed only in CI, where the build container runs as root. They now
+    remove the trace directory instead, which fails for any uid.
+
 ### Changed
 
 - `CLAUDE.md` now documents `bf` as the bead CLI and `bf close --reason`
   (not the invalid `--body`), and states that `br` must never be emitted from a
   prompt template or doc.
+
+### Known issues
+
+- `bead_store::tests::bf_cli_bead_store_{ready,list_all}_passes_explicit_limit`
+  are flaky under parallel load — the fake `bf` script they exec sometimes never
+  writes its args file (`bf-2mp0y`).
+- `classify_error_code` lists 153 duplicated error codes, leaving 46 match arms
+  unreachable, so those codes silently classify into the wrong category
+  (`bf-5ts0z`).
 
 ## [0.2.15] - 2026-07-31
 
