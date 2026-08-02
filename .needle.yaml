@@ -89,7 +89,7 @@ strands:
   splice:
     enabled: true
     stale_threshold_secs: 300
-    report_workspace: null
+    report_workspace: /home/coding/NEEDLE
     detect_live_loops: true
     live_loop_scan_events: 200
     claim_churn_threshold: 20
