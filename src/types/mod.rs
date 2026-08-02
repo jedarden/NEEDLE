@@ -1502,6 +1502,324 @@ mod tests {
         assert_ne!(ErrorType::Compile, ErrorType::Unknown);
         assert_ne!(ErrorType::Test, ErrorType::Unknown);
     }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // detect_compilation_errors tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_compilation_errors_empty_stderr() {
+        let stderr = "";
+        let errors = detect_compilation_errors(stderr);
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn detect_compilation_errors_single_error_with_code() {
+        let stderr = "error[E0308]: mismatched types";
+        let errors = detect_compilation_errors(stderr);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            CompilationError::RustError {
+                code,
+                message,
+                file,
+                line,
+                column,
+            } => {
+                assert_eq!(code, "E0308");
+                assert_eq!(message, "mismatched types");
+                assert!(file.is_none());
+                assert!(line.is_none());
+                assert!(column.is_none());
+            }
+            _ => panic!("Expected RustError variant"),
+        }
+    }
+
+    #[test]
+    fn detect_compilation_errors_error_with_location() {
+        let stderr = r#"error[E0308]: mismatched types
+  --> src/main.rs:10:5"#;
+        let errors = detect_compilation_errors(stderr);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            CompilationError::RustError {
+                code,
+                message,
+                file,
+                line,
+                column,
+            } => {
+                assert_eq!(code, "E0308");
+                assert_eq!(message, "mismatched types");
+                assert_eq!(file, &Some("src/main.rs".to_string()));
+                assert_eq!(line, &Some(10));
+                assert_eq!(column, &Some(5));
+            }
+            _ => panic!("Expected RustError variant"),
+        }
+    }
+
+    #[test]
+    fn detect_compilation_errors_multiple_errors() {
+        let stderr = r#"error[E0308]: mismatched types
+  --> src/main.rs:10:5
+error[E0382]: use of moved value
+  --> src/lib.rs:42:10"#;
+        let errors = detect_compilation_errors(stderr);
+        assert_eq!(errors.len(), 2);
+        match &errors[0] {
+            CompilationError::RustError { code, .. } => {
+                assert_eq!(code, "E0308");
+            }
+            _ => panic!("Expected RustError variant"),
+        }
+        match &errors[1] {
+            CompilationError::RustError { code, .. } => {
+                assert_eq!(code, "E0382");
+            }
+            _ => panic!("Expected RustError variant"),
+        }
+    }
+
+    #[test]
+    fn detect_compilation_errors_could_not_compile() {
+        let stderr = "error: could not compile `my_crate` (bin \"my_crate\")";
+        let errors = detect_compilation_errors(stderr);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            CompilationError::General { message } => {
+                assert!(message.contains("my_crate"));
+            }
+            _ => panic!("Expected General variant"),
+        }
+    }
+
+    #[test]
+    fn detect_compilation_errors_abort_message() {
+        let stderr = "error: aborting due to 3 previous errors";
+        let errors = detect_compilation_errors(stderr);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            CompilationError::Abort { error_count } => {
+                assert_eq!(*error_count, 3);
+            }
+            _ => panic!("Expected Abort variant"),
+        }
+    }
+
+    #[test]
+    fn detect_compilation_errors_full_compilation_output() {
+        let stderr = r#"   Compiling my_crate v0.1.0 (/path/to/crate)
+error[E0308]: mismatched types
+  --> src/main.rs:10:5
+   |
+10 |     let x: i32 = "hello";
+   |            ---   ^^^^^^^ expected `i32`, found `&str`
+   |            expected due to this
+
+error: aborting due to 1 previous error
+
+error: could not compile `my_crate` (bin \"my_crate\)
+"#;
+        let errors = detect_compilation_errors(stderr);
+        assert!(!errors.is_empty(), "Should detect at least one error");
+
+        // Should have RustError, Abort, and General errors
+        let has_rust_error = errors
+            .iter()
+            .any(|e| matches!(e, CompilationError::RustError { .. }));
+        let has_abort = errors
+            .iter()
+            .any(|e| matches!(e, CompilationError::Abort { .. }));
+        let has_general = errors
+            .iter()
+            .any(|e| matches!(e, CompilationError::General { .. }));
+
+        assert!(has_rust_error, "Should have RustError");
+        assert!(has_abort, "Should have Abort");
+        assert!(has_general, "Should have General");
+    }
+
+    #[test]
+    fn detect_compilation_errors_test_output_only() {
+        // Test output without compilation errors
+        let stderr = "running 3 tests\ntest test_foo ... ok\ntest test_bar ... FAILED\n";
+        let errors = detect_compilation_errors(stderr);
+        assert!(
+            errors.is_empty(),
+            "Should not detect compilation errors in test output"
+        );
+    }
+
+    #[test]
+    fn detect_compilation_errors_unused_warnings() {
+        let stderr = "error: unused variable: `x`\nerror: dead_code";
+        let errors = detect_compilation_errors(stderr);
+        assert_eq!(errors.len(), 2);
+        assert!(errors
+            .iter()
+            .all(|e| matches!(e, CompilationError::General { .. })));
+    }
+
+    #[test]
+    fn detect_compilation_errors_mixed_output() {
+        let stderr = r#"warning: unused variable
+error[E0308]: mismatched types
+  --> src/main.rs:10:5
+running tests
+test foo ... ok"#;
+        let errors = detect_compilation_errors(stderr);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            CompilationError::RustError { code, .. } => {
+                assert_eq!(code, "E0308");
+            }
+            _ => panic!("Expected RustError variant"),
+        }
+    }
+
+    #[test]
+    fn detect_compilation_errors_location_no_column() {
+        let stderr = r#"error[E0308]: mismatched types
+  --> src/main.rs:10"#;
+        let errors = detect_compilation_errors(stderr);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            CompilationError::RustError {
+                code,
+                file,
+                line,
+                column,
+                ..
+            } => {
+                assert_eq!(code, "E0308");
+                assert_eq!(file, &Some("src/main.rs".to_string()));
+                assert_eq!(line, &Some(10));
+                assert!(column.is_none());
+            }
+            _ => panic!("Expected RustError variant"),
+        }
+    }
+
+    #[test]
+    fn detect_compilation_errors_location_no_line_or_column() {
+        let stderr = r#"error[E0308]: mismatched types
+  --> src/main.rs"#;
+        let errors = detect_compilation_errors(stderr);
+        assert_eq!(errors.len(), 1);
+        match &errors[0] {
+            CompilationError::RustError {
+                code,
+                file,
+                line,
+                column,
+                ..
+            } => {
+                assert_eq!(code, "E0308");
+                assert_eq!(file, &Some("src/main.rs".to_string()));
+                assert!(line.is_none());
+                assert!(column.is_none());
+            }
+            _ => panic!("Expected RustError variant"),
+        }
+    }
+
+    #[test]
+    fn parse_error_line_valid_format() {
+        let line = "error[E0308]: mismatched types";
+        let result = parse_error_line(line);
+        assert!(result.is_some());
+        let (code, message) = result.unwrap();
+        assert_eq!(code, "E0308");
+        assert_eq!(message, "mismatched types");
+    }
+
+    #[test]
+    fn parse_error_line_no_message() {
+        let line = "error[E0308]:";
+        let result = parse_error_line(line);
+        assert!(result.is_some());
+        let (code, message) = result.unwrap();
+        assert_eq!(code, "E0308");
+        assert!(message.is_empty());
+    }
+
+    #[test]
+    fn parse_error_line_not_an_error() {
+        let line = "warning: unused variable";
+        let result = parse_error_line(line);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_location_line_full_location() {
+        let line = "   --> src/main.rs:10:5";
+        let result = parse_location_line(line);
+        assert!(result.is_some());
+        let (file, line_num, column) = result.unwrap();
+        assert_eq!(file, "src/main.rs");
+        assert_eq!(line_num, Some(10));
+        assert_eq!(column, Some(5));
+    }
+
+    #[test]
+    fn parse_location_line_no_column() {
+        let line = "   --> src/main.rs:10";
+        let result = parse_location_line(line);
+        assert!(result.is_some());
+        let (file, line_num, column) = result.unwrap();
+        assert_eq!(file, "src/main.rs");
+        assert_eq!(line_num, Some(10));
+        assert!(column.is_none());
+    }
+
+    #[test]
+    fn parse_location_line_no_line_or_column() {
+        let line = "   --> src/main.rs";
+        let result = parse_location_line(line);
+        assert!(result.is_some());
+        let (file, line_num, column) = result.unwrap();
+        assert_eq!(file, "src/main.rs");
+        assert!(line_num.is_none());
+        assert!(column.is_none());
+    }
+
+    #[test]
+    fn parse_location_line_not_a_location() {
+        let line = "   some other text";
+        let result = parse_location_line(line);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_abort_count_valid() {
+        let line = "aborting due to 3 previous errors";
+        let result = parse_abort_count(line);
+        assert_eq!(result, Some(3));
+    }
+
+    #[test]
+    fn parse_abort_count_single_digit() {
+        let line = "aborting due to 5 previous errors";
+        let result = parse_abort_count(line);
+        assert_eq!(result, Some(5));
+    }
+
+    #[test]
+    fn parse_abort_count_no_number() {
+        let line = "aborting due to previous errors";
+        let result = parse_abort_count(line);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_abort_count_large_number() {
+        let line = "aborting due to 42 previous errors";
+        let result = parse_abort_count(line);
+        assert_eq!(result, Some(42));
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1832,6 +2150,214 @@ impl fmt::Display for CompilationError {
             }
         }
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Compilation Error Detection
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Detect compilation errors from cargo test stderr.
+///
+/// Parses cargo test stderr output and extracts compilation errors including
+/// error codes, messages, and file locations. Handles multi-line error output
+/// with location information on subsequent lines.
+///
+/// # Arguments
+///
+/// * `stderr` - The stderr output from cargo test
+///
+/// # Returns
+///
+/// A vector of `CompilationError` values representing all detected errors.
+/// Returns an empty vector if no compilation errors are detected.
+///
+/// # Examples
+///
+/// ```
+/// use needle::types::detect_compilation_errors;
+///
+/// let stderr = r#"error[E0308]: mismatched types
+///  --> src/main.rs:10:5
+///   |
+/// 10|     let x: i32 = "hello";
+///   |     ---   ^^^^^^^ expected `i32`, found `&str`
+///   |     expected due to this
+///
+/// error: aborting due to 1 previous error"#;
+///
+/// let errors = detect_compilation_errors(stderr);
+/// assert_eq!(errors.len(), 1);
+/// assert!(matches!(errors[0], CompilationError::RustError { code, .. } if code == "E0308"));
+/// ```
+pub fn detect_compilation_errors(stderr: &str) -> Vec<CompilationError> {
+    let mut errors = Vec::new();
+    let mut current_error: Option<CompilationError> = None;
+    let mut error_count: Option<usize> = None;
+
+    for line in stderr.lines() {
+        let line = line.trim();
+
+        // Pattern 1: Rust compiler error with code: "error[E0308]: mismatched types"
+        if let Some((code, message)) = parse_error_line(line) {
+            // Save any current error before starting a new one
+            if let Some(err) = current_error.take() {
+                errors.push(err);
+            }
+            current_error = Some(CompilationError::RustError {
+                code,
+                message,
+                file: None,
+                line: None,
+                column: None,
+            });
+            continue;
+        }
+
+        // Pattern 2: File location line: "   --> src/main.rs:10:5"
+        if current_error.is_some() && line.contains("-->") {
+            if let Some((file, line_num, col)) = parse_location_line(line) {
+                if let Some(CompilationError::RustError {
+                    code,
+                    message,
+                    file: _,
+                    line: _,
+                    column: _,
+                }) = current_error.take()
+                {
+                    current_error = Some(CompilationError::RustError {
+                        code,
+                        message,
+                        file: Some(file),
+                        line: line_num,
+                        column: col,
+                    });
+                }
+            }
+            continue;
+        }
+
+        // Pattern 3: "could not compile" message
+        if line.contains("could not compile") {
+            // Save any current error before adding the general error
+            if let Some(err) = current_error.take() {
+                errors.push(err);
+            }
+            errors.push(CompilationError::General {
+                message: line.to_string(),
+            });
+            continue;
+        }
+
+        // Pattern 4: "aborting due to N previous errors"
+        if line.contains("aborting due to") {
+            // Save any current error before processing abort
+            if let Some(err) = current_error.take() {
+                errors.push(err);
+            }
+            if let Some(count) = parse_abort_count(line) {
+                error_count = Some(count);
+            }
+            continue;
+        }
+
+        // Pattern 5: Check for warning/error messages without error codes (unused, dead_code, etc.)
+        if line.starts_with("error:") && !line.starts_with("error[E") {
+            // Check for unused warnings
+            if line.contains("unused")
+                || line.contains("dead_code")
+                || line.contains("unused_variables")
+            {
+                // Save any current error before adding the general error
+                if let Some(err) = current_error.take() {
+                    errors.push(err);
+                }
+                errors.push(CompilationError::General {
+                    message: line.to_string(),
+                });
+            }
+        }
+
+        // If we hit a blank line, save the current error
+        if line.is_empty() {
+            if let Some(err) = current_error.take() {
+                errors.push(err);
+            }
+        }
+    }
+
+    // Don't forget the last error if there was one
+    if let Some(err) = current_error {
+        errors.push(err);
+    }
+
+    // Add abort error if we detected one
+    if let Some(count) = error_count {
+        errors.push(CompilationError::Abort { error_count: count });
+    }
+
+    errors
+}
+
+/// Parse an error line to extract error code and message.
+///
+/// Input: "error[E0308]: mismatched types"
+/// Output: Some(("E0308", "mismatched types"))
+fn parse_error_line(line: &str) -> Option<(String, String)> {
+    if line.starts_with("error[E") {
+        if let Some(end_bracket) = line.find(']') {
+            let code = line[6..end_bracket].to_string(); // Skip "error[" but keep the "E"
+            let rest = line[end_bracket + 1..].trim();
+            let message = rest.strip_prefix(':').map(|s| s.trim()).unwrap_or(rest);
+            return Some((code, message.to_string()));
+        }
+    }
+    None
+}
+
+/// Parse a location line to extract file, line, and column.
+///
+/// Input: "   --> src/main.rs:10:5"
+/// Output: Some(("src/main.rs", Some(10), Some(5)))
+fn parse_location_line(line: &str) -> Option<(String, Option<usize>, Option<usize>)> {
+    // Find the part after "-->"
+    if let Some(arrow_pos) = line.find("-->") {
+        let location_part = line[arrow_pos + 3..].trim();
+
+        // Split by ':' to get file, line, and column
+        let parts: Vec<&str> = location_part.split(':').collect();
+
+        if parts.is_empty() {
+            return None;
+        }
+
+        let file = parts[0].trim().to_string();
+        let line_num = if parts.len() >= 2 {
+            parts[1].trim().parse().ok()
+        } else {
+            None
+        };
+        let column = if parts.len() >= 3 {
+            parts[2].trim().parse().ok()
+        } else {
+            None
+        };
+
+        return Some((file, line_num, column));
+    }
+    None
+}
+
+/// Parse the error count from an abort message.
+///
+/// Input: "aborting due to 3 previous errors"
+/// Output: Some(3)
+fn parse_abort_count(line: &str) -> Option<usize> {
+    for word in line.split_whitespace() {
+        if let Ok(n) = word.parse::<usize>() {
+            return Some(n);
+        }
+    }
+    None
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
