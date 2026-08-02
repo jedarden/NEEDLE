@@ -543,6 +543,25 @@ mod tests {
     }
 
     #[test]
+    fn trace_capture_returns_none_when_directory_creation_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+
+        // Create a file at the trace directory path to block directory creation.
+        let blocking_path = beads_root
+            .join(".beads")
+            .join("traces")
+            .join("blocked-bead");
+        std::fs::create_dir_all(blocking_path.parent().unwrap()).unwrap();
+        std::fs::write(&blocking_path, b"blocking file").unwrap();
+
+        // Attempting to create a TraceCapture should return None gracefully.
+        let bead_id = BeadId::from("blocked-bead");
+        let capture = TraceCapture::new(&bead_id, beads_root);
+        assert!(capture.is_none(), "TraceCapture should return None when directory creation fails");
+    }
+
+    #[test]
     fn trace_capture_writes_stdout() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
