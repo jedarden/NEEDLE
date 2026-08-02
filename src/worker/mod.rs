@@ -2089,7 +2089,9 @@ impl Worker {
         // Write trace files for stdout and stderr.
         // Errors are logged but don't fail the bead cycle — the output is
         // still available in exec_output for the outcome handler.
-        if let Err(e) = self.write_trace_files(&bead.id, dispatch_ws, &output.stdout, &output.stderr) {
+        if let Err(e) =
+            self.write_trace_files(&bead.id, dispatch_ws, &output.stdout, &output.stderr)
+        {
             tracing::warn!(
                 bead_id = %bead.id,
                 error = %e,
@@ -2127,21 +2129,27 @@ impl Worker {
 
         // Create the trace directory if it doesn't exist.
         // This will also create parent directories (.beads/traces/) if needed.
-        fs::create_dir_all(&trace_dir)
-            .with_context(|| format!("failed to create trace directory at {}", trace_dir.display()))?;
+        fs::create_dir_all(&trace_dir).with_context(|| {
+            format!(
+                "failed to create trace directory at {}",
+                trace_dir.display()
+            )
+        })?;
 
         // Write stdout to stdout.txt
         let stdout_path = trace_dir.join("stdout.txt");
-        let mut stdout_file = fs::File::create(&stdout_path)
-            .with_context(|| format!("failed to create stdout file at {}", stdout_path.display()))?;
+        let mut stdout_file = fs::File::create(&stdout_path).with_context(|| {
+            format!("failed to create stdout file at {}", stdout_path.display())
+        })?;
         stdout_file
             .write_all(stdout.as_bytes())
             .with_context(|| format!("failed to write stdout to {}", stdout_path.display()))?;
 
         // Write stderr to stderr.txt
         let stderr_path = trace_dir.join("stderr.txt");
-        let mut stderr_file = fs::File::create(&stderr_path)
-            .with_context(|| format!("failed to create stderr file at {}", stderr_path.display()))?;
+        let mut stderr_file = fs::File::create(&stderr_path).with_context(|| {
+            format!("failed to create stderr file at {}", stderr_path.display())
+        })?;
         stderr_file
             .write_all(stderr.as_bytes())
             .with_context(|| format!("failed to write stderr to {}", stderr_path.display()))?;
