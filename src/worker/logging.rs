@@ -48,20 +48,23 @@ impl LogLevel {
     }
 }
 
-/// Emit a structured log event through the telemetry system.
+/// Emit a structured log event through the telemetry system at the specified level.
 ///
 /// This is the core logging function that all other helpers build upon.
-/// It converts the LogEvent into a telemetry EventKind and emits it.
+/// It converts the LogEvent into a telemetry EventKind and emits it at the
+/// specified log level.
 ///
 /// # Arguments
 ///
 /// * `telemetry` - The telemetry instance to emit through
 /// * `event` - The log event to emit
+/// * `level` - The log level to emit at
+/// * `bead_id` - Optional bead identifier for context tracking
 ///
 /// # Example
 ///
 /// ```no_run
-/// # use needle::worker::logging::{LogEvent, emit_log};
+/// # use needle::worker::logging::{LogEvent, emit_log_with_level, LogLevel};
 /// # use needle::telemetry::Telemetry;
 /// # use std::collections::HashMap;
 /// # let telemetry: Telemetry = unimplemented!();
@@ -72,9 +75,14 @@ impl LogLevel {
 ///     timestamp: chrono::Utc::now(),
 ///     context,
 /// };
-/// emit_log(&telemetry, &event).ok();
+/// emit_log_with_level(&telemetry, &event, LogLevel::Info, None).ok();
 /// ```
-pub fn emit_log(telemetry: &Telemetry, event: &LogEvent) -> anyhow::Result<()> {
+pub fn emit_log_with_level(
+    telemetry: &Telemetry,
+    event: &LogEvent,
+    level: LogLevel,
+    bead_id: Option<&BeadId>,
+) -> anyhow::Result<()> {
     // Convert HashMap<String, String> to serde_json::Value for telemetry
     let json_context = serde_json::Value::Object(
         event.context
@@ -82,13 +90,22 @@ pub fn emit_log(telemetry: &Telemetry, event: &LogEvent) -> anyhow::Result<()> {
             .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
             .collect(),
     );
-    telemetry.log_info(&event.phase, json_context)
+    telemetry.log(&event.phase, level.as_str(), json_context, bead_id.cloned())
+}
+
+/// Emit a structured log event through the telemetry system at info level.
+///
+/// This is a convenience function that calls `emit_log_with_level` with `LogLevel::Info`.
+pub fn emit_log(telemetry: &Telemetry, event: &LogEvent) -> anyhow::Result<()> {
+    emit_log_with_level(telemetry, event, LogLevel::Info, None)
 }
 
 /// Emit a structured log event with phase and context.
 ///
 /// This is a convenience function that builds a LogEvent internally
-/// with the current timestamp and emits it through the telemetry system.
+/// with the current timestamp and emits it through the telemetry system
+/// at the Info level (for backward compatibility). For explicit level control,
+/// use `emit_log_event_with_level()`.
 ///
 /// # Arguments
 ///
@@ -109,6 +126,36 @@ pub fn emit_log_event(
     phase: &str,
     context: &[(&str, &str)],
 ) -> anyhow::Result<()> {
+    emit_log_event_with_level(telemetry, phase, context, LogLevel::Info)
+}
+
+/// Emit a structured log event with phase, context, and explicit log level.
+///
+/// This is a convenience function that builds a LogEvent internally
+/// with the current timestamp and emits it through the telemetry system
+/// at the specified log level.
+///
+/// # Arguments
+///
+/// * `telemetry` - The telemetry instance to emit through
+/// * `phase` - The phase identifier (e.g., "dispatch", "claim", "outcome")
+/// * `context` - Slice of key-value pairs for structured context data
+/// * `level` - The log level to emit at
+///
+/// # Example
+///
+/// ```no_run
+/// # use needle::worker::logging::{emit_log_event_with_level, LogLevel};
+/// # use needle::telemetry::Telemetry;
+/// # let telemetry: Telemetry = unimplemented!();
+/// emit_log_event_with_level(&telemetry, "dispatch", &[("status", "started")], LogLevel::Info).ok();
+/// ```
+pub fn emit_log_event_with_level(
+    telemetry: &Telemetry,
+    phase: &str,
+    context: &[(&str, &str)],
+    level: LogLevel,
+) -> anyhow::Result<()> {
     let context_map = context
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -118,7 +165,7 @@ pub fn emit_log_event(
         timestamp: chrono::Utc::now(),
         context: context_map,
     };
-    emit_log(telemetry, &event)
+    emit_log_with_level(telemetry, &event, level, None)
 }
 
 /// Convenience macro for emitting structured log events with key-value syntax.
@@ -192,7 +239,7 @@ pub fn log_info(
         timestamp: chrono::Utc::now(),
         context: context_map,
     };
-    emit_log(telemetry, &event)
+    emit_log_with_level(telemetry, &event, LogLevel::Info, None)
 }
 
 /// Emit a warn-level log with the given phase and context.
@@ -219,7 +266,7 @@ pub fn log_warn(
         timestamp: chrono::Utc::now(),
         context: context_map,
     };
-    emit_log(telemetry, &event)
+    emit_log_with_level(telemetry, &event, LogLevel::Warn, None)
 }
 
 /// Emit an error-level log with the given phase and context.
@@ -246,7 +293,7 @@ pub fn log_error(
         timestamp: chrono::Utc::now(),
         context: context_map,
     };
-    emit_log(telemetry, &event)
+    emit_log_with_level(telemetry, &event, LogLevel::Error, None)
 }
 
 /// Emit a debug-level log with the given phase and context.
@@ -273,7 +320,7 @@ pub fn log_debug(
         timestamp: chrono::Utc::now(),
         context: context_map,
     };
-    emit_log(telemetry, &event)
+    emit_log_with_level(telemetry, &event, LogLevel::Debug, None)
 }
 
 /// Emit an info-level log with bead context.
@@ -304,7 +351,7 @@ pub fn log_info_with_bead(
         timestamp: chrono::Utc::now(),
         context: context_map,
     };
-    emit_log(telemetry, &event)
+    emit_log_with_level(telemetry, &event, LogLevel::Info, Some(bead_id))
 }
 
 /// Emit a warn-level log with bead context.
@@ -335,7 +382,7 @@ pub fn log_warn_with_bead(
         timestamp: chrono::Utc::now(),
         context: context_map,
     };
-    emit_log(telemetry, &event)
+    emit_log_with_level(telemetry, &event, LogLevel::Warn, Some(bead_id))
 }
 
 /// Emit an error-level log with bead context.
@@ -366,7 +413,7 @@ pub fn log_error_with_bead(
         timestamp: chrono::Utc::now(),
         context: context_map,
     };
-    emit_log(telemetry, &event)
+    emit_log_with_level(telemetry, &event, LogLevel::Error, Some(bead_id))
 }
 
 /// Emit a debug-level log with bead context.
@@ -397,7 +444,7 @@ pub fn log_debug_with_bead(
         timestamp: chrono::Utc::now(),
         context: context_map,
     };
-    emit_log(telemetry, &event)
+    emit_log_with_level(telemetry, &event, LogLevel::Debug, Some(bead_id))
 }
 
 #[cfg(test)]
