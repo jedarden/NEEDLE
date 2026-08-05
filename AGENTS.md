@@ -1,6 +1,141 @@
-# AGENTS.md
+# NEEDLE Codex Guide
 
-This file contains guidance for AI agents (Claude, GPT, etc.) that are reading the NEEDLE codebase to perform work.
+This file is the primary operating guide for Codex in this repository, both in
+interactive sessions and when Codex runs headlessly as a NEEDLE worker. Inspect
+the current repository state and the relevant source before relying on older
+examples or planning documents.
+
+## Project Overview
+
+NEEDLE (Navigates Every Enqueued Deliverable, Logs Effort) is a Rust worker
+binary. It selects and claims work from a bead-forge store, dispatches a coding
+agent, records telemetry, and routes every outcome through an explicit state
+machine.
+
+The canonical bead CLI is `bf` (bead-forge). `br` is a deprecated compatibility
+shim on some hosts. Do not add new source, prompts, scripts, tests, or
+documentation that invoke `br`.
+
+## Working Safely
+
+- Inspect `git status --short` before editing. Preserve unrelated user and
+  worker changes in a dirty worktree.
+- Multiple NEEDLE workers may share the same repository. Re-check files before
+  modifying them and avoid broad rewrites that can overwrite concurrent work.
+- Do not use destructive Git operations (`reset --hard`, forced checkout,
+  forced push) to resolve unrelated changes.
+- Forgejo (`git.ardenone.com`) is the authoritative remote. GitHub is a mirror.
+  Push only to the configured `origin`, and never use `--force` or
+  `--force-with-lease`.
+- Keep commands suitable for unattended execution: avoid prompts, pagers, and
+  commands that require an interactive terminal.
+- Treat `docs/plan/plan.md` as architecture and design history. Verify current
+  behavior in source and against the installed CLI before depending on old
+  command examples.
+
+## Rust Compatibility
+
+The declared MSRV is Rust 1.75 (`Cargo.toml`). Do not add language features or
+dependencies that require a newer compiler without intentionally updating the
+MSRV and associated toolchain and CI configuration.
+
+## Code Conventions
+
+- Prefer `Result` and `?` for fallible operations. Do not hide operational
+  failures with `unwrap()` or `expect()`. Reserve those calls for tests or a
+  clearly documented invariant/unrecoverable initialization condition.
+- Fallible public operations should return `Result`; infallible constructors,
+  accessors, and pure transformations may return ordinary values.
+- Match state and outcome enums exhaustively. Avoid catch-all `_` arms where a
+  new variant should force an explicit decision.
+- Emit telemetry for every state transition and terminal outcome.
+- Preserve error context at process, filesystem, database, and parsing
+  boundaries.
+- Unit tests belong in `#[cfg(test)]` modules near their implementation.
+- Integration and end-to-end tests belong under `tests/`.
+- Use `#[tokio::test]` for asynchronous tests; do not introduce
+  `tokio_test::block_on`.
+- Prefer testing public behavior over implementation details.
+
+## Critical Test Isolation
+
+Any test that spawns the compiled `needle` binary as a real subprocess (for
+example, `Command::new(CARGO_BIN_EXE_needle)`) must isolate both `HOME` and the
+Explore strand's scan root.
+
+Explore is enabled by default and otherwise scans under the real home
+directory. An unisolated test can discover and mutate production bead stores.
+This previously created hundreds of phantom beads across real repositories.
+
+At minimum, give the subprocess a temporary home:
+
+```rust
+cmd.env("HOME", temp_dir.path());
+```
+
+Prefer also configuring `workspace_root` to a temporary fixture directory, or
+disable Explore when the behavior under test does not require it. Never point a
+test worker at `/home/coding` or another directory containing real projects.
+
+## Verification
+
+- Run `cargo fmt --check` for Rust changes.
+- Run targeted tests for the modules or behavior changed.
+- Run `cargo clippy --all-targets -- -D warnings` when practical. Existing
+  unrelated warnings must be reported distinctly rather than silently fixed as
+  part of an unrelated task.
+- On this host, the `cargo` wrapper may offload a clean repository to iad-ci and
+  use a resource-limited local fallback for a dirty repository. Do not assume a
+  command ran remotely; report what actually ran and its result.
+- The authoritative full verification is the `needle-ci` workflow on iad-ci
+  after a push to `main`. Do not claim full-suite success from targeted tests.
+- If required CI fails, record the failure on the bead, fix it, and do not close
+  the bead as successfully completed.
+
+## Bead Workflow
+
+Each bead supplies its own deliverables and acceptance criteria. Complete and
+verify the requested repository work before closing it.
+
+Use:
+
+```bash
+bf close BEAD_ID --reason "Summary of what was done"
+```
+
+The close flag is `--reason`, not `--body`. When no code change is appropriate,
+record the reason with `bf update --notes` or a bead comment rather than
+creating an empty commit.
+
+SQLite (`.beads/beads.db`) is the live store. `issues.jsonl` is a checkpoint
+written by `bf sync --flush-only`; mutations do not necessarily flush it
+automatically.
+
+Before repairing a healthy-enough store, protect live database state first:
+
+```bash
+bf sync --flush-only
+sqlite3 .beads/beads.db "PRAGMA integrity_check;"
+bf doctor --repair
+```
+
+Only run the repair step when diagnostics show it is needed. If the database is
+already corrupt and a flush may poison the checkpoint, inspect checkpoint
+freshness and recovery options before acting. Never delete or rebuild a bead
+database without explicitly accounting for unflushed work.
+
+## Commits
+
+Use the bead identifier when the work is bead-driven:
+
+```text
+feat(needle-XYZ): short description
+fix(needle-XYZ): short description
+test(needle-XYZ): short description
+```
+
+Do not mix unrelated cleanup into the task commit. State which checks were run
+and any remaining limitations in the final handoff or bead notes.
 
 ## Telemetry Contract
 

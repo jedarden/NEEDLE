@@ -32,3 +32,6 @@
 {"bead":"bf-3l25s","duration_ms":81,"event":"complete","exit_code":0,"outcome":"success","strand":"explore","ts":"2026-08-02T00:34:23.715201182+00:00","worker":"test-worker"}
 {"bead":"bf-x1r","event":"claim","strand":"explore","ts":"2026-08-02T00:36:30.650377527+00:00","worker":"debug-worker"}
 {"bead":"bf-4en7k","event":"claim","strand":"explore","ts":"2026-08-02T00:36:38.062199283+00:00","worker":"debug-worker"}
+{"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-02T15:53:25.935866512+00:00","worker":"test-worker"}
+{"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-02T16:02:05.598220612+00:00","worker":"test-worker"}
+{"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-02T16:07:28.558714286+00:00","worker":"test-worker"}
