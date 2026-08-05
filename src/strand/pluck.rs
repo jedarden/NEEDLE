@@ -317,6 +317,14 @@ impl super::Strand for PluckStrand {
             "Querying bead store for ready candidates"
         );
 
+        // Log the complete query before execution
+        tracing::info!(
+            assignee = ?filters.assignee,
+            exclude_labels = ?filters.exclude_labels,
+            exclude_ids_count = filters.exclude_ids.len(),
+            "Executing Pluck query with filters"
+        );
+
         let mut candidates = match store.ready(&filters).await {
             Ok(beads) => {
                 tracing::debug!(
