@@ -456,12 +456,7 @@ impl BeadStore for MockBeadStore {
         Ok(())
     }
 
-    async fn create_bead(
-        &self,
-        _title: &str,
-        _body: &str,
-        _labels: &[&str],
-    ) -> Result<BeadId> {
+    async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
         Ok(BeadId::from("new-mock-bead"))
     }
 
@@ -766,7 +761,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_rising_load_setup_helper() {
-        let (simulator, _temp_dir) = rising_load_setup(Some(1), Some(3), Some(2), None).await.unwrap();
+        let (simulator, _temp_dir) = rising_load_setup(Some(1), Some(3), Some(2), None)
+            .await
+            .unwrap();
 
         // Should have recorded initial + 2 steps = 3 spawn attempts
         assert_eq!(simulator.spawn_attempt_count(), 3);

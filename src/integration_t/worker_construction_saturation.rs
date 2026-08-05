@@ -9,9 +9,9 @@
 //! 2. Simulate the CLI's resource check loop with retry behavior
 //! 3. Verify eventual failure with a clear error message (not panic/unwrap)
 
+use anyhow::Result;
 use std::path::Path;
 use std::time::Duration;
-use anyhow::Result;
 
 /// Simulated saturated load test fixture.
 ///
@@ -37,16 +37,13 @@ impl SaturatedLoadFixture {
 
         // Create mocked /proc/loadavg with extremely high load
         let loadavg_path = temp_dir.path().join("loadavg");
-        std::fs::write(
-            &loadavg_path,
-            "100.00 95.00 90.00 1/123 45678\n"
-        )?;
+        std::fs::write(&loadavg_path, "100.00 95.00 90.00 1/123 45678\n")?;
 
         // Create mocked /proc/meminfo with only 1 MB available
         let meminfo_path = temp_dir.path().join("meminfo");
         std::fs::write(
             &meminfo_path,
-            "MemAvailable: 1024 kB\nMemTotal: 8388608 kB\n"
+            "MemAvailable: 1024 kB\nMemTotal: 8388608 kB\n",
         )?;
 
         Ok(SaturatedLoadFixture {
@@ -62,16 +59,13 @@ impl SaturatedLoadFixture {
 
         // Create mocked /proc/loadavg with low load
         let loadavg_path = temp_dir.path().join("loadavg");
-        std::fs::write(
-            &loadavg_path,
-            "0.50 0.45 0.40 1/123 45678\n"
-        )?;
+        std::fs::write(&loadavg_path, "0.50 0.45 0.40 1/123 45678\n")?;
 
         // Create mocked /proc/meminfo with plenty of memory
         let meminfo_path = temp_dir.path().join("meminfo");
         std::fs::write(
             &meminfo_path,
-            "MemAvailable: 8388608 kB\nMemTotal: 8388608 kB\n"
+            "MemAvailable: 8388608 kB\nMemTotal: 8388608 kB\n",
         )?;
 
         Ok(SaturatedLoadFixture {
@@ -192,8 +186,8 @@ async fn worker_construction_defers_on_saturated_cpu() {
     let fixture = SaturatedLoadFixture::new().unwrap();
 
     // Set CPU threshold low enough that mocked load (100.0) definitely exceeds it
-    let cpu_load_warn = 0.5;  // 50% CPU threshold
-    let memory_free_warn_mb = 1;  // 1 MB - our mocked value exactly equals this
+    let cpu_load_warn = 0.5; // 50% CPU threshold
+    let memory_free_warn_mb = 1; // 1 MB - our mocked value exactly equals this
 
     // Very short timeout for test - should fail quickly
     let max_wait_secs = 2u64;
@@ -208,7 +202,10 @@ async fn worker_construction_defers_on_saturated_cpu() {
     );
 
     // Should fail with a clear error message
-    assert!(result.is_err(), "worker construction should fail under saturation");
+    assert!(
+        result.is_err(),
+        "worker construction should fail under saturation"
+    );
 
     let error_msg = result.unwrap_err().to_string();
     assert!(
@@ -228,8 +225,14 @@ async fn worker_construction_defers_on_saturated_cpu() {
     );
 
     // Should NOT contain panic/unwrap language
-    assert!(!error_msg.contains("panic"), "error should not mention panic");
-    assert!(!error_msg.contains("unwrap"), "error should not mention unwrap");
+    assert!(
+        !error_msg.contains("panic"),
+        "error should not mention panic"
+    );
+    assert!(
+        !error_msg.contains("unwrap"),
+        "error should not mention unwrap"
+    );
 }
 
 #[tokio::test]
@@ -237,8 +240,8 @@ async fn worker_construction_defers_on_saturated_memory() {
     let fixture = SaturatedLoadFixture::new().unwrap();
 
     // Set memory threshold high enough that mocked value (1 MB) definitely is below it
-    let cpu_load_warn = 200.0;  // CPU is fine (100.0 < 200.0)
-    let memory_free_warn_mb = 10;  // 10 MB threshold, only 1 MB available
+    let cpu_load_warn = 200.0; // CPU is fine (100.0 < 200.0)
+    let memory_free_warn_mb = 10; // 10 MB threshold, only 1 MB available
 
     let max_wait_secs = 2u64;
     let retry_delay_secs = 1u64;
@@ -252,7 +255,10 @@ async fn worker_construction_defers_on_saturated_memory() {
     );
 
     // Should fail due to memory saturation
-    assert!(result.is_err(), "worker construction should fail under memory saturation");
+    assert!(
+        result.is_err(),
+        "worker construction should fail under memory saturation"
+    );
 
     let error_msg = result.unwrap_err().to_string();
     assert!(
@@ -272,8 +278,8 @@ async fn worker_construction_succeeds_when_resources_comfortable() {
     let fixture = SaturatedLoadFixture::comfortable().unwrap();
 
     // Set thresholds that comfortable resources easily meet
-    let cpu_load_warn = 2.0;  // 200% CPU - our mocked 0.5 is well below
-    let memory_free_warn_mb = 1;  // 1 MB - our mocked 8 GB is well above
+    let cpu_load_warn = 2.0; // 200% CPU - our mocked 0.5 is well below
+    let memory_free_warn_mb = 1; // 1 MB - our mocked 8 GB is well above
 
     let max_wait_secs = 1u64;
     let retry_delay_secs = 1u64;
@@ -287,7 +293,10 @@ async fn worker_construction_succeeds_when_resources_comfortable() {
     );
 
     // Should succeed immediately without deferring
-    assert!(result.is_ok(), "worker construction should succeed with comfortable resources");
+    assert!(
+        result.is_ok(),
+        "worker construction should succeed with comfortable resources"
+    );
 }
 
 #[tokio::test]
@@ -296,7 +305,7 @@ async fn worker_construction_exponential_backoff() {
 
     let cpu_load_warn = 0.5;
     let memory_free_warn_mb = 1;
-    let max_wait_secs = 8u64;  // Allow multiple retries
+    let max_wait_secs = 8u64; // Allow multiple retries
     let retry_delay_secs = 1u64;
 
     let start = std::time::Instant::now();
@@ -427,8 +436,8 @@ async fn worker_construction_immediate_failure_on_extreme_saturation() {
     let fixture = SaturatedLoadFixture::new().unwrap();
 
     // Even extreme saturation should go through the defer loop
-    let cpu_load_warn = 0.1;  // Very low threshold (10%)
-    let memory_free_warn_mb = 100;  // Very high threshold (100 MB)
+    let cpu_load_warn = 0.1; // Very low threshold (10%)
+    let memory_free_warn_mb = 100; // Very high threshold (100 MB)
 
     // Zero timeout should fail immediately on first check
     let max_wait_secs = 0u64;
@@ -443,7 +452,10 @@ async fn worker_construction_immediate_failure_on_extreme_saturation() {
     );
 
     // Should fail immediately without waiting
-    assert!(result.is_err(), "should fail immediately under extreme saturation");
+    assert!(
+        result.is_err(),
+        "should fail immediately under extreme saturation"
+    );
 
     let error_msg = result.unwrap_err().to_string();
     assert!(

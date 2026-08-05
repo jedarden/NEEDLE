@@ -19,17 +19,17 @@
 //! 5. Verify telemetry events are emitted for deferred spawns
 //! 6. Verify eventual failure with a clear error message under persistent saturation
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use anyhow::Result;
+use crate::bead_store::{BeadStore, Filters};
 use crate::config::{Config, SupervisorConfig, WorkerConfig};
 use crate::registry::Registry;
 use crate::supervisor::Supervisor;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{Bead, BeadId, BeadStatus};
-use crate::bead_store::{BeadStore, Filters};
+use anyhow::Result;
 use chrono::Utc;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Mock Bead Store for Testing
@@ -131,12 +131,7 @@ impl BeadStore for MockBeadStore {
         Ok(())
     }
 
-    async fn create_bead(
-        &self,
-        _title: &str,
-        _body: &str,
-        _labels: &[&str],
-    ) -> Result<BeadId> {
+    async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
         Ok(BeadId::from("new-mock-bead"))
     }
 
@@ -211,21 +206,19 @@ impl SupervisedSaturationFixture {
         // Backup original files (if they exist)
         let backup_success = if original_loadavg_path.exists() && original_meminfo_path.exists() {
             std::fs::copy(&original_loadavg_path, temp_dir.path().join("loadavg.bak")).is_ok()
-                && std::fs::copy(&original_meminfo_path, temp_dir.path().join("meminfo.bak")).is_ok()
+                && std::fs::copy(&original_meminfo_path, temp_dir.path().join("meminfo.bak"))
+                    .is_ok()
         } else {
             false
         };
 
         // Create mocked /proc/loadavg with extremely high load
-        std::fs::write(
-            &loadavg_path,
-            "100.00 95.00 90.00 1/123 45678\n"
-        )?;
+        std::fs::write(&loadavg_path, "100.00 95.00 90.00 1/123 45678\n")?;
 
         // Create mocked /proc/meminfo with only 1 MB available
         std::fs::write(
             &meminfo_path,
-            "MemAvailable: 1024 kB\nMemTotal: 8388608 kB\n"
+            "MemAvailable: 1024 kB\nMemTotal: 8388608 kB\n",
         )?;
 
         Ok(SupervisedSaturationFixture {
@@ -263,21 +256,19 @@ impl SupervisedSaturationFixture {
         // Backup original files
         let backup_success = if original_loadavg_path.exists() && original_meminfo_path.exists() {
             std::fs::copy(&original_loadavg_path, temp_dir.path().join("loadavg.bak")).is_ok()
-                && std::fs::copy(&original_meminfo_path, temp_dir.path().join("meminfo.bak")).is_ok()
+                && std::fs::copy(&original_meminfo_path, temp_dir.path().join("meminfo.bak"))
+                    .is_ok()
         } else {
             false
         };
 
         // Create mocked /proc/loadavg with low load
-        std::fs::write(
-            &loadavg_path,
-            "0.50 0.45 0.40 1/123 45678\n"
-        )?;
+        std::fs::write(&loadavg_path, "0.50 0.45 0.40 1/123 45678\n")?;
 
         // Create mocked /proc/meminfo with plenty of memory
         std::fs::write(
             &meminfo_path,
-            "MemAvailable: 8388608 kB\nMemTotal: 8388608 kB\n"
+            "MemAvailable: 8388608 kB\nMemTotal: 8388608 kB\n",
         )?;
 
         Ok(SupervisedSaturationFixture {
@@ -297,11 +288,11 @@ impl Drop for SupervisedSaturationFixture {
         if self.backup_success {
             let _ = std::fs::copy(
                 self.temp_dir.path().join("loadavg.bak"),
-                &self.original_loadavg_path
+                &self.original_loadavg_path,
             );
             let _ = std::fs::copy(
                 self.temp_dir.path().join("meminfo.bak"),
-                &self.original_meminfo_path
+                &self.original_meminfo_path,
             );
         }
     }
@@ -449,8 +440,8 @@ async fn supervisor_spawn_defers_on_saturated_cpu() {
     let fixture = SupervisedSaturationFixture::new().unwrap();
 
     // Set CPU threshold low enough that mocked load (100.0) definitely exceeds it
-    let cpu_load_warn = 0.5;  // 50% CPU threshold
-    let memory_free_warn_mb = 1;  // 1 MB - our mocked value exactly equals this
+    let cpu_load_warn = 0.5; // 50% CPU threshold
+    let memory_free_warn_mb = 1; // 1 MB - our mocked value exactly equals this
 
     // Very short timeout for test - should fail quickly
     let max_wait_secs = 2u64;
@@ -466,10 +457,14 @@ async fn supervisor_spawn_defers_on_saturated_cpu() {
         cpu_load_warn,
         memory_free_warn_mb,
         &telemetry,
-    ).await;
+    )
+    .await;
 
     // Should fail with a clear error message
-    assert!(result.is_err(), "supervisor spawn should fail under saturation");
+    assert!(
+        result.is_err(),
+        "supervisor spawn should fail under saturation"
+    );
 
     let error_msg = result.unwrap_err().to_string();
     assert!(
@@ -489,8 +484,14 @@ async fn supervisor_spawn_defers_on_saturated_cpu() {
     );
 
     // Should NOT contain panic/unwrap language
-    assert!(!error_msg.contains("panic"), "error should not mention panic");
-    assert!(!error_msg.contains("unwrap"), "error should not mention unwrap");
+    assert!(
+        !error_msg.contains("panic"),
+        "error should not mention panic"
+    );
+    assert!(
+        !error_msg.contains("unwrap"),
+        "error should not mention unwrap"
+    );
 
     // Verify telemetry was emitted
     let events = telemetry.get_events();
@@ -510,8 +511,8 @@ async fn supervisor_spawn_defers_on_saturated_memory() {
     let fixture = SupervisedSaturationFixture::new().unwrap();
 
     // Set memory threshold high enough that mocked value (1 MB) definitely is below it
-    let cpu_load_warn = 200.0;  // CPU is fine (100.0 < 200.0)
-    let memory_free_warn_mb = 10;  // 10 MB threshold, only 1 MB available
+    let cpu_load_warn = 200.0; // CPU is fine (100.0 < 200.0)
+    let memory_free_warn_mb = 10; // 10 MB threshold, only 1 MB available
 
     let max_wait_secs = 2u64;
     let retry_delay_secs = 1u64;
@@ -526,10 +527,14 @@ async fn supervisor_spawn_defers_on_saturated_memory() {
         cpu_load_warn,
         memory_free_warn_mb,
         &telemetry,
-    ).await;
+    )
+    .await;
 
     // Should fail due to memory saturation
-    assert!(result.is_err(), "supervisor spawn should fail under memory saturation");
+    assert!(
+        result.is_err(),
+        "supervisor spawn should fail under memory saturation"
+    );
 
     let error_msg = result.unwrap_err().to_string();
     assert!(
@@ -549,8 +554,8 @@ async fn supervisor_spawn_succeeds_when_resources_comfortable() {
     let fixture = SupervisedSaturationFixture::comfortable().unwrap();
 
     // Set thresholds that comfortable resources easily meet
-    let cpu_load_warn = 2.0;  // 200% CPU - our mocked 0.5 is well below
-    let memory_free_warn_mb = 1;  // 1 MB - our mocked 8 GB is well above
+    let cpu_load_warn = 2.0; // 200% CPU - our mocked 0.5 is well below
+    let memory_free_warn_mb = 1; // 1 MB - our mocked 8 GB is well above
 
     let max_wait_secs = 1u64;
     let retry_delay_secs = 1u64;
@@ -565,10 +570,14 @@ async fn supervisor_spawn_succeeds_when_resources_comfortable() {
         cpu_load_warn,
         memory_free_warn_mb,
         &telemetry,
-    ).await;
+    )
+    .await;
 
     // Should succeed immediately without deferring
-    assert!(result.is_ok(), "supervisor spawn should succeed with comfortable resources");
+    assert!(
+        result.is_ok(),
+        "supervisor spawn should succeed with comfortable resources"
+    );
 }
 
 #[tokio::test]
@@ -590,7 +599,8 @@ async fn supervisor_spawn_emits_telemetry_on_defer() {
         cpu_load_warn,
         memory_free_warn_mb,
         &telemetry,
-    ).await;
+    )
+    .await;
 
     // Verify telemetry was captured
     let events = telemetry.get_events();
@@ -627,7 +637,7 @@ async fn supervisor_spawn_exponential_backoff() {
 
     let cpu_load_warn = 0.5;
     let memory_free_warn_mb = 1;
-    let max_wait_secs = 8u64;  // Allow multiple retries
+    let max_wait_secs = 8u64; // Allow multiple retries
     let retry_delay_secs = 1u64;
 
     let telemetry = Telemetry::new("supervisor-backoff-test".to_string());
@@ -641,7 +651,8 @@ async fn supervisor_spawn_exponential_backoff() {
         cpu_load_warn,
         memory_free_warn_mb,
         &telemetry,
-    ).await;
+    )
+    .await;
     let elapsed = start.elapsed();
 
     assert!(result.is_err(), "should still fail under saturation");
@@ -698,7 +709,8 @@ async fn supervisor_spawn_eventual_failure_not_panic() {
         cpu_load_warn,
         memory_free_warn_mb,
         &telemetry,
-    ).await;
+    )
+    .await;
 
     // The key requirement: should return Err with a clear message,
     // NOT panic or unwrap
@@ -753,10 +765,14 @@ async fn supervisor_uses_same_gate_as_cli() {
         cpu_load_warn,
         memory_free_warn_mb,
         &supervisor_telemetry,
-    ).await;
+    )
+    .await;
 
     // Verify both fail (they should, since we're using the same saturation fixture)
-    assert!(supervisor_result.is_err(), "supervisor should fail under saturation");
+    assert!(
+        supervisor_result.is_err(),
+        "supervisor should fail under saturation"
+    );
 
     // Verify both emit similar telemetry events
     let supervisor_events = supervisor_telemetry.get_events();
@@ -777,7 +793,9 @@ async fn supervisor_uses_same_gate_as_cli() {
     // Verify the error messages have similar structure
     let supervisor_error = supervisor_result.unwrap_err().to_string();
     assert!(
-        supervisor_error.contains("saturated") || supervisor_error.contains("CPU") || supervisor_error.contains("Memory"),
+        supervisor_error.contains("saturated")
+            || supervisor_error.contains("CPU")
+            || supervisor_error.contains("Memory"),
         "supervisor error should mention resource saturation: {}",
         supervisor_error
     );
@@ -796,19 +814,24 @@ async fn supervisor_no_bypass_path_exists() {
 
     // Simulate a spawn attempt with saturated resources
     let result = check_resources_with_mocked_proc(
-        0.5,  // cpu_load_warn
-        1,    // memory_free_warn_mb
+        0.5, // cpu_load_warn
+        1,   // memory_free_warn_mb
         &fixture.loadavg_path,
         &fixture.meminfo_path,
         &telemetry,
     );
 
     // Should fail - the gate is enforced
-    assert!(result.is_err(), "resource gate should block spawn under saturation");
+    assert!(
+        result.is_err(),
+        "resource gate should block spawn under saturation"
+    );
 
     let error_msg = result.unwrap_err().to_string();
     assert!(
-        error_msg.contains("saturated") || error_msg.contains("CPU") || error_msg.contains("Memory"),
+        error_msg.contains("saturated")
+            || error_msg.contains("CPU")
+            || error_msg.contains("Memory"),
         "gate error should mention the specific resource issue: {}",
         error_msg
     );

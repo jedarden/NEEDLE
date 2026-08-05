@@ -1,4 +1,28 @@
+# Pinned to an exact version, not the "stable" channel.
+#
+# With `channel = "stable"` rustup re-resolves on every invocation and will
+# auto-update whenever a new stable ships. On 2026-08-05 that broke the iad-ci
+# `rust-verify` gate for every repo using it: the builder tried to sync stable
+# 1.97.1 (released 2026-07-16) mid-job and died with
+#
+#   error: could not rename 'component' file from
+#     '/root/.rustup/toolchains/stable-.../share/zsh/site-functions'
+#     to '/root/.rustup/tmp/.../bk': Invalid cross-device link (os error 18)
+#
+# rustup's temp dir and its toolchain dir sit on different mounts in that image,
+# so a component rename across them fails with EXDEV. `cargo check` never ran.
+#
+# Pinning stops the unattended updates and makes local and CI builds agree.
+# The durable fix belongs in the builder image — put RUSTUP_HOME and rustup's
+# temp dir on the same filesystem — and is tracked separately.
+#
+# NOTE: 1.95.0 is the known-good toolchain this repo currently builds with, not
+# the MSRV. CLAUDE.md states an MSRV of 1.75 and says it is pinned here, which
+# was never the case while this file read `channel = "stable"`. If the MSRV is
+# meant to be enforced it needs its own CI job building against 1.75; pinning
+# this file to 1.75 would instead force everyone onto a toolchain the current
+# code has not been verified against.
 [toolchain]
-channel = "stable"
+channel = "1.95.0"
 components = ["rustfmt", "clippy"]
 targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]

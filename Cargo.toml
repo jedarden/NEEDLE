@@ -36,6 +36,10 @@ integration = [
     "otlp",
     "testcontainers",
 ]
+# Load-simulation harness in src/integration_t/. Off by default — it does not
+# currently build inside the library; see the doc comment on the module in
+# src/lib.rs for what is outstanding.
+integration-t = []
 
 [dependencies]
 # Async runtime

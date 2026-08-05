@@ -3876,11 +3876,7 @@ impl Telemetry {
     /// # let telemetry: Telemetry = unimplemented!();
     /// telemetry.log_info("dispatch", json!({ "status": "started" })).ok();
     /// ```
-    pub fn log_info(
-        &self,
-        phase: impl Into<String>,
-        context: serde_json::Value,
-    ) -> Result<()> {
+    pub fn log_info(&self, phase: impl Into<String>, context: serde_json::Value) -> Result<()> {
         self.log(phase, "info", context, None)
     }
 
@@ -3899,11 +3895,7 @@ impl Telemetry {
     /// Emit a warn-level log event.
     ///
     /// Convenience method for logging at "warn" level.
-    pub fn log_warn(
-        &self,
-        phase: impl Into<String>,
-        context: serde_json::Value,
-    ) -> Result<()> {
+    pub fn log_warn(&self, phase: impl Into<String>, context: serde_json::Value) -> Result<()> {
         self.log(phase, "warn", context, None)
     }
 
@@ -3922,11 +3914,7 @@ impl Telemetry {
     /// Emit an error-level log event.
     ///
     /// Convenience method for logging at "error" level.
-    pub fn log_error(
-        &self,
-        phase: impl Into<String>,
-        context: serde_json::Value,
-    ) -> Result<()> {
+    pub fn log_error(&self, phase: impl Into<String>, context: serde_json::Value) -> Result<()> {
         self.log(phase, "error", context, None)
     }
 
@@ -3945,11 +3933,7 @@ impl Telemetry {
     /// Emit a debug-level log event.
     ///
     /// Convenience method for logging at "debug" level.
-    pub fn log_debug(
-        &self,
-        phase: impl Into<String>,
-        context: serde_json::Value,
-    ) -> Result<()> {
+    pub fn log_debug(&self, phase: impl Into<String>, context: serde_json::Value) -> Result<()> {
         self.log(phase, "debug", context, None)
     }
 

@@ -13,10 +13,10 @@
 //!
 //! Related: ADR-008 (fleet resource safety), P12.2 (load-adaptive launch stagger)
 
-use std::time::{Duration, Instant};
 use crate::integration_t::LoadSimulator;
 use crate::rate_limit::RateLimiter;
 use crate::telemetry::Telemetry;
+use std::time::{Duration, Instant};
 
 /// Simulate batch launch with rising load and verify inter-launch delays increase.
 ///
@@ -31,11 +31,11 @@ async fn batch_launch_rising_load_produces_increasing_delays() {
     let mut simulator = LoadSimulator::new(5, temp_dir).unwrap();
 
     // Simulate CPU/memory thresholds that will trigger load-adaptive behavior
-    let cpu_load_warn = 0.5;  // 50% CPU threshold (conservative for test reliability)
-    let memory_free_warn_mb = 2048;  // 2GB free memory threshold
-    let base_stagger_secs = 1;  // 1 second base delay (faster than default 2s for test speed)
-    let max_wait_secs = 10;  // 10 second max wait (bounded for test speed)
-    let check_interval_secs = 1;  // Check every 1 second during extended wait
+    let cpu_load_warn = 0.5; // 50% CPU threshold (conservative for test reliability)
+    let memory_free_warn_mb = 2048; // 2GB free memory threshold
+    let base_stagger_secs = 1; // 1 second base delay (faster than default 2s for test speed)
+    let max_wait_secs = 10; // 10 second max wait (bounded for test speed)
+    let check_interval_secs = 1; // Check every 1 second during extended wait
 
     // Simulate batch launch sequence (like --count=5)
     // Worker 1: launches immediately (no stagger for seq=0)
@@ -61,7 +61,11 @@ async fn batch_launch_rising_load_produces_increasing_delays() {
 
     simulator.record_spawn_attempt();
     let delay_1_to_2 = worker_2_start.saturating_duration_since(worker_1_start)
-        + simulator.inter_launch_delays().last().copied().unwrap_or(Duration::ZERO);
+        + simulator
+            .inter_launch_delays()
+            .last()
+            .copied()
+            .unwrap_or(Duration::ZERO);
 
     // Simulate rising load (worker 2 + worker 1 both active)
     simulate_load_increase(Duration::from_millis(150));
@@ -81,7 +85,11 @@ async fn batch_launch_rising_load_produces_increasing_delays() {
 
     simulator.record_spawn_attempt();
     let delay_2_to_3 = worker_3_start.saturating_duration_since(worker_2_start)
-        + simulator.inter_launch_delays().last().copied().unwrap_or(Duration::ZERO);
+        + simulator
+            .inter_launch_delays()
+            .last()
+            .copied()
+            .unwrap_or(Duration::ZERO);
 
     // Simulate further rising load (3 workers now active)
     simulate_load_increase(Duration::from_millis(200));
@@ -101,7 +109,11 @@ async fn batch_launch_rising_load_produces_increasing_delays() {
 
     simulator.record_spawn_attempt();
     let delay_3_to_4 = worker_4_start.saturating_duration_since(worker_3_start)
-        + simulator.inter_launch_delays().last().copied().unwrap_or(Duration::ZERO);
+        + simulator
+            .inter_launch_delays()
+            .last()
+            .copied()
+            .unwrap_or(Duration::ZERO);
 
     // Simulate maximum load (4 workers active)
     simulate_load_increase(Duration::from_millis(250));
@@ -121,7 +133,11 @@ async fn batch_launch_rising_load_produces_increasing_delays() {
 
     simulator.record_spawn_attempt();
     let delay_4_to_5 = worker_5_start.saturating_duration_since(worker_4_start)
-        + simulator.inter_launch_delays().last().copied().unwrap_or(Duration::ZERO);
+        + simulator
+            .inter_launch_delays()
+            .last()
+            .copied()
+            .unwrap_or(Duration::ZERO);
 
     // Verify we recorded 5 spawn attempts
     assert_eq!(
@@ -144,7 +160,10 @@ async fn batch_launch_rising_load_produces_increasing_delays() {
         assert!(
             delays[i] >= delays[i - 1],
             "inter-launch delay[{}] ({:?}) should be >= delay[{}] ({:?}) under rising load",
-            i, delays[i], i - 1, delays[i - 1]
+            i,
+            delays[i],
+            i - 1,
+            delays[i - 1]
         );
     }
 
@@ -157,7 +176,9 @@ async fn batch_launch_rising_load_produces_increasing_delays() {
         variation_ratio >= 1.1,
         "inter-launch delays should vary by at least 10% under rising load, \
          but min={:?} max={:?} (ratio={:.2})",
-        min_delay, max_delay, variation_ratio
+        min_delay,
+        max_delay,
+        variation_ratio
     );
 
     // Verify all delays are at least the base stagger time
@@ -165,17 +186,22 @@ async fn batch_launch_rising_load_produces_increasing_delays() {
         assert!(
             *delay >= Duration::from_secs(base_stagger_secs),
             "delay[{}] ({:?}) should be at least base_stagger_secs ({:?})",
-            i, delay, Duration::from_secs(base_stagger_secs)
+            i,
+            delay,
+            Duration::from_secs(base_stagger_secs)
         );
     }
 
     // Verify no delay exceeds max_wait_secs by more than check_interval
     for (i, delay) in delays.iter().enumerate() {
-        let max_allowed = Duration::from_secs(max_wait_secs) + Duration::from_secs(check_interval_secs);
+        let max_allowed =
+            Duration::from_secs(max_wait_secs) + Duration::from_secs(check_interval_secs);
         assert!(
             *delay <= max_allowed,
             "delay[{}] ({:?}) should not exceed max_wait_secs + check_interval ({:?})",
-            i, delay, max_allowed
+            i,
+            delay,
+            max_allowed
         );
     }
 
@@ -186,7 +212,10 @@ async fn batch_launch_rising_load_produces_increasing_delays() {
     }
     println!("  Min delay: {:?}", min_delay);
     println!("  Max delay: {:?}", max_delay);
-    println!("  Average delay: {:?}", simulator.average_inter_launch_delay().unwrap());
+    println!(
+        "  Average delay: {:?}",
+        simulator.average_inter_launch_delay().unwrap()
+    );
     println!("  Variation ratio: {:.2}x", variation_ratio);
 }
 
