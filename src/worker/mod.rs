@@ -20,6 +20,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+// Needed for `.instrument()` — attaches a span to a future instead of holding an
+// `Entered` guard across `.await`, which is unsound and leaked spans (bf-3uj6i).
+use tracing::Instrument;
 
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
@@ -1549,14 +1552,27 @@ impl Worker {
             needle.claim.retry_number = tracing::field::Empty,
             needle.claim.result = tracing::field::Empty,
         );
-        let _claim_enter = claim_span.enter();
-
-        // Record the initial retry number (will be updated by claim module)
-        tracing::Span::current().record("needle.claim.retry_number", 1u32);
+        // Do NOT hold an `Entered`/`EnteredSpan` guard here. Those are RAII guards
+        // over a thread-local span stack and require LIFO drop order. The previous
+        // code entered this span, then entered `bead.lifecycle` on top of it inside
+        // the match below, and only dropped this one at end of scope — an
+        // out-of-order exit, so neither span was ever popped. One `bead.claim` plus
+        // one `bead.lifecycle` leaked per claim cycle. Because the fmt layer
+        // re-serializes the whole span stack on every event, output grew
+        // quadratically: measured at 18 deep / 4,983-byte lines early and 2,488 deep
+        // / 629,829-byte lines late, reaching ~159 GB/hr and filling a 444 GB disk.
+        // Holding the guard across the `.await` below was independently unsound.
+        // See bf-3uj6i.
+        //
+        // `.instrument()` attaches the span to the future correctly, so
+        // `Span::current()` inside `claim_one` (claim/mod.rs records
+        // needle.claim.result there) still resolves to this span.
+        claim_span.record("needle.claim.retry_number", 1u32);
 
         let claim = self
             .claimer
             .claim_one(&bead_id, &self.qualified_id(), &exclusions, Some(strand))
+            .instrument(claim_span.clone())
             .await?;
 
         match claim {
@@ -1607,18 +1623,26 @@ impl Worker {
                 );
                 self.bead_lifecycle_span = Some(lifecycle_span.entered());
 
-                // Note: The claim_span (_claim_enter) is dropped here, closing the bead.claim span.
-                // The bead.lifecycle span is now active and will be the parent for subsequent operations.
+                // bead.claim is already closed by the time we get here: it is scoped to
+                // the instrumented claim_one() future above rather than held open by a
+                // guard, so entering bead.lifecycle here is LIFO-clean. The old comment
+                // claimed `_claim_enter` was dropped at this point — it was not, it was
+                // dropped at end of scope, which is what leaked the span (bf-3uj6i).
+                //
+                // bead.lifecycle stays entered across the whole bead, and is dropped via
+                // `bead_lifecycle_span.take()` when the bead finishes. That guard IS
+                // LIFO-correct now that nothing is pushed above it.
 
                 self.set_state(WorkerState::Building)?;
             }
             ClaimResult::RaceLost { claimed_by } => {
                 tracing::debug!(bead_id = %bead_id, %claimed_by, "claim race lost");
-                // Set the claim span result attribute
-                tracing::Span::current().record("needle.claim.result", "race_lost");
-                // Set Error status on the claim span
-                tracing::Span::current().record("otel.status_code", 2u64);
-                tracing::Span::current().record("otel.status_description", "race_lost");
+                // Record on claim_span explicitly: it is no longer entered here, so
+                // Span::current() would resolve to the enclosing strand span and the
+                // field would be silently dropped.
+                claim_span.record("needle.claim.result", "race_lost");
+                claim_span.record("otel.status_code", 2u64);
+                claim_span.record("otel.status_description", "race_lost");
                 // Add to race-lost exclusions with TTL (persists across cycles)
                 let expires = Instant::now() + RACE_LOST_EXCLUSION_TTL;
                 self.race_lost_exclusions.push((bead_id.clone(), expires));
@@ -1632,11 +1656,10 @@ impl Worker {
             }
             ClaimResult::NotClaimable { reason } => {
                 tracing::debug!(bead_id = %bead_id, %reason, "bead not claimable");
-                // Set the claim span result attribute
-                tracing::Span::current().record("needle.claim.result", &reason);
-                // Set Error status on the claim span
-                tracing::Span::current().record("otel.status_code", 2u64);
-                tracing::Span::current().record("otel.status_description", &reason);
+                // Record on claim_span explicitly — see the RaceLost arm.
+                claim_span.record("needle.claim.result", &reason);
+                claim_span.record("otel.status_code", 2u64);
+                claim_span.record("otel.status_description", &reason);
                 self.consecutive_race_lost = 0;
                 self.exclusion_set.insert(bead_id);
                 self.current_bead = None;
@@ -1645,11 +1668,10 @@ impl Worker {
             }
             ClaimResult::ClaimError { reason } => {
                 tracing::debug!(bead_id = %bead_id, %reason, "claim error");
-                // Set the claim span result attribute
-                tracing::Span::current().record("needle.claim.result", &reason);
-                // Set Error status on the claim span
-                tracing::Span::current().record("otel.status_code", 2u64);
-                tracing::Span::current().record("otel.status_description", &reason);
+                // Record on claim_span explicitly — see the RaceLost arm.
+                claim_span.record("needle.claim.result", &reason);
+                claim_span.record("otel.status_code", 2u64);
+                claim_span.record("otel.status_description", &reason);
                 self.consecutive_race_lost = 0;
                 self.exclusion_set.insert(bead_id);
                 self.current_bead = None;
@@ -1667,11 +1689,10 @@ impl Worker {
                     %last_error,
                     "bead marked as suspect after repeated claim errors"
                 );
-                // Set the claim span result attribute
-                tracing::Span::current().record("needle.claim.result", "suspect");
-                // Set Error status on the claim span
-                tracing::Span::current().record("otel.status_code", 2u64);
-                tracing::Span::current().record(
+                // Record on claim_span explicitly — see the RaceLost arm.
+                claim_span.record("needle.claim.result", "suspect");
+                claim_span.record("otel.status_code", 2u64);
+                claim_span.record(
                     "otel.status_description",
                     format!(
                         "suspect: {} consecutive errors: {}",
