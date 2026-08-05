@@ -692,6 +692,81 @@ pub fn launch_workers(
 
 /// Initialize the tracing subscriber with OTLP layer if configured.
 ///
+/// Default level for the worker's fmt layer, overridable with `RUST_LOG`.
+///
+/// Historically no filter was installed on the fmt layer at all. A
+/// `tracing_subscriber::registry()` with no filter passes every level, so each
+/// `DEBUG needle::telemetry` event was written to the worker's log. On lab that
+/// produced 157.7 GB across two files — 100.9 GB of it from a single worker
+/// that never processed a bead, looping on a launch that could not succeed
+/// (see the `/ 1 cores` saturation miscount). Those same events are already
+/// persisted as structured JSONL by `telemetry::FileSink`, which *does* have a
+/// retention policy, so the human-readable copy was unmanaged duplication.
+///
+/// `RUST_LOG=debug` still restores the old behaviour for debugging.
+fn worker_log_filter() -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+}
+
+/// Rotated worker logs kept on disk. Hourly rotation × 48 bounds a worker to
+/// two days of history regardless of how noisy it is.
+const WORKER_LOG_MAX_FILES: usize = 48;
+
+/// Writer for a worker's fmt layer.
+///
+/// Inner (tmux-launched) workers get an hourly-rotating file that *this process
+/// owns*, so rotation actually works. The previous design redirected stderr
+/// with `2>>` from the shell, which meant nothing in NEEDLE held the fd: the
+/// file could only grow, and `logrotate` would have needed `copytruncate` to
+/// have any effect at all.
+///
+/// Anything not routed through `tracing` — panics, `anyhow` errors on exit, and
+/// the `eprintln!` boot diagnostics in [`run_worker`] — still goes to raw
+/// stderr, which the tmux command continues to append to `<session>.stderr.log`.
+/// That file stays tiny now that the telemetry stream no longer lands in it,
+/// and keeping it preserves crash capture.
+///
+/// Returns the writer plus whether ANSI should be enabled (never, for a file).
+fn worker_log_writer(
+    config: &crate::config::Config,
+    worker_id: &str,
+) -> (tracing_subscriber::fmt::writer::BoxMakeWriter, bool) {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+
+    if !is_needle_inner() {
+        // Foreground/debug invocation — keep logs on the terminal.
+        return (BoxMakeWriter::new(std::io::stderr), use_ansi());
+    }
+
+    let log_dir = config
+        .telemetry
+        .file_sink
+        .log_dir
+        .clone()
+        .unwrap_or_else(|| config.workspace.home.join("logs"));
+
+    let prefix = sanitize_session_name(&format!("needle-{worker_id}"));
+
+    match tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::HOURLY)
+        .filename_prefix(&prefix)
+        .filename_suffix("log")
+        .max_log_files(WORKER_LOG_MAX_FILES)
+        .build(&log_dir)
+    {
+        Ok(appender) => (BoxMakeWriter::new(appender), false),
+        Err(e) => {
+            // Never let logging config abort a worker boot.
+            eprintln!(
+                "NEEDLE worker boot: rolling log appender unavailable in {}: {e} — falling back to stderr",
+                log_dir.display()
+            );
+            (BoxMakeWriter::new(std::io::stderr), use_ansi())
+        }
+    }
+}
+
 /// This must be called before any tracing spans are created so that the OTLP
 /// layer can export them to the configured collector.
 ///
@@ -705,15 +780,16 @@ fn init_tracing_subscriber(
     use opentelemetry::trace::TracerProvider;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    let use_ansi = use_ansi();
+    let (writer, use_ansi) = worker_log_writer(config, &worker_id);
 
     // Check if OTLP is enabled
     if !config.telemetry.otlp_sink.enabled {
         // No OTLP - just initialize with fmt layer
         let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
+            .with_writer(writer)
             .with_ansi(use_ansi);
         tracing_subscriber::registry()
+            .with(worker_log_filter())
             .with(fmt_layer)
             .try_init()
             .context("failed to initialize tracing subscriber")?;
@@ -764,11 +840,14 @@ fn init_tracing_subscriber(
 
     // Create a fmt layer that works with any subscriber implementing LookupSpan
     // We build this after the OTLP layer to ensure proper type compatibility
-    let subscriber = tracing_subscriber::registry().with(otlp_layer).with(
-        tracing_subscriber::fmt::layer()
-            .with_writer(std::io::stderr)
-            .with_ansi(use_ansi),
-    );
+    let subscriber = tracing_subscriber::registry()
+        .with(worker_log_filter())
+        .with(otlp_layer)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .with_ansi(use_ansi),
+        );
 
     subscriber
         .try_init()
@@ -780,19 +859,20 @@ fn init_tracing_subscriber(
 /// No-op tracing initialization when OTLP feature is disabled.
 #[cfg(not(feature = "otlp"))]
 fn init_tracing_subscriber(
-    _worker_id: String,
+    worker_id: String,
     _session_id: String,
-    _config: &crate::config::Config,
+    config: &crate::config::Config,
 ) -> Result<()> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    let use_ansi = use_ansi();
+    let (writer, use_ansi) = worker_log_writer(config, &worker_id);
 
     // Initialize with just the stdout layer when OTLP is disabled
     tracing_subscriber::registry()
+        .with(worker_log_filter())
         .with(
             tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
+                .with_writer(writer)
                 .with_ansi(use_ansi),
         )
         .try_init()
@@ -5142,6 +5222,90 @@ mod tests {
         // Verify clap parses with minimal args.
         let cli = Cli::try_parse_from(["needle", "run"]);
         assert!(cli.is_ok(), "needle run should parse with defaults");
+    }
+
+    /// Serialises the RUST_LOG-mutating tests; cargo runs tests in threads and
+    /// env vars are process-global.
+    static LOG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn worker_log_filter_defaults_to_info() {
+        let _guard = LOG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("RUST_LOG").ok();
+        std::env::remove_var("RUST_LOG");
+
+        // Regression guard: before this, the fmt layer had NO filter at all, so
+        // a registry() passed every level and each DEBUG needle::telemetry event
+        // was written to the worker log. That produced 157.7 GB across two files
+        // on lab. The default must stay at or below INFO.
+        let rendered = worker_log_filter().to_string();
+        assert_eq!(
+            rendered, "info",
+            "default worker log filter must be INFO, got {rendered:?}"
+        );
+
+        if let Some(v) = saved {
+            std::env::set_var("RUST_LOG", v);
+        }
+    }
+
+    #[test]
+    fn worker_log_filter_honours_rust_log() {
+        let _guard = LOG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("RUST_LOG").ok();
+        std::env::set_var("RUST_LOG", "debug");
+
+        // Debugging must still be reachable — the fix caps the default, it does
+        // not remove the ability to ask for DEBUG.
+        let rendered = worker_log_filter().to_string();
+        assert_eq!(rendered, "debug", "RUST_LOG must override the INFO default");
+
+        match saved {
+            Some(v) => std::env::set_var("RUST_LOG", v),
+            None => std::env::remove_var("RUST_LOG"),
+        }
+    }
+
+    #[test]
+    fn rolling_appender_writes_and_caps_file_count() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // Same construction as worker_log_writer(), with a small cap so the
+        // pruning behaviour is observable in a test.
+        let mut appender = tracing_appender::rolling::Builder::new()
+            .rotation(tracing_appender::rolling::Rotation::HOURLY)
+            .filename_prefix("needle-test-worker")
+            .filename_suffix("log")
+            .max_log_files(2)
+            .build(dir.path())
+            .expect("appender should build in a writable dir");
+
+        writeln!(appender, "hello from the rolling appender").expect("write");
+        appender.flush().expect("flush");
+
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("needle-test-worker")
+            })
+            .collect();
+
+        assert!(
+            !files.is_empty(),
+            "rolling appender must actually create a log file"
+        );
+
+        let total: u64 = files
+            .iter()
+            .filter_map(|f| f.metadata().ok())
+            .map(|m| m.len())
+            .sum();
+        assert!(total > 0, "appender wrote no bytes");
     }
 
     #[test]
