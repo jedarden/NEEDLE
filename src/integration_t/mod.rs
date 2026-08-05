@@ -27,12 +27,12 @@ use anyhow::Result;
 use chrono::Utc;
 use tempfile::TempDir;
 
-use needle::bead_store::{BeadStore, Filters};
-use needle::config::{Config, WorkerConfig};
-use needle::registry::Registry;
-use needle::telemetry::Telemetry;
-use needle::types::{Bead, BeadId, BeadStatus};
-use needle::worker::Worker;
+use crate::bead_store::{BeadStore, Filters};
+use crate::config::{Config, WorkerConfig};
+use crate::registry::Registry;
+use crate::telemetry::Telemetry;
+use crate::types::{Bead, BeadId, BeadStatus};
+use crate::worker::Worker;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // LoadSimulator
@@ -805,3 +805,12 @@ mod tests {
         assert!(max > avg);
     }
 }
+
+// Worker construction saturated load regression tests
+mod worker_construction_saturation;
+
+// Batch launch rising load regression test (P12.2)
+mod batch_launch_rising_load;
+
+// Supervise auto-scale spawn gate regression test
+mod supervise_auto_scale_gate;

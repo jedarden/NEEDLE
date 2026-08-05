@@ -341,11 +341,10 @@ pub fn log_info_with_bead(
     context: &[(&str, &str)],
     bead_id: &BeadId,
 ) -> anyhow::Result<()> {
-    let mut context_map = context
+    let context_map = context
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<String, String>>();
-    context_map.insert("bead_id".to_string(), bead_id.to_string());
     let event = LogEvent {
         phase: phase.to_string(),
         timestamp: chrono::Utc::now(),
@@ -372,11 +371,10 @@ pub fn log_warn_with_bead(
     context: &[(&str, &str)],
     bead_id: &BeadId,
 ) -> anyhow::Result<()> {
-    let mut context_map = context
+    let context_map = context
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<String, String>>();
-    context_map.insert("bead_id".to_string(), bead_id.to_string());
     let event = LogEvent {
         phase: phase.to_string(),
         timestamp: chrono::Utc::now(),
@@ -403,11 +401,10 @@ pub fn log_error_with_bead(
     context: &[(&str, &str)],
     bead_id: &BeadId,
 ) -> anyhow::Result<()> {
-    let mut context_map = context
+    let context_map = context
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<String, String>>();
-    context_map.insert("bead_id".to_string(), bead_id.to_string());
     let event = LogEvent {
         phase: phase.to_string(),
         timestamp: chrono::Utc::now(),
@@ -434,11 +431,10 @@ pub fn log_debug_with_bead(
     context: &[(&str, &str)],
     bead_id: &BeadId,
 ) -> anyhow::Result<()> {
-    let mut context_map = context
+    let context_map = context
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect::<HashMap<String, String>>();
-    context_map.insert("bead_id".to_string(), bead_id.to_string());
     let event = LogEvent {
         phase: phase.to_string(),
         timestamp: chrono::Utc::now(),

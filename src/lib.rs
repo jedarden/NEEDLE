@@ -17,6 +17,7 @@ pub mod dispatch;
 pub mod drift;
 pub mod health;
 pub mod hoop_hooks;
+pub mod integration_t;
 pub mod learning;
 pub mod mitosis;
 pub mod outcome;
