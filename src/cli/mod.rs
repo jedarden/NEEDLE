@@ -709,9 +709,19 @@ fn worker_log_filter() -> tracing_subscriber::EnvFilter {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
 }
 
-/// Rotated worker logs kept on disk. Hourly rotation × 48 bounds a worker to
-/// two days of history regardless of how noisy it is.
-const WORKER_LOG_MAX_FILES: usize = 48;
+/// Bytes per worker log file before it rolls.
+const WORKER_LOG_MAX_BYTES: u64 = 128 * 1024 * 1024; // 128 MiB
+/// Historical files kept alongside the live one.
+///
+/// Total on-disk bytes per worker are bounded by
+/// `WORKER_LOG_MAX_BYTES * (WORKER_LOG_MAX_FILES + 1)` = **2 GiB**.
+///
+/// This is a *size* bound, not a time bound, and that distinction is the whole
+/// point. `tracing-appender` only rotates on time; during bf-3uj6i a worker
+/// produced ~159 GB/hr, so the current hourly file would have passed 159 GB
+/// before rotating even once, and `max_log_files` caps file count rather than
+/// bytes. A 444 GB disk still filled in under three hours.
+const WORKER_LOG_MAX_FILES: usize = 15;
 
 /// Writer for a worker's fmt layer.
 ///
@@ -747,14 +757,13 @@ fn worker_log_writer(
         .unwrap_or_else(|| config.workspace.home.join("logs"));
 
     let prefix = sanitize_session_name(&format!("needle-{worker_id}"));
+    let path = log_dir.join(format!("{prefix}.log"));
 
-    match tracing_appender::rolling::Builder::new()
-        .rotation(tracing_appender::rolling::Rotation::HOURLY)
-        .filename_prefix(&prefix)
-        .filename_suffix("log")
-        .max_log_files(WORKER_LOG_MAX_FILES)
-        .build(&log_dir)
-    {
+    match crate::log_writer::SizeCappedWriter::new(
+        &path,
+        WORKER_LOG_MAX_BYTES,
+        WORKER_LOG_MAX_FILES,
+    ) {
         Ok(appender) => (BoxMakeWriter::new(appender), false),
         Err(e) => {
             // Never let logging config abort a worker boot.
@@ -5264,48 +5273,6 @@ mod tests {
             Some(v) => std::env::set_var("RUST_LOG", v),
             None => std::env::remove_var("RUST_LOG"),
         }
-    }
-
-    #[test]
-    fn rolling_appender_writes_and_caps_file_count() {
-        use std::io::Write;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-
-        // Same construction as worker_log_writer(), with a small cap so the
-        // pruning behaviour is observable in a test.
-        let mut appender = tracing_appender::rolling::Builder::new()
-            .rotation(tracing_appender::rolling::Rotation::HOURLY)
-            .filename_prefix("needle-test-worker")
-            .filename_suffix("log")
-            .max_log_files(2)
-            .build(dir.path())
-            .expect("appender should build in a writable dir");
-
-        writeln!(appender, "hello from the rolling appender").expect("write");
-        appender.flush().expect("flush");
-
-        let files: Vec<_> = std::fs::read_dir(dir.path())
-            .expect("read_dir")
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("needle-test-worker")
-            })
-            .collect();
-
-        assert!(
-            !files.is_empty(),
-            "rolling appender must actually create a log file"
-        );
-
-        let total: u64 = files
-            .iter()
-            .filter_map(|f| f.metadata().ok())
-            .map(|m| m.len())
-            .sum();
-        assert!(total > 0, "appender wrote no bytes");
     }
 
     #[test]

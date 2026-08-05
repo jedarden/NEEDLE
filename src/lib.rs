@@ -39,6 +39,7 @@ pub mod hoop_hooks;
 #[cfg(feature = "integration-t")]
 pub mod integration_t;
 pub mod learning;
+pub mod log_writer;
 pub mod mitosis;
 pub mod outcome;
 pub mod peer;
