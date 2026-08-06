@@ -14,6 +14,7 @@
 //!
 //! Inspired by bg-gate (docs/research/bg-gate-validation.md).
 
+pub mod predispatch;
 mod shipped_work;
 pub use shipped_work::verify_shipped_work;
 

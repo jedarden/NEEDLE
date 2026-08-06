@@ -441,7 +441,7 @@ impl OutcomeHandler {
         match self.timeout_op(|| store.show(&bead.id), "show").await {
             Ok(Some(current)) if current.status.is_done() => {
                 if self.config.worker.enforce_shipped_work {
-                    match verify_shipped_work(bead, &current, &bead.workspace).await {
+                    match verify_shipped_work(&current, &bead.workspace).await {
                         Ok(crate::validation::GateResult::Fail(reason)) => {
                             tracing::warn!(
                                 bead_id = %bead.id,
@@ -461,6 +461,10 @@ impl OutcomeHandler {
                         }
                     }
                 }
+
+                // Dispatch is fully accounted for — drop its snapshot so the
+                // next claim of this bead starts from a fresh baseline.
+                crate::validation::predispatch::clear(&bead.workspace, &bead.id).await;
 
                 tracing::info!(bead_id = %bead.id, "bead confirmed closed by agent");
                 events.push(EventKind::BeadCompleted {
@@ -619,17 +623,46 @@ impl OutcomeHandler {
         let mut release_events = self.release_bead(store, bead).await?;
         events.append(&mut release_events);
 
-        // If release succeeded, increment failure count.
+        // If release succeeded, increment the failure count and apply the same
+        // quarantine ceiling `handle_failure` uses. Without this, a bead that
+        // fails a gate every cycle is released back to open forever: the
+        // ARMOR/bf-135k storm ran one bead 24 times in a single day, each
+        // attempt leaving another commit behind. A gate failure is no less
+        // repeatable than an agent failure and must respect the same ceiling.
         let release_succeeded = events
             .iter()
             .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+        let mut action = BeadAction::Released;
         if release_succeeded {
-            if let Err(e) = self.increment_failure_count(store, bead).await {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    error = %e,
-                    "failed to increment failure count after gate failure"
-                );
+            match self.increment_failure_count(store, bead).await {
+                Ok(new_count) => {
+                    let threshold = self.config.outcome.quarantine_after_failures;
+                    if threshold > 0 && new_count >= threshold {
+                        match self
+                            .quarantine_bead(store, bead, new_count, threshold)
+                            .await
+                        {
+                            Ok(quarantine_events) => {
+                                events.extend(quarantine_events);
+                                action = BeadAction::Quarantined;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    bead_id = %bead.id,
+                                    error = %e,
+                                    "failed to quarantine bead after exceeding gate-failure threshold"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "failed to increment failure count after gate failure"
+                    );
+                }
             }
         }
 
@@ -647,7 +680,7 @@ impl OutcomeHandler {
             );
         }
 
-        Ok((BeadAction::Released, events))
+        Ok((action, events))
     }
 
     /// Failure: release bead and increment failure count.
