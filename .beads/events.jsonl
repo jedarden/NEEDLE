@@ -41,3 +41,4 @@
 {"bead":"bf-21qj5","duration_ms":600262,"event":"timeout","exit_code":124,"outcome":"timeout","strand":"explore","ts":"2026-08-06T02:32:38.060820459+00:00","worker":"lima"}
 {"bead":"bf-21qj5","event":"claim","strand":"explore","ts":"2026-08-06T02:32:40.076374525+00:00","worker":"lima"}
 {"adapter":"claude-code-glm-4.7","bead":"bf-21qj5","event":"dispatch","model":"glm-4.7","strand":"explore","ts":"2026-08-06T02:32:40.114288023+00:00","worker":"lima"}
+{"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-06T11:04:40.320577389+00:00","worker":"test-worker"}
