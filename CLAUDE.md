@@ -63,7 +63,28 @@ cmd.env("HOME", temp_dir.path())
 // (prefer HOME isolation — it's more realistic and catches more bugs)
 ```
 
+**Required isolation for in-process tests:**
+
+Setting `HOME` only affects child processes. A test that builds a `Worker`
+**in-process** (e.g. via a `test_config()` helper) never spawns one, so it
+inherits `ExploreConfig::default()` — `workspaces: []` (auto-discover) with
+`workspace_root` from `default_workspace_root()` -> `dirs_or_home("")`, the
+real home directory. Pin the scan root explicitly:
+
+```rust
+config.strands.explore.workspace_root = temp_home.to_path_buf();
+config.strands.explore.workspaces = Vec::new();
+```
+
 **Rationale:** This policy exists due to the 2026-07-20 contamination incident, where a non-isolated test created ~284 phantom beads across ~22 repos under fixture worker identifiers. See ADR-006 for full postmortem.
+
+The in-process clause was added after 2026-08-05, when `test_config()` in
+`tests/integration_tests.rs` — which isolated `workspace.default` and
+`workspace.home` but not `strands.explore` — let an orphaned local
+`integration_tests` binary roam into bead-forge's live store, mutate beads to
+`in_progress` under assignee `echo-test-test-worker`, and truncate
+`.beads/issues.jsonl` to 0 bytes (2302 beads, recovered from git). The
+subprocess clause above was already in force and did not cover this shape.
 
 **Do not run `cargo test` locally.** Tests run on iad-ci automatically when you push to `main`. A GitHub webhook triggers the `needle-ci` WorkflowTemplate on iad-ci.
 

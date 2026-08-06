@@ -243,6 +243,24 @@ fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
     config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
     // Isolate workspace home so the registry doesn't leak between tests.
     config.workspace.home = workspace_home.to_path_buf();
+    // Confine the Explore strand to the test's temp home.
+    //
+    // REQUIRED — see "Test Isolation Policy" in CLAUDE.md and ADR-006. That
+    // policy is written for tests that spawn the `needle` *binary* and isolate
+    // it with `cmd.env("HOME", ...)`. Workers built in-process here never go
+    // through a child process, so no `HOME` override applies and they inherit
+    // `ExploreConfig::default()`: `workspaces: []` (= auto-discover) with
+    // `workspace_root` defaulting to the real home directory
+    // (`ExploreConfig::default_workspace_root()` -> `dirs_or_home("")`).
+    //
+    // Left unset, Explore scans every directory under $HOME containing a
+    // `.beads/` and claims REAL beads from REAL repos under the fixture
+    // adapter/worker identity. On 2026-08-05 that emptied bead-forge's live
+    // store — beads were mutated to `in_progress` under assignee
+    // `echo-test-test-worker` (adapter `echo-test` + worker `test-worker`)
+    // and `.beads/issues.jsonl` was truncated to 0 bytes.
+    config.strands.explore.workspace_root = workspace_home.to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
     config
 }
 
