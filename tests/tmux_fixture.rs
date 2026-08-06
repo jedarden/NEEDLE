@@ -70,6 +70,7 @@ fn tmux() -> Command {
 /// production NEEDLE worker launches, including the NEEDLE_INNER=1 shell wrapper
 /// indirection that creates the pane_pid-vs-child-PID split.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct TmuxSession {
     /// Name of the tmux session (e.g., "test-session-abc123")
     pub session_name: String,
@@ -195,6 +196,7 @@ impl TmuxSession {
     ///
     /// This finds all child processes spawned from the tmux session,
     /// useful for asserting cleanup behavior.
+    #[allow(dead_code)]
     pub fn process_tree_pids(&self) -> Result<Vec<u32>> {
         // On Linux, we can use pgrep to find all processes in the session
         // For simplicity, we'll just return the pane_pid
@@ -278,6 +280,7 @@ pub fn list_all_sessions() -> Vec<String> {
 /// List all needle tmux sessions currently running.
 ///
 /// Returns a list of session names that start with "needle-".
+#[allow(dead_code)]
 pub fn list_needle_sessions() -> Vec<String> {
     list_all_sessions()
         .into_iter()
