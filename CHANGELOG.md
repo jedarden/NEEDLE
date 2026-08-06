@@ -4,6 +4,77 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.17] - 2026-08-05
+
+Log volume release. A single worker wrote 100.9 GB of stderr and a second wrote
+56.8 GB, filling a 444 GB disk to zero bytes. A full disk on that host is silent
+— `bf` flushes, commits and pushes all fail without surfacing — so roughly 92
+completed beads went unrecorded while the fleet looked healthy.
+
+### Fixed
+
+- **Worker log had no level filter at all** — the `fmt` layer was attached to a
+  `tracing_subscriber::registry()` with no `EnvFilter`, and a registry with no
+  filter passes every level. Every `DEBUG needle::telemetry` event was written
+  verbatim to the worker log, duplicating events `telemetry::FileSink` already
+  persists as structured JSONL *with* a retention policy. Now defaults to INFO;
+  `RUST_LOG=debug` restores the previous behaviour.
+- **Nothing in NEEDLE owned the log file descriptor** — `launch_in_tmux()`
+  appended stderr with a shell redirect (`2>> path`), so the file could only
+  grow. Rotation was impossible from inside the process, and `logrotate` would
+  have needed `copytruncate` to have any effect. Workers now write through a
+  `SizeCappedWriter` they own.
+- **Rotation is now bounded by bytes, not time** — `tracing-appender` rotates
+  only on `MINUTELY | HOURLY | DAILY | NEVER`, which is not a bound: at the
+  ~159 GB/hr this bug produced, the current hourly file passes 159 GB before
+  rotating once, and `max_log_files` caps file count rather than size. Total
+  on-disk bytes per worker are now capped at **2 GiB**
+  (`128 MiB × (15 + 1)`). The writer also counts rolls per minute and warns on
+  stderr past a threshold — a cap that silently absorbs a runaway is how a
+  159 GB/hr leak stays invisible.
+- **Span guard held across the claim `await` leaked one span per cycle**
+  (bf-3uj6i) — `do_claim` entered `bead.claim` with an RAII guard and held it
+  across `claimer.claim_one().await`. On a multi-thread runtime the task can
+  resume on another thread; the guard drops there, that thread's span stack has
+  no matching id, `pop()` returns false, and the original thread's entry is
+  orphaned permanently. Because the `fmt` layer re-serializes the whole span
+  stack on every event, output grew quadratically: 18 deep / 4,983-byte lines
+  early, 2,488 deep / **629,829-byte** lines late. Replaced with
+  `.instrument()`.
+
+  Note the bead's own root-cause analysis (non-LIFO exit order) is incorrect and
+  is corrected in a comment on it: `SpanStack::pop` does a reverse search and
+  `stack.remove(idx)`, removing a span from anywhere in the stack, so
+  out-of-order exit on a single thread is harmless. **When auditing other
+  `.enter()` sites the rule is "never hold a guard across `await`", not
+  "preserve LIFO order".**
+
+### Changed
+
+- `rust-toolchain.toml` pins an exact version (`1.95.0`) instead of the `stable`
+  channel. rustup re-resolves `stable` on every invocation and auto-updates; on
+  2026-08-05 the iad-ci builder tried to sync 1.97.1 mid-job and died on
+  `Invalid cross-device link (os error 18)` because rustup's temp dir and
+  toolchain dir are on different mounts in that image. `cargo check` never ran,
+  and `rust-verify` was failing for **every** repo using it, not just NEEDLE.
+- `src/integration_t/` is gated behind a non-default `integration-t` feature. It
+  was moved from `tests/` into `src/` without being adapted to build inside the
+  library — it uses `needle::` self-referential paths, needs the `tempfile`
+  dev-dependency, and calls `Telemetry::get_events()`, which does not exist —
+  which broke `cargo test` and `cargo clippy` for the whole crate. Gated rather
+  than reverted so the work survives; see the module doc for what is outstanding.
+- Dropped the `tracing-appender` dependency, replaced by `log_writer`.
+
+### Known issues
+
+- `cargo clippy --all-targets -- -D warnings` still fails: 46 `unreachable
+  pattern` errors in `src/types/mod.rs`, where a large error-code table lists 59
+  codes in more than one match arm (and several codes that do not exist).
+  `needle-ci` does not gate on clippy, but `rust-verify` does.
+- Several unit tests sleep on wall-clock (`handle_exhausted_with_wait_returns_selecting`
+  waits out a real `idle_backoff` of 60–120s), which is why CI runs take 17–25
+  minutes against a ~40-second compile.
+
 ## [0.2.16] - 2026-08-02
 
 ### Fixed

@@ -27,12 +27,12 @@ use anyhow::Result;
 use chrono::Utc;
 use tempfile::TempDir;
 
-use needle::bead_store::{BeadStore, Filters};
-use needle::config::{Config, WorkerConfig};
-use needle::registry::Registry;
-use needle::telemetry::Telemetry;
-use needle::types::{Bead, BeadId, BeadStatus};
-use needle::worker::Worker;
+use crate::bead_store::{BeadStore, Filters};
+use crate::config::{Config, WorkerConfig};
+use crate::registry::Registry;
+use crate::telemetry::Telemetry;
+use crate::types::{Bead, BeadId, BeadStatus};
+use crate::worker::Worker;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // LoadSimulator
@@ -456,12 +456,7 @@ impl BeadStore for MockBeadStore {
         Ok(())
     }
 
-    async fn create_bead(
-        &self,
-        _title: &str,
-        _body: &str,
-        _labels: &[&str],
-    ) -> Result<BeadId> {
+    async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
         Ok(BeadId::from("new-mock-bead"))
     }
 
@@ -766,7 +761,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_rising_load_setup_helper() {
-        let (simulator, _temp_dir) = rising_load_setup(Some(1), Some(3), Some(2), None).await.unwrap();
+        let (simulator, _temp_dir) = rising_load_setup(Some(1), Some(3), Some(2), None)
+            .await
+            .unwrap();
 
         // Should have recorded initial + 2 steps = 3 spawn attempts
         assert_eq!(simulator.spawn_attempt_count(), 3);
@@ -805,3 +802,12 @@ mod tests {
         assert!(max > avg);
     }
 }
+
+// Worker construction saturated load regression tests
+mod worker_construction_saturation;
+
+// Batch launch rising load regression test (P12.2)
+mod batch_launch_rising_load;
+
+// Supervise auto-scale spawn gate regression test
+mod supervise_auto_scale_gate;
