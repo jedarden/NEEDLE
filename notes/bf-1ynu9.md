@@ -5,13 +5,16 @@ Fix GitHub issue #11 where `Supervisor::spawn_worker` builds its child via `Comm
 
 ## Resolution Status
 **ALREADY COMPLETE** - Implemented in commit e97e88a on 2026-07-28
+("fix: harden gates/spawn/bead-status per external adopter (GH #7-#11)")
+
+No code changes required.
 
 ## Implementation Details
 
 The fix was implemented as part of ADR-009 (External-Adopter Hardening) along with fixes for GH #7-#10:
 
 ### 1. New Config Field
-`WorkerConfig::worker_binary_path: Option<PathBuf>` - allows explicit override of the worker binary path
+`WorkerConfig::worker_binary_path: Option<PathBuf>` in `src/config/mod.rs` - allows explicit override of the worker binary path. Defaults to `None` (uses `current_exe()`).
 
 ### 2. Binary Resolution Function
 `resolve_worker_binary()` in `src/supervisor/mod.rs` (lines 88-106):
@@ -36,7 +39,7 @@ Three comprehensive tests verify the behavior:
 - `resolve_worker_binary_defaults_to_current_exe` - confirms current_exe() is default (not PATH lookup)
 - `supervisor_config_default_has_no_worker_binary_override` - confirms default behavior
 
-All tests pass ✅
+Plus config tests covering the `worker_binary_path` field.
 
 ## Documentation
 - ADR-009 documents the rationale and implementation
@@ -46,5 +49,17 @@ All tests pass ✅
 ## Verification
 ```bash
 cargo test --lib supervisor::tests::resolve_worker_binary
-# All tests pass
 ```
+- `resolve_worker_binary` tests: 2 passed
+- `worker_binary_path` config tests: 3 passed
+- Supervisor tests: 39 passed
+
+## References
+- GitHub issue #11: https://github.com/jedarden/NEEDLE/issues/11
+- ADR-009: `docs/adr/009-external-adopter-hardening.md`
+- Commit: e97e88a
+
+---
+*Note: this file was written independently by two workers (one on each clone) and
+reconciled during the 2026-08-06 merge. Both reached the same conclusion; the
+detail from each has been kept.*
