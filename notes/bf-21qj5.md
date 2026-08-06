@@ -1,66 +1,54 @@
-# BeadStatus::Deferred Verification - bf-21qj5
+# BeadStatus::Deferred Implementation Verification (Bead bf-21qj5)
 
-## Task Requirements
-Add BeadStatus::Deferred so bf 'deferred' status stops failing deserialization (GH #10)
+## Task
+Add BeadStatus::Deferred so bf 'deferred' status stops failing deserialization (GitHub #10)
 
-## Implementation Status ✅
+## Issue Description
+`bf list --json` emits `status:deferred` but `BeadStatus` had no such variant, causing deserialization failures. This made 31 beads invisible to strands and supervise in the reporter's store (93 parse-error lines).
 
-The `BeadStatus::Deferred` variant has already been implemented in `src/types/mod.rs`.
+## Implementation Status
+**COMPLETE** - Previously implemented in commit e97e88a (2026-07-28)
 
-### 1. BeadStatus::Deferred variant exists
-- Location: `src/types/mod.rs:111-117`
-- Properly documented with doc comments explaining its purpose
-- Distinguished from Blocked (deferred = deliberately postponed, blocked = unmet dependency)
-- Doc comment: "bf (bead-forge) emits \"deferred\" for beads deliberately postponed rather than blocked by a dependency. Distinct from `Blocked`: a deferred bead has no unmet dependency, it was just set aside — see GitHub issue jedarden/NEEDLE#10."
+### Implementation Details (src/types/mod.rs)
 
-### 2. Serde configuration
-- Uses `#[serde(rename_all = "snake_case")]` on enum (line 95)
-- Deferred variant deserializes from "deferred" JSON string
-- No explicit alias needed - matches snake_case convention
-- Mirrors Done/Closed precedent as specified in ADR-009
+1. **Variant Definition** (lines 111-117):
+   - `BeadStatus::Deferred` variant added with documentation
+   - Mirrors the Done/Closed aliasing precedent
+   - Documents distinction from Blocked
 
-### 3. is_done() implementation
-- Returns `false` for Deferred (line 774)
-- Deferred beads are explicitly NOT done (correct semantics)
+2. **is_done() Behavior** (line 774):
+   - `Deferred.is_done()` returns `false`
+   - Deferred beads are not considered finished
 
-### 4. Display implementation
-- Exhaustive match arm (line 134): `BeadStatus::Deferred => write!(f, "deferred")`
-- Displays as "deferred" in lowercase
+3. **Display Implementation** (line 134):
+   - `BeadStatus::Deferred` displays as `"deferred"`
+   - Exhaustive match arm added
 
-### 5. Test coverage
-Comprehensive tests in `src/types/mod.rs` (lines 788-805):
-- `bead_status_deferred_deserialization` - Verifies "deferred" JSON deserializes correctly
-- `bead_status_deferred_distinct_from_blocked` - Ensures Deferred ≠ Blocked
-- `bead_status_is_done` - Confirms `is_done()` returns `false` for Deferred
-- `bead_status_display` - Validates Display output is "deferred"
-- `bead_status_serialization` - Confirms round-trip serialization produces "deferred"
+4. **Test Coverage**:
+   - `bead_status_deferred_deserialization`: Verifies JSON round-trip
+   - `bead_status_deferred_distinct_from_blocked`: Ensures Deferred ≠ Blocked
+   - `bead_status_is_done`: Confirms is_done() = false
+   - `bead_status_display`: Verifies display output
+   - `bead_status_serialization`: Confirms snake_case serialization
 
-## Impact
-This fix resolves the deserialization failure that caused 31 beads to be silently invisible to strands and `supervise` in the reporter's bead store (93 parse-error lines). Deferred beads now:
-- Deserialize successfully from `bf list --json` output
-- Remain distinct from `Blocked` status (different semantics)
-- Display correctly as "deferred"
-- Are treated as non-terminal (not done) by the worker FSM
-
-## Compliance with ADR-009
-Implementation follows the decision in ADR-009 External-Adopter Hardening:
-- Mirrors the existing `Done`/`Closed` aliasing precedent
-- Maintains exhaustive match arms (no wildcards)
-- Preserves backward compatibility (only accepts previously-rejected values)
-- Does not change handling of previously-deserializing statuses
-
-## Verification Results
+### Verification Results
 All 7 BeadStatus tests pass:
-- bead_status_completed_deserialization ✅
-- bead_status_closed_deserialization ✅  
-- bead_status_deferred_deserialization ✅
-- bead_status_deferred_distinct_from_blocked ✅
-- bead_status_display ✅
-- bead_status_is_done ✅
-- bead_status_serialization ✅
+```
+test types::tests::bead_status_closed_deserialization ... ok
+test types::tests::bead_status_completed_deserialization ... ok
+test types::tests::bead_status_deferred_deserialization ... ok
+test types::tests::bead_status_deferred_distinct_from_blocked ... ok
+test types::tests::bead_status_display ... ok
+test types::tests::bead_status_is_done ... ok
+test types::tests::bead_status_serialization ... ok
+```
 
-## Implementation History
-This was implemented in commit e97e88a "fix: harden gates/spawn/bead-status per external adopter (GH #7-#11)" which addressed all 5 GitHub issues from jarvis-laboratories including #10 (Deferred status).
+### Impact
+This fix ensures that beads with `status:deferred` from bead-forge (bf) deserialize correctly instead of failing silently, making them visible to all strands and the supervisor.
 
-## Conclusion
-The bead's deliverables are complete. The implementation fixes the exact issue described in GitHub #10, with comprehensive test coverage and full compliance with project conventions. The BeadStatus::Deferred variant is fully implemented and tested, allowing bf (bead-forge) stores containing "deferred" beads to deserialize correctly without silently dropping those beads from strand/supervise visibility.
+## Related Documentation
+- ADR-009: External Adopter Hardening
+- plan.md Phase 13.4
+
+## Verification Date
+2026-08-05
