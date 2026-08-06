@@ -35,3 +35,6 @@
 {"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-02T15:53:25.935866512+00:00","worker":"test-worker"}
 {"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-02T16:02:05.598220612+00:00","worker":"test-worker"}
 {"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-02T16:07:28.558714286+00:00","worker":"test-worker"}
+{"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-05T21:38:57.447436374+00:00","worker":"test-worker"}
+{"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-05T22:15:00.347580045+00:00","worker":"test-worker"}
+{"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-05T22:27:13.123888401+00:00","worker":"test-worker"}
