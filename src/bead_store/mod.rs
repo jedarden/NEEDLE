@@ -1089,6 +1089,25 @@ impl BeadStore for BrCliBeadStore {
 
     async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
         let id_str = id.as_ref();
+
+        // CRITICAL: Verify the bead is actually claimable BEFORE attempting to claim.
+        // This prevents duplicate dispatches where two workers race to claim the same
+        // bead. Without this check, the second worker can overwrite the first's claim.
+        // See bead bf-1ne6u for details.
+        let bead_before = self.show(id).await?;
+        if bead_before.status != crate::types::BeadStatus::Open {
+            // Bead is already in progress - another worker won this race
+            let claimed_by = bead_before
+                .assignee
+                .clone()
+                .unwrap_or_else(|| "(unknown)".to_string());
+            return Ok(ClaimResult::RaceLost { claimed_by });
+        }
+        if let Some(claimed_by) = bead_before.assignee {
+            // Bead has a stale assignee - not claimable
+            return Ok(ClaimResult::RaceLost { claimed_by });
+        }
+
         // Attempt claim by setting status=in_progress and assignee.
         let (code, _stdout) = self
             .run_br_with_status(&[
@@ -1106,7 +1125,14 @@ impl BeadStore for BrCliBeadStore {
             0 => {
                 // Verify we actually won by reading back the bead.
                 let bead = self.show(id).await?;
-                if bead.assignee.as_deref() == Some(actor) {
+                // Verify BOTH status and assignee to catch races
+                if bead.status == crate::types::BeadStatus::InProgress
+                    && bead.assignee.as_deref() == Some(actor)
+                {
+                    Ok(ClaimResult::Claimed(bead))
+                } else if bead.assignee.as_deref() == Some(actor) {
+                    // Assignee matches but status is wrong - still treat as claimed
+                    // (this handles edge cases where status didn't update but assignee did)
                     Ok(ClaimResult::Claimed(bead))
                 } else {
                     let claimed_by = bead
@@ -1409,7 +1435,10 @@ impl BeadStore for BrCliBeadStore {
                 // If bf is not available, fall back to the old br-style pattern
                 tracing::warn!(error = %e, "bf claim failed, falling back to br-style ready+claim");
                 let filters = Filters::default();
-                let candidates = self.ready(&filters).await?;
+                let mut candidates = self.ready(&filters).await?;
+                // Filter to only Open beads with no assignee - prevents claiming in_progress beads
+                candidates
+                    .retain(|b| b.status == crate::types::BeadStatus::Open && b.assignee.is_none());
                 if let Some(bead) = candidates.first() {
                     self.claim(&bead.id, actor).await
                 } else {

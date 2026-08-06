@@ -1,5 +1,4 @@
 use std::fs;
-use std::path::Path;
 use tempfile::TempDir;
 
 fn main() {

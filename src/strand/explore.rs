@@ -1025,7 +1025,9 @@ mod tests {
         assert_eq!(strand.home_workspace, home);
     }
 
-    #[tokio::test]
+    /// Uses multi-threaded runtime to avoid deadlock with PID checking in
+    /// cleanup_orphaned_in_progress (see bf-2unnq).
+    #[tokio::test(flavor = "multi_thread")]
     async fn nonexistent_workspace_path_returns_no_work() {
         let strand = make_test_explore_strand(
             true,
@@ -1609,7 +1611,10 @@ mod tests {
     /// The test verifies that workspace 2's candidates ARE returned, proving
     /// that the strand advances past workspace 1 after filtering out unclaimable
     /// candidates.
-    #[tokio::test]
+    ///
+    /// Uses multi-threaded runtime to avoid deadlock with PID checking in
+    /// cleanup_orphaned_in_progress (see bf-2unnq).
+    #[tokio::test(flavor = "multi_thread")]
     async fn deadlock_scenario_assigned_beads_allow_advancement() {
         let temp_root = tempfile::tempdir().unwrap();
         let workspace1 = temp_root.path().join("workspace1");
@@ -1692,7 +1697,10 @@ mod tests {
     ///
     /// This proves that the strand advances when candidates are excluded by
     /// the Filters (deferred/human/blocked labels), not just when assigned.
-    #[tokio::test]
+    ///
+    /// Uses multi-threaded runtime to avoid deadlock with PID checking in
+    /// cleanup_orphaned_in_progress (see bf-2unnq).
+    #[tokio::test(flavor = "multi_thread")]
     async fn deadlock_scenario_excluded_beads_allow_advancement() {
         let temp_root = tempfile::tempdir().unwrap();
         let workspace1 = temp_root.path().join("workspace1");
@@ -1775,7 +1783,10 @@ mod tests {
     /// - The defensive filtering logic checks BOTH conditions (assignee_ok AND labels_ok)
     /// - A bead that fails EITHER condition should be filtered out
     /// - A bead that fails BOTH conditions should DEFINITELY be filtered out
-    #[tokio::test]
+    ///
+    /// Uses multi-threaded runtime to avoid deadlock with PID checking in
+    /// cleanup_orphaned_in_progress (see bf-2unnq).
+    #[tokio::test(flavor = "multi_thread")]
     async fn deadlock_scenario_excluded_and_assigned_beads_allow_advancement() {
         let temp_root = tempfile::tempdir().unwrap();
         let workspace1 = temp_root.path().join("workspace1");

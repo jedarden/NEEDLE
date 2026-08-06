@@ -2224,7 +2224,7 @@ impl Worker {
     fn write_trace_files(
         &self,
         bead_id: &crate::types::BeadId,
-        workspace: &PathBuf,
+        workspace: &std::path::Path,
         stdout: &str,
         stderr: &str,
     ) -> Result<()> {

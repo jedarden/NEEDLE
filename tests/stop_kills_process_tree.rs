@@ -83,7 +83,7 @@ fn pid_exists(pid: u32) -> bool {
 #[allow(dead_code)]
 fn find_needle_processes() -> Vec<u32> {
     let output = Command::new("ps")
-        .args(&["aux", "--no-headers"])
+        .args(["aux", "--no-headers"])
         .output()
         .expect("ps command should work");
 

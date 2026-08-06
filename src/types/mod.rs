@@ -2252,10 +2252,7 @@ pub fn parse_error_code(input: &str) -> Option<String> {
         if let Some(code) = captures.get(0) {
             let code_str = code.as_str();
             // Verify it's the E0XXX format (first digit should be 0)
-            if code_str.len() == 5
-                && code_str.starts_with('E')
-                && code_str[1..].chars().next() == Some('0')
-            {
+            if code_str.len() == 5 && code_str.starts_with("E0") {
                 return Some(code_str.to_string());
             }
         }
@@ -2394,14 +2391,8 @@ pub fn classify_error_code(code: &str) -> ErrorCategory {
         | "E0563" | "E0564" => ErrorCategory::Generic,
 
         // Macro expansion errors
-        "E0276" | "E0519" | "E0520" | "E0521" | "E0522" | "E0523" | "E0704" | "E0748" | "E0749"
-        | "E0750" | "E0751" | "E0752" | "E0753" | "E0754" | "E0755" | "E0756" | "E0757"
-        | "E0758" | "E0759" | "E0760" | "E0761" | "E0762" | "E0763" | "E0764" | "E0765"
-        | "E0766" | "E0767" | "E0768" | "E0769" | "E0770" | "E0771" | "E0772" | "E0773"
-        | "E0774" | "E0775" | "E0776" | "E0777" | "E0778" | "E0779" | "E0780" | "E0781"
-        | "E0782" | "E0783" | "E0784" | "E0785" | "E0786" | "E0787" | "E0788" | "E0789"
-        | "E0790" | "E0791" | "E0792" | "E0793" | "E0794" | "E0795" | "E0796" | "E0797"
-        | "E0798" | "E0799" => ErrorCategory::Macro,
+        "E0276" | "E0519" | "E0520" | "E0521" | "E0522" | "E0523" | "E0704" | "E0784" | "E0785"
+        | "E0786" | "E0787" | "E0788" | "E0789" => ErrorCategory::Macro,
 
         // Dead code or unused item errors
         "E0425" | "E0526" => ErrorCategory::DeadCode,

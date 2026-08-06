@@ -3,10 +3,8 @@
 //! Run with: cargo run --example test_actual_bf_error_format
 
 use anyhow::{anyhow, Context, Result};
-use std::path::PathBuf;
 
 // Import StrandError from the crate
-use needle::types::StrandError;
 
 /// Simulate the ACTUAL current error chain from run_bf() in bead_store/mod.rs (2026-07-15).
 /// This matches lines 1030-1035:
@@ -39,7 +37,7 @@ fn simulate_strand_error() -> Result<()> {
     simulate_actual_bf_error().map_err(|e| {
         // This matches the real pattern: StrandError::StoreError(e.into())
         // which preserves the error chain.
-        let strand_err = needle::types::StrandError::StoreError(e.into());
+        let strand_err = needle::types::StrandError::StoreError(e);
         anyhow::Error::from(strand_err)
     })
 }

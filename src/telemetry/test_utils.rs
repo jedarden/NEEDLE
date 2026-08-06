@@ -2,6 +2,7 @@
 
 #[cfg(any(test, feature = "integration"))]
 use crate::telemetry::{Result, Sink, Telemetry, TelemetryEvent};
+#[cfg(any(test, feature = "integration"))]
 use std::sync::{Arc, Mutex};
 
 /// In-memory sink for testing — collects events via a shared Vec.
