@@ -10,6 +10,10 @@
 //! - the bead's own `notes` field changed during this dispatch — i.e. the agent
 //!   ran `bf update --notes` to record why no code change was needed.
 //!
+//! With no snapshot the gate has no baseline and **fails open** — it cannot tell
+//! a commit made during the dispatch from one that predates it, and releasing on
+//! "don't know" would recreate the retry loop it exists to stop.
+//!
 //! Deliberately does NOT accept a commit touching only `notes/`/`.beads/` as
 //! sufficient on its own: a prior incident (see docs/notes on ARMOR's
 //! commit-storm) showed a worker stuck retrying an uncompletable bead will
@@ -73,21 +77,34 @@ async fn evaluate(
     snapshot: Option<&predispatch::PreDispatch>,
     post_notes: &str,
 ) -> Result<GateResult> {
-    if let Some(result) = check_commit(workspace, snapshot).await? {
+    // No baseline means the gate has no basis to judge this dispatch: it cannot
+    // tell a commit made during the dispatch from one that predates it. Fail
+    // OPEN. Releasing on "don't know" would re-release every closure whenever
+    // snapshot recording failed — the same unbounded retry loop this gate
+    // exists to stop, just triggered from the other side.
+    let Some(snapshot) = snapshot else {
+        tracing::debug!(
+            workspace = %workspace.display(),
+            "no pre-dispatch snapshot — shipped-work gate passing without a verdict"
+        );
+        return Ok(GateResult::Pass);
+    };
+
+    if let Some(result) = check_commit(workspace, Some(snapshot)).await? {
         return Ok(result);
     }
 
     // Fallback: the agent recorded an explanation on the bead itself.
-    match snapshot.and_then(|s| s.notes_hash.as_deref()) {
+    match snapshot.notes_hash.as_deref() {
         Some(pre_hash) => {
             if hash_notes(post_notes) != pre_hash {
                 return Ok(GateResult::Pass);
             }
         }
         None => {
-            // No baseline to compare against (snapshot missing or notes
-            // unreadable). Accept a non-empty note rather than failing a bead
-            // the gate cannot actually judge.
+            // Notes were unreadable at dispatch, so there is nothing to diff
+            // against. Accept a non-empty note rather than failing a bead on a
+            // comparison the gate could not make.
             if !post_notes.trim().is_empty() {
                 return Ok(GateResult::Pass);
             }
@@ -217,22 +234,43 @@ mod tests {
 
     // ── fallback: bead notes ──
 
+    /// Without a snapshot the gate cannot distinguish a commit made during this
+    /// dispatch from one that predates it, so it must not render a verdict.
+    /// Failing closed here would release every closure whenever snapshot
+    /// recording failed — the same unbounded retry loop, triggered from the
+    /// other side.
     #[tokio::test]
-    async fn no_snapshot_and_no_notes_fails() {
+    async fn no_snapshot_fails_open() {
         let dir = TempDir::new().unwrap();
         init_repo(dir.path()).await;
-        let result = evaluate(dir.path(), None, "").await.unwrap();
-        assert!(matches!(result, GateResult::Fail(_)));
+        assert_eq!(
+            evaluate(dir.path(), None, "").await.unwrap(),
+            GateResult::Pass
+        );
     }
 
     #[tokio::test]
-    async fn no_snapshot_but_a_recorded_note_passes() {
+    async fn snapshot_without_readable_notes_accepts_a_non_empty_note() {
         let dir = TempDir::new().unwrap();
-        init_repo(dir.path()).await;
-        let result = evaluate(dir.path(), None, "already implemented in 4f2a1c")
-            .await
-            .unwrap();
-        assert_eq!(result, GateResult::Pass);
+        let head = init_repo(dir.path()).await;
+        let snap = snapshot(Some(&head), None);
+        assert_eq!(
+            evaluate(dir.path(), Some(&snap), "already implemented in 4f2a1c")
+                .await
+                .unwrap(),
+            GateResult::Pass
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_without_readable_notes_and_no_note_fails() {
+        let dir = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await;
+        let snap = snapshot(Some(&head), None);
+        assert!(matches!(
+            evaluate(dir.path(), Some(&snap), "   ").await.unwrap(),
+            GateResult::Fail(_)
+        ));
     }
 
     #[tokio::test]
