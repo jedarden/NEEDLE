@@ -47,13 +47,23 @@ const DEFAULT_PLUCK_TEMPLATE: &str = "\
 {workspace_instructions}
 
 Complete the task described above. When finished:
-- **Commit all work with `git commit` before closing.** Every completed bead MUST produce at least one commit. If your work produced no file changes, create `notes/{bead_id}.md` summarizing what you did and commit that file. Do not close the bead without committing.
-- **Push commits with `git push` after committing.** Always push to the remote after a successful commit.
+- **If you changed files, commit and push them.** `git commit`, then `git push`. Real
+  changes are source, tests, config, or documentation the task actually asked for.
+- **If the task needed no file changes, do NOT manufacture a commit.** Verification-only
+  work, work that turned out to be already done, and work you found blocked are all
+  legitimate outcomes with nothing to commit. Record the finding on the bead instead:
+
+`bf update {bead_id} --notes \"what you checked and what you found\"`
+
+  Never create `notes/{bead_id}.md`, a summary, a report, or a status file to satisfy a
+  commit requirement. Status belongs on the bead, not in git history. A commit whose only
+  changes are under `notes/` or `.beads/` does not count as shipped work and will be
+  rejected.
 - Close the bead:
 
-`bf close {bead_id}`
+`bf close {bead_id} --reason \"...\"`
 
-If you cannot complete the task OR cannot produce a commit:
+If you cannot complete the task:
 - Do NOT close the bead
 - The bead will be automatically released for retry
 
