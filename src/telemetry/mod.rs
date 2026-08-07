@@ -3237,7 +3237,14 @@ impl Telemetry {
         let mut file_sink: Option<Arc<FileSink>> = None;
 
         // File sink is always created (fallback)
-        match FileSink::new(&worker_id, &session_id) {
+        // Use configured log_dir if set, otherwise use default
+        let file_sink_result = if let Some(ref log_dir) = config.file_sink.log_dir {
+            FileSink::with_dir(log_dir, &worker_id, &session_id)
+        } else {
+            FileSink::new(&worker_id, &session_id)
+        };
+
+        match file_sink_result {
             Ok(s) => {
                 // Write boot event directly to file BEFORE spawning writer thread.
                 // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
