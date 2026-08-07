@@ -2853,4 +2853,88 @@ mod tests {
         monitor.stop();
         assert!(!path.exists(), "heartbeat file should not exist after stop");
     }
+
+    /// Test that heartbeat_path field is correctly set for shutdown handler access.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - The heartbeat_path field is computed during construction
+    /// - The path matches the expected pattern: {heartbeat_dir}/{qualified_id}.json
+    /// - The path can be used for cleanup by the shutdown handler
+    /// - The path is accessible and consistent throughout the monitor lifecycle
+    ///
+    /// This ensures the shutdown handler will have access to the correct file path
+    /// for cleanup on graceful shutdown.
+    #[tokio::test]
+    async fn heartbeat_path_field_correct_for_shutdown_handler() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let mut config = Config::default();
+        config.workspace.home = dir.path().to_path_buf();
+        config.health.heartbeat_interval_secs = 1;
+        config.health.heartbeat_ttl_secs = 5;
+
+        // Create monitor with specific adapter and worker name
+        config.agent.default = "test-adapter".to_string();
+        let worker_name = "shutdown-handler-test".to_string();
+        let monitor = HealthMonitor::new(
+            config,
+            worker_name.clone(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // EXPECTED PATH: {heartbeat_dir}/{qualified_id}.json
+        // qualified_id = {adapter}-{worker_name} = "test-adapter-shutdown-handler-test"
+        let expected_path = hb_dir.join("test-adapter-shutdown-handler-test.json");
+
+        // ACCEPTANCE CRITERION: heartbeat_path field matches expected path
+        let actual_path = monitor.heartbeat_path();
+        assert_eq!(
+            actual_path, expected_path,
+            "heartbeat_path field must match expected path: {{heartbeat_dir}}/{{qualified_id}}.json"
+        );
+
+        // ACCEPTANCE CRITERION: Path is correctly formatted
+        assert!(
+            actual_path.starts_with(&hb_dir),
+            "heartbeat_path must start with heartbeat_dir"
+        );
+        assert!(
+            actual_path.extension().and_then(|e| e.to_str()) == Some("json"),
+            "heartbeat_path must have .json extension"
+        );
+
+        // ACCEPTANCE CRITERION: Path can be used for actual file creation
+        let mut monitor = monitor;
+        monitor.start_emitter().unwrap();
+        assert!(
+            actual_path.exists(),
+            "heartbeat file must be created at the computed path"
+        );
+
+        // ACCEPTANCE CRITERION: Shutdown handler can use this path for cleanup
+        // Simulate shutdown handler accessing the path for cleanup
+        let cleanup_path = monitor.heartbeat_path();
+        assert_eq!(
+            cleanup_path, actual_path,
+            "shutdown handler must receive consistent path for cleanup"
+        );
+        assert!(cleanup_path.exists(), "shutdown handler must be able to access the file");
+
+        // Verify cleanup works using the path (as shutdown handler would)
+        monitor.stop();
+        assert!(
+            !cleanup_path.exists(),
+            "shutdown handler must successfully remove file using heartbeat_path"
+        );
+
+        // After shutdown, the path should still be consistent (even though file is gone)
+        let final_path = monitor.heartbeat_path();
+        assert_eq!(
+            final_path, expected_path,
+            "heartbeat_path must remain consistent even after file is removed"
+        );
+    }
 }
