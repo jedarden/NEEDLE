@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use tracing::Instrument;
 
 use crate::bead_store::{BeadStore, NewChild};
 use crate::claim::acquire_flock;
@@ -408,8 +409,18 @@ impl MitosisEvaluator {
             needle.mitosis.children_created = tracing::field::Empty, // Will be set based on result
             needle.mitosis.children_skipped = tracing::field::Empty, // Will be set based on result
         );
-        let _mitosis_enter = mitosis_span.enter();
 
+        self.create_children_inner(store, parent, proposed)
+            .instrument(mitosis_span)
+            .await
+    }
+
+    async fn create_children_inner(
+        &self,
+        store: &dyn BeadStore,
+        parent: &Bead,
+        proposed: &[ProposedChild],
+    ) -> Result<MitosisResult> {
         // Extract the root label from the parent for lineage tracking.
         // If the parent has a root-* label, propagate it to children.
         // Otherwise, this parent is the root of the lineage.

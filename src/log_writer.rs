@@ -31,6 +31,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tracing_subscriber::fmt::MakeWriter;
+
+/// Maximum bytes emitted for one human-readable tracing line.
+///
+/// This is deliberately much smaller than the file-roll threshold. A disk cap
+/// limits aggregate damage, but without a line cap a leaked span stack can still
+/// allocate and emit a multi-hundred-KiB event on every log call.
+pub const DEFAULT_MAX_LINE_BYTES: usize = 64 * 1024;
+
 /// Rolls per window above which the writer complains on stderr.
 const ROLL_ALERT_THRESHOLD: u32 = 10;
 /// Window over which rolls are counted.
@@ -52,6 +61,96 @@ struct Shared {
     path: PathBuf,
     max_bytes: u64,
     max_files: usize,
+}
+
+/// A [`MakeWriter`] adapter that discards bytes after a per-line limit.
+///
+/// The adapter reports discarded bytes as successfully written, then resumes at
+/// the next newline. This keeps tracing operational during a runaway without
+/// allowing any one formatted event to grow without bound.
+#[derive(Clone)]
+pub struct LineCappedMakeWriter<M> {
+    inner: M,
+    max_line_bytes: usize,
+}
+
+impl<M> LineCappedMakeWriter<M> {
+    pub fn new(inner: M, max_line_bytes: usize) -> Self {
+        Self {
+            inner,
+            max_line_bytes: max_line_bytes.max(1),
+        }
+    }
+}
+
+impl<'a, M> MakeWriter<'a> for LineCappedMakeWriter<M>
+where
+    M: MakeWriter<'a>,
+{
+    type Writer = LineCappedWriter<M::Writer>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LineCappedWriter::new(self.inner.make_writer(), self.max_line_bytes)
+    }
+
+    fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Self::Writer {
+        LineCappedWriter::new(self.inner.make_writer_for(meta), self.max_line_bytes)
+    }
+}
+
+/// A writer that emits at most `max_line_bytes` bytes per newline-delimited line.
+pub struct LineCappedWriter<W> {
+    inner: W,
+    max_line_bytes: usize,
+    written_on_line: usize,
+}
+
+impl<W> LineCappedWriter<W> {
+    fn new(inner: W, max_line_bytes: usize) -> Self {
+        Self {
+            inner,
+            max_line_bytes: max_line_bytes.max(1),
+            written_on_line: 0,
+        }
+    }
+}
+
+impl<W: Write> Write for LineCappedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Reserve one byte for the terminating newline. Long lines therefore
+        // remain separate instead of being concatenated after truncation.
+        let payload_limit = self.max_line_bytes.saturating_sub(1);
+        let mut remaining = buf;
+
+        while !remaining.is_empty() {
+            let newline = remaining.iter().position(|byte| *byte == b'\n');
+            let segment_len = newline.unwrap_or(remaining.len());
+            let available = payload_limit.saturating_sub(self.written_on_line);
+            let emit_len = segment_len.min(available);
+
+            if emit_len > 0 {
+                self.inner.write_all(&remaining[..emit_len])?;
+                self.written_on_line += emit_len;
+            }
+
+            match newline {
+                Some(index) => {
+                    self.inner.write_all(b"\n")?;
+                    self.written_on_line = 0;
+                    remaining = &remaining[index + 1..];
+                }
+                None => break,
+            }
+        }
+
+        // Discarded bytes are intentionally reported as consumed so the tracing
+        // formatter does not retry them.
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// A `MakeWriter` that appends to a file and rolls it once it exceeds a byte cap.
@@ -335,5 +434,33 @@ mod tests {
             "kept history despite max_files=0"
         );
         assert!(std::fs::metadata(&path).unwrap().len() <= 16);
+    }
+
+    #[test]
+    fn line_cap_discards_runaway_bytes_and_resumes_on_newline() {
+        let mut writer = LineCappedWriter::new(Vec::new(), 16);
+        writer
+            .write_all(b"abcdefghijklmnopqrstuvwxyz\nok\n")
+            .unwrap();
+
+        assert_eq!(writer.inner, b"abcdefghijklmno\nok\n");
+        assert!(writer
+            .inner
+            .split_inclusive(|byte| *byte == b'\n')
+            .all(|line| line.len() <= 16));
+    }
+
+    #[test]
+    fn line_cap_handles_a_line_split_across_writes() {
+        let mut writer = LineCappedWriter::new(Vec::new(), 8);
+        writer.write_all(b"12345").unwrap();
+        writer.write_all(b"67890").unwrap();
+        writer.write_all(b"\nnext\n").unwrap();
+
+        assert_eq!(writer.inner, b"1234567\nnext\n");
+        assert!(writer
+            .inner
+            .split_inclusive(|byte| *byte == b'\n')
+            .all(|line| line.len() <= 8));
     }
 }

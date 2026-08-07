@@ -368,10 +368,12 @@ pub struct Worker {
     /// Handle to the watchdog thread for cleanup on worker drop.
     #[allow(dead_code)]
     watchdog_handle: Option<std::thread::JoinHandle<()>>,
-    /// The current bead lifecycle span guard. Created when a bead is claimed,
-    /// dropped when the bead lifecycle ends (after HANDLING or when the bead is released).
-    #[allow(dead_code)]
-    bead_lifecycle_span: Option<tracing::span::EnteredSpan>,
+    /// The current bead lifecycle span. Created when a bead is claimed and
+    /// instrumented onto each state-handler future until the lifecycle ends.
+    ///
+    /// This must remain a `Span`, not an `EnteredSpan`: entered guards mutate a
+    /// thread-local stack and cannot safely be stored across `.await` points.
+    bead_lifecycle_span: Option<tracing::Span>,
     /// The last outcome for the current bead (used to record on bead.lifecycle span).
     last_outcome: Option<String>,
     /// Last observed mtime across all workspace .beads/issues.jsonl files.
@@ -818,8 +820,14 @@ impl Worker {
             needle.model = %self.config.agent.default, // Will be updated when adapter is resolved
             needle.workspace = %self.config.workspace.default.display(),
         );
-        let _enter = session_span.enter();
 
+        // Instrumenting the future re-enters this span on every poll. Holding an
+        // entered guard around the loop would strand its thread-local entry if the
+        // task resumed on another Tokio worker thread.
+        self.run_state_machine().instrument(session_span).await
+    }
+
+    async fn run_state_machine(&mut self) -> Result<WorkerState> {
         loop {
             // Check for shutdown signal between states.
             if self.shutdown.load(Ordering::SeqCst) {
@@ -912,15 +920,32 @@ impl Worker {
                 self.set_state(WorkerState::Logging)?;
             }
 
+            // A plain `Span` handle is safe to clone and move between threads. Each
+            // bead-processing handler is instrumented separately so its polls and
+            // synchronous tracing events see the lifecycle span as current without
+            // keeping a thread-local entry alive between polls.
+            let lifecycle_span = self
+                .bead_lifecycle_span
+                .clone()
+                .unwrap_or_else(tracing::Span::none);
+
             match self.state {
                 WorkerState::Selecting => self.do_select().await?,
                 WorkerState::Claiming => self.do_claim().await?,
                 WorkerState::Retrying => self.do_retry().await?,
-                WorkerState::Building => self.do_build().await?,
-                WorkerState::Dispatching => self.do_dispatch().await?,
-                WorkerState::Executing => self.do_execute().await?,
-                WorkerState::Handling => self.do_handle().await?,
-                WorkerState::Logging => self.do_log()?,
+                WorkerState::Building => self.do_build().instrument(lifecycle_span.clone()).await?,
+                WorkerState::Dispatching => {
+                    self.do_dispatch()
+                        .instrument(lifecycle_span.clone())
+                        .await?
+                }
+                WorkerState::Executing => {
+                    self.do_execute().instrument(lifecycle_span.clone()).await?
+                }
+                WorkerState::Handling => {
+                    self.do_handle().instrument(lifecycle_span.clone()).await?
+                }
+                WorkerState::Logging => lifecycle_span.in_scope(|| self.do_log())?,
                 WorkerState::Exhausted => {
                     let next = self.handle_exhausted().await?;
                     match next {
@@ -1552,16 +1577,15 @@ impl Worker {
             needle.claim.retry_number = tracing::field::Empty,
             needle.claim.result = tracing::field::Empty,
         );
-        // Do NOT hold an `Entered`/`EnteredSpan` guard here. Those are RAII guards
-        // over a thread-local span stack and require LIFO drop order. The previous
-        // code entered this span, then entered `bead.lifecycle` on top of it inside
-        // the match below, and only dropped this one at end of scope — an
-        // out-of-order exit, so neither span was ever popped. One `bead.claim` plus
-        // one `bead.lifecycle` leaked per claim cycle. Because the fmt layer
-        // re-serializes the whole span stack on every event, output grew
+        // Do NOT hold an `Entered`/`EnteredSpan` guard here. Those guards mutate a
+        // thread-local span stack. The previous code kept one alive across the
+        // claim await; when Tokio resumed the task on a different worker thread,
+        // dropping the guard there could not remove the entry left on the original
+        // thread. The lifecycle guard had the same cross-await problem. One
+        // `bead.claim` plus one `bead.lifecycle` leaked per cycle. Because the fmt
+        // layer re-serializes the whole span stack on every event, output grew
         // quadratically: measured at 18 deep / 4,983-byte lines early and 2,488 deep
         // / 629,829-byte lines late, reaching ~159 GB/hr and filling a 444 GB disk.
-        // Holding the guard across the `.await` below was independently unsound.
         // See bf-3uj6i.
         //
         // `.instrument()` attaches the span to the future correctly, so
@@ -1621,17 +1645,13 @@ impl Worker {
                     needle.bead.title_hash = %bead_title_hash.as_deref().unwrap_or("unknown"),
                     needle.bead.outcome = tracing::field::Empty, // Will be set on completion
                 );
-                self.bead_lifecycle_span = Some(lifecycle_span.entered());
+                self.bead_lifecycle_span = Some(lifecycle_span);
 
-                // bead.claim is already closed by the time we get here: it is scoped to
-                // the instrumented claim_one() future above rather than held open by a
-                // guard, so entering bead.lifecycle here is LIFO-clean. The old comment
-                // claimed `_claim_enter` was dropped at this point — it was not, it was
-                // dropped at end of scope, which is what leaked the span (bf-3uj6i).
-                //
-                // bead.lifecycle stays entered across the whole bead, and is dropped via
-                // `bead_lifecycle_span.take()` when the bead finishes. That guard IS
-                // LIFO-correct now that nothing is pushed above it.
+                // bead.claim is already closed by the time we get here: it is scoped
+                // to the instrumented claim_one() future above. bead.lifecycle is
+                // stored as an inert `Span` handle and instrumented onto each
+                // subsequent state-handler future by `run_state_machine`, so neither
+                // span leaves a thread-local guard alive between polls (bf-3uj6i).
 
                 self.set_state(WorkerState::Building)?;
             }
@@ -1787,6 +1807,19 @@ impl Worker {
 
     /// BUILDING: construct prompt from claimed bead.
     async fn do_build(&mut self) -> Result<()> {
+        let bead_id = match self.current_bead.as_ref() {
+            Some(bead) => bead.id.clone(),
+            None => bail!("BUILDING state without current_bead — invariant violated"),
+        };
+        let prompt_build_span = tracing::info_span!(
+            "bead.prompt_build",
+            needle.bead.id = %bead_id,
+        );
+
+        self.do_build_inner().instrument(prompt_build_span).await
+    }
+
+    async fn do_build_inner(&mut self) -> Result<()> {
         let bead = match self.current_bead {
             Some(ref b) => b.clone(),
             None => {
@@ -1816,13 +1849,6 @@ impl Worker {
         let bead_id = bead.id.clone();
         let heartbeat_bead_id = bead_id.clone();
         let telemetry = self.telemetry.clone();
-
-        // Enter the bead.prompt_build span for the prompt building phase.
-        let prompt_build_span = tracing::info_span!(
-            "bead.prompt_build",
-            needle.bead.id = %bead_id,
-        );
-        let _prompt_build_enter = prompt_build_span.enter();
 
         // Spawn heartbeat task that emits periodic updates during the build.
         // Heartbeat interval: every 30 seconds.
@@ -2014,7 +2040,15 @@ impl Worker {
             needle.agent.pid = tracing::field::Empty, // Will be set when process starts
             needle.agent.exit_code = tracing::field::Empty, // Will be set after execution
         );
-        let _dispatch_enter = dispatch_span.enter();
+
+        self.do_dispatch_inner(adapter)
+            .instrument(dispatch_span)
+            .await
+    }
+
+    async fn do_dispatch_inner(&mut self, adapter: crate::dispatch::AgentAdapter) -> Result<()> {
+        let provider = adapter.provider.as_deref();
+        let model = adapter.model.as_deref();
 
         let decision = self.rate_limiter.check(provider, model, &self.registry)?;
 
@@ -2115,13 +2149,11 @@ impl Worker {
             // This is a child of agent.dispatch.
             // We need to record attributes on the parent agent.dispatch span after execution,
             // so we use a scope to drop the execution_span guard first.
-            let (result, exec_tokens) = {
-                let execution_span = tracing::info_span!(
-                    "agent.execution",
-                    needle.bead.id = %bead.id,
-                );
-                let _execution_enter = execution_span.enter();
-
+            let execution_span = tracing::info_span!(
+                "agent.execution",
+                needle.bead.id = %bead.id,
+            );
+            let (result, exec_tokens) = async {
                 // Snapshot workspace HEAD + the bead's notes before the agent
                 // runs, so the shipped-work gate has a baseline to judge the
                 // closure against. Best-effort: a missing snapshot degrades the
@@ -2156,8 +2188,10 @@ impl Worker {
                     &result.stdout,
                     &result.stderr,
                 );
-                (result, exec_tokens)
-            };
+                Ok::<_, anyhow::Error>((result, exec_tokens))
+            }
+            .instrument(execution_span)
+            .await?;
 
             // Now we're back in the agent.dispatch span. Record the execution results.
             tracing::Span::current().record("needle.agent.pid", result.pid);
@@ -2363,19 +2397,16 @@ impl Worker {
         // Wrap the entire HANDLING state in a timeout to prevent indefinite hangs.
         // Even if the Tokio runtime gets blocked by a synchronous operation, this
         // timeout will fire (on a threadpool) and allow recovery.
+        let outcome_span = tracing::info_span!(
+            "bead.outcome",
+            needle.bead.id = %bead.id,
+            needle.outcome = tracing::field::Empty, // Will be set based on handler result
+            needle.outcome.action = tracing::field::Empty, // Will be set based on handler result
+        );
         let handling_future = async {
             // Wrap the outcome handler in a 60-second timeout to prevent indefinite hangs.
             // The health monitor's background thread writes heartbeat files based on
             // shared state, so external monitoring can detect hangs via stale heartbeats.
-
-            // Enter the bead.outcome span for the outcome handling phase.
-            let outcome_span = tracing::info_span!(
-                "bead.outcome",
-                needle.bead.id = %bead.id,
-                needle.outcome = tracing::field::Empty, // Will be set based on handler result
-                needle.outcome.action = tracing::field::Empty, // Will be set based on handler result
-            );
-            let _outcome_enter = outcome_span.enter();
 
             let handler_future = self.outcome_handler.handle_with_cancellation(
                 self.store.as_ref(),
@@ -2474,7 +2505,8 @@ impl Worker {
                     Err(anyhow::anyhow!("handler timed out after 60s"))
                 }
             }
-        };
+        }
+        .instrument(outcome_span);
 
         // Wrap the entire HANDLING state in a 90-second timeout using spawn_blocking.
         // This provides a safety net that can fire even if the tokio runtime becomes wedged.
@@ -2629,22 +2661,22 @@ impl Worker {
                 needle.bead.id = %bead.id,
                 needle.mitosis.result = tracing::field::Empty, // Will be set based on evaluation result
             );
-            let _mitosis_enter = mitosis_span.enter();
 
             // Wrap mitosis evaluation in timeout to prevent indefinite hang.
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(120),
-                self.mitosis_evaluator.evaluate(
-                    self.store.as_ref(),
-                    &bead,
-                    &workspace,
-                    &self.dispatcher,
-                    &self.prompt_builder,
-                    &self.config.agent.default,
-                ),
-            )
-            .await
-            {
+            async {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    self.mitosis_evaluator.evaluate(
+                        self.store.as_ref(),
+                        &bead,
+                        &workspace,
+                        &self.dispatcher,
+                        &self.prompt_builder,
+                        &self.config.agent.default,
+                    ),
+                )
+                .await
+                {
                 Ok(Ok(crate::mitosis::MitosisResult::Split { children })) => {
                     tracing::Span::current().record("needle.mitosis.result", "split");
                     tracing::info!(
@@ -2694,8 +2726,10 @@ impl Worker {
                         "mitosis evaluation timed out after 120s, continuing to LOGGING"
                     );
                 }
+                }
             }
-            // mitosis span ends here when _mitosis_enter is dropped
+            .instrument(mitosis_span)
+            .await;
         }
 
         // On success, inject Bead-Id trailer into the latest commit (non-fatal if it fails).
@@ -2790,22 +2824,22 @@ impl Worker {
         self.beads_processed += 1;
         self.current_bead = None;
 
-        // Close the bead.lifecycle span by dropping it.
+        // Close the bead.lifecycle span by dropping the final handle.
         // Record the outcome before closing if we have the handler result available.
-        if let Some(lifecycle_guard) = self.bead_lifecycle_span.take() {
+        if let Some(lifecycle_span) = self.bead_lifecycle_span.take() {
             // Record the outcome on the bead.lifecycle span before closing
             if let Some(ref outcome) = self.last_outcome {
-                lifecycle_guard.record("needle.bead.outcome", outcome.as_str());
+                lifecycle_span.record("needle.bead.outcome", outcome.as_str());
                 // Set span status: Ok for success, Error for all other outcomes
                 if outcome != "success" {
                     // otel.status_code = 2 indicates ERROR in OpenTelemetry
-                    lifecycle_guard.record("otel.status_code", 2u64);
-                    lifecycle_guard.record("otel.status_description", outcome.as_str());
+                    lifecycle_span.record("otel.status_code", 2u64);
+                    lifecycle_span.record("otel.status_description", outcome.as_str());
                 }
             }
             // Clear the outcome for the next cycle
             self.last_outcome = None;
-            // The span is automatically closed when the guard is dropped.
+            // The span closes when this final handle is dropped.
         }
 
         // Update heartbeat with new bead count.
@@ -3938,7 +3972,32 @@ mod tests {
     use crate::bead_store::{BeadStore, Filters, RepairReport};
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
     use async_trait::async_trait;
+    use std::io::Write;
     use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl Write for CapturedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogWriter(self.0.clone())
+        }
+    }
 
     // ── Mock BeadStore ──
 
@@ -4486,6 +4545,96 @@ mod tests {
     }
 
     // ── do_claim tests ──
+
+    #[test]
+    fn two_hundred_claim_cycles_keep_span_depth_and_lines_bounded() {
+        const CLAIM_CYCLES: usize = 200;
+
+        let captured = CapturedLogs::default();
+        let writer = crate::log_writer::LineCappedMakeWriter::new(
+            captured.clone(),
+            crate::log_writer::DEFAULT_MAX_LINE_BYTES,
+        );
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let home = tempfile::tempdir().unwrap();
+
+        tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                let mut bead = make_test_bead("needle-span-depth");
+                bead.workspace = home.path().to_path_buf();
+                let store = Arc::new(MockStore::new(vec![bead.clone()]));
+                let mut config = Config::default();
+                config.workspace.home = home.path().to_path_buf();
+                config.workspace.default = home.path().to_path_buf();
+                config.self_modification.hot_reload = false;
+                config.strands.explore.enabled = false;
+                let mut worker = Worker::new(config, "span-depth".to_string(), store.clone());
+                worker.boot().unwrap();
+
+                for cycle in 0..CLAIM_CYCLES {
+                    // Reset the in-memory bead to a claimable state for the next
+                    // independent cycle.
+                    *store.beads.lock().unwrap() = vec![bead.clone()];
+                    worker.current_bead = Some(bead.clone());
+                    worker.current_strand = Some("pluck".to_string());
+                    worker.state = WorkerState::Claiming;
+
+                    worker.do_claim().await.unwrap();
+                    let lifecycle_span = worker
+                        .bead_lifecycle_span
+                        .clone()
+                        .expect("successful claim should create lifecycle span");
+                    lifecycle_span.in_scope(|| {
+                        tracing::info!(cycle, "claim-cycle-depth-probe");
+                    });
+
+                    worker.last_outcome = Some("success".to_string());
+                    lifecycle_span.in_scope(|| worker.do_log()).unwrap();
+                    assert!(worker.bead_lifecycle_span.is_none());
+                }
+
+                // Exercise the production line guard with a single event larger
+                // than its configured ceiling.
+                let payload = "x".repeat(crate::log_writer::DEFAULT_MAX_LINE_BYTES * 2);
+                tracing::info!(%payload, "oversized-line-depth-probe");
+            });
+        });
+
+        let bytes = captured.0.lock().unwrap().clone();
+        let logs = String::from_utf8_lossy(&bytes);
+        let probe_lines: Vec<_> = logs
+            .lines()
+            .filter(|line| line.contains("claim-cycle-depth-probe"))
+            .collect();
+        assert_eq!(probe_lines.len(), CLAIM_CYCLES);
+
+        for line in logs.lines() {
+            assert!(
+                line.matches("bead.claim{").count() <= 1,
+                "bead.claim depth grew beyond one: {line}"
+            );
+            assert!(
+                line.matches("bead.lifecycle{").count() <= 1,
+                "bead.lifecycle depth grew beyond one: {line}"
+            );
+            assert!(
+                line.len() < crate::log_writer::DEFAULT_MAX_LINE_BYTES,
+                "formatted log line exceeded byte cap: {} bytes",
+                line.len()
+            );
+        }
+        assert!(probe_lines
+            .iter()
+            .all(|line| line.matches("bead.lifecycle{").count() == 1));
+    }
 
     #[tokio::test]
     async fn do_claim_suspect_marks_bead_and_transitions_to_selecting() {

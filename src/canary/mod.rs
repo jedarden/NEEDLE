@@ -368,6 +368,19 @@ impl CanaryRunner {
         let timeout = Duration::from_secs(self.test_timeout);
 
         // Spawn the testing binary against the canary workspace.
+        //
+        // `--workspace` alone does NOT confine the worker. The Explore strand is
+        // enabled by default and, with `workspaces` empty, scans
+        // `workspace_root` — which defaults to $HOME — for every bead workspace
+        // on the box. A canary worker spawned without isolation therefore roams
+        // into the operator's real repos and dispatches agents against them: on
+        // 2026-08-07 a single `needle upgrade` put four agents into spaxel and
+        // bead-forge, where they ran git commands and left files behind. This is
+        // the same escape ADR-006 documents for tests, and the isolation policy
+        // in CLAUDE.md was never applied to the canary runner itself.
+        //
+        // Pin the scan root to the canary workspace and switch Explore off, so a
+        // canary run can only ever touch beads that live in the canary.
         let mut child = match Command::new(testing_binary)
             .args([
                 "run",
@@ -378,6 +391,11 @@ impl CanaryRunner {
                 "--count",
                 "1",
             ])
+            .env("NEEDLE_STRANDS__EXPLORE__ENABLED", "false")
+            .env(
+                "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT",
+                &self.canary_workspace,
+            )
             .spawn()
         {
             Ok(c) => c,

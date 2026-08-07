@@ -284,11 +284,18 @@ pub fn perform_upgrade() -> Result<PathBuf> {
 
         use crate::canary::CanaryRunner;
 
-        let runner = CanaryRunner::new(
-            home.clone(),
-            canary_workspace,
-            300, // 5 minute test timeout
-        );
+        // Honour `self_modification.canary_timeout` instead of hardcoding 300s.
+        // A canary test dispatches a real agent against a real bead, which
+        // routinely takes longer than five minutes — so the hardcoded budget
+        // failed every test by timeout regardless of the binary's health. On
+        // 2026-08-07 that produced "0/4 tests passed" for a build whose workers
+        // were observably fine, and rejected it. A gate that cannot pass is not
+        // a gate; it is an outage with a good reputation.
+        let canary_timeout = crate::config::ConfigLoader::load_global()
+            .map(|c| c.self_modification.canary_timeout)
+            .unwrap_or(1800);
+
+        let runner = CanaryRunner::new(home.clone(), canary_workspace, canary_timeout);
 
         let report = runner.run().context("canary validation failed")?;
 

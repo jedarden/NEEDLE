@@ -15,6 +15,7 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
+use tracing::Instrument;
 
 use crate::bead_store::BeadStore;
 use crate::config::KnotConfig;
@@ -189,85 +190,88 @@ impl super::Strand for KnotStrand {
             needle.strand.diagnosis = tracing::field::Empty, // Will be set based on diagnosis
             needle.strand.exhaustion_count = cycle,
         );
-        let _knot_enter = knot_span.enter();
 
-        // Diagnose the exhaustion reason using a different code path from Pluck.
-        let diagnosis = match self.diagnose(store).await {
-            Ok(d) => d,
-            Err(e) => {
-                // Record error on the span
-                tracing::Span::current().record("needle.strand.result", "error");
-                tracing::Span::current().record("otel.status_code", 2u64);
-                tracing::Span::current().record("otel.status_description", format!("{e}"));
-                return StrandResult::Error(e);
-            }
-        };
-
-        // Record the diagnosis result on the span
-        tracing::Span::current().record("needle.strand.result", "no_work");
-        tracing::Span::current().record("needle.strand.diagnosis", diagnosis.as_str());
-
-        tracing::info!(
-            strand = "knot",
-            diagnosis = diagnosis.as_str(),
-            cycle,
-            "knot strand evaluated"
-        );
-
-        // Only emit telemetry for INVISIBLE diagnosis and only after threshold.
-        if let ExhaustionDiagnosis::Invisible {
-            total,
-            open_count,
-            in_progress_count,
-            claimed_by,
-        } = &diagnosis
-        {
-            if cycle >= self.config.exhaustion_threshold && !self.is_within_cooldown() {
-                // Calculate excluded beads: those that are neither open nor in progress.
-                let excluded_count = total - open_count - in_progress_count;
-
-                // Build candidate exclusion reasons from assignees holding in-progress beads.
-                let mut candidate_exclusion_reasons = Vec::new();
-                for worker in claimed_by {
-                    candidate_exclusion_reasons.push(format!("held_by_{}", worker));
+        async {
+            // Diagnose the exhaustion reason using a different code path from Pluck.
+            let diagnosis = match self.diagnose(store).await {
+                Ok(d) => d,
+                Err(e) => {
+                    // Record error on the span
+                    tracing::Span::current().record("needle.strand.result", "error");
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current().record("otel.status_description", format!("{e}"));
+                    return StrandResult::Error(e);
                 }
-                if excluded_count > 0 {
-                    candidate_exclusion_reasons.push("excluded_by_status".to_string());
-                }
+            };
 
-                // Extract workspace path from beads for telemetry.
-                // All beads in a single store should have the same workspace.
-                let workspace_path = if let Ok(beads) = store.list_all().await {
-                    beads
-                        .first()
-                        .and_then(|b| b.workspace.to_str().map(|s| s.to_string()))
-                        .unwrap_or_else(|| "unknown".to_string())
-                } else {
-                    "unknown".to_string()
-                };
+            // Record the diagnosis result on the span
+            tracing::Span::current().record("needle.strand.result", "no_work");
+            tracing::Span::current().record("needle.strand.diagnosis", diagnosis.as_str());
 
-                // Emit telemetry instead of creating a bead.
-                let _ = self
-                    .telemetry
-                    .emit(crate::telemetry::EventKind::PluckStarvationDetected {
-                        workspace: workspace_path,
-                        open_count: *open_count,
+            tracing::info!(
+                strand = "knot",
+                diagnosis = diagnosis.as_str(),
+                cycle,
+                "knot strand evaluated"
+            );
+
+            // Only emit telemetry for INVISIBLE diagnosis and only after threshold.
+            if let ExhaustionDiagnosis::Invisible {
+                total,
+                open_count,
+                in_progress_count,
+                claimed_by,
+            } = &diagnosis
+            {
+                if cycle >= self.config.exhaustion_threshold && !self.is_within_cooldown() {
+                    // Calculate excluded beads: those that are neither open nor in progress.
+                    let excluded_count = total - open_count - in_progress_count;
+
+                    // Build candidate exclusion reasons from assignees holding in-progress beads.
+                    let mut candidate_exclusion_reasons = Vec::new();
+                    for worker in claimed_by {
+                        candidate_exclusion_reasons.push(format!("held_by_{}", worker));
+                    }
+                    if excluded_count > 0 {
+                        candidate_exclusion_reasons.push("excluded_by_status".to_string());
+                    }
+
+                    // Extract workspace path from beads for telemetry.
+                    // All beads in a single store should have the same workspace.
+                    let workspace_path = if let Ok(beads) = store.list_all().await {
+                        beads
+                            .first()
+                            .and_then(|b| b.workspace.to_str().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "unknown".to_string())
+                    } else {
+                        "unknown".to_string()
+                    };
+
+                    // Emit telemetry instead of creating a bead.
+                    let _ =
+                        self.telemetry
+                            .emit(crate::telemetry::EventKind::PluckStarvationDetected {
+                                workspace: workspace_path,
+                                open_count: *open_count,
+                                excluded_count,
+                                candidate_exclusion_reasons,
+                            });
+
+                    self.record_alert();
+                    tracing::warn!(
+                        diagnosis = diagnosis.as_str(),
+                        open_count,
                         excluded_count,
-                        candidate_exclusion_reasons,
-                    });
-
-                self.record_alert();
-                tracing::warn!(
-                    diagnosis = diagnosis.as_str(),
-                    open_count,
-                    excluded_count,
-                    "knot emitted starvation telemetry"
-                );
+                        "knot emitted starvation telemetry"
+                    );
+                }
             }
-        }
 
-        // Knot never produces work — always returns NoWork.
-        StrandResult::NoWork
+            // Knot never produces work — always returns NoWork.
+            StrandResult::NoWork
+        }
+        .instrument(knot_span)
+        .await
     }
 }
 

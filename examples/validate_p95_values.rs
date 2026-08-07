@@ -1,7 +1,6 @@
 //! Comprehensive validation of p95 values from benchmark output
 //!
 //! This validates that p95 values meet all acceptance criteria:
-//! - p95 values are positive numbers
 //! - Values fall within reasonable bounds for benchmark
 //! - Values show appropriate variance
 
@@ -31,14 +30,9 @@ fn main() {
         ("Single element", vec![42u128]),
     ];
 
-    let mut all_positive = true;
     for (name, data) in &test_cases {
         let p95 = calculate_p95(data);
-        let is_positive = p95 >= 0;
-        println!("   ✓ {}: p95 = {} (positive: {})", name, p95, is_positive);
-        if !is_positive {
-            all_positive = false;
-        }
+        println!("   ✓ {}: p95 = {}", name, p95);
     }
 
     // Empty data edge case - should return 0, which is valid
@@ -46,10 +40,7 @@ fn main() {
     let p95_empty = calculate_p95(&empty);
     println!("   ✓ Empty data: p95 = {} (valid for no data)", p95_empty);
 
-    println!(
-        "   Result: All p95 values are valid (non-negative) - {}\n",
-        all_positive
-    );
+    println!("   Result: All p95 values are valid (u128 is non-negative by definition)\n");
 
     // Test 2: Verify values fall within reasonable bounds
     println!("2. Testing that p95 values fall within reasonable bounds");
@@ -203,7 +194,7 @@ fn main() {
     println!("VALIDATION COMPLETE");
     println!("============================");
     println!("\nSummary:");
-    println!("✓ All p95 values are positive numbers (or 0 for empty data)");
+    println!("✓ All p95 values are valid (u128 is non-negative by definition)");
     println!("✓ All p95 values fall within reasonable bounds");
     println!("✓ p95 values show appropriate variance across datasets");
     println!("✓ p95 calculation is mathematically sound");

@@ -530,3 +530,17 @@
 {"last_strand":null,"state":"idle","ts":"2026-08-06T11:08:14.528177922+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-08-06T11:08:41.015945832+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-08-06T11:08:49.636183196+00:00","worker":"test-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.651714579+00:00","worker":"atomic-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.657283128+00:00","worker":"cleanup-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.657327338+00:00","worker":"cleanup-running-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.657373836+00:00","worker":"graceful-shutdown-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.658108918+00:00","worker":"drop-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.658988303+00:00","worker":"test-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.659092030+00:00","worker":"stop-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.659100419+00:00","worker":"validate-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.659918705+00:00","worker":"test-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.659938835+00:00","worker":"state-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.661175297+00:00","worker":"cross-ws-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.662052009+00:00","worker":"foxtrot"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T03:25:32.662411917+00:00","worker":"foxtrot"}
+{"last_strand":null,"state":"idle","ts":"2026-08-07T14:10:05.908671414+00:00","worker":"bravo"}
