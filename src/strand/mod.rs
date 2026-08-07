@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use anyhow::Result;
+use tracing::Instrument;
 
 use crate::bead_store::BeadStore;
 use crate::config::Config;
@@ -52,11 +53,6 @@ pub struct SelectOutcome {
     /// All strand evaluations in order, across all waterfall passes.
     /// Each entry is (strand_name, result, duration_ms).
     pub strand_evaluations: Vec<StrandEvaluation>,
-    /// The strand span guard for the strand that found the bead.
-    /// This keeps the strand span active through the bead lifecycle.
-    /// Dropped when the bead lifecycle ends (in do_log).
-    #[allow(dead_code)]
-    pub strand_span_guard: Option<tracing::span::EnteredSpan>,
     /// If set, this bead should be dispatched with a split prompt instead of
     /// the normal work prompt. Contains the consecutive failure count.
     pub split_failure_count: Option<u32>,
@@ -287,11 +283,17 @@ impl StrandRunner {
                     strand_name,
                     needle.strand.name = %strand_name,
                 );
-                let strand_enter = strand_span.entered();
-
                 let start = Instant::now();
-                let result = strand.evaluate(store, exclusions).await;
+                let result = strand
+                    .evaluate(store, exclusions)
+                    .instrument(strand_span.clone())
+                    .await;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
+
+                // The remaining evaluation bookkeeping is synchronous, so a
+                // scoped guard is safe here and preserves strand context on its
+                // tracing events without crossing an `.await`.
+                let _strand_enter = strand_span.enter();
 
                 // Record strand evaluation result as span attribute.
                 let (result_str, should_record) = match &result {
@@ -380,14 +382,11 @@ impl StrandRunner {
                             "strand found candidates"
                         );
                         if let Some(bead) = filtered.into_iter().next() {
-                            // Keep the strand span active through the bead lifecycle.
-                            // The span guard will be dropped when the bead lifecycle ends.
                             return Ok(SelectOutcome {
                                 bead: Some((bead, strand_name.clone())),
                                 waterfall_restarts: restarts,
                                 restart_triggers,
                                 strand_evaluations,
-                                strand_span_guard: Some(strand_enter),
                                 split_failure_count: None,
                             });
                         }
@@ -420,7 +419,6 @@ impl StrandRunner {
                             waterfall_restarts: restarts,
                             restart_triggers,
                             strand_evaluations,
-                            strand_span_guard: Some(strand_enter),
                             split_failure_count: Some(failure_count),
                         });
                     }
@@ -558,7 +556,6 @@ impl StrandRunner {
                 waterfall_restarts: restarts,
                 restart_triggers,
                 strand_evaluations,
-                strand_span_guard: None,
                 split_failure_count: None,
             });
         }

@@ -722,6 +722,8 @@ const WORKER_LOG_MAX_BYTES: u64 = 128 * 1024 * 1024; // 128 MiB
 /// before rotating even once, and `max_log_files` caps file count rather than
 /// bytes. A 444 GB disk still filled in under three hours.
 const WORKER_LOG_MAX_FILES: usize = 15;
+/// Maximum bytes in one formatted worker log line.
+const WORKER_LOG_MAX_LINE_BYTES: usize = crate::log_writer::DEFAULT_MAX_LINE_BYTES;
 
 /// Writer for a worker's fmt layer.
 ///
@@ -744,36 +746,39 @@ fn worker_log_writer(
 ) -> (tracing_subscriber::fmt::writer::BoxMakeWriter, bool) {
     use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
-    if !is_needle_inner() {
+    let (writer, use_ansi) = if !is_needle_inner() {
         // Foreground/debug invocation — keep logs on the terminal.
-        return (BoxMakeWriter::new(std::io::stderr), use_ansi());
-    }
+        (BoxMakeWriter::new(std::io::stderr), use_ansi())
+    } else {
+        let log_dir = config
+            .telemetry
+            .file_sink
+            .log_dir
+            .clone()
+            .unwrap_or_else(|| config.workspace.home.join("logs"));
 
-    let log_dir = config
-        .telemetry
-        .file_sink
-        .log_dir
-        .clone()
-        .unwrap_or_else(|| config.workspace.home.join("logs"));
+        let prefix = sanitize_session_name(&format!("needle-{worker_id}"));
+        let path = log_dir.join(format!("{prefix}.log"));
 
-    let prefix = sanitize_session_name(&format!("needle-{worker_id}"));
-    let path = log_dir.join(format!("{prefix}.log"));
-
-    match crate::log_writer::SizeCappedWriter::new(
-        &path,
-        WORKER_LOG_MAX_BYTES,
-        WORKER_LOG_MAX_FILES,
-    ) {
-        Ok(appender) => (BoxMakeWriter::new(appender), false),
-        Err(e) => {
-            // Never let logging config abort a worker boot.
-            eprintln!(
-                "NEEDLE worker boot: rolling log appender unavailable in {}: {e} — falling back to stderr",
-                log_dir.display()
-            );
-            (BoxMakeWriter::new(std::io::stderr), use_ansi())
+        match crate::log_writer::SizeCappedWriter::new(
+            &path,
+            WORKER_LOG_MAX_BYTES,
+            WORKER_LOG_MAX_FILES,
+        ) {
+            Ok(appender) => (BoxMakeWriter::new(appender), false),
+            Err(e) => {
+                // Never let logging config abort a worker boot.
+                eprintln!(
+                    "NEEDLE worker boot: rolling log appender unavailable in {}: {e} — falling back to stderr",
+                    log_dir.display()
+                );
+                (BoxMakeWriter::new(std::io::stderr), use_ansi())
+            }
         }
-    }
+    };
+
+    let writer = crate::log_writer::LineCappedMakeWriter::new(writer, WORKER_LOG_MAX_LINE_BYTES);
+    (BoxMakeWriter::new(writer), use_ansi)
 }
 
 /// This must be called before any tracing spans are created so that the OTLP
