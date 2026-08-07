@@ -1704,7 +1704,13 @@ impl SelfModificationConfig {
     }
 
     fn default_canary_timeout() -> u64 {
-        300 // 5 minutes
+        // 30 minutes. A canary test is a full agent dispatch against a real
+        // bead — clone, reason, edit, run gates, commit — not a unit test. The
+        // previous 5-minute budget was shorter than a routine dispatch, so every
+        // canary timed out and every upgrade was rejected no matter how healthy
+        // the binary (observed 2026-08-07: 0/4, workers still visibly working
+        // when the runner gave up on them).
+        1800
     }
 
     fn default_hot_reload() -> bool {
@@ -2351,6 +2357,29 @@ impl ConfigLoader {
                                 "invalid value for self_modification.canary_timeout — expected integer"
                             );
                         }
+                    }
+                    // Explore roams by default: with `workspaces` empty it scans
+                    // `workspace_root` (which defaults to $HOME) for every bead
+                    // workspace it can find. Anything that spawns a worker as a
+                    // subprocess and needs it confined — the canary runner above
+                    // all — must be able to switch that off without editing the
+                    // fleet's global config.
+                    "strands.explore.enabled" => match value.parse::<bool>() {
+                        Ok(v) => {
+                            config.strands.explore.enabled = v;
+                            sources.insert(config_path, source);
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for strands.explore.enabled — expected true or false"
+                            );
+                        }
+                    },
+                    "strands.explore.workspace_root" => {
+                        config.strands.explore.workspace_root = PathBuf::from(&value);
+                        sources.insert(config_path, source);
                     }
                     "supervisor.heartbeat_path" => {
                         config.supervisor.heartbeat_path =
@@ -3355,6 +3384,44 @@ strands:
         assert!(sources.contains_key("self_modification.enabled"));
     }
 
+    /// The canary runner relies on these two overrides to confine a spawned
+    /// worker to the canary workspace. Without them Explore scans $HOME and the
+    /// worker dispatches agents into the operator's real repos.
+    #[test]
+    fn env_override_explore_enabled() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        assert!(
+            config.strands.explore.enabled,
+            "explore is expected to default on — this test is meaningless otherwise"
+        );
+
+        let key = "NEEDLE_STRANDS__EXPLORE__ENABLED";
+        std::env::set_var(key, "false");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert!(!config.strands.explore.enabled);
+        assert!(sources.contains_key("strands.explore.enabled"));
+    }
+
+    #[test]
+    fn env_override_explore_workspace_root() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT";
+        std::env::set_var(key, "/home/coding/.needle/canary");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        std::env::remove_var(key);
+
+        assert_eq!(
+            config.strands.explore.workspace_root,
+            PathBuf::from("/home/coding/.needle/canary")
+        );
+        assert!(sources.contains_key("strands.explore.workspace_root"));
+    }
+
     #[test]
     fn env_override_self_modification_auto_promote() {
         let mut config = Config::default();
@@ -3886,7 +3953,10 @@ worker:
         let config = SelfModificationConfig::default();
         assert!(!config.enabled);
         assert!(!config.auto_promote);
-        assert_eq!(config.canary_timeout, 300);
+        // 30 minutes, not 5: a canary test is a full agent dispatch, and the
+        // old budget was shorter than a routine one, so every upgrade was
+        // rejected by timeout.
+        assert_eq!(config.canary_timeout, 1800);
         assert!(config.hot_reload);
     }
 
