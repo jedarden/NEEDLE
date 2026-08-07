@@ -4415,3 +4415,44 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 - `is_pid_alive` returns `false` for a zombie PID on Linux, regression-tested; behavior on non-Linux platforms and for genuinely-alive/genuinely-dead PIDs is unchanged.
 - `needle-ci` (fmt + clippy + test) passes on `main` at the commit implementing this phase.
 - #12 is closed on GitHub with a comment showing the fixing commit and the passing CI run.
+
+# Phase 15: Activity-Aware Agent Execution Timeouts
+
+**Status:** planned.
+
+**Goal:** stop terminating healthy agents merely because a bead takes longer than an adapter's fixed wall-clock timeout, while still terminating agents that have stopped making observable progress and bounding agents that emit output forever. This phase is driven by the 2026-08-06 fleet observation that GLM-4.7 workers timed out at the adapter's exact 600-second deadline while still emitting stream events and performing tool calls; the same absolute-timeout behavior also affected the Opus worker, so this is dispatcher policy rather than a model-specific workaround.
+
+## Changes
+
+### 15.1 Split the adapter timeout into idle and hard deadlines
+- Extend the adapter schema with `idle_timeout_secs` and `hard_timeout_secs`. `idle_timeout_secs` is the maximum interval with no observable agent-process output; `hard_timeout_secs` is the non-resettable maximum wall-clock execution time. `0` disables the corresponding deadline.
+- Preserve compatibility for existing adapters that specify only `timeout_secs`: it retains today's absolute wall-clock behavior until that adapter opts into the new fields. Reject ambiguous adapter configurations that combine legacy `timeout_secs` with either new field rather than silently choosing precedence.
+- The effective timeout remains adapter-specific first and global/default second. `needle config`, adapter validation errors, and example adapters must expose the resolved policy clearly.
+
+### 15.2 Reset the idle deadline on streaming output activity
+- Treat every successfully-read byte from the agent process's stdout or stderr as activity and reset `idle_timeout_secs`. Detection must happen before output transforms and must not wait for a newline, valid JSON, or a transform result; partial JSONL records and stderr-only progress count.
+- Refactor `dispatch::run_process` so process exit, output activity, idle expiry, hard expiry, and cancellation are observed concurrently. Continue draining stdout/stderr without back-pressure and preserve the existing process-group kill/reap behavior on either timeout.
+- Output activity resets only the idle deadline. It never extends `hard_timeout_secs`, so an agent that prints heartbeats or loops noisily cannot run forever.
+
+### 15.3 Distinguish timeout reasons in outcomes and telemetry
+- Preserve exit code `124` for compatibility, but carry a structured timeout reason (`idle` or `hard`) through `ExecutionResult`, outcome handling, trace metadata, and telemetry.
+- Emit the configured idle/hard limits, elapsed wall time, and time since last output with the timeout event. Operator-facing logs must say which deadline fired rather than the current undifferentiated `agent timed out` message.
+- A timed-out bead continues through the existing release/failure-count/quarantine policy; this phase changes detection and evidence, not bead lifecycle rules.
+
+### 15.4 Deterministic tests
+- A fixture agent that emits stdout bytes periodically for longer than `idle_timeout_secs`, then exits before `hard_timeout_secs`, succeeds.
+- A fixture agent that emits only stderr activity receives the same idle-deadline resets and succeeds.
+- A fixture agent that emits partial lines without newlines still resets the idle deadline.
+- A silent fixture is killed at the idle deadline with reason `idle`, exit code `124`, and its full process group reaped.
+- An endlessly chatty fixture is killed at the hard deadline with reason `hard`, proving activity cannot defeat the cap.
+- A legacy adapter containing only `timeout_secs` retains the current absolute-timeout behavior, and a mixed legacy/new configuration fails validation with an actionable message.
+
+### 15.5 Deployment
+- Update the GLM-4.7 adapter to opt into activity-aware execution only after the deterministic dispatcher tests pass. Choose initial limits from observed fleet traces (expected starting point: a short inactivity bound and a 30–60 minute hard cap), then compare completion, idle-timeout, hard-timeout, and bead-orphan rates against the 2026-08-06 baseline before applying the policy to other adapters.
+- Version bump, `needle-ci` (fmt + Clippy + test on iad-ci), and staged canary rollout through `needle-testing` to `needle-stable`.
+
+## Exit criteria
+- A streaming agent can run beyond its former fixed ten-minute adapter timeout as long as it continues producing stdout/stderr activity and remains below the hard cap.
+- A silent agent is terminated within the configured idle bound, and a continuously chatty agent is terminated within the configured hard bound.
+- Timeout telemetry identifies the firing deadline and contains enough timing evidence to distinguish provider stalls from long-running productive work.
+- Existing adapters retain their current timeout behavior until explicitly migrated.
