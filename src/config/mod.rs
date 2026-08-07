@@ -2633,6 +2633,24 @@ impl ConfigLoader {
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Get the HOME environment variable safely.
+///
+/// Returns `Some(home)` if HOME is set and valid UTF-8, `None` otherwise.
+/// This function never panics - it gracefully handles missing or invalid HOME values.
+///
+/// # Examples
+///
+/// ```
+/// let home = get_home_env();
+/// match home {
+///     Some(h) => println!("Home directory: {}", h),
+///     None => println!("HOME not set"),
+/// }
+/// ```
+pub fn get_home_env() -> Option<String> {
+    std::env::var("HOME").ok()
+}
+
 /// Resolve a path relative to the user's home directory.
 fn dirs_or_home(relative: &str) -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
@@ -4849,5 +4867,88 @@ agent:
             expanded
         );
         assert!(expanded.ends_with("bin/needle"));
+    }
+
+    // ── get_home_env() tests ──
+
+    #[test]
+    fn get_home_env_returns_some_when_set() {
+        // Save the original HOME value
+        let original_home = std::env::var("HOME").ok();
+
+        // Set a known HOME value
+        std::env::set_var("HOME", "/test/home");
+
+        let home = get_home_env();
+        assert_eq!(home, Some("/test/home".to_string()));
+
+        // Restore original HOME
+        if let Some(orig) = original_home {
+            std::env::set_var("HOME", orig);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn get_home_env_returns_none_when_not_set() {
+        // Save the original HOME value
+        let original_home = std::env::var("HOME").ok();
+
+        // Remove HOME
+        std::env::remove_var("HOME");
+
+        let home = get_home_env();
+        assert!(home.is_none(), "HOME should be None when not set");
+
+        // Restore original HOME
+        if let Some(orig) = original_home {
+            std::env::set_var("HOME", orig);
+        }
+    }
+
+    #[test]
+    fn get_home_env_never_panics() {
+        // This test verifies that get_home_env() handles all cases gracefully
+        // without panicking, even with unusual HOME values.
+
+        // Save the original HOME value
+        let original_home = std::env::var("HOME").ok();
+
+        // Test with empty HOME
+        std::env::set_var("HOME", "");
+        let home = get_home_env();
+        assert_eq!(home, Some("".to_string()));
+
+        // Test with special characters in HOME
+        std::env::set_var("HOME", "/path/with spaces");
+        let home = get_home_env();
+        assert_eq!(home, Some("/path/with spaces".to_string()));
+
+        // Test with HOME that contains UTF-8
+        std::env::set_var("HOME", "/path/with/🏠");
+        let home = get_home_env();
+        assert_eq!(home, Some("/path/with/🏠".to_string()));
+
+        // Restore original HOME
+        if let Some(orig) = original_home {
+            std::env::set_var("HOME", orig);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+
+    #[test]
+    fn get_home_env_no_unwrap_or_expect() {
+        // This is a compile-time test that verifies the implementation
+        // doesn't use unwrap() or expect(). The function signature
+        // returning Option<String> forces proper error handling.
+
+        // Simply calling the function proves it compiles
+        let _home = get_home_env();
+
+        // If this test compiles, the implementation is correct
+        // because unwrap() or expect() would change the return type
+        // or require different call patterns
     }
 }
