@@ -4,6 +4,46 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.18] - 2026-08-06
+
+Process-porn release. Across 16 worked repos, 70-91% of the last 45 days of
+commits changed nothing outside `*.md` / `docs/` / `notes/` / `.beads/` — 8,543
+of 18,761 commits were `docs:` prefixed. The dispatch prompt required a commit
+per bead and offered `notes/{bead_id}.md` as the way to satisfy it when there
+was nothing to commit, and the gate meant to reject exactly that had never once
+fired.
+
+### Fixed
+
+- **The pluck template manufactured the artifact the gate rejects** — it told
+  every agent "Every completed bead MUST produce at least one commit. If your
+  work produced no file changes, create `notes/{bead_id}.md` ... and commit that
+  file." Verification-only work, work found already done, and blocked work are
+  legitimate outcomes with nothing to commit; they now route to
+  `bf update --notes`, and the template states that a notes-only commit is not
+  shipped work.
+- **The shipped-work gate could never fail** — three independent defects, any
+  one sufficient. Its pre-dispatch snapshot writer was never implemented, so the
+  baseline it reads never existed. Its fallback compared
+  `post.updated_at > pre.updated_at`, but `bf close` *is* an update, so the
+  timestamp always advanced on the exact case the gate existed to judge. And
+  stale git-tracked `.needle-predispatch-sha` files (254 commits touch it in
+  ARMOR) were swept into commits by `git commit -a`, making notes-only diffs
+  read as substantial. Snapshots are now recorded for real under
+  `~/.needle/state/predispatch/`, outside any working tree so they cannot be
+  committed or go stale; the fallback compares the bead's `notes` field; the
+  marker path is treated as trivial.
+- **The gate now fails open when it has no baseline** — without a snapshot it
+  cannot distinguish a commit made during the dispatch from one that predates
+  it. Failing closed there would release every closure whenever snapshot
+  recording failed, retrying each forever — the same unbounded loop, entered
+  from the other side.
+- **Gate failures never hit the quarantine ceiling** — `handle_gate_failure`
+  incremented the failure count but, unlike `handle_failure`, never checked
+  `outcome.quarantine_after_failures`, so a bead failing a gate was released
+  back to open indefinitely. ARMOR's `bf-135k` ran 24 times in a single day,
+  each attempt leaving another commit.
+
 ## [0.2.17] - 2026-08-05
 
 Log volume release. A single worker wrote 100.9 GB of stderr and a second wrote

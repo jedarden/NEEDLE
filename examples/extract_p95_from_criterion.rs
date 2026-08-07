@@ -42,7 +42,7 @@ fn main() {
     // Read the sample.json file that Criterion generates
     let sample_path = Path::new("target/criterion/latency_percentiles/p95_100kb/new/sample.json");
 
-    let content = match fs::read_to_string(&sample_path) {
+    let content = match fs::read_to_string(sample_path) {
         Ok(content) => content,
         Err(e) => {
             eprintln!("Error reading {}: {}", sample_path.display(), e);

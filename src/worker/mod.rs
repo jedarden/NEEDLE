@@ -2122,6 +2122,19 @@ impl Worker {
                 );
                 let _execution_enter = execution_span.enter();
 
+                // Snapshot workspace HEAD + the bead's notes before the agent
+                // runs, so the shipped-work gate has a baseline to judge the
+                // closure against. Best-effort: a missing snapshot degrades the
+                // gate to its conservative path, it never blocks dispatch.
+                if let Err(e) = crate::validation::predispatch::record(dispatch_ws, &bead.id).await
+                {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "failed to record pre-dispatch snapshot — shipped-work gate will fall back"
+                    );
+                }
+
                 self.exec_started_at = Some(Instant::now());
                 let result = self
                     .dispatcher
@@ -2224,7 +2237,7 @@ impl Worker {
     fn write_trace_files(
         &self,
         bead_id: &crate::types::BeadId,
-        workspace: &PathBuf,
+        workspace: &std::path::Path,
         stdout: &str,
         stderr: &str,
     ) -> Result<()> {

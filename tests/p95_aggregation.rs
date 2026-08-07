@@ -140,7 +140,7 @@ fn test_p95_collector_clear_and_reuse() {
     let mut collector = P95Collector::new();
 
     // First benchmark run
-    collector.record_all(vec![10, 20, 30].iter().copied());
+    collector.record_all([10, 20, 30].iter().copied());
     let p95_run1 = collector.p95();
     assert_eq!(collector.count(), 3);
 
@@ -150,7 +150,7 @@ fn test_p95_collector_clear_and_reuse() {
     assert_eq!(collector.p95(), 0);
 
     // Second benchmark run
-    collector.record_all(vec![100, 200, 300].iter().copied());
+    collector.record_all([100, 200, 300].iter().copied());
     let p95_run2 = collector.p95();
     assert_eq!(collector.count(), 3);
 
@@ -167,7 +167,7 @@ fn test_p95_collector_large_dataset() {
     let mut collector = P95Collector::with_capacity(10000);
 
     // Generate 10000 samples
-    let samples: Vec<u128> = (1..=10000).map(|i| i).collect();
+    let samples: Vec<u128> = (1..=10000).collect();
     collector.record_all(samples.iter().copied());
 
     assert_eq!(collector.count(), 10000);

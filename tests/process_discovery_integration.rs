@@ -7,8 +7,6 @@
 //! Regression test for bf-4lkno: A worker was found running for 3+ days, actively
 //! dispatching, completely invisible to both needle status and needle list.
 
-use std::fs::File;
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -33,8 +31,7 @@ impl TestWorkspace {
             .status()?;
 
         if !status.success() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 format!("br init failed: {}", status),
             ));
         }
@@ -50,8 +47,7 @@ impl TestWorkspace {
             .status()?;
 
         if !status.success() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
+            return Err(std::io::Error::other(
                 format!("br create failed: {}", status),
             ));
         }
@@ -73,7 +69,7 @@ impl TestWorkspace {
 /// Find needle run processes by scanning the process table.
 fn find_needle_processes() -> Vec<u32> {
     let output = Command::new("ps")
-        .args(&["aux", "--no-headers"])
+        .args(["aux", "--no-headers"])
         .output()
         .expect("ps command should work");
 

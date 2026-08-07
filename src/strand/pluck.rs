@@ -2239,7 +2239,7 @@ mod tests {
 
         // Create a workspace with an empty queue (no beads at all)
         let workspace = tempfile::tempdir().unwrap();
-        let workspace_path = workspace.path().to_str().unwrap();
+        let _workspace_path = workspace.path().to_str().unwrap();
 
         // Use UnfilteredStore to bypass store-level label filtering
         let store = UnfilteredStore { beads: vec![] };

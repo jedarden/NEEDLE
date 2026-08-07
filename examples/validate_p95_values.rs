@@ -58,7 +58,7 @@ fn main() {
     // For the basic 10 elements [10, 20, ..., 100], p95 should be between 90 and 100
     let basic_data = vec![10u128, 20, 30, 40, 50, 60, 70, 80, 90, 100];
     let p95_basic = calculate_p95(&basic_data);
-    let basic_in_bounds = p95_basic >= 90 && p95_basic <= 100;
+    let basic_in_bounds = (90..=100).contains(&p95_basic);
     println!(
         "   ✓ Basic data: p95 = {} (expected range: 90-100, in bounds: {})",
         p95_basic, basic_in_bounds
@@ -69,7 +69,7 @@ fn main() {
         12, 15, 18, 20, 22, 25, 28, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90, 100, 120, 150,
     ];
     let p95_real = calculate_p95(&real_data);
-    let real_in_bounds = p95_real >= 120 && p95_real <= 150;
+    let real_in_bounds = (120..=150).contains(&p95_real);
     println!(
         "   ✓ Real-world latencies: p95 = {} (expected range: 120-150, in bounds: {})",
         p95_real, real_in_bounds
@@ -134,7 +134,7 @@ fn main() {
 
     let sample_path = Path::new("target/criterion/latency_percentiles/p95_100kb/new/sample.json");
     if sample_path.exists() {
-        let content = match fs::read_to_string(&sample_path) {
+        let content = match fs::read_to_string(sample_path) {
             Ok(content) => content,
             Err(e) => {
                 println!("   Error reading {}: {}", sample_path.display(), e);
@@ -189,7 +189,7 @@ fn main() {
                 );
 
                 // P95 should be reasonably close to the 95th percentile position
-                let position_reasonable = p95_position >= 0.85 && p95_position <= 1.0;
+                let position_reasonable = (0.85..=1.0).contains(&p95_position);
                 println!("   ✓ Position reasonable: {}", position_reasonable);
             }
         }
