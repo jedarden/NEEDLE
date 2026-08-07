@@ -4,6 +4,29 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.19] - 2026-08-07
+
+Canary release. `needle upgrade` was simultaneously unsafe and unusable: it
+rejected every binary regardless of health, and each attempt loosed four agents
+into the operator's real repositories.
+
+### Fixed
+
+- **Canary workers were not isolated** — `run_test` spawned the testing binary
+  with no environment isolation, so it inherited `$HOME` and the Explore strand
+  scanned the whole home directory for bead workspaces. A canary run roamed out
+  of `~/.needle/canary` into real repos and dispatched agents there. Now pinned
+  with `NEEDLE_STRANDS__EXPLORE__ENABLED=false` and a `workspace_root` fixed to
+  the canary workspace.
+- **The canary could never pass** — `perform_upgrade` hardcoded a 300s test
+  timeout and ignored `self_modification.canary_timeout`. A canary test is a
+  full agent dispatch, routinely longer than five minutes, so every test timed
+  out and every upgrade was rejected. Default raised to 1800s and the configured
+  value is now honoured.
+- **`strands.explore.enabled` / `strands.explore.workspace_root`** added to the
+  env-override layer, so anything spawning a worker as a subprocess can confine
+  it without editing the fleet's global config.
+
 ## [0.2.18] - 2026-08-06
 
 Process-porn release. Across 16 worked repos, 70-91% of the last 45 days of
