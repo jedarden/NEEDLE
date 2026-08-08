@@ -29,6 +29,37 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::warn;
 
+/// Resolve configured OTLP headers without writing secrets into NEEDLE's YAML.
+/// A value beginning with `env:` names an environment variable read when the
+/// exporter is initialized, for example `Authorization: env:OTLP_AUTH`.
+fn resolve_headers(headers: &[String]) -> Result<Vec<(String, String)>> {
+    headers
+        .iter()
+        .map(|header| {
+            let (key, raw_value) = header
+                .split_once(':')
+                .ok_or_else(|| anyhow::anyhow!("invalid OTLP header; expected 'name: value'"))?;
+            let key = key.trim();
+            let raw_value = raw_value.trim();
+            if key.is_empty() || raw_value.is_empty() {
+                anyhow::bail!("invalid OTLP header; name and value must be non-empty");
+            }
+
+            let value = if let Some(variable) = raw_value.strip_prefix("env:") {
+                if variable.is_empty() {
+                    anyhow::bail!("invalid OTLP header environment reference");
+                }
+                std::env::var(variable).map_err(|_| {
+                    anyhow::anyhow!("OTLP header environment variable '{variable}' is not set")
+                })?
+            } else {
+                raw_value.to_string()
+            };
+            Ok((key.to_string(), value))
+        })
+        .collect()
+}
+
 /// Drop event signal type (traces, metrics, or logs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -751,20 +782,12 @@ impl OtlpSink {
 
         // Build metadata map from headers
         let mut metadata = MetadataMap::new();
-        for header in &config.headers {
-            if let Some((key, value)) = header.split_once(": ") {
-                if let Ok(key_val) = MetadataKey::from_bytes(key.as_bytes()) {
-                    if let Ok(metadata_value) = MetadataValue::try_from(value) {
-                        metadata.insert(key_val, metadata_value);
-                    }
-                }
-            } else if let Some((key, value)) = header.split_once(':') {
-                if let Ok(key_val) = MetadataKey::from_bytes(key.as_bytes()) {
-                    if let Ok(metadata_value) = MetadataValue::try_from(value) {
-                        metadata.insert(key_val, metadata_value);
-                    }
-                }
-            }
+        for (key, value) in resolve_headers(&config.headers)? {
+            let key_val = MetadataKey::from_bytes(key.as_bytes())
+                .map_err(|_| anyhow::anyhow!("invalid OTLP metadata header name '{key}'"))?;
+            let metadata_value = MetadataValue::try_from(value.as_str())
+                .map_err(|_| anyhow::anyhow!("invalid value for OTLP metadata header '{key}'"))?;
+            metadata.insert(key_val, metadata_value);
         }
 
         // Import the tonic-specific exporters
@@ -845,12 +868,8 @@ impl OtlpSink {
 
         // Build headers map from config
         let mut headers_map = HashMap::new();
-        for header in &config.headers {
-            if let Some((key, value)) = header.split_once(": ") {
-                headers_map.insert(key.to_string(), value.to_string());
-            } else if let Some((key, value)) = header.split_once(':') {
-                headers_map.insert(key.to_string(), value.to_string());
-            }
+        for (key, value) in resolve_headers(&config.headers)? {
+            headers_map.insert(key, value);
         }
 
         // Build span exporter, then wrap for resilience
@@ -917,34 +936,36 @@ impl OtlpSink {
     /// Dispatch a telemetry event to the appropriate signal.
     ///
     /// Per the semantic mapping:
-    /// - Spans (NOT logs): bead.claim.attempted, bead.claim.succeeded, bead.claim.race_lost,
+    /// - Spans: bead.claim.attempted, bead.claim.succeeded, bead.claim.race_lost,
     ///   bead.claim.failed, agent.dispatched, agent.completed,
     ///   strand.evaluated, outcome.handled, bead.completed
-    /// - Span events (NOT logs): heartbeat.emitted, build.heartbeat
+    /// - Span events: heartbeat.emitted, build.heartbeat
     /// - Metrics: beads.completed, bead.duration, strand.duration, agent.duration, etc.
-    /// - Logs: everything not already represented as a span or span event
+    /// - Logs: every event, providing a complete event stream for lightweight
+    ///   consumers that do not query the trace backend
     fn dispatch_event(&self, event: &TelemetryEvent) -> Result<()> {
+        // Keep a complete, self-contained event feed in the log backend. Traces
+        // and metrics remain the canonical analytical representations, while
+        // this log copy lets dashboards reconstruct worker state without
+        // joining three signal stores.
+        self.emit_log(event)?;
+
         match event.event_type.as_str() {
             // Metrics: worker lifecycle
             "worker.started" => {
                 self.metrics.workers_active.add(1, &[]);
-                // Also export as log for visibility
-                self.emit_log(event)?;
             }
 
             "worker.stopped" => {
                 self.metrics.workers_active.add(-1, &[]);
-                // Also export as log for visibility
-                self.emit_log(event)?;
             }
 
-            // Events that ARE spans - export as metrics only, NOT as logs
+            // Events whose analytical representation is a span.
             "bead.claim.attempted" => {
                 // Track claim attempts with result="attempting"
                 self.metrics
                     .claim_attempts
                     .add(1, &[KeyValue::new("result", "attempting")]);
-                // Do NOT export as log - this is a span
             }
 
             "bead.claim.succeeded" => {
@@ -971,7 +992,6 @@ impl OtlpSink {
                         KeyValue::new("priority", priority),
                     ],
                 );
-                // Do NOT export as log - this is a span
             }
 
             "bead.claim.race_lost" => {
@@ -979,8 +999,6 @@ impl OtlpSink {
                 self.metrics
                     .claim_attempts
                     .add(1, &[KeyValue::new("result", "race_lost")]);
-                // Export as log with INFO severity
-                self.emit_log(event)?;
             }
 
             "bead.claim.failed" => {
@@ -988,13 +1006,9 @@ impl OtlpSink {
                 self.metrics
                     .claim_attempts
                     .add(1, &[KeyValue::new("result", "failed")]);
-                // Export as log with ERROR severity
-                self.emit_log(event)?;
             }
 
-            "agent.dispatched" => {
-                // Do NOT export as log - this is a span
-            }
+            "agent.dispatched" => {}
 
             "agent.completed" => {
                 if let Some(duration_ms) = event.duration_ms {
@@ -1025,7 +1039,6 @@ impl OtlpSink {
                         ],
                     );
                 }
-                // Do NOT export as log - this is a span
             }
 
             "strand.evaluated" => {
@@ -1047,12 +1060,9 @@ impl OtlpSink {
                         );
                     }
                 }
-                // Do NOT export as log - this is a span
             }
 
-            "outcome.handled" => {
-                // Do NOT export as log - this is a span
-            }
+            "outcome.handled" => {}
 
             // Metrics: bead completion (also a span, but we need metrics)
             "bead.completed" => {
@@ -1070,10 +1080,9 @@ impl OtlpSink {
                         &[KeyValue::new("outcome", outcome.to_string())],
                     );
                 }
-                // Do NOT export as log - this is a span
             }
 
-            // Span events - emit as span events, NOT as logs
+            // Span events are also attached to the active span.
             "heartbeat.emitted" | "build.heartbeat" => {
                 // Update heartbeat age observable state
                 let now = SystemTime::now()
@@ -1084,7 +1093,6 @@ impl OtlpSink {
                     .last_heartbeat_secs
                     .store(now, Ordering::Relaxed);
                 self.emit_span_event(event)?;
-                // Do NOT export as log - this is a span event
             }
 
             // Metrics: effort.recorded (not a span, but metrics only)
@@ -1130,21 +1138,16 @@ impl OtlpSink {
                         ],
                     );
                 }
-                // Do NOT export as log - metrics only
             }
 
             // Metrics: peer staleness
             "peer.stale" => {
                 self.metrics.peers_stale.add(1, &[]);
-                // Also export as log with WARN severity
-                self.emit_log(event)?;
             }
 
             // Metrics: peer recovery (decrement stale count)
             "peer.crashed" => {
                 self.metrics.peers_stale.add(-1, &[]);
-                // Also export as log with WARN severity
-                self.emit_log(event)?;
             }
 
             // Metrics: mitosis child creation
@@ -1159,14 +1162,10 @@ impl OtlpSink {
                         .mitosis_children_created
                         .add(children_created, &[]);
                 }
-                // Also export as log for visibility (includes parent_id in log body)
-                self.emit_log(event)?;
             }
 
-            // For all other events, export as logs
-            _ => {
-                self.emit_log(event)?;
-            }
+            // All other events need no additional signal representation.
+            _ => {}
         }
 
         Ok(())
@@ -1717,6 +1716,25 @@ mod tests {
             service_namespace: "needle-fleet".to_string(),
             max_queue_size: 2048,
         }
+    }
+
+    #[test]
+    fn resolves_literal_otlp_headers() {
+        let headers = resolve_headers(&["Authorization: Bearer test-token".to_string()])
+            .expect("literal header should resolve");
+        assert_eq!(
+            headers,
+            vec![("Authorization".to_string(), "Bearer test-token".to_string())]
+        );
+    }
+
+    #[test]
+    fn missing_otlp_header_environment_variable_is_an_error() {
+        let variable = "NEEDLE_TEST_MISSING_OTLP_AUTH_7BBD6249";
+        std::env::remove_var(variable);
+        let error = resolve_headers(&[format!("Authorization: env:{variable}")])
+            .expect_err("missing secret must fail exporter initialization");
+        assert!(error.to_string().contains(variable));
     }
 
     #[test]
