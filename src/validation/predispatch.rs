@@ -242,7 +242,8 @@ mod tests {
         .await;
 
         let path = snapshot_path_in(root.path(), ws.path(), &bead);
-        tokio::fs::remove_file(&path).await.unwrap();
+        tokio::fs::remove_file(&path).await
+            .expect("failed to remove snapshot file during clear test");
         assert!(load_at(root.path(), ws.path(), &bead).await.is_none());
     }
 }

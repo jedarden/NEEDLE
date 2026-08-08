@@ -560,7 +560,10 @@ mod tests {
             BinaryMetadata::from_path(&binary_path).expect("failed to record baseline metadata");
 
         // Delete the binary
-        fs::remove_file(&binary_path).expect("failed to delete binary");
+        fs::remove_file(&binary_path).expect(format!(
+            "failed to delete binary at {}",
+            binary_path.display()
+        ).as_str());
 
         // Since current_exe() still returns the real needle binary, this test
         // would normally return Replaced. Instead, let's test the logic directly
