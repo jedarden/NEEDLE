@@ -130,6 +130,34 @@ where
     Err(last_err.expect("loop always sets last_err before exhausting MAX_ATTEMPTS"))
 }
 
+/// Retry wrapper for `Command::spawn()` calls that handle ETXTBSY (errno 26).
+///
+/// Specialized version of `spawn_with_etxtbsy_retry` for subprocess spawns that
+/// return a `Child` process. Use this when you need to interact with the spawned
+/// process (e.g., for timeout handling with `kill_on_drop`).
+///
+/// # Parameters
+///
+/// * `spawn_fn` - An async function that attempts to spawn the subprocess
+/// * `max_attempts` - Maximum number of retry attempts (default: 5)
+/// * `backoff_ms` - Backoff delay between retries in milliseconds (default: 20)
+///
+/// # Returns
+///
+/// * `Ok(Child)` - The spawned child process on success
+/// * `Err(io::Error)` - The last error if all attempts are exhausted
+pub async fn spawn_with_etxtbsy_retry_child<F, Fut>(
+    spawn_fn: F,
+    max_attempts: u32,
+    backoff_ms: u64,
+) -> std::io::Result<tokio::process::Child>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<tokio::process::Child>>,
+{
+    spawn_with_etxtbsy_retry(spawn_fn, max_attempts, backoff_ms).await
+}
+
 /// Result of a version check.
 #[derive(Debug)]
 pub enum VersionCheck {
@@ -648,15 +676,24 @@ impl BrCliBeadStore {
 
         // kill_on_drop ensures the process is killed if the wait_with_output
         // future is dropped (e.g., on timeout), preventing orphaned br processes.
-        let mut cmd = tokio::process::Command::new(&self.br_path);
-        cmd.args(args)
-            .current_dir(dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn br subprocess: {args:?}"))?;
+        let br_path = self.br_path.clone();
+        let dir_buf = dir.to_path_buf();
+        let args_vec = args.to_vec();
+        let child = spawn_with_etxtbsy_retry_child(
+            || async {
+                let mut cmd = tokio::process::Command::new(&br_path);
+                cmd.args(&args_vec)
+                    .current_dir(&dir_buf)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
+                cmd.spawn()
+            },
+            5,
+            20,
+        )
+        .await
+        .with_context(|| format!("failed to spawn br subprocess: {args:?}"))?;
 
         // Wait for output with timeout. On timeout, kill_on_drop fires automatically.
         let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
@@ -706,7 +743,7 @@ impl BrCliBeadStore {
                 let mut sync_cmd = tokio::process::Command::new(&self.br_path);
                 sync_cmd
                     .args(["sync"])
-                    .current_dir(dir)
+                    .current_dir(&dir_buf)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .kill_on_drop(true);
@@ -738,8 +775,8 @@ impl BrCliBeadStore {
                 // Retry the original command once with timeout.
                 let mut retry_cmd = tokio::process::Command::new(&self.br_path);
                 retry_cmd
-                    .args(args)
-                    .current_dir(dir)
+                    .args(&args_vec)
+                    .current_dir(&dir_buf)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .kill_on_drop(true);
@@ -933,14 +970,24 @@ impl BrCliBeadStore {
             .map_err(|e| e.context("bf CLI not found; cannot run atomic batch"))?;
 
         let args = ["batch", "--json", ops_json];
-        let mut cmd = tokio::process::Command::new(&bf_path);
-        cmd.args(args)
-            .current_dir(&self.workspace)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-
-        let child = cmd.spawn().context("failed to spawn bf batch subprocess")?;
+        let bf_path_clone = bf_path.clone();
+        let workspace = self.workspace.clone();
+        let args = args.to_vec();
+        let child = spawn_with_etxtbsy_retry_child(
+            || async {
+                let mut cmd = tokio::process::Command::new(&bf_path_clone);
+                cmd.args(&args)
+                    .current_dir(&workspace)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
+                cmd.spawn()
+            },
+            5,
+            20,
+        )
+        .await
+        .context("failed to spawn bf batch subprocess")?;
 
         let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
             Ok(Ok(output)) => output,
@@ -994,16 +1041,24 @@ impl BrCliBeadStore {
         args.push(actor);
         args.push("--json");
 
-        let mut cmd = tokio::process::Command::new(&bf_path);
-        cmd.args(&args)
-            .current_dir(&self.workspace)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
-
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn bf subprocess: {:?}", args))?;
+        let bf_path_clone = bf_path.clone();
+        let workspace = self.workspace.clone();
+        let args_clone = args.clone();
+        let child = spawn_with_etxtbsy_retry_child(
+            || async {
+                let mut cmd = tokio::process::Command::new(&bf_path_clone);
+                cmd.args(&args_clone)
+                    .current_dir(&workspace)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .kill_on_drop(true);
+                cmd.spawn()
+            },
+            5,
+            20,
+        )
+        .await
+        .with_context(|| format!("failed to spawn bf subprocess: {:?}", args))?;
 
         let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
             Ok(Ok(output)) => output,
@@ -1677,15 +1732,24 @@ impl BfCliBeadStore {
             attempt += 1;
             let timeout_duration = std::time::Duration::from_secs(timeout_secs);
 
-            let mut cmd = tokio::process::Command::new(&self.bf_path);
-            cmd.args(args)
-                .current_dir(dir)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .kill_on_drop(true);
-            let child = cmd
-                .spawn()
-                .with_context(|| format!("failed to spawn bf subprocess: {args:?}"))?;
+            let bf_path = self.bf_path.clone();
+            let dir = dir.to_path_buf();
+            let args = args.to_vec();
+            let child = spawn_with_etxtbsy_retry_child(
+                || async {
+                    let mut cmd = tokio::process::Command::new(&bf_path);
+                    cmd.args(&args)
+                        .current_dir(&dir)
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .kill_on_drop(true);
+                    cmd.spawn()
+                },
+                5,
+                20,
+            )
+            .await
+            .with_context(|| format!("failed to spawn bf subprocess: {args:?}"))?;
 
             let output =
                 match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
