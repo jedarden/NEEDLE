@@ -110,6 +110,25 @@ struct ResolvedBinary {
 /// Otherwise, returns the result of `std::env::current_exe()`.
 /// Handles current_exe() errors gracefully by logging and returning an error.
 ///
+/// This fixes GitHub issue jedarden/NEEDLE#11, where a supervisor spawning
+/// workers via bare "needle" PATH lookup could accidentally invoke a different
+/// binary occupying that name. Using current_exe() by default ensures the
+/// supervisor always spawns workers from its own binary path (supervisor and
+/// worker are the same binary in the normal case).
+///
+/// **Implementation context:** The pre-#11 behavior was `Command::new("needle")`,
+/// which resolved from $PATH at spawn time. In the reporter's migration, a
+/// legacy tool occupied the name "needle" on $PATH, causing supervisors to
+/// believe they were spawning workers (cap=3, 5 ready beads) while worker
+/// heartbeats stayed at 0 for 60 seconds — they were silently invoking the
+/// wrong binary. This fix changes the default resolution to `std::env::current_exe()`
+/// with an optional `worker.worker_binary_path` config override for cases where
+/// the running binary's path is deliberately not what should be spawned (e.g.
+/// a wrapper script).
+///
+/// See ADR-009 (External-Adopter Hardening) for full context.
+/// See GitHub issue: https://github.com/jedarden/NEEDLE/issues/11
+///
 /// # Arguments
 /// * `override_path` - Optional config override for worker binary path
 ///
