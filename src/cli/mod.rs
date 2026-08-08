@@ -394,11 +394,7 @@ pub fn run() -> Result<()> {
             set,
             dump,
             show_source,
-        } => {
-            // Convert Option<Vec<String>> to Option<String> by taking the first value
-            let set_string = set.and_then(|v| v.first().cloned());
-            cmd_config(get, set_string, dump, show_source)
-        }
+        } => cmd_config(get, set, dump, show_source),
         CliCommand::Doctor { repair, workspace } => cmd_doctor(repair, workspace),
         CliCommand::Init => cmd_init(),
         CliCommand::Version => {
@@ -2902,7 +2898,7 @@ fn cmd_supervise(workspace: Option<PathBuf>) -> Result<()> {
 /// `needle config` — view or inspect configuration.
 fn cmd_config(
     get: Option<String>,
-    set: Option<String>,
+    set: Option<Vec<String>>,
     dump: bool,
     show_source: bool,
 ) -> Result<()> {
@@ -2914,8 +2910,8 @@ fn cmd_config(
     let (config, sources) = ConfigLoader::load_resolved(&workspace_root, CliOverrides::default())?;
 
     // Handle --set flag (stub implementation)
-    if let Some(set_value) = set {
-        return handle_config_set_stub(vec![set_value]);
+    if let Some(set_args) = set {
+        return handle_config_set_stub(set_args);
     }
 
     if let Some(key) = get {
