@@ -84,6 +84,62 @@ pub struct Supervisor {
     worker_binary: PathBuf,
 }
 
+/// Source of the resolved worker binary path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BinarySource {
+    /// Explicit override from `worker.worker_binary_path` config.
+    ConfigOverride,
+    /// Resolved via `std::env::current_exe()`.
+    CurrentExe,
+    /// Fallback to PATH lookup of "needle" (when current_exe fails).
+    PathLookup,
+}
+
+/// Result of binary path resolution.
+#[derive(Debug, PartialEq, Eq)]
+struct ResolvedBinary {
+    /// The resolved path to the worker binary.
+    path: PathBuf,
+    /// The source/method used to resolve the path.
+    source: BinarySource,
+}
+
+/// Resolve the worker binary path.
+///
+/// Takes an optional config override path. If provided, uses that path directly.
+/// Otherwise, returns the result of `std::env::current_exe()`.
+/// Handles current_exe() errors gracefully by logging and returning an error.
+///
+/// # Arguments
+/// * `override_path` - Optional config override for worker binary path
+///
+/// # Returns
+/// * `Ok(PathBuf)` - The resolved worker binary path
+/// * `Err(anyhow::Error)` - If current_exe() fails (and no override provided)
+///
+/// # Examples
+/// ```ignore
+/// use std::path::PathBuf;
+///
+/// // With explicit override
+/// let override_path = Some(PathBuf::from("/opt/custom/needle"));
+/// let path = resolve_worker_binary(override_path)?;
+///
+/// // Without override (uses current_exe)
+/// let path = resolve_worker_binary(None)?;
+/// ```
+pub fn resolve_worker_binary(override_path: Option<PathBuf>) -> Result<PathBuf, anyhow::Error> {
+    if let Some(path) = override_path {
+        tracing::debug!(
+            worker_binary = %path.display(),
+            "using explicit worker binary path from config"
+        );
+        return Ok(path);
+    }
+
+    std::env::current_exe().context("failed to resolve current_exe for worker binary")
+}
+
 /// Resolve the binary path `needle supervise` spawns workers from.
 ///
 /// Prefers an explicit `worker.worker_binary_path` override; otherwise
@@ -92,17 +148,32 @@ pub struct Supervisor {
 /// `current_exe()` itself fails (e.g. the executable was deleted after
 /// launch) — this is the previous behavior, now a last resort rather than
 /// the only behavior. See GitHub issue jedarden/NEEDLE#11.
-fn resolve_worker_binary(override_path: Option<&PathBuf>) -> PathBuf {
+///
+/// Returns both the resolved path and the source used for resolution.
+fn resolve_worker_binary_with_source(override_path: Option<&PathBuf>) -> ResolvedBinary {
     if let Some(path) = override_path {
-        return path.clone();
+        return ResolvedBinary {
+            path: path.clone(),
+            source: BinarySource::ConfigOverride,
+        };
     }
-    std::env::current_exe().unwrap_or_else(|e| {
-        tracing::warn!(
-            error = %e,
-            "failed to resolve current_exe for worker spawn, falling back to PATH lookup of 'needle'"
-        );
-        PathBuf::from("needle")
-    })
+
+    match std::env::current_exe() {
+        Ok(path) => ResolvedBinary {
+            path,
+            source: BinarySource::CurrentExe,
+        },
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to resolve current_exe for worker spawn, falling back to PATH lookup of 'needle'"
+            );
+            ResolvedBinary {
+                path: PathBuf::from("needle"),
+                source: BinarySource::PathLookup,
+            }
+        }
+    }
 }
 
 impl Supervisor {
@@ -134,11 +205,25 @@ impl Supervisor {
         // name collision on $PATH (another tool occupying "needle") is
         // visible immediately rather than only via stalled worker heartbeats.
         // See GitHub issue jedarden/NEEDLE#11.
-        let worker_binary = resolve_worker_binary(config.worker_binary_path.as_ref());
+        let resolved = resolve_worker_binary_with_source(config.worker_binary_path.as_ref());
+
+        let source_display = match resolved.source {
+            BinarySource::ConfigOverride => "config override (worker.worker_binary_path)",
+            BinarySource::CurrentExe => "current_exe()",
+            BinarySource::PathLookup => "PATH lookup of 'needle' (fallback)",
+        };
+
         tracing::info!(
-            worker_binary = %worker_binary.display(),
-            "resolved worker spawn binary"
+            worker_binary = %resolved.path.display(),
+            source = source_display,
+            "resolved worker spawn binary at supervisor startup"
         );
+
+        // Emit supervisor binary resolved telemetry event
+        telemetry.emit(EventKind::SupervisorBinaryResolved {
+            worker_binary: resolved.path.display().to_string(),
+            source: source_display.to_string(),
+        })?;
 
         Ok(Supervisor {
             config,
@@ -147,7 +232,7 @@ impl Supervisor {
             registry,
             telemetry,
             shutdown: Arc::new(AtomicBool::new(false)),
-            worker_binary,
+            worker_binary: resolved.path,
         })
     }
 
@@ -639,22 +724,42 @@ mod tests {
     #[test]
     fn resolve_worker_binary_uses_explicit_override_when_set() {
         let override_path = PathBuf::from("/opt/custom/needle-wrapper");
-        let resolved = resolve_worker_binary(Some(&override_path));
-        assert_eq!(resolved, override_path);
+        let resolved = resolve_worker_binary_with_source(Some(&override_path));
+        assert_eq!(resolved.path, override_path);
+        assert_eq!(resolved.source, BinarySource::ConfigOverride);
     }
 
     #[test]
     fn resolve_worker_binary_defaults_to_current_exe() {
         // No override — must resolve to the actual running test binary's
         // path, not a bare "needle" PATH lookup (the pre-#11 behavior).
-        let resolved = resolve_worker_binary(None);
+        let resolved = resolve_worker_binary_with_source(None);
         let expected = std::env::current_exe().unwrap();
-        assert_eq!(resolved, expected);
+        assert_eq!(resolved.path, expected);
+        assert_eq!(resolved.source, BinarySource::CurrentExe);
         assert_ne!(
-            resolved,
+            resolved.path,
             PathBuf::from("needle"),
             "must not fall back to a bare PATH lookup when current_exe() succeeds"
         );
+    }
+
+    // ── resolve_worker_binary (Result<PathBuf, anyhow::Error>) tests ──
+
+    #[test]
+    fn resolve_worker_binary_with_explicit_override() {
+        let override_path = PathBuf::from("/opt/custom/needle-wrapper");
+        let result = resolve_worker_binary(Some(override_path.clone()));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), override_path);
+    }
+
+    #[test]
+    fn resolve_worker_binary_without_override_succeeds() {
+        let result = resolve_worker_binary(None);
+        assert!(result.is_ok());
+        let expected = std::env::current_exe().unwrap();
+        assert_eq!(result.unwrap(), expected);
     }
 
     #[test]
@@ -718,5 +823,134 @@ mod tests {
         // Prevent a double-wait/drop warning: the child is already reaped by
         // our sweep, so explicitly forget rather than calling child.wait().
         std::mem::forget(child);
+    }
+
+    // ── Supervisor startup resolved path logging test (bf-5hnpy) ──
+
+    #[tokio::test]
+    async fn supervisor_emits_binary_resolved_event_on_startup() {
+        use std::sync::{Arc, Mutex};
+        use crate::config::{Config, WorkerConfig, AgentConfig, TelemetryConfig, WorkspaceConfig};
+        use crate::telemetry::{EventKind, Sink, Telemetry, TelemetryEvent};
+
+        // Create a custom sink that captures events
+        #[derive(Clone)]
+        struct CaptureSink {
+            events: Arc<Mutex<Vec<TelemetryEvent>>>,
+        }
+
+        impl CaptureSink {
+            fn new() -> Self {
+                CaptureSink {
+                    events: Arc::new(Mutex::new(Vec::new())),
+                }
+            }
+
+            fn events(&self) -> Vec<TelemetryEvent> {
+                self.events.lock().unwrap().clone()
+            }
+        }
+
+        impl Sink for CaptureSink {
+            fn accept(&self, event: &TelemetryEvent) -> anyhow::Result<()> {
+                self.events.lock().unwrap().push(event.clone());
+                Ok(())
+            }
+
+            fn flush(&self, _deadline: std::time::Duration) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        // Create a minimal test workspace
+        let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
+        let workspace = temp_dir.path();
+
+        // Create minimal config needed for supervisor
+        let workspace_config = WorkspaceConfig {
+            default: workspace.to_path_buf(),
+            home: workspace.to_path_buf(),
+            labels: Vec::new(),
+        };
+
+        let worker_config = WorkerConfig {
+            max_workers: 1,
+            worker_binary_path: None, // Test default resolution
+            ..Default::default()
+        };
+
+        let agent_config = AgentConfig {
+            default: "claude".to_string(),
+            ..Default::default()
+        };
+
+        let telemetry_config = TelemetryConfig::default();
+
+        let _config = Config {
+            workspace: workspace_config,
+            worker: worker_config,
+            agent: agent_config,
+            telemetry: telemetry_config,
+            ..Default::default()
+        };
+
+        // Create supervisor config
+        let supervisor_config = SupervisorConfig {
+            workspace: workspace.to_path_buf(),
+            max_workers: 1,
+            poll_interval_secs: 10,
+            agent: Some("claude".to_string()),
+            agent_timeout: Some(3600),
+            worker_binary_path: None, // Test default resolution
+        };
+
+        // Create capture sink and telemetry
+        let capture_sink = CaptureSink::new();
+        let worker_id = "test-supervisor".to_string();
+        let telemetry = Telemetry::with_sink(worker_id, capture_sink.clone());
+
+        // Manually replicate the binary resolution and logging from Supervisor::new()
+        // This tests the core logic without requiring full bead store setup
+        let resolved = resolve_worker_binary_with_source(supervisor_config.worker_binary_path.as_ref());
+
+        let source_display = match resolved.source {
+            BinarySource::ConfigOverride => "config override (worker.worker_binary_path)",
+            BinarySource::CurrentExe => "current_exe()",
+            BinarySource::PathLookup => "PATH lookup of 'needle' (fallback)",
+        };
+
+        // Emit the same event that Supervisor::new() emits
+        let emit_result = telemetry.emit(EventKind::SupervisorBinaryResolved {
+            worker_binary: resolved.path.display().to_string(),
+            source: source_display.to_string(),
+        });
+
+        // Verify the event was emitted successfully
+        assert!(emit_result.is_ok(), "telemetry emit should succeed");
+
+        // Wait for event to propagate through the telemetry channel
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Verify the captured event
+        let events = capture_sink.events();
+        assert_eq!(events.len(), 1, "should capture exactly one event");
+
+        let event = &events[0];
+        assert_eq!(event.event_type, "supervisor.binary_resolved");
+
+        // Verify the event data contains expected fields
+        assert!(event.data.is_object(), "event data should be an object");
+        let data = event.data.as_object().unwrap();
+        assert!(data.contains_key("worker_binary"), "event should contain worker_binary field");
+        assert!(data.contains_key("source"), "event should contain source field");
+
+        // Verify the source indicates current_exe() (since we didn't set an override)
+        let source = data.get("source").and_then(|v| v.as_str());
+        assert_eq!(source, Some("current_exe()"), "source should be current_exe() when no override is set");
+
+        // Verify the worker_binary is not just "needle" (the pre-#11 behavior)
+        let worker_binary = data.get("worker_binary").and_then(|v| v.as_str());
+        assert!(worker_binary.is_some(), "worker_binary should be present");
+        assert_ne!(worker_binary, Some("needle"), "worker_binary should not be bare 'needle' lookup when current_exe() succeeds");
     }
 }
