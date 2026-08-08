@@ -42,6 +42,94 @@ const KNOWN_BAD_VERSIONS: &[(&str, &str)] = &[
     ),
 ];
 
+// ─── ETXTBSY retry helper ─────────────────────────────────────────────────────
+
+/// Retry wrapper for subprocess spawns that handle ETXTBSY (errno 26).
+///
+/// ETXTBSY ("Text file busy") occurs when the kernel blocks execution of a binary
+/// that has a write-mode file descriptor still open. This is a genuine race condition:
+///
+/// 1. A process writes a binary to disk and closes the file descriptor.
+/// 2. The kernel's page cache and filesystem synchronization haven't fully completed.
+/// 3. Another process immediately attempts to `exec()` the same binary.
+/// 4. The kernel returns ETXTBSY (errno 26) because the file is still marked for write.
+///
+/// This is most common with:
+/// - Freshly-extracted upgrade binaries executed immediately
+/// - Test fixtures written and chmod'd immediately before use
+/// - Any binary that's written to disk and executed in quick succession
+///
+/// The race is narrow (typically <100ms) but real. Retrying with a short backoff
+/// is the correct fix — the file descriptor is already closed, we're just waiting
+/// for the kernel to finish its internal bookkeeping.
+///
+/// # Parameters
+///
+/// * `spawn_fn` - An async function that attempts to spawn the subprocess
+/// * `max_attempts` - Maximum number of retry attempts (default: 5)
+/// * `backoff_ms` - Backoff delay between retries in milliseconds (default: 20)
+///
+/// # Returns
+///
+/// * `Ok(T)` - The subprocess output on success
+/// * `Err(io::Error)` - The last error if all attempts are exhausted
+///
+/// # When to use this helper
+///
+/// Use this wrapper whenever spawning a subprocess that may have been written to
+/// disk immediately before execution:
+///
+/// - Freshly-installed or updated binaries
+/// - Test fixtures created during test setup
+/// - Any executable extracted from an archive and immediately run
+///
+/// Do NOT use this for long-running processes or stable system binaries — the
+/// retry overhead is unnecessary and ETXTBSY is unlikely in those cases.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use needle::bead_store::spawn_with_etxtbsy_retry;
+///
+/// # async fn example() -> Result<(), std::io::Error> {
+/// let binary_path = Path::new("/path/to/binary");
+/// let output = spawn_with_etxtbsy_retry(
+///     || async {
+///         tokio::process::Command::new(binary_path)
+///             .arg("--version")
+///             .output()
+///             .await
+///     },
+///     5,
+///     20,
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn spawn_with_etxtbsy_retry<F, Fut, T>(
+    spawn_fn: F,
+    max_attempts: u32,
+    backoff_ms: u64,
+) -> std::io::Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    let mut last_err = None;
+    for attempt in 0..max_attempts {
+        match spawn_fn().await {
+            Ok(output) => return Ok(output),
+            Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < max_attempts => {
+                last_err = Some(e);
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("loop always sets last_err before exhausting MAX_ATTEMPTS"))
+}
+
 /// Result of a version check.
 #[derive(Debug)]
 pub enum VersionCheck {
@@ -56,33 +144,24 @@ pub enum VersionCheck {
     Failed { reason: String },
 }
 
-/// Spawn `<br_path> --version`, retrying briefly on ETXTBSY.
+/// Spawn `<br_path> --version>`, retrying briefly on ETXTBSY.
 ///
-/// A binary written to disk moments earlier (e.g. a freshly-extracted
-/// upgrade, or — as originally surfaced — a test fixture written and
-/// chmod'd immediately before being executed) can transiently report
-/// "Text file busy" (errno 26) if the kernel hasn't released the
-/// write-mode file descriptor yet even though the writer has already
-/// closed it. This is a real, if narrow, race — not a logic bug — so
-/// retry a few times with a short backoff before giving up.
+/// Wraps `spawn_with_etxtbsy_retry` to handle the specific case of checking
+/// bead-forge version. The retry logic handles the race condition where a
+/// binary written to disk moments earlier (e.g., during upgrade or test setup)
+/// transiently reports "Text file busy" (errno 26).
 async fn spawn_version_check(br_path: &Path) -> std::io::Result<std::process::Output> {
-    const MAX_ATTEMPTS: u32 = 5;
-    let mut last_err = None;
-    for attempt in 0..MAX_ATTEMPTS {
-        match tokio::process::Command::new(br_path)
-            .arg("--version")
-            .output()
-            .await
-        {
-            Ok(output) => return Ok(output),
-            Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < MAX_ATTEMPTS => {
-                last_err = Some(e);
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err(last_err.expect("loop always sets last_err before exhausting MAX_ATTEMPTS"))
+    spawn_with_etxtbsy_retry(
+        || async {
+            tokio::process::Command::new(br_path)
+                .arg("--version")
+                .output()
+                .await
+        },
+        5,
+        20,
+    )
+    .await
 }
 
 /// Check the bead-forge version and detect known-bad versions.

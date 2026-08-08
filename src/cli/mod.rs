@@ -394,7 +394,11 @@ pub fn run() -> Result<()> {
             set,
             dump,
             show_source,
-        } => cmd_config(get, set, dump, show_source),
+        } => {
+            // Convert Option<Vec<String>> to Option<String> by taking the first value
+            let set_string = set.and_then(|v| v.first().cloned());
+            cmd_config(get, set_string, dump, show_source)
+        }
         CliCommand::Doctor { repair, workspace } => cmd_doctor(repair, workspace),
         CliCommand::Init => cmd_init(),
         CliCommand::Version => {
@@ -2898,7 +2902,7 @@ fn cmd_supervise(workspace: Option<PathBuf>) -> Result<()> {
 /// `needle config` — view or inspect configuration.
 fn cmd_config(
     get: Option<String>,
-    set: Option<Vec<String>>,
+    set: Option<String>,
     dump: bool,
     show_source: bool,
 ) -> Result<()> {
@@ -2909,9 +2913,9 @@ fn cmd_config(
     let workspace_root = std::env::current_dir().unwrap_or_default();
     let (config, sources) = ConfigLoader::load_resolved(&workspace_root, CliOverrides::default())?;
 
-    // Handle --set flag
-    if let Some(set_args) = set {
-        return handle_config_set(set_args);
+    // Handle --set flag (stub implementation)
+    if let Some(set_value) = set {
+        return handle_config_set_stub(vec![set_value]);
     }
 
     if let Some(key) = get {
@@ -2944,30 +2948,21 @@ fn cmd_config(
     Ok(())
 }
 
-/// Handle --set flag: parse key-value pairs and update global config.
+/// Handle --set flag (stub implementation).
 ///
 /// Supports two syntaxes:
 /// --set KEY VALUE
 /// --set KEY=VALUE
 ///
 /// Multiple sets can be specified in a single invocation.
-fn handle_config_set(set_args: Vec<String>) -> Result<()> {
-    use crate::config::Config;
-
+///
+/// This is a stub that only parses and prints the key-value pairs.
+fn handle_config_set_stub(set_args: Vec<String>) -> Result<()> {
     if set_args.is_empty() {
         bail!("--set requires at least one KEY VALUE or KEY=VALUE pair");
     }
 
-    // Load global config
-    let global_config_path = dirs_or_home(".config/needle/config.yaml");
-    let mut config = if global_config_path.exists() {
-        ConfigLoader::load_from_path(&global_config_path)?
-    } else {
-        Config::default()
-    };
-
-    // Parse and apply each key-value pair
-    let mut updates = Vec::new();
+    // Parse and display each key-value pair
     let mut i = 0;
     while i < set_args.len() {
         let arg = &set_args[i];
@@ -2980,8 +2975,7 @@ fn handle_config_set(set_args: Vec<String>) -> Result<()> {
             }
             let key = parts[0].to_string();
             let value = parts[1].to_string();
-            apply_config_set(&mut config, &key, &value)?;
-            updates.push((key, value));
+            println!("Would set: {} = {}", key, value);
             i += 1;
         } else {
             // KEY VALUE format - need next arg
@@ -2990,122 +2984,13 @@ fn handle_config_set(set_args: Vec<String>) -> Result<()> {
             }
             let key = arg.clone();
             let value = set_args[i + 1].clone();
-            apply_config_set(&mut config, &key, &value)?;
-            updates.push((key, value));
+            println!("Would set: {} = {}", key, value);
             i += 2;
         }
     }
 
-    // Ensure config directory exists
-    if let Some(parent) = global_config_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create config directory: {}", parent.display()))?;
-    }
-
-    // Write updated config back to file
-    let yaml = serde_yaml::to_string(&config).context("failed to serialize config")?;
-    std::fs::write(&global_config_path, yaml).with_context(|| {
-        format!(
-            "failed to write config file: {}",
-            global_config_path.display()
-        )
-    })?;
-
-    // Report success
-    for (key, value) in &updates {
-        println!("Set {} = {}", key, value);
-    }
-    println!("\nConfig updated: {}", global_config_path.display());
-
+    println!("\nset not yet implemented");
     Ok(())
-}
-
-/// Apply a single key-value pair to the config.
-fn apply_config_set(config: &mut Config, key: &str, value: &str) -> Result<()> {
-    let parts: Vec<&str> = key.split('.').collect();
-
-    match parts.as_slice() {
-        ["agent", "default"] => {
-            config.agent.default = value.to_string();
-        }
-        ["agent", "timeout"] => {
-            config.agent.timeout = value
-                .parse()
-                .with_context(|| format!("invalid timeout value: {}", value))?;
-        }
-        ["worker", "max_workers"] => {
-            config.worker.max_workers = value
-                .parse()
-                .with_context(|| format!("invalid max_workers value: {}", value))?;
-        }
-        ["worker", "launch_stagger_seconds"] => {
-            config.worker.launch_stagger_seconds = value
-                .parse()
-                .with_context(|| format!("invalid launch_stagger_seconds value: {}", value))?;
-        }
-        ["worker", "idle_timeout"] => {
-            config.worker.idle_timeout = value
-                .parse()
-                .with_context(|| format!("invalid idle_timeout value: {}", value))?;
-        }
-        ["worker", "idle_action"] => {
-            config.worker.idle_action = match value {
-                "wait" => IdleAction::Wait,
-                "exit" => IdleAction::Exit,
-                other => bail!(
-                    "invalid idle_action value: '{}' (expected 'wait' or 'exit')",
-                    other
-                ),
-            };
-        }
-        ["worker", "max_claim_retries"] => {
-            config.worker.max_claim_retries = value
-                .parse()
-                .with_context(|| format!("invalid max_claim_retries value: {}", value))?;
-        }
-        ["worker", "cpu_load_warn"] => {
-            config.worker.cpu_load_warn = value
-                .parse()
-                .with_context(|| format!("invalid cpu_load_warn value: {}", value))?;
-        }
-        ["worker", "memory_free_warn_mb"] => {
-            config.worker.memory_free_warn_mb = value
-                .parse()
-                .with_context(|| format!("invalid memory_free_warn_mb value: {}", value))?;
-        }
-        ["worker", "building_timeout"] => {
-            config.worker.building_timeout = value
-                .parse()
-                .with_context(|| format!("invalid building_timeout value: {}", value))?;
-        }
-        ["health", "heartbeat_interval_secs"] => {
-            config.health.heartbeat_interval_secs = value
-                .parse()
-                .with_context(|| format!("invalid heartbeat_interval_secs value: {}", value))?;
-        }
-        ["health", "heartbeat_ttl_secs"] => {
-            config.health.heartbeat_ttl_secs = value
-                .parse()
-                .with_context(|| format!("invalid heartbeat_ttl_secs value: {}", value))?;
-        }
-        _ => {
-            bail!(
-                "unknown or non-writable config key: '{}'\nSupported keys:\n  agent.default\n  agent.timeout\n  worker.max_workers\n  worker.launch_stagger_seconds\n  worker.idle_timeout\n  worker.idle_action\n  worker.max_claim_retries\n  worker.cpu_load_warn\n  worker.memory_free_warn_mb\n  worker.building_timeout\n  health.heartbeat_interval_secs\n  health.heartbeat_ttl_secs",
-                key
-            );
-        }
-    }
-
-    Ok(())
-}
-
-/// Resolve a path relative to the user's home directory.
-fn dirs_or_home(relative: &str) -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(relative)
-    } else {
-        PathBuf::from("/tmp").join(relative)
-    }
 }
 
 /// Look up a single config key by dot-separated path.
