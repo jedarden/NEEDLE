@@ -228,7 +228,7 @@ impl IdentityRegistry {
     }
 
     /// Clean up expired identities.
-    pub async fn cleanup_expired(&self) {
+    pub async fn cleanup_expired(&self) -> Result<()> {
         let mut identities = self.identities.write().await;
         let mut to_remove = Vec::new();
 
@@ -242,6 +242,8 @@ impl IdentityRegistry {
             identities.remove(&hostname);
             tracing::debug!(hostname = %hostname, "cleaned up expired tsnet identity");
         }
+
+        Ok(())
     }
 
     /// Get the current count of active identities.
