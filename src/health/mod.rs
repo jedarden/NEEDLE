@@ -326,24 +326,15 @@ impl HealthMonitor {
     ///
     /// This method removes the heartbeat file at `self.heartbeat_path()`.
     /// It returns `Ok(())` if the file is successfully removed or if it
-    /// doesn't exist. Logs a warning but returns `Ok(())` if removal fails
-    /// so cleanup failures don't prevent shutdown.
+    /// doesn't exist. Returns an error if removal fails for reasons
+    /// other than the file not being found.
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - Always returns Ok (errors are logged, not returned)
+    /// * `Ok(())` - If the file was removed successfully or doesn't exist
+    /// * `Err(e)` - If removal fails for reasons other than NotFound
     pub fn cleanup_heartbeat_file(&self) -> Result<()> {
         let path = self.heartbeat_path();
-
-        // Check if the file exists before attempting removal.
-        // This allows us to return Ok(()) for non-existent files.
-        if !path.exists() {
-            tracing::debug!(
-                path = %path.display(),
-                "heartbeat file does not exist, skipping cleanup"
-            );
-            return Ok(());
-        }
 
         // Attempt to remove the file using std::fs::remove_file.
         match std::fs::remove_file(&path) {
@@ -352,18 +343,27 @@ impl HealthMonitor {
                     path = %path.display(),
                     "heartbeat file removed successfully"
                 );
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // File doesn't exist - this is success (idempotent cleanup)
+                tracing::debug!(
+                    path = %path.display(),
+                    "heartbeat file does not exist, skipping cleanup"
+                );
+                Ok(())
             }
             Err(e) => {
-                // Log the error but don't fail - cleanup is best-effort
+                // Log the error before returning - this ensures visibility of cleanup failures
                 tracing::warn!(
                     error = %e,
                     path = %path.display(),
                     "failed to remove heartbeat file during cleanup"
                 );
+                // Return with context for upstream handling
+                Err(e).with_context(|| format!("failed to remove heartbeat file: {}", path.display()))
             }
         }
-
-        Ok(())
     }
 
     /// Stop the heartbeat emitter and remove this worker's heartbeat file.

@@ -321,8 +321,22 @@ impl TraceCapture {
         for file in ["trace.jsonl", STDOUT_FILE, STDERR_FILE, TEST_OUTPUT_FILE] {
             let path = self.trace_dir.join(file);
             if path.exists() {
-                std::fs::remove_file(&path)
-                    .with_context(|| format!("failed to prune trace file: {}", path.display()))?;
+                match std::fs::remove_file(&path) {
+                    Ok(_) => {
+                        tracing::debug!(
+                            path = %path.display(),
+                            "successfully removed trace file"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            path = %path.display(),
+                            "failed to remove trace file during prune"
+                        );
+                        return Err(e).with_context(|| format!("failed to prune trace file: {}", path.display()));
+                    }
+                }
             }
         }
 
@@ -529,8 +543,22 @@ fn prune_trace_dir(trace_dir: &Path) -> Result<()> {
     for file in ["trace.jsonl", STDOUT_FILE, STDERR_FILE, TEST_OUTPUT_FILE] {
         let path = trace_dir.join(file);
         if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("failed to prune trace file: {}", path.display()))?;
+            match std::fs::remove_file(&path) {
+                Ok(_) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        "successfully removed trace file"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = %path.display(),
+                        "failed to remove trace file during cleanup"
+                    );
+                    return Err(e).with_context(|| format!("failed to prune trace file: {}", path.display()));
+                }
+            }
         }
     }
 

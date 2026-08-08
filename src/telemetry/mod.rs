@@ -721,6 +721,10 @@ pub enum EventKind {
         consecutive_empty: u32,
         fleet_idle: String,
     },
+    SupervisorBinaryResolved {
+        worker_binary: String,
+        source: String,
+    },
 
     // ── Explore strand telemetry ──
     ExploreScanSummary {
@@ -896,6 +900,7 @@ impl EventKind {
             EventKind::SupervisorStopped { .. } => "supervisor.stopped",
             EventKind::SupervisorWorkerSpawned { .. } => "supervisor.worker_spawned",
             EventKind::SupervisorIdleCycle { .. } => "supervisor.idle_cycle",
+            EventKind::SupervisorBinaryResolved { .. } => "supervisor.binary_resolved",
             EventKind::ExploreScanSummary { .. } => "explore.scan_summary",
             EventKind::ExploreStarvationAlarm { .. } => "explore.starvation_alarm",
             EventKind::SinkError { .. } => "telemetry.sink_error",
@@ -1036,7 +1041,8 @@ impl EventKind {
             | EventKind::SupervisorSummary { .. }
             | EventKind::SupervisorStopped { .. }
             | EventKind::SupervisorWorkerSpawned { .. }
-            | EventKind::SupervisorIdleCycle { .. } => None,
+            | EventKind::SupervisorIdleCycle { .. }
+            | EventKind::SupervisorBinaryResolved { .. } => None,
             EventKind::ExploreScanSummary { .. } => None,
             EventKind::ExploreStarvationAlarm { .. } => None,
             EventKind::SpawnPathModifiedInPlace { .. } => None,
@@ -2127,6 +2133,13 @@ impl EventKind {
                 }
                 data
             }
+            EventKind::SupervisorBinaryResolved {
+                worker_binary,
+                source,
+            } => serde_json::json!({
+                "worker_binary": worker_binary,
+                "source": source,
+            }),
         }
     }
 
@@ -2252,6 +2265,7 @@ impl EventKind {
             | EventKind::SupervisorStopped { .. }
             | EventKind::SupervisorWorkerSpawned { .. }
             | EventKind::SupervisorIdleCycle { .. }
+            | EventKind::SupervisorBinaryResolved { .. }
             | EventKind::ExploreStarvationAlarm { .. }
             | EventKind::SinkError { .. }
             | EventKind::OtlpDropped { .. }

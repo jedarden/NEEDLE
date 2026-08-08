@@ -3,8 +3,13 @@
 //! Tests that verify the --set flag parses correctly in both invocation formats:
 //! 1. needle config --set KEY VALUE
 //! 2. needle config --set KEY=VALUE
+//!
+//! Also includes integration tests for config file deserialization.
 
 use clap::Parser;
+use std::path::PathBuf;
+use tempfile::TempDir;
+use needle::config::{Config, ConfigLoader};
 
 /// Test that `--set worker.max_workers 10` (KEY VALUE format) parses without clap error.
 #[test]
@@ -368,5 +373,109 @@ fn config_help_output_includes_set_flag() {
         set_text.len() > "--set".len(),
         "--set section should have description text. Got:\n{}",
         set_text
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Config file deserialization integration tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn worker_binary_path_deserializes_from_yaml_file() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let config_path = temp_dir.path().join("config.yaml");
+
+    let yaml_content = r#"worker:
+  worker_binary_path: /custom/path/to/needle
+"#;
+    std::fs::write(&config_path, yaml_content).expect("failed to write config file");
+
+    let config = ConfigLoader::load_from_path(&config_path)
+        .expect("failed to load config from file");
+
+    assert_eq!(
+        config.worker.worker_binary_path,
+        Some(PathBuf::from("/custom/path/to/needle"))
+    );
+}
+
+#[test]
+fn worker_binary_path_default_when_omitted_from_file() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let config_path = temp_dir.path().join("config.yaml");
+
+    // Config file without worker_binary_path specified
+    let yaml_content = r#"worker:
+  max_workers: 10
+"#;
+    std::fs::write(&config_path, yaml_content).expect("failed to write config file");
+
+    let config = ConfigLoader::load_from_path(&config_path)
+        .expect("failed to load config from file");
+
+    assert_eq!(config.worker.worker_binary_path, None);
+}
+
+#[test]
+fn worker_binary_path_tilde_expansion_from_file() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let config_path = temp_dir.path().join("config.yaml");
+
+    let yaml_content = r#"worker:
+  worker_binary_path: ~/local/bin/needle
+"#;
+    std::fs::write(&config_path, yaml_content).expect("failed to write config file");
+
+    let mut config = ConfigLoader::load_from_path(&config_path)
+        .expect("failed to load config from file");
+
+    // Verify tilde was expanded
+    assert!(config.worker.worker_binary_path.is_some());
+    let path = config.worker.worker_binary_path.as_ref().unwrap();
+    assert!(
+        !path.starts_with("~"),
+        "tilde should be expanded, got: {:?}",
+        path
+    );
+    assert!(path.ends_with("local/bin/needle"));
+}
+
+#[test]
+fn config_load_returns_default_when_file_missing() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let nonexistent_path = temp_dir.path().join("nonexistent-config.yaml");
+
+    let config = ConfigLoader::load_from_path(&nonexistent_path)
+        .expect("should return default config when file missing");
+
+    // Should get a valid default config
+    assert_eq!(config.worker.worker_binary_path, None);
+    assert_eq!(config.worker.max_workers, 4); // Default value
+}
+
+#[test]
+fn worker_binary_path_nonexistent_path_accepted() {
+    let temp_dir = TempDir::new().expect("failed to create temp dir");
+    let config_path = temp_dir.path().join("config.yaml");
+
+    // Path that doesn't exist should still deserialize successfully
+    let yaml_content = r#"worker:
+  worker_binary_path: /this/path/does/not/exist/needle
+"#;
+    std::fs::write(&config_path, yaml_content).expect("failed to write config file");
+
+    let config = ConfigLoader::load_from_path(&config_path)
+        .expect("failed to load config from file");
+
+    assert_eq!(
+        config.worker.worker_binary_path,
+        Some(PathBuf::from("/this/path/does/not/exist/needle"))
+    );
+
+    // Validation should not fail (path validation happens at runtime)
+    let errors = ConfigLoader::validate(&config);
+    assert!(
+        !errors.iter().any(|e| e.field == "worker.worker_binary_path"),
+        "path existence should not be validated at config load time"
     );
 }

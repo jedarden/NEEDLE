@@ -9,6 +9,8 @@
 //!
 //! Depends on: `bead_store`, `config`, `dispatch`, `prompt`, `telemetry`, `types`, `claim`.
 
+pub mod timeout_eligibility;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -1587,6 +1589,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1621,6 +1624,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1677,6 +1681,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1724,6 +1729,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1767,6 +1773,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1815,6 +1822,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 50,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1906,6 +1914,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 50,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -1948,6 +1957,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2001,6 +2011,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 50,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2054,6 +2065,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2113,6 +2125,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2158,6 +2171,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2203,6 +2217,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 3, // Maximum depth is 3
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2257,6 +2272,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0, // No limit
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2301,6 +2317,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2345,6 +2362,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2418,6 +2436,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2491,6 +2510,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2574,6 +2594,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2634,6 +2655,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
@@ -2676,6 +2698,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
