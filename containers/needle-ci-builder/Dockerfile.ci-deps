@@ -1,4 +1,4 @@
-FROM ronaldraygun/needle-ci-builder:0.1.0
+FROM ronaldraygun/needle-ci-builder:latest
 
 # Pre-compile all dependencies.
 # Copy only Cargo.toml/Cargo.lock first, create dummy source, build deps.

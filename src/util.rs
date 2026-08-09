@@ -331,7 +331,10 @@ mod tests {
         assert_eq!(expand_tilde("./current/dir"), "./current/dir");
         assert_eq!(expand_tilde("../parent/dir"), "../parent/dir");
         assert_eq!(expand_tilde("file.txt"), "file.txt");
-        assert_eq!(expand_tilde("nested/deep/path/file.json"), "nested/deep/path/file.json");
+        assert_eq!(
+            expand_tilde("nested/deep/path/file.json"),
+            "nested/deep/path/file.json"
+        );
     }
 
     /// Test fallback behavior when HOME environment variable is not set.
@@ -386,8 +389,8 @@ mod tests {
 
     #[test]
     fn test_resolve_worker_binary_path_without_override() {
-        let resolved = resolve_worker_binary_path(None)
-            .expect("failed to resolve current executable");
+        let resolved =
+            resolve_worker_binary_path(None).expect("failed to resolve current executable");
         // current_exe() should always succeed in normal test environments
         // and will return the path to the test binary
         assert!(resolved.exists(), "resolved path should exist");

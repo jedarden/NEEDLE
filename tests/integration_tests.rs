@@ -2694,8 +2694,8 @@ fn heartbeat_cleanup_on_signal_integration() {
 /// from config YAML files and properly integrated into the SupervisorConfig.
 #[tokio::test]
 async fn worker_binary_path_config_parsing() {
-    use std::path::PathBuf;
     use needle::config::Config;
+    use std::path::PathBuf;
 
     // Test that the config can parse worker_binary_path correctly
     let yaml_config = r#"
@@ -2704,8 +2704,8 @@ worker:
   max_workers: 4
 "#;
 
-    let config: Config = serde_yaml::from_str(yaml_config)
-        .expect("should parse config with worker_binary_path");
+    let config: Config =
+        serde_yaml::from_str(yaml_config).expect("should parse config with worker_binary_path");
 
     assert_eq!(
         config.worker.worker_binary_path,
@@ -2723,10 +2723,10 @@ worker:
 /// in the configuration works correctly and doesn't cause initialization errors.
 #[tokio::test]
 async fn worker_binary_path_supervisor_initialization() {
-    use std::fs;
-    use std::path::PathBuf;
     use needle::config::Config;
     use needle::supervisor::{Supervisor, SupervisorConfig};
+    use std::fs;
+    use std::path::PathBuf;
 
     // Create a temporary workspace
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
@@ -3167,7 +3167,10 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
                     println!("Worker did not exit within {:?}, killing", exit_timeout);
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("Worker did not exit naturally within {:?}, test failed", exit_timeout);
+                    panic!(
+                        "Worker did not exit naturally within {:?}, test failed",
+                        exit_timeout
+                    );
                 }
             }
             Err(e) => {
@@ -3202,8 +3205,8 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
 
     // Verify no stale heartbeat files remain in the heartbeat directory
     if heartbeat_dir.exists() {
-        let stale_files = std::fs::read_dir(&heartbeat_dir)
-            .expect("failed to read heartbeat directory");
+        let stale_files =
+            std::fs::read_dir(&heartbeat_dir).expect("failed to read heartbeat directory");
 
         let stale_count = stale_files.count();
         if stale_count > 0 {
@@ -3217,7 +3220,10 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
     println!("✓ No stale heartbeat files remain");
 
     let total_time = start.elapsed();
-    println!("✓ Normal exit integration test passed, total time: {:?}", total_time);
+    println!(
+        "✓ Normal exit integration test passed, total time: {:?}",
+        total_time
+    );
 
     assert!(
         total_time < Duration::from_secs(60),
@@ -3300,8 +3306,7 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
         "labels": []
     }"#;
 
-    std::fs::write(beads_dir1.join("nd-scenario1.json"), bead1)
-        .expect("failed to create bead");
+    std::fs::write(beads_dir1.join("nd-scenario1.json"), bead1).expect("failed to create bead");
 
     let mut cmd1 = Command::new(&needle_binary);
     cmd1.arg("run")
@@ -3447,8 +3452,14 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
     println!("\n✓ All shutdown scenarios passed: heartbeat cleanup verified");
 
     // Final verification: no cross-contamination between workspaces
-    assert!(!heartbeat_file1.exists(), "Scenario 1 heartbeat should still be absent");
-    assert!(!heartbeat_file2.exists(), "Scenario 2 heartbeat should still be absent");
+    assert!(
+        !heartbeat_file1.exists(),
+        "Scenario 1 heartbeat should still be absent"
+    );
+    assert!(
+        !heartbeat_file2.exists(),
+        "Scenario 2 heartbeat should still be absent"
+    );
 
     println!("✓ No cross-contamination between scenarios");
 }

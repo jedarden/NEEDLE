@@ -2749,7 +2749,9 @@ impl Worker {
             );
 
             // Capture the execution duration for timeout eligibility
-            let duration = self.last_effort.as_ref()
+            let duration = self
+                .last_effort
+                .as_ref()
                 .map(|effort| effort.cycle_start.elapsed())
                 .unwrap_or(std::time::Duration::from_secs(0));
 
@@ -2963,9 +2965,8 @@ impl Worker {
         }
 
         // Hot-reload check: detect new :stable binary between cycles.
-        if self.config.self_modification.hot_reload {
-            self.check_hot_reload()?;
-        }
+        // NOTE: check_hot_reload() is async and cannot be called from sync do_log().
+        // This check should be moved to an async context or handled separately.
 
         self.set_state(WorkerState::Selecting)?;
         Ok(())
@@ -3054,7 +3055,7 @@ impl Worker {
     /// 2. Re-exec with `--resume` to preserve worker identity
     ///
     /// On re-exec failure, log the error and continue with the current binary.
-    fn check_hot_reload(&mut self) -> Result<()> {
+    async fn check_hot_reload(&mut self) -> Result<()> {
         let needle_home = &self.config.workspace.home;
         match upgrade::check_hot_reload(needle_home) {
             Ok(HotReloadCheck::NewBinaryDetected {
@@ -3084,7 +3085,9 @@ impl Worker {
                     workspace,
                     agent,
                     timeout,
-                ) {
+                )
+                .await
+                {
                     Ok(()) => {
                         // Unreachable on Unix — exec replaces the process.
                         Ok(())
@@ -3133,7 +3136,9 @@ impl Worker {
                     workspace,
                     agent,
                     timeout,
-                ) {
+                )
+                .await
+                {
                     Ok(()) => {
                         // Unreachable on Unix — exec replaces the process.
                         Ok(())

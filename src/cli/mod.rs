@@ -17,7 +17,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::bead_store::{spawn_with_etxtbsy_retry, BeadStore, BfCliBeadStore, BrCliBeadStore};
+use crate::bead_store::{BeadStore, BfCliBeadStore, BrCliBeadStore};
 use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};

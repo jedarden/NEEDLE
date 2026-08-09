@@ -207,7 +207,12 @@ fn extract_origin_from_reason(eligibility: &TimeoutEligibility) -> TimeoutOrigin
 /// Extract gate name from a handler timeout reason string.
 fn extract_gate_name_from_reason(reason: &str) -> Option<String> {
     // Look for patterns like "gate 'cargo-test' timed out"
-    let patterns = ["gate '", "gate \"", "validation gate '", "validation gate \""];
+    let patterns = [
+        "gate '",
+        "gate \"",
+        "validation gate '",
+        "validation gate \"",
+    ];
 
     for pattern in &patterns {
         if let Some(idx) = reason.find(pattern) {
@@ -333,7 +338,10 @@ async fn capture_post_attempt_git_state(
     let dirty_paths = git_dirty_paths(workspace).await;
 
     // Compute committed work by comparing pre and post HEAD
-    let committed_work = if let (Some(current_head), Some(pre_head)) = (&head_sha, pre_dispatch.as_ref().and_then(|p| p.head_sha.as_ref())) {
+    let committed_work = if let (Some(current_head), Some(pre_head)) = (
+        &head_sha,
+        pre_dispatch.as_ref().and_then(|p| p.head_sha.as_ref()),
+    ) {
         // HEAD changed - compute commit summary
         compute_committed_work(workspace, pre_head, current_head).await
     } else {
@@ -409,9 +417,17 @@ async fn compute_committed_work(
     post_sha: &str,
 ) -> Option<CommittedWorkSummary> {
     // Count commits between pre and post
-    let commit_count = run_git(workspace, &["rev-list", "--count", &format!("{}...{}", pre_sha, post_sha)]).await?
-        .parse::<usize>()
-        .unwrap_or(0);
+    let commit_count = run_git(
+        workspace,
+        &[
+            "rev-list",
+            "--count",
+            &format!("{}...{}", pre_sha, post_sha),
+        ],
+    )
+    .await?
+    .parse::<usize>()
+    .unwrap_or(0);
 
     if commit_count == 0 {
         return None;
@@ -420,13 +436,19 @@ async fn compute_committed_work(
     // Get commit subjects (max 10)
     let commit_subjects = run_git(
         workspace,
-        &["log", "--pretty=format:%s", &format!("{}...{}", pre_sha, post_sha), "-n", "10"],
+        &[
+            "log",
+            "--pretty=format:%s",
+            &format!("{}...{}", pre_sha, post_sha),
+            "-n",
+            "10",
+        ],
     )
     .await
     .unwrap_or_default()
     .lines()
-        .map(|s| s.to_string())
-        .collect();
+    .map(|s| s.to_string())
+    .collect();
 
     // Get diff --stat for lines changed
     let lines_changed = run_git(
@@ -458,8 +480,8 @@ pub async fn write_timeout_context(
             .with_context(|| format!("creating timeout-context directory {}", parent.display()))?;
     }
 
-    let encoded = serde_json::to_vec_pretty(context)
-        .context("serializing timeout decomposition context")?;
+    let encoded =
+        serde_json::to_vec_pretty(context).context("serializing timeout decomposition context")?;
 
     tokio::fs::write(&path, encoded)
         .await

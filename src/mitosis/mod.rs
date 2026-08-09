@@ -3467,7 +3467,7 @@ End of response."#;
             },
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let _evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
 
         let _store = MockStore::new();
         let bead = test_bead();

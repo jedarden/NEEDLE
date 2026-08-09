@@ -13,6 +13,8 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+use crate::bead_store::spawn_with_etxtbsy_retry_child;
+
 /// Current version of the needle binary.
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -470,37 +472,65 @@ pub fn check_hot_reload(needle_home: &Path) -> Result<HotReloadCheck> {
 /// This function does not return on success — it replaces the current process.
 /// On failure, it returns an error so the worker can continue on the current binary.
 #[cfg(unix)]
-pub fn re_exec_stable(
+pub async fn re_exec_stable(
     stable_path: &Path,
     worker_name: &str,
     workspace: Option<&Path>,
     agent: Option<&str>,
     timeout: Option<u64>,
 ) -> Result<()> {
-    use std::os::unix::process::CommandExt;
+    let stable_path = stable_path.to_path_buf();
+    let worker_name = worker_name.to_string();
+    let workspace = workspace.map(|p| p.to_path_buf());
+    let agent = agent.map(|a| a.to_string());
 
-    let mut cmd = std::process::Command::new(stable_path);
-    cmd.arg("run").arg("--resume");
-    cmd.arg("--identifier").arg(worker_name);
-    cmd.arg("--count").arg("1");
+    // Retry with ETXTBSY handling - the :stable binary was just written and may be busy
+    let mut child = spawn_with_etxtbsy_retry_child(
+        || {
+            let stable_path = stable_path.clone();
+            let worker_name = worker_name.clone();
+            let workspace = workspace.clone();
+            let agent = agent.clone();
+            async move {
+                let mut cmd = tokio::process::Command::new(&stable_path);
+                cmd.arg("run").arg("--resume");
+                cmd.arg("--identifier").arg(&worker_name);
+                cmd.arg("--count").arg("1");
 
-    if let Some(ws) = workspace {
-        cmd.arg("--workspace").arg(ws);
-    }
-    if let Some(a) = agent {
-        cmd.arg("--agent").arg(a);
-    }
-    if let Some(t) = timeout {
-        cmd.arg("--timeout").arg(t.to_string());
-    }
+                if let Some(ws) = &workspace {
+                    cmd.arg("--workspace").arg(ws);
+                }
+                if let Some(a) = &agent {
+                    cmd.arg("--agent").arg(a);
+                }
+                if let Some(t) = timeout {
+                    cmd.arg("--timeout").arg(t.to_string());
+                }
 
-    // exec() replaces the current process — does not return on success.
-    let err = cmd.exec();
-    Err(anyhow::anyhow!("re-exec failed: {}", err))
+                cmd.spawn()
+            }
+        },
+        5,  // max_attempts
+        20, // backoff_ms
+    )
+    .await
+    .context("failed to spawn :stable binary after retries")?;
+
+    // Wait for the child process to complete - it will replace us
+    let status = child
+        .wait()
+        .await
+        .context("failed to wait for :stable binary")?;
+
+    // If we get here, the child exited (which shouldn't happen on successful exec)
+    Err(anyhow::anyhow!(
+        "re-exec failed: :stable binary exited with status {}",
+        status
+    ))
 }
 
 #[cfg(not(unix))]
-pub fn re_exec_stable(
+pub async fn re_exec_stable(
     _stable_path: &Path,
     _worker_name: &str,
     _workspace: Option<&Path>,
