@@ -2820,6 +2820,8 @@ exit 0
     // Configure supervisor to use the isolated paths
     let telemetry = needle::telemetry::Telemetry::new("isolation-test".to_string());
     let config = needle::config::Config::default();
+    let session_id = needle::telemetry::generate_session_id();
+    needle::cli::init_tracing_subscriber("test-worker".to_string(), session_id, &config);
 
     let mut supervisor_config = SupervisorConfig::default();
     supervisor_config.workspace = isolated_workspace.clone();
