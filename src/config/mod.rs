@@ -1300,7 +1300,7 @@ impl Default for FileSinkConfig {
     fn default() -> Self {
         FileSinkConfig {
             enabled: Self::default_enabled(),
-            log_dir: None,
+            log_dir: Self::default_log_dir(),
             retention_days: Self::default_retention_days(),
         }
     }
@@ -1309,6 +1309,11 @@ impl Default for FileSinkConfig {
 impl FileSinkConfig {
     fn default_enabled() -> bool {
         true
+    }
+
+    fn default_log_dir() -> Option<PathBuf> {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        Some(PathBuf::from(home).join(".needle").join("logs"))
     }
 
     fn default_retention_days() -> u32 {
