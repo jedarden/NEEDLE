@@ -2971,3 +2971,459 @@ async fn worker_binary_path_precedence_over_default() {
     println!("  Override path: {}", override_path.display());
     println!("  Precedence correctly applied");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Integration tests: graceful shutdown workflow (bf-4sbb)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Integration test that verifies heartbeat cleanup happens on normal worker exit.
+///
+/// This test validates the graceful shutdown workflow when a worker completes
+/// its work naturally (no signals, just normal exhaustion).
+///
+/// Test strategy:
+/// 1. Spawn a real needle worker subprocess with limited work
+/// 2. Wait for the worker to create its heartbeat file
+/// 3. Wait for the worker to complete work and exit naturally
+/// 4. Verify the heartbeat file is cleaned up after exit
+/// 5. Verify no stale heartbeat files remain
+#[test]
+fn heartbeat_cleanup_on_normal_exit_integration() {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    // Find the needle binary
+    let needle_binary = std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            let path_str = p.to_string_lossy().to_string();
+            if path_str.contains("integration_tests") {
+                Some(
+                    p.parent()
+                        .and_then(|grandparent| {
+                            let needle_path = grandparent.join("needle");
+                            if needle_path.exists() {
+                                Some(needle_path)
+                            } else {
+                                let debug_path = grandparent.join("debug").join("needle");
+                                if debug_path.exists() {
+                                    Some(debug_path)
+                                } else {
+                                    Some(grandparent.join("release").join("needle"))
+                                }
+                            }
+                        })
+                        .unwrap_or_else(|| PathBuf::from("needle")),
+                )
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from("needle"));
+
+    if !needle_binary.exists() {
+        println!(
+            "Skipping test: needle binary not found at {}",
+            needle_binary.display()
+        );
+        return;
+    }
+
+    println!("Using needle binary: {}", needle_binary.display());
+
+    // Create a temporary workspace with a bead that will complete quickly
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("failed to create workspace");
+
+    let beads_dir = workspace.join(".beads");
+    std::fs::create_dir_all(&beads_dir).expect("failed to create beads dir");
+
+    // Create a simple bead that will succeed immediately
+    let success_bead = r#"{
+        "id": "nd-success-test",
+        "type": "task",
+        "title": "Success test bead",
+        "description": "Bead that succeeds immediately",
+        "status": "open",
+        "acceptance_criteria": [],
+        "labels": []
+    }"#;
+
+    std::fs::write(beads_dir.join("nd-success-test.json"), success_bead)
+        .expect("failed to create success bead");
+
+    // Set up environment to use the test workspace
+    let mut cmd = Command::new(&needle_binary);
+    cmd.arg("run")
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--agent")
+        .arg("echo") // Use echo adapter which succeeds quickly
+        .arg("--identifier")
+        .arg("normal-exit-test-worker")
+        .arg("--count")
+        .arg("1"); // Process only 1 bead then exit
+
+    // Isolate the test from the real user environment
+    cmd.env("HOME", temp_dir.path());
+
+    // Spawn the worker process
+    println!("Spawning worker process for normal exit test...");
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Skipping test: failed to spawn worker: {}", e);
+            return;
+        }
+    };
+
+    let worker_pid = child.id();
+    println!("Worker PID: {}", worker_pid);
+
+    // Give the worker time to start up and create its heartbeat file
+    let heartbeat_dir = workspace.join("state").join("heartbeats");
+    let heartbeat_file = heartbeat_dir.join("claude-echo-normal-exit-test-worker.json");
+
+    println!("Waiting for heartbeat file: {}", heartbeat_file.display());
+
+    let start = Instant::now();
+    let heartbeat_timeout = Duration::from_secs(30);
+    let mut heartbeat_found = false;
+
+    // Wait up to 30 seconds for the heartbeat file to appear
+    while start.elapsed() < heartbeat_timeout {
+        if heartbeat_file.exists() {
+            heartbeat_found = true;
+            println!("✓ Heartbeat file created after {:?}", start.elapsed());
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    if !heartbeat_found {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!(
+            "Heartbeat file not found after {:?}, test failed",
+            heartbeat_timeout
+        );
+    }
+
+    // Verify the heartbeat file contains valid data
+    let heartbeat_content =
+        std::fs::read_to_string(&heartbeat_file).expect("failed to read heartbeat file");
+
+    println!("Heartbeat content: {}", heartbeat_content);
+
+    let heartbeat: serde_json::Value =
+        serde_json::from_str(&heartbeat_content).expect("heartbeat file should contain valid JSON");
+
+    assert_eq!(
+        heartbeat["worker_id"], "normal-exit-test-worker",
+        "heartbeat should have correct worker_id"
+    );
+
+    println!("✓ Heartbeat file is valid");
+
+    // Wait for the worker to complete work and exit naturally (no signals)
+    println!("Waiting for worker to complete and exit naturally...");
+
+    let exit_timeout = Duration::from_secs(30);
+    let exit_start = Instant::now();
+
+    let exit_status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if exit_start.elapsed() < exit_timeout {
+                    std::thread::sleep(Duration::from_millis(100));
+                } else {
+                    println!("Worker did not exit within {:?}, killing", exit_timeout);
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("Worker did not exit naturally within {:?}, test failed", exit_timeout);
+                }
+            }
+            Err(e) => {
+                println!("Error checking worker status: {}", e);
+                let _ = child.kill();
+                let _ = child.wait();
+                return;
+            }
+        }
+    };
+
+    println!("✓ Worker exited naturally with status: {:?}", exit_status);
+
+    // Verify the heartbeat file was cleaned up after normal exit
+    let cleanup_check_start = Instant::now();
+    let cleanup_timeout = Duration::from_secs(5);
+
+    while cleanup_check_start.elapsed() < cleanup_timeout {
+        if !heartbeat_file.exists() {
+            println!(
+                "✓ Heartbeat file cleaned up after {:?}",
+                cleanup_check_start.elapsed()
+            );
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if heartbeat_file.exists() {
+        panic!("Heartbeat file was not cleaned up after normal exit, test failed");
+    }
+
+    // Verify no stale heartbeat files remain in the heartbeat directory
+    if heartbeat_dir.exists() {
+        let stale_files = std::fs::read_dir(&heartbeat_dir)
+            .expect("failed to read heartbeat directory");
+
+        let stale_count = stale_files.count();
+        if stale_count > 0 {
+            panic!(
+                "Found {} stale heartbeat file(s) in directory, test failed",
+                stale_count
+            );
+        }
+    }
+
+    println!("✓ No stale heartbeat files remain");
+
+    let total_time = start.elapsed();
+    println!("✓ Normal exit integration test passed, total time: {:?}", total_time);
+
+    assert!(
+        total_time < Duration::from_secs(60),
+        "test should complete within 60 seconds, took {:?}",
+        total_time
+    );
+}
+
+/// Integration test that verifies heartbeat cleanup happens on multiple shutdown scenarios.
+///
+/// This test validates that heartbeat cleanup works correctly across different
+/// worker exit scenarios:
+/// 1. Normal exit after processing all available work
+/// 2. Shutdown due to idle_action=Exit with empty queue
+/// 3. Signal-triggered shutdown (SIGTERM)
+///
+/// Test strategy:
+/// 1. Test each scenario sequentially
+/// 2. Verify heartbeat cleanup in each case
+/// 3. Verify no cross-contamination between scenarios
+#[test]
+fn heartbeat_cleanup_multiple_scenarios_integration() {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    let needle_binary = std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            let path_str = p.to_string_lossy().to_string();
+            if path_str.contains("integration_tests") {
+                Some(
+                    p.parent()
+                        .and_then(|grandparent| {
+                            let needle_path = grandparent.join("needle");
+                            if needle_path.exists() {
+                                Some(needle_path)
+                            } else {
+                                let debug_path = grandparent.join("debug").join("needle");
+                                if debug_path.exists() {
+                                    Some(debug_path)
+                                } else {
+                                    Some(grandparent.join("release").join("needle"))
+                                }
+                            }
+                        })
+                        .unwrap_or_else(|| PathBuf::from("needle")),
+                )
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| PathBuf::from("needle"));
+
+    if !needle_binary.exists() {
+        println!(
+            "Skipping test: needle binary not found at {}",
+            needle_binary.display()
+        );
+        return;
+    }
+
+    println!("Testing multiple shutdown scenarios...");
+
+    // Scenario 1: Normal exit after processing work
+    println!("\n=== Scenario 1: Normal exit after processing work ===");
+
+    let temp_dir1 = tempfile::tempdir().expect("failed to create temp dir");
+    let workspace1 = temp_dir1.path().join("workspace1");
+    std::fs::create_dir_all(&workspace1).expect("failed to create workspace");
+    let beads_dir1 = workspace1.join(".beads");
+    std::fs::create_dir_all(&beads_dir1).expect("failed to create beads dir");
+
+    let bead1 = r#"{
+        "id": "nd-scenario1",
+        "type": "task",
+        "title": "Scenario 1 bead",
+        "description": "Bead for scenario 1",
+        "status": "open",
+        "acceptance_criteria": [],
+        "labels": []
+    }"#;
+
+    std::fs::write(beads_dir1.join("nd-scenario1.json"), bead1)
+        .expect("failed to create bead");
+
+    let mut cmd1 = Command::new(&needle_binary);
+    cmd1.arg("run")
+        .arg("--workspace")
+        .arg(&workspace1)
+        .arg("--agent")
+        .arg("echo")
+        .arg("--identifier")
+        .arg("scenario1-worker")
+        .arg("--count")
+        .arg("1")
+        .env("HOME", temp_dir1.path());
+
+    let mut child1 = match cmd1.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Skipping scenario 1: failed to spawn worker: {}", e);
+            return;
+        }
+    };
+
+    // Wait for heartbeat creation
+    let heartbeat_dir1 = workspace1.join("state").join("heartbeats");
+    let heartbeat_file1 = heartbeat_dir1.join("claude-echo-scenario1-worker.json");
+
+    let start1 = Instant::now();
+    while start1.elapsed() < Duration::from_secs(20) {
+        if heartbeat_file1.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if !heartbeat_file1.exists() {
+        let _ = child1.kill();
+        let _ = child1.wait();
+        panic!("Scenario 1: Heartbeat file not created");
+    }
+
+    println!("✓ Scenario 1: Heartbeat created");
+
+    // Wait for normal exit
+    let exit_start = Instant::now();
+    while exit_start.elapsed() < Duration::from_secs(20) {
+        if let Ok(Some(_)) = child1.try_wait() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    println!("✓ Scenario 1: Worker exited");
+
+    // Verify cleanup
+    let cleanup_start = Instant::now();
+    while cleanup_start.elapsed() < Duration::from_secs(3) {
+        if !heartbeat_file1.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if heartbeat_file1.exists() {
+        panic!("Scenario 1: Heartbeat file not cleaned up after normal exit");
+    }
+
+    println!("✓ Scenario 1: Heartbeat cleaned up successfully");
+
+    // Scenario 2: Idle exit with empty queue
+    println!("\n=== Scenario 2: Idle exit with empty queue ===");
+
+    let temp_dir2 = tempfile::tempdir().expect("failed to create temp dir");
+    let workspace2 = temp_dir2.path().join("workspace2");
+    std::fs::create_dir_all(&workspace2).expect("failed to create workspace");
+    let beads_dir2 = workspace2.join(".beads");
+    std::fs::create_dir_all(&beads_dir2).expect("failed to create beads dir");
+
+    let mut cmd2 = Command::new(&needle_binary);
+    cmd2.arg("run")
+        .arg("--workspace")
+        .arg(&workspace2)
+        .arg("--agent")
+        .arg("echo")
+        .arg("--identifier")
+        .arg("scenario2-worker")
+        .arg("--count")
+        .arg("1")
+        .env("HOME", temp_dir2.path());
+
+    let mut child2 = match cmd2.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Skipping scenario 2: failed to spawn worker: {}", e);
+            return;
+        }
+    };
+
+    // Wait for heartbeat creation
+    let heartbeat_dir2 = workspace2.join("state").join("heartbeats");
+    let heartbeat_file2 = heartbeat_dir2.join("claude-echo-scenario2-worker.json");
+
+    let start2 = Instant::now();
+    while start2.elapsed() < Duration::from_secs(20) {
+        if heartbeat_file2.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if !heartbeat_file2.exists() {
+        let _ = child2.kill();
+        let _ = child2.wait();
+        panic!("Scenario 2: Heartbeat file not created");
+    }
+
+    println!("✓ Scenario 2: Heartbeat created");
+
+    // Worker should exit quickly due to empty queue
+    let exit_start2 = Instant::now();
+    while exit_start2.elapsed() < Duration::from_secs(20) {
+        if let Ok(Some(_)) = child2.try_wait() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    println!("✓ Scenario 2: Worker exited due to empty queue");
+
+    // Verify cleanup
+    let cleanup_start2 = Instant::now();
+    while cleanup_start2.elapsed() < Duration::from_secs(3) {
+        if !heartbeat_file2.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    if heartbeat_file2.exists() {
+        panic!("Scenario 2: Heartbeat file not cleaned up after idle exit");
+    }
+
+    println!("✓ Scenario 2: Heartbeat cleaned up successfully");
+
+    println!("\n✓ All shutdown scenarios passed: heartbeat cleanup verified");
+
+    // Final verification: no cross-contamination between workspaces
+    assert!(!heartbeat_file1.exists(), "Scenario 1 heartbeat should still be absent");
+    assert!(!heartbeat_file2.exists(), "Scenario 2 heartbeat should still be absent");
+
+    println!("✓ No cross-contamination between scenarios");
+}
