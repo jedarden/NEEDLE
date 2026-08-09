@@ -261,6 +261,10 @@ fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
     // and `.beads/issues.jsonl` was truncated to 0 bytes.
     config.strands.explore.workspace_root = workspace_home.to_path_buf();
     config.strands.explore.workspaces = Vec::new();
+    // Enable OTLP sink to trigger the runtime guard (bf-4nwm7).
+    // This ensures that init_tracing_subscriber's tokio::spawn calls
+    // work correctly with the runtime context guard from bf-3s2b0.
+    config.telemetry.otlp_sink.enabled = true;
     config
 }
 
