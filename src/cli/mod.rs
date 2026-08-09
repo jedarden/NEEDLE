@@ -17,7 +17,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::bead_store::{BeadStore, BfCliBeadStore, BrCliBeadStore};
+use crate::bead_store::{spawn_with_etxtbsy_retry, BeadStore, BfCliBeadStore, BrCliBeadStore};
 use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
@@ -786,7 +786,7 @@ fn worker_log_writer(
 ///
 /// Note: Shutdown is handled by the OtlpSink in the telemetry module, not here.
 #[cfg(feature = "otlp")]
-fn init_tracing_subscriber(
+pub fn init_tracing_subscriber(
     worker_id: String,
     session_id: String,
     config: &crate::config::Config,
@@ -4912,6 +4912,7 @@ fn cmd_update_rules(output: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bead_store::spawn_with_etxtbsy_retry;
 
     #[test]
     fn nato_alphabet_has_26_entries() {
@@ -4947,15 +4948,24 @@ mod tests {
         let _ = is_needle_inner();
     }
 
-    #[test]
-    fn is_needle_inner_true_when_env_set() {
+    #[tokio::test]
+    async fn is_needle_inner_true_when_env_set() {
         // Temporarily set NEEDLE_INNER=1 and verify detection.
         // Use a sub-process approach via std::process to avoid mutating the
         // test process's env and racing with parallel tests.
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .env("NEEDLE_INNER", "1")
-            .args(["--help"])
-            .output();
+        let exe_path = std::env::current_exe().unwrap();
+        let output = spawn_with_etxtbsy_retry(
+            || async {
+                tokio::process::Command::new(&exe_path)
+                    .env("NEEDLE_INNER", "1")
+                    .args(["--help"])
+                    .output()
+                    .await
+            },
+            5,  // max_attempts
+            20, // backoff_ms
+        )
+        .await;
         // We can't call is_needle_inner() with a controlled env from here
         // without unsafe env mutation, so we verify the env var logic directly.
         assert!(
