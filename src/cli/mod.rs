@@ -194,7 +194,12 @@ pub enum CliCommand {
         get: Option<String>,
 
         /// Set a config key to a value.
-        #[arg(long, num_args = 0.., value_name = "KEY VALUE", help = "Set a config key to a value. Both syntax forms are valid and supported: --set KEY=VALUE (equals-separated) or --set KEY VALUE (space-separated)")]
+        ///
+        /// Examples:
+        ///   --set worker.max_workers 10
+        ///   --set agent.timeout=3600
+        ///   --set log.console_sink=true
+        #[arg(long, num_args = 0.., value_name = "KEY VALUE")]
         set: Option<Vec<String>>,
 
         /// Dump all resolved config values.
