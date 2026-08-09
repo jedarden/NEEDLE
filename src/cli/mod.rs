@@ -195,10 +195,15 @@ pub enum CliCommand {
 
         /// Set a config key to a value.
         ///
+        /// Two forms are accepted:
+        ///   --set KEY VALUE      (space-separated)
+        ///   --set KEY=VALUE       (equals-separated)
+        ///
         /// Examples:
         ///   --set worker.max_workers 10
         ///   --set agent.timeout=3600
         ///   --set log.console_sink=true
+        ///   --set strands.explore.enabled=false
         #[arg(long, num_args = 0.., value_name = "KEY VALUE")]
         set: Option<Vec<String>>,
 
