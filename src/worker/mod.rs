@@ -2732,6 +2732,107 @@ impl Worker {
             .await;
         }
 
+        // Evaluate for timeout-triggered mitosis after timeout — the bead has already been
+        // released and marked as deferred by the outcome handler.
+        if handler_result.outcome == Outcome::Timeout {
+            let workspace = if is_workspace_unset(&bead.workspace) {
+                self.config.workspace.default.clone()
+            } else {
+                bead.workspace.clone()
+            };
+
+            // Enter the bead.mitosis span for timeout mitosis evaluation.
+            let mitosis_span = tracing::info_span!(
+                "bead.mitosis",
+                needle.bead.id = %bead.id,
+                needle.mitosis.result = tracing::field::Empty, // Will be set based on evaluation result
+            );
+
+            // Capture the execution duration for timeout eligibility
+            let duration = self.last_effort.as_ref()
+                .map(|effort| effort.cycle_start.elapsed())
+                .unwrap_or(std::time::Duration::from_secs(0));
+
+            // Build AgentOutcome from the last execution result
+            // Note: we don't track stdout/stderr in EffortData, so use empty strings
+            let agent_outcome = crate::types::AgentOutcome {
+                exit_code: 124, // SIGTERM exit code for timeout
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+
+            // Wrap timeout mitosis evaluation in timeout to prevent indefinite hang.
+            async {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(120),
+                    self.mitosis_evaluator.evaluate_timeout(
+                        self.store.as_ref(),
+                        &bead,
+                        &workspace,
+                        &self.dispatcher,
+                        &self.prompt_builder,
+                        &self.config.agent.default,
+                        &agent_outcome,
+                        duration,
+                    ),
+                )
+                .await
+                {
+                Ok(Ok(crate::mitosis::MitosisResult::Split { children })) => {
+                    tracing::Span::current().record("needle.mitosis.result", "split");
+                    tracing::info!(
+                        bead_id = %bead.id,
+                        children = children.len(),
+                        "timeout mitosis created child beads — parent blocked"
+                    );
+                }
+                Ok(Ok(crate::mitosis::MitosisResult::NotSplittable)) => {
+                    tracing::Span::current().record("needle.mitosis.result", "not_splittable");
+                    tracing::debug!(bead_id = %bead.id, "timeout mitosis: bead is single task or unsafe to split");
+                }
+                Ok(Ok(crate::mitosis::MitosisResult::Skipped { reason })) => {
+                    tracing::Span::current().record("needle.mitosis.result", "skipped");
+                    tracing::debug!(
+                        bead_id = %bead.id,
+                        reason = %reason,
+                        "timeout mitosis skipped"
+                    );
+                }
+                Ok(Ok(crate::mitosis::MitosisResult::OutOfScope)) => {
+                    tracing::Span::current().record("needle.mitosis.result", "out_of_scope");
+                    tracing::debug!(
+                        bead_id = %bead.id,
+                        "timeout mitosis: bead references NEEDLE-internal config, out of scope for workspace"
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::Span::current().record("needle.mitosis.result", "error");
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current()
+                        .record("otel.status_description", format!("error: {e}"));
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "timeout mitosis evaluation failed (bead already released)"
+                    );
+                }
+                Err(_) => {
+                    // Timeout after 120s - log warning and continue.
+                    tracing::Span::current().record("needle.mitosis.result", "timeout");
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current()
+                        .record("otel.status_description", "timeout after 120s");
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "timeout mitosis evaluation timed out after 120s, continuing to LOGGING"
+                    );
+                }
+                }
+            }
+            .instrument(mitosis_span)
+            .await;
+        }
+
         // On success, inject Bead-Id trailer into the latest commit (non-fatal if it fails).
         if handler_result.outcome == Outcome::Success {
             if let Some(ref pre_head) = self.pre_dispatch_head {
