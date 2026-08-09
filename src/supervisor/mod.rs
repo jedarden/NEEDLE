@@ -199,6 +199,16 @@ fn resolve_worker_binary_with_source(override_path: Option<&PathBuf>) -> Resolve
 impl Supervisor {
     /// Create a new supervisor with the given configuration.
     pub fn new(config: SupervisorConfig, needle_config: Config) -> Result<Self> {
+        // Resolve and log worker binary path at startup
+        let worker_binary = resolve_worker_binary(config.worker_binary_path.clone())
+            .context("failed to resolve worker binary path for supervisor")?;
+
+        tracing::info!(
+            worker_binary = %worker_binary.display(),
+            "Resolved worker binary: {}",
+            worker_binary.display()
+        );
+
         // Initialize bead store
         let store: Arc<dyn BeadStore> = Arc::new(
             BrCliBeadStore::discover(
