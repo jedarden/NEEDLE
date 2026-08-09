@@ -1548,17 +1548,36 @@ fn run_shell_command(cmd: &str) -> Result<String> {
 /// Run a trivial probe: ask the agent CLI to do nothing meaningful.
 fn run_probe(agent_cli: &str) -> Result<ProbeResult> {
     let start = Instant::now();
-    let output = ProcessCommand::new(agent_cli)
-        .arg("--help")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .with_context(|| format!("failed to probe {agent_cli}"))?;
+    let mut last_err = None;
+    const MAX_ATTEMPTS: u32 = 5;
+    const BACKOFF_MS: u64 = 20;
 
-    Ok(ProbeResult {
-        exit_code: output.code().unwrap_or(-1),
-        elapsed_ms: start.elapsed().as_millis() as u64,
-    })
+    for attempt in 0..MAX_ATTEMPTS {
+        match ProcessCommand::new(agent_cli)
+            .arg("--help")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(status) => {
+                return Ok(ProbeResult {
+                    exit_code: status.code().unwrap_or(-1),
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                });
+            }
+            Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < MAX_ATTEMPTS => {
+                // ETXTBSY (errno 26): transient "text file busy" - retry with backoff
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to probe {agent_cli}"));
+            }
+        }
+    }
+
+    Err(last_err.expect("loop always sets last_err before exhausting MAX_ATTEMPTS"))
+        .with_context(|| format!("failed to probe {agent_cli} after {MAX_ATTEMPTS} attempts"))
 }
 
 /// Build a sample JSON string for testing JSON field extraction.

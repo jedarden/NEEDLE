@@ -22,6 +22,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::bead_store::spawn_with_etxtbsy_retry;
 use crate::types::BeadId;
 
 /// Workspace + bead state captured immediately before an agent is dispatched.
@@ -134,13 +135,29 @@ async fn read_notes(workspace: &Path, bead_id: &BeadId) -> Option<String> {
 }
 
 async fn run(workspace: &Path, bin: &str, args: &[&str]) -> Option<String> {
-    let output = tokio::process::Command::new(bin)
-        .args(args)
-        .current_dir(workspace)
-        .kill_on_drop(true)
-        .output()
-        .await
-        .ok()?;
+    let bin = bin.to_string();
+    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let workspace = workspace.to_path_buf();
+
+    let output = spawn_with_etxtbsy_retry(
+        || {
+            let bin = bin.clone();
+            let args = args.clone();
+            let workspace = workspace.clone();
+            async move {
+                tokio::process::Command::new(&bin)
+                    .args(&args.iter().map(String::as_str).collect::<Vec<_>>())
+                    .current_dir(&workspace)
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+            }
+        },
+        5,
+        20,
+    )
+    .await
+    .ok()?;
     if !output.status.success() {
         return None;
     }
