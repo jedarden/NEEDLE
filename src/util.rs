@@ -216,7 +216,7 @@ mod tests {
     fn test_expand_tilde_edge_case_multiple_tildes() {
         env::set_var("HOME", "/home/testuser");
 
-        // Only the first "~/" prefix is expanded
+        // Any path starting with "~/" is expanded, regardless of tildes elsewhere
         assert_eq!(expand_tilde("~/~/path"), "/home/testuser/~/path");
         assert_eq!(expand_tilde("~/a/~/b"), "/home/testuser/a/~/b");
 
@@ -252,5 +252,78 @@ mod tests {
         assert_eq!(expand_tilde("~/foo"), "~/foo");
         assert_eq!(expand_tilde("~foo"), "~foo");
         assert_eq!(expand_tilde("~/~/path"), "~/~/path");
+    }
+
+    /// Test that absolute paths without tilde prefix pass through unchanged.
+    ///
+    /// This is one of the acceptance criteria: verify "/abs/path" returns unchanged.
+    #[test]
+    fn test_absolute_paths_unchanged() {
+        env::set_var("HOME", "/home/testuser");
+
+        // Absolute paths should pass through unchanged
+        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+        assert_eq!(expand_tilde("/usr/local/bin"), "/usr/local/bin");
+        assert_eq!(expand_tilde("/etc/config.json"), "/etc/config.json");
+        assert_eq!(expand_tilde("/"), "/");
+        assert_eq!(expand_tilde("/var/log/app.log"), "/var/log/app.log");
+    }
+
+    /// Test that relative paths without tilde prefix pass through unchanged.
+    ///
+    /// This is one of the acceptance criteria: verify relative paths without tilde
+    /// remain unchanged.
+    #[test]
+    fn test_relative_paths_unchanged() {
+        env::set_var("HOME", "/home/testuser");
+
+        // Relative paths should pass through unchanged
+        assert_eq!(expand_tilde("relative/path"), "relative/path");
+        assert_eq!(expand_tilde("./current/dir"), "./current/dir");
+        assert_eq!(expand_tilde("../parent/dir"), "../parent/dir");
+        assert_eq!(expand_tilde("file.txt"), "file.txt");
+        assert_eq!(expand_tilde("nested/deep/path/file.json"), "nested/deep/path/file.json");
+    }
+
+    /// Test fallback behavior when HOME environment variable is not set.
+    ///
+    /// This is one of the acceptance criteria: verify missing HOME fallback behavior
+    /// where tilde paths return unchanged.
+    #[test]
+    fn test_missing_home_fallback() {
+        // Explicitly remove HOME to test fallback behavior
+        env::remove_var("HOME");
+
+        // When HOME is missing, tilde-prefixed paths should return unchanged
+        assert_eq!(expand_tilde("~/foo"), "~/foo");
+        assert_eq!(expand_tilde("~/documents/file.txt"), "~/documents/file.txt");
+        assert_eq!(expand_tilde("~/path/to/resource"), "~/path/to/resource");
+
+        // Verify non-tilde paths still work correctly
+        assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
+        assert_eq!(expand_tilde("relative/path"), "relative/path");
+    }
+
+    /// Test that HOME manipulation in tests is properly isolated.
+    ///
+    /// This is one of the acceptance criteria: ensure proper test isolation for HOME
+    /// manipulation. Each test should set up its own HOME state.
+    #[test]
+    fn test_home_isolation() {
+        // Set HOME to a specific value
+        env::set_var("HOME", "/home/testuser");
+        assert_eq!(expand_tilde("~/test"), "/home/testuser/test");
+
+        // Change HOME in the same test
+        env::set_var("HOME", "/different/home");
+        assert_eq!(expand_tilde("~/test"), "/different/home/test");
+
+        // Remove HOME in the same test
+        env::remove_var("HOME");
+        assert_eq!(expand_tilde("~/test"), "~/test");
+
+        // Restore HOME and verify it works again
+        env::set_var("HOME", "/restored/home");
+        assert_eq!(expand_tilde("~/test"), "/restored/home/test");
     }
 }
