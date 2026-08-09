@@ -1,6 +1,9 @@
 //! Utility functions for common operations.
 
 use std::env;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 
 /// Safely retrieve the HOME environment variable.
 ///
@@ -83,10 +86,56 @@ pub fn expand_tilde(path: &str) -> String {
     }
 }
 
+/// Resolve the worker binary path with optional config override.
+///
+/// This function resolves the path to the worker binary by first checking
+/// for an explicit config override, then falling back to the current executable.
+///
+/// # Arguments
+///
+/// * `worker_binary_path` - An optional path override from config. If `Some(path)`,
+///   that path is used directly. If `None`, falls back to `std::env::current_exe()`.
+///
+/// # Returns
+///
+/// * `Result<PathBuf>` - The resolved binary path, or an error if resolution fails.
+///
+/// # Errors
+///
+/// * Returns an error if `worker_binary_path` is `None` and `std::env::current_exe()`
+///   fails (which can happen in some restricted environments or when the binary
+///   has been deleted/moved after launch).
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::util::resolve_worker_binary_path;
+/// use std::path::PathBuf;
+///
+/// // With explicit override
+/// let override_path = Some(PathBuf::from("/custom/path/to/needle"));
+/// let resolved = resolve_worker_binary_path(override_path.as_ref())
+///     .expect("failed to resolve binary path");
+/// assert_eq!(resolved, PathBuf::from("/custom/path/to/needle"));
+///
+/// // Without override (uses current_exe)
+/// let resolved = resolve_worker_binary_path(None)
+///     .expect("failed to resolve current executable");
+/// ```
+pub fn resolve_worker_binary_path(worker_binary_path: Option<&PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = worker_binary_path {
+        Ok(path.clone())
+    } else {
+        std::env::current_exe()
+            .context("failed to resolve worker binary path: current_exe() failed")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
+    use std::path::PathBuf;
 
     #[test]
     fn test_expand_tilde_with_home() {
@@ -325,5 +374,38 @@ mod tests {
         // Restore HOME and verify it works again
         env::set_var("HOME", "/restored/home");
         assert_eq!(expand_tilde("~/test"), "/restored/home/test");
+    }
+
+    #[test]
+    fn test_resolve_worker_binary_path_with_override() {
+        let override_path = Some(PathBuf::from("/custom/path/to/needle"));
+        let resolved = resolve_worker_binary_path(override_path.as_ref())
+            .expect("failed to resolve binary path with override");
+        assert_eq!(resolved, PathBuf::from("/custom/path/to/needle"));
+    }
+
+    #[test]
+    fn test_resolve_worker_binary_path_without_override() {
+        let resolved = resolve_worker_binary_path(None)
+            .expect("failed to resolve current executable");
+        // current_exe() should always succeed in normal test environments
+        // and will return the path to the test binary
+        assert!(resolved.exists(), "resolved path should exist");
+    }
+
+    #[test]
+    fn test_resolve_worker_binary_path_different_override() {
+        let override_path = Some(PathBuf::from("/usr/local/bin/needle-worker"));
+        let resolved = resolve_worker_binary_path(override_path.as_ref())
+            .expect("failed to resolve binary path with override");
+        assert_eq!(resolved, PathBuf::from("/usr/local/bin/needle-worker"));
+    }
+
+    #[test]
+    fn test_resolve_worker_binary_path_relative_override() {
+        let override_path = Some(PathBuf::from("./target/debug/needle"));
+        let resolved = resolve_worker_binary_path(override_path.as_ref())
+            .expect("failed to resolve binary path with relative override");
+        assert_eq!(resolved, PathBuf::from("./target/debug/needle"));
     }
 }
