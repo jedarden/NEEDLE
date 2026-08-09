@@ -217,8 +217,11 @@ fn extract_gate_name_from_reason(reason: &str) -> Option<String> {
     for pattern in &patterns {
         if let Some(idx) = reason.find(pattern) {
             let start = idx + pattern.len();
-            if let Some(end) = reason[start..].find(|c| c == '\'' || c == '"') {
-                return Some(reason[start..start + end].to_string());
+            // Find the next quote character by iterating chars
+            for (offset, c) in reason[start..].char_indices() {
+                if c == '\'' || c == '"' {
+                    return Some(reason[start..start + offset].to_string());
+                }
             }
         }
     }
@@ -654,7 +657,7 @@ mod tests {
 
         // Initialize git repo
         tokio::process::Command::new("git")
-            .args(&["init"])
+            .args(["init"])
             .current_dir(workspace)
             .kill_on_drop(true)
             .output()
@@ -695,7 +698,7 @@ mod tests {
 
         // Initialize git repo
         tokio::process::Command::new("git")
-            .args(&["init"])
+            .args(["init"])
             .current_dir(workspace)
             .kill_on_drop(true)
             .output()
