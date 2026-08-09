@@ -139,4 +139,59 @@ mod tests {
         env::remove_var("HOME");
         assert_eq!(get_home_or_default("fallback"), "fallback");
     }
+
+    #[test]
+    fn test_expand_tilde_multi_level_paths() {
+        env::set_var("HOME", "/home/testuser");
+
+        // Test single level
+        assert_eq!(expand_tilde("~/foo"), "/home/testuser/foo");
+
+        // Test two levels
+        assert_eq!(expand_tilde("~/bar/baz"), "/home/testuser/bar/baz");
+
+        // Test three levels
+        assert_eq!(expand_tilde("~/a/b/c"), "/home/testuser/a/b/c");
+
+        // Test four levels
+        assert_eq!(
+            expand_tilde("~/deep/nested/path/here"),
+            "/home/testuser/deep/nested/path/here"
+        );
+
+        // Test mixed with file extensions
+        assert_eq!(
+            expand_tilde("~/project/src/main.rs"),
+            "/home/testuser/project/src/main.rs"
+        );
+
+        // Test path with dots
+        assert_eq!(
+            expand_tilde("~/config/settings.local.json"),
+            "/home/testuser/config/settings.local.json"
+        );
+    }
+
+    #[test]
+    fn test_expand_tilde_normal_cases() {
+        env::set_var("HOME", "/home/testuser");
+
+        // Basic tilde expansion
+        assert_eq!(expand_tilde("~/foo"), "/home/testuser/foo");
+
+        // Two-level path
+        assert_eq!(expand_tilde("~/bar/baz"), "/home/testuser/bar/baz");
+
+        // Multi-level path
+        assert_eq!(expand_tilde("~/a/b/c"), "/home/testuser/a/b/c");
+
+        // Path with file extension
+        assert_eq!(expand_tilde("~/doc.txt"), "/home/testuser/doc.txt");
+
+        // Path with multiple extensions
+        assert_eq!(
+            expand_tilde("~/archive.tar.gz"),
+            "/home/testuser/archive.tar.gz"
+        );
+    }
 }
