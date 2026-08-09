@@ -194,7 +194,7 @@ pub enum CliCommand {
         get: Option<String>,
 
         /// Set a config key to a value (e.g., --set KEY VALUE or --set KEY=VALUE).
-        #[arg(long, num_args = 0.., value_name = "KEY=VALUE")]
+        #[arg(long, num_args = 0.., value_name = "KEY=VALUE", help = "Set a config key to a value (e.g., --set KEY VALUE or --set KEY=VALUE)")]
         set: Option<Vec<String>>,
 
         /// Dump all resolved config values.
