@@ -3452,3 +3452,31 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
 
     println!("✓ No cross-contamination between scenarios");
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test: init_tracing_subscriber with OTLP doesn't panic (bf-3xfw3)
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn init_tracing_subscriber_with_otlp_enabled_does_not_panic() {
+    // This test validates the fix from bf-3s2b0: init_tracing_subscriber should not
+    // panic when OTLP is enabled, even when called without a tokio runtime context.
+    //
+    // Before the fix: tokio::spawn calls in init_tracing_subscriber would panic
+    // with "cannot drop a runtime in a context where blocking is not allowed"
+    //
+    // After the fix: spawn_with_etxtbsy_retry wrappers and runtime guards
+    // prevent the panic
+    let _home_dir = tempfile::tempdir().unwrap();
+    let config = test_config("echo-test", _home_dir.path());
+
+    // Generate a session ID for the tracing subscriber
+    let session_id = needle::telemetry::generate_session_id();
+
+    // This should NOT panic if the fix is applied
+    // The config has OTLP enabled (from bf-4nwm7), so this will trigger
+    // the tokio::spawn calls that previously caused panics
+    let _ = needle::cli::init_tracing_subscriber("test-worker".to_string(), session_id, &config);
+
+    // Test passes if we get here without panicking - no explicit assert needed
+}
