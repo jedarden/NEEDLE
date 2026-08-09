@@ -64,5 +64,6 @@ pub mod transcript;
 pub mod tsnet;
 pub mod types;
 pub mod upgrade;
+pub mod util;
 pub mod validation;
 pub mod worker;
