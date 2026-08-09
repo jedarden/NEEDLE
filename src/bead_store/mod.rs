@@ -872,16 +872,24 @@ impl BrCliBeadStore {
                 );
 
                 let sync_timeout = std::time::Duration::from_secs(60);
-                let mut sync_cmd = tokio::process::Command::new(&self.br_path);
-                sync_cmd
-                    .args(["sync"])
-                    .current_dir(&dir_buf)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .kill_on_drop(true);
-                let sync_child = sync_cmd
-                    .spawn()
-                    .context("failed to spawn br sync during SYNC_CONFLICT recovery")?;
+                let br_path = self.br_path.clone();
+                let dir_buf_clone = dir_buf.to_path_buf();
+                let sync_child = spawn_with_etxtbsy_retry_child(
+                    || async {
+                        let mut sync_cmd = tokio::process::Command::new(&br_path);
+                        sync_cmd
+                            .args(["sync"])
+                            .current_dir(&dir_buf_clone)
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .kill_on_drop(true);
+                        sync_cmd.spawn()
+                    },
+                    5,
+                    20,
+                )
+                .await
+                .context("failed to spawn br sync during SYNC_CONFLICT recovery")?;
 
                 let sync_output = match tokio::time::timeout(
                     sync_timeout,
@@ -905,16 +913,25 @@ impl BrCliBeadStore {
                 }
 
                 // Retry the original command once with timeout.
-                let mut retry_cmd = tokio::process::Command::new(&self.br_path);
-                retry_cmd
-                    .args(&args_vec)
-                    .current_dir(&dir_buf)
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .kill_on_drop(true);
-                let retry_child = retry_cmd
-                    .spawn()
-                    .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
+                let br_path = self.br_path.clone();
+                let dir_buf_clone = dir_buf.to_path_buf();
+                let args_vec_clone = args_vec.clone();
+                let retry_child = spawn_with_etxtbsy_retry_child(
+                    || async {
+                        let mut retry_cmd = tokio::process::Command::new(&br_path);
+                        retry_cmd
+                            .args(&args_vec_clone)
+                            .current_dir(&dir_buf_clone)
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .kill_on_drop(true);
+                        retry_cmd.spawn()
+                    },
+                    5,
+                    20,
+                )
+                .await
+                .with_context(|| format!("failed to spawn br retry with args: {args:?}"))?;
 
                 let retry =
                     match tokio::time::timeout(timeout_duration, retry_child.wait_with_output())
@@ -966,13 +983,22 @@ impl BrCliBeadStore {
 
         // kill_on_drop ensures the process is killed if the wait_with_output
         // future is dropped (e.g., on timeout), preventing orphaned br processes.
-        let mut cmd = tokio::process::Command::new(&self.br_path);
-        cmd.args(args)
-            .current_dir(&self.workspace)
-            .kill_on_drop(true);
-        let child = cmd
-            .spawn()
-            .with_context(|| format!("failed to spawn br subprocess: {args:?}"))?;
+        let br_path = self.br_path.clone();
+        let workspace = self.workspace.clone();
+        let args_vec = args.to_vec();
+        let child = spawn_with_etxtbsy_retry_child(
+            || async {
+                let mut cmd = tokio::process::Command::new(&br_path);
+                cmd.args(&args_vec)
+                    .current_dir(&workspace)
+                    .kill_on_drop(true);
+                cmd.spawn()
+            },
+            5,
+            20,
+        )
+        .await
+        .with_context(|| format!("failed to spawn br subprocess: {args:?}"))?;
 
         let output = match tokio::time::timeout(timeout_duration, child.wait_with_output()).await {
             Ok(Ok(output)) => output,
@@ -1003,21 +1029,40 @@ impl BrCliBeadStore {
                 "br hit SYNC_CONFLICT (run_br_with_status), running br sync and retrying"
             );
             let sync_timeout = std::time::Duration::from_secs(60);
+            let br_path = self.br_path.clone();
+            let workspace = self.workspace.clone();
             let _ = tokio::time::timeout(
                 sync_timeout,
-                tokio::process::Command::new(&self.br_path)
-                    .args(["sync"])
-                    .current_dir(&self.workspace)
-                    .output(),
+                spawn_with_etxtbsy_retry(
+                    || async {
+                        tokio::process::Command::new(&br_path)
+                            .args(["sync"])
+                            .current_dir(&workspace)
+                            .output()
+                            .await
+                    },
+                    5,
+                    20,
+                ),
             )
             .await;
 
+            let br_path = self.br_path.clone();
+            let workspace = self.workspace.clone();
+            let args_vec = args.to_vec();
             let retry = tokio::time::timeout(
                 timeout_duration,
-                tokio::process::Command::new(&self.br_path)
-                    .args(args)
-                    .current_dir(&self.workspace)
-                    .output(),
+                spawn_with_etxtbsy_retry(
+                    || async {
+                        tokio::process::Command::new(&br_path)
+                            .args(&args_vec)
+                            .current_dir(&workspace)
+                            .output()
+                            .await
+                    },
+                    5,
+                    20,
+                ),
             )
             .await
             .with_context(|| {
