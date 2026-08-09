@@ -1677,10 +1677,13 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
 
     let telemetry = Telemetry::new("test-worker".to_string());
 
+    // Isolate Explore strand to prevent scanning real home directory
+    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    let explore_temp_dir = tempfile::tempdir().unwrap();
     let explore_config = ExploreConfig {
         enabled: true,
         workspaces: vec![remote_workspace.clone()],
-        workspace_root: PathBuf::from("/tmp"),
+        workspace_root: explore_temp_dir.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
     };
@@ -1787,10 +1790,13 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
 
     let telemetry = Telemetry::new("test-worker".to_string());
 
+    // Isolate Explore strand to prevent scanning real home directory
+    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    let explore_temp_dir = tempfile::tempdir().unwrap();
     let explore_config = ExploreConfig {
         enabled: true,
         workspaces: vec![remote_workspace.clone()],
-        workspace_root: PathBuf::from("/tmp"),
+        workspace_root: explore_temp_dir.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
     };
