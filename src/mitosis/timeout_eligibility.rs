@@ -105,7 +105,10 @@ pub enum ActivityEvidence {
     /// Timeout occurred after substantial elapsed time (not a flaky early timeout).
     ///
     /// Carries the actual elapsed duration and the configured timeout.
-    SubstantialElapsedTime { elapsed: Duration, timeout: Duration },
+    SubstantialElapsedTime {
+        elapsed: Duration,
+        timeout: Duration,
+    },
 
     /// No evidence of activity — timeout may have occurred on an idle agent.
     NoEvidence,
@@ -154,6 +157,12 @@ pub fn classify_timeout_eligibility(
     duration: Duration,
     policy: &TimeoutTriggeredPolicy,
 ) -> TimeoutEligibility {
+    if matches!(outcome.exit_code, 130 | 143) {
+        return TimeoutEligibility::NotEligible {
+            reason: "interrupted by signal (SIGINT/SIGTERM), not a timeout".to_string(),
+        };
+    }
+
     // Step 1: Classify the outcome to determine if this is a timeout at all
     let outcome_classification = Outcome::classify(outcome.exit_code, false);
 
@@ -169,7 +178,10 @@ pub fn classify_timeout_eligibility(
         }
         Outcome::Crash(code) => {
             return TimeoutEligibility::NotEligible {
-                reason: format!("process killed by signal (exit code {}), not a timeout", code),
+                reason: format!(
+                    "process killed by signal (exit code {}), not a timeout",
+                    code
+                ),
             };
         }
         Outcome::Success | Outcome::Failure | Outcome::AgentNotFound => {
@@ -226,7 +238,9 @@ pub fn classify_timeout_eligibility(
 
     // Step 6: Apply policy rules per timeout origin
     match timeout_origin {
-        TimeoutOrigin::AgentWallclock { timeout_duration: _ } => {
+        TimeoutOrigin::AgentWallclock {
+            timeout_duration: _,
+        } => {
             if !policy.agent_wallclock_timeout {
                 return TimeoutEligibility::NotEligible {
                     reason: "agent wall-clock timeouts are not enabled in policy".to_string(),
@@ -236,31 +250,37 @@ pub fn classify_timeout_eligibility(
             // Require affirmative evidence of agent activity
             match activity {
                 ActivityEvidence::NoEvidence => {
-                    return TimeoutEligibility::NotEligible {
+                    TimeoutEligibility::NotEligible {
                         reason: "no evidence of agent activity (empty stdout/stderr) — timeout may have occurred on an idle agent".to_string(),
-                    };
+                    }
                 }
                 ActivityEvidence::HasToolUseCalls
                 | ActivityEvidence::HasStructuredOutput
                 | ActivityEvidence::SubstantialElapsedTime { .. } => {
                     // At least one evidence marker — qualifies
                     let evidence_desc = match activity {
-                        ActivityEvidence::HasToolUseCalls => "agent emitted tool-use calls".to_string(),
-                        ActivityEvidence::HasStructuredOutput => "agent produced structured output".to_string(),
+                        ActivityEvidence::HasToolUseCalls => {
+                            "agent emitted tool-use calls".to_string()
+                        }
+                        ActivityEvidence::HasStructuredOutput => {
+                            "agent produced structured output".to_string()
+                        }
                         ActivityEvidence::SubstantialElapsedTime { .. } => {
-                            format!("substantial time elapsed ({} of timeout budget used)",
-                                format_percent(elapsed_fraction))
+                            format!(
+                                "substantial time elapsed ({} of timeout budget used)",
+                                format_percent(elapsed_fraction)
+                            )
                         }
                         ActivityEvidence::NoEvidence => unreachable!(),
                     };
 
-                    return TimeoutEligibility::Eligible {
+                    TimeoutEligibility::Eligible {
                         reason: format!(
                             "agent wall-clock timeout with evidence of productive work — {} (elapsed: {:.2} of timeout)",
                             evidence_desc,
                             elapsed_fraction
                         ),
-                    };
+                    }
                 }
             }
         }
@@ -280,19 +300,18 @@ pub fn classify_timeout_eligibility(
                         .map(|n| n.as_str())
                         .unwrap_or("validation gate");
 
-                    return TimeoutEligibility::Eligible {
+                    TimeoutEligibility::Eligible {
                         reason: format!(
                             "handler timeout on {} with substantial elapsed time ({:.2} of timeout)",
                             gate,
                             elapsed_fraction
                         ),
-                    };
+                    }
                 }
-                _ => {
-                    return TimeoutEligibility::NotEligible {
-                        reason: "handler timeout without evidence of substantial validation work".to_string(),
-                    };
-                }
+                _ => TimeoutEligibility::NotEligible {
+                    reason: "handler timeout without evidence of substantial validation work"
+                        .to_string(),
+                },
             }
         }
 
@@ -365,7 +384,7 @@ fn extract_gate_name(stderr: &str) -> Option<String> {
     for pattern in &patterns {
         if let Some(idx) = stderr.find(pattern) {
             let start = idx + pattern.len();
-            if let Some(end) = stderr[start..].find(|c| c == '\'' || c == '"' || c == '`') {
+            if let Some(end) = stderr[start..].find(['\'', '"', '`']) {
                 return Some(stderr[start..start + end].to_string());
             }
         }
@@ -466,7 +485,7 @@ mod tests {
 
         let eligibility = classify_timeout_eligibility(
             &outcome,
-            Duration::from_secs(2700), // 45 minutes of a 1-hour timeout
+            Duration::from_secs(3540), // 59 minutes of a 1-hour timeout
             &test_policy(),
         );
 
@@ -482,11 +501,8 @@ mod tests {
             stderr: "".to_string(),
         };
 
-        let eligibility = classify_timeout_eligibility(
-            &outcome,
-            Duration::from_secs(3600),
-            &test_policy(),
-        );
+        let eligibility =
+            classify_timeout_eligibility(&outcome, Duration::from_secs(3600), &test_policy());
 
         assert!(!eligibility.is_eligible());
         assert!(eligibility.reason().contains("interrupted by signal"));
@@ -500,11 +516,8 @@ mod tests {
             stderr: "".to_string(),
         };
 
-        let eligibility = classify_timeout_eligibility(
-            &outcome,
-            Duration::from_secs(3600),
-            &test_policy(),
-        );
+        let eligibility =
+            classify_timeout_eligibility(&outcome, Duration::from_secs(3600), &test_policy());
 
         assert!(!eligibility.is_eligible());
         assert!(eligibility.reason().contains("signal"));
@@ -525,7 +538,9 @@ mod tests {
         );
 
         assert!(!eligibility.is_eligible());
-        assert!(eligibility.reason().contains("insufficient elapsed fraction"));
+        assert!(eligibility
+            .reason()
+            .contains("insufficient elapsed fraction"));
     }
 
     #[test]
@@ -543,7 +558,9 @@ mod tests {
         );
 
         assert!(!eligibility.is_eligible());
-        assert!(eligibility.reason().contains("no evidence of agent activity"));
+        assert!(eligibility
+            .reason()
+            .contains("no evidence of agent activity"));
     }
 
     #[test]
@@ -557,11 +574,8 @@ mod tests {
         let mut policy = test_policy();
         policy.enabled = false;
 
-        let eligibility = classify_timeout_eligibility(
-            &outcome,
-            Duration::from_secs(3540),
-            &policy,
-        );
+        let eligibility =
+            classify_timeout_eligibility(&outcome, Duration::from_secs(3540), &policy);
 
         assert!(!eligibility.is_eligible());
         assert!(eligibility.reason().contains("disabled"));
@@ -578,14 +592,13 @@ mod tests {
         let mut policy = test_policy();
         policy.agent_wallclock_timeout = false;
 
-        let eligibility = classify_timeout_eligibility(
-            &outcome,
-            Duration::from_secs(3540),
-            &policy,
-        );
+        let eligibility =
+            classify_timeout_eligibility(&outcome, Duration::from_secs(3540), &policy);
 
         assert!(!eligibility.is_eligible());
-        assert!(eligibility.reason().contains("agent wall-clock timeouts are not enabled"));
+        assert!(eligibility
+            .reason()
+            .contains("agent wall-clock timeouts are not enabled"));
     }
 
     #[test]
@@ -594,7 +607,10 @@ mod tests {
         assert_eq!(extract_gate_name(stderr), Some("cargo-test".to_string()));
 
         let stderr = "gate \"integration-tests\" timed out after 120s";
-        assert_eq!(extract_gate_name(stderr), Some("integration-tests".to_string()));
+        assert_eq!(
+            extract_gate_name(stderr),
+            Some("integration-tests".to_string())
+        );
 
         let stderr = "no gate here";
         assert_eq!(extract_gate_name(stderr), None);

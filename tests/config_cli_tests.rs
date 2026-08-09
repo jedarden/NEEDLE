@@ -7,9 +7,9 @@
 //! Also includes integration tests for config file deserialization.
 
 use clap::Parser;
+use needle::config::ConfigLoader;
 use std::path::PathBuf;
 use tempfile::TempDir;
-use needle::config::{Config, ConfigLoader};
 
 /// Test that `--set worker.max_workers 10` (KEY VALUE format) parses without clap error.
 #[test]
@@ -390,8 +390,8 @@ fn worker_binary_path_deserializes_from_yaml_file() {
 "#;
     std::fs::write(&config_path, yaml_content).expect("failed to write config file");
 
-    let config = ConfigLoader::load_from_path(&config_path)
-        .expect("failed to load config from file");
+    let config =
+        ConfigLoader::load_from_path(&config_path).expect("failed to load config from file");
 
     assert_eq!(
         config.worker.worker_binary_path,
@@ -410,8 +410,8 @@ fn worker_binary_path_default_when_omitted_from_file() {
 "#;
     std::fs::write(&config_path, yaml_content).expect("failed to write config file");
 
-    let config = ConfigLoader::load_from_path(&config_path)
-        .expect("failed to load config from file");
+    let config =
+        ConfigLoader::load_from_path(&config_path).expect("failed to load config from file");
 
     assert_eq!(config.worker.worker_binary_path, None);
 }
@@ -426,8 +426,8 @@ fn worker_binary_path_tilde_expansion_from_file() {
 "#;
     std::fs::write(&config_path, yaml_content).expect("failed to write config file");
 
-    let mut config = ConfigLoader::load_from_path(&config_path)
-        .expect("failed to load config from file");
+    let config =
+        ConfigLoader::load_from_path(&config_path).expect("failed to load config from file");
 
     // Verify tilde was expanded
     assert!(config.worker.worker_binary_path.is_some());
@@ -464,8 +464,8 @@ fn worker_binary_path_nonexistent_path_accepted() {
 "#;
     std::fs::write(&config_path, yaml_content).expect("failed to write config file");
 
-    let config = ConfigLoader::load_from_path(&config_path)
-        .expect("failed to load config from file");
+    let config =
+        ConfigLoader::load_from_path(&config_path).expect("failed to load config from file");
 
     assert_eq!(
         config.worker.worker_binary_path,
@@ -475,7 +475,9 @@ fn worker_binary_path_nonexistent_path_accepted() {
     // Validation should not fail (path validation happens at runtime)
     let errors = ConfigLoader::validate(&config);
     assert!(
-        !errors.iter().any(|e| e.field == "worker.worker_binary_path"),
+        !errors
+            .iter()
+            .any(|e| e.field == "worker.worker_binary_path"),
         "path existence should not be validated at config load time"
     );
 }

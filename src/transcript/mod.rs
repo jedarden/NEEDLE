@@ -349,7 +349,10 @@ impl TranscriptDiscovery {
     /// `claude_dir` is the path to the `.claude` directory (defaults to `~/.claude`).
     /// `max_sessions` limits the number of sessions returned (sorted by recency).
     pub fn new(workspace: &Path, claude_dir: Option<&Path>, max_sessions: usize) -> Self {
-        let home_claude = PathBuf::from(std::env::var("HOME").unwrap()).join(".claude");
+        let home_claude = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".claude");
         let claude_root = claude_dir.unwrap_or(&home_claude);
         let claude_projects_dir = claude_root.join("projects");
 

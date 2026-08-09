@@ -334,7 +334,9 @@ impl TraceCapture {
                             path = %path.display(),
                             "failed to remove trace file during prune"
                         );
-                        return Err(e).with_context(|| format!("failed to prune trace file: {}", path.display()));
+                        return Err(e).with_context(|| {
+                            format!("failed to prune trace file: {}", path.display())
+                        });
                     }
                 }
             }
@@ -556,7 +558,9 @@ fn prune_trace_dir(trace_dir: &Path) -> Result<()> {
                         path = %path.display(),
                         "failed to remove trace file during cleanup"
                     );
-                    return Err(e).with_context(|| format!("failed to prune trace file: {}", path.display()));
+                    return Err(e).with_context(|| {
+                        format!("failed to prune trace file: {}", path.display())
+                    });
                 }
             }
         }

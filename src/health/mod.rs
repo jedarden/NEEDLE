@@ -361,7 +361,8 @@ impl HealthMonitor {
                     "failed to remove heartbeat file during cleanup"
                 );
                 // Return with context for upstream handling
-                Err(e).with_context(|| format!("failed to remove heartbeat file: {}", path.display()))
+                Err(e)
+                    .with_context(|| format!("failed to remove heartbeat file: {}", path.display()))
             }
         }
     }
@@ -1232,7 +1233,7 @@ mod tests {
         monitor.stop();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn heartbeat_updates_with_shared_state() {
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
@@ -1254,9 +1255,8 @@ mod tests {
         );
         monitor.update_beads_processed(5);
 
-        // Wait for the emitter to write a new heartbeat.
-        // With start_paused, we advance time instead of sleeping.
-        tokio::time::advance(Duration::from_millis(1500)).await;
+        // The emitter is a standard thread, so wait on wall-clock time.
+        std::thread::sleep(Duration::from_millis(1500));
 
         let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
         let data: HeartbeatData = serde_json::from_str(&content).unwrap();
@@ -1736,9 +1736,9 @@ mod tests {
 
         let mut config = Config::default();
         config.workspace.home = dir.path().to_path_buf();
-        // Use a short interval for fast tests (100ms instead of 30s)
-        // This validates the same periodic refresh logic as production
-        config.health.heartbeat_interval_secs = 0; // 0 = use default (1 second for tests)
+        // Use a one-second interval so the test exercises the real emitter
+        // without spending a minute and a half waiting on wall-clock time.
+        config.health.heartbeat_interval_secs = 1;
         config.health.heartbeat_ttl_secs = 300;
 
         let mut monitor = HealthMonitor::new(
@@ -1792,8 +1792,8 @@ mod tests {
             let before_data: HeartbeatData = serde_json::from_str(&before_content).unwrap();
             let before_timestamp = before_data.last_heartbeat;
 
-            // Wait for the next refresh (30 seconds + 2 second buffer)
-            std::thread::sleep(Duration::from_secs(32));
+            // Wait for at least one one-second refresh.
+            std::thread::sleep(Duration::from_secs(2));
 
             // Verify the file has been updated
             let after_content = std::fs::read_to_string(&path).unwrap();
@@ -1805,8 +1805,8 @@ mod tests {
             // The timestamp should have advanced by approximately the interval
             // Allow some tolerance for system load and scheduling delays
             assert!(
-                (28..=35).contains(&time_diff),
-                "heartbeat should refresh every ~30 seconds, got {} seconds difference between updates (cycle {})",
+                (1..=3).contains(&time_diff),
+                "heartbeat should refresh every ~1 second, got {} seconds difference between updates (cycle {})",
                 time_diff,
                 cycle
             );
@@ -2920,12 +2920,12 @@ mod tests {
         // Create a directory at the path (removing a directory will fail)
         std::fs::create_dir(&path).unwrap();
 
-        // Attempting to cleanup a directory instead of a file should succeed
-        // (errors are logged but not returned)
+        // Attempting to cleanup a directory instead of a file reports the
+        // removal failure while leaving the directory intact.
         let result = monitor.cleanup_heartbeat_file();
         assert!(
-            result.is_ok(),
-            "cleanup should succeed even when removal fails (errors are logged, not returned)"
+            result.is_err(),
+            "cleanup should return the removal failure after logging it"
         );
 
         // The directory should still exist (removal failed, but execution continued)
@@ -3031,7 +3031,10 @@ mod tests {
             cleanup_path, actual_path,
             "shutdown handler must receive consistent path for cleanup"
         );
-        assert!(cleanup_path.exists(), "shutdown handler must be able to access the file");
+        assert!(
+            cleanup_path.exists(),
+            "shutdown handler must be able to access the file"
+        );
 
         // Verify cleanup works using the path (as shutdown handler would)
         monitor.stop();

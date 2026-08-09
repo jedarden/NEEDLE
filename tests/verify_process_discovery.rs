@@ -7,7 +7,6 @@
 //!
 //! See bead bf-4lkno for full context.
 
-
 #[test]
 #[cfg(unix)]
 fn test_process_table_reconciliation() {

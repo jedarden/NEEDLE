@@ -6550,13 +6550,19 @@ mod tests {
         let args = vec!["=value".to_string()];
         let result = parse_key_value_pairs(args);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid KEY=VALUE format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid KEY=VALUE format"));
 
         // Test invalid KEY=VALUE format (empty value)
         let args = vec!["key=".to_string()];
         let result = parse_key_value_pairs(args);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid KEY=VALUE format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid KEY=VALUE format"));
     }
 
     #[test]

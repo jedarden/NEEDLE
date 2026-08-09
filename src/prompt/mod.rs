@@ -371,7 +371,13 @@ fn extra_vars_for_template(name: &str) -> Option<&'static [&'static str]> {
         "pluck" => Some(&[]),
         "split" => Some(&["{failure_count}"]),
         "mitosis" => Some(&["{existing_children}"]),
-        "mitosis-timeout" => Some(&["{existing_children}", "{elapsed_duration}", "{timeout_duration}", "{elapsed_percent}", "{activity_evidence}"]),
+        "mitosis-timeout" => Some(&[
+            "{existing_children}",
+            "{elapsed_duration}",
+            "{timeout_duration}",
+            "{elapsed_percent}",
+            "{activity_evidence}",
+        ]),
         "weave" => Some(&["{doc_files}", "{existing_beads}"]),
         "unravel" => Some(&["{human_bead_context}"]),
         "pulse" => Some(&["{scan_results}", "{existing_beads}"]),
@@ -381,7 +387,15 @@ fn extra_vars_for_template(name: &str) -> Option<&'static [&'static str]> {
 
 /// All known built-in template names (used in tests to verify defaults).
 #[cfg(test)]
-const KNOWN_TEMPLATE_NAMES: &[&str] = &["pluck", "split", "mitosis", "mitosis-timeout", "weave", "unravel", "pulse"];
+const KNOWN_TEMPLATE_NAMES: &[&str] = &[
+    "pluck",
+    "split",
+    "mitosis",
+    "mitosis-timeout",
+    "weave",
+    "unravel",
+    "pulse",
+];
 
 // ──────────────────────────────────────────────────────────────────────────────
 // BuiltPrompt
@@ -401,6 +415,14 @@ pub struct BuiltPrompt {
     /// Version tag identifying which variant/version was used
     /// (e.g., `"pluck-default"`, `"pluck-v2"`).
     pub template_version: String,
+}
+
+/// Dynamic context added to a timeout-triggered mitosis prompt.
+pub struct MitosisTimeoutContext<'a> {
+    pub elapsed_duration: &'a str,
+    pub timeout_duration: &'a str,
+    pub elapsed_percent: &'a str,
+    pub activity_evidence: &'a str,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -440,7 +462,10 @@ impl PromptBuilder {
         templates.insert("pluck".to_string(), DEFAULT_PLUCK_TEMPLATE.to_string());
         templates.insert("split".to_string(), DEFAULT_SPLIT_TEMPLATE.to_string());
         templates.insert("mitosis".to_string(), DEFAULT_MITOSIS_TEMPLATE.to_string());
-        templates.insert("mitosis-timeout".to_string(), DEFAULT_MITOSIS_TIMEOUT_TEMPLATE.to_string());
+        templates.insert(
+            "mitosis-timeout".to_string(),
+            DEFAULT_MITOSIS_TIMEOUT_TEMPLATE.to_string(),
+        );
         templates.insert("weave".to_string(), DEFAULT_WEAVE_TEMPLATE.to_string());
         templates.insert("unravel".to_string(), DEFAULT_UNRAVEL_TEMPLATE.to_string());
         templates.insert("pulse".to_string(), DEFAULT_PULSE_TEMPLATE.to_string());
@@ -805,10 +830,7 @@ impl PromptBuilder {
         workspace: &Path,
         worker_id: &str,
         existing_children: &str,
-        elapsed_duration: &str,
-        timeout_duration: &str,
-        elapsed_percent: &str,
-        activity_evidence: &str,
+        timeout: &MitosisTimeoutContext<'_>,
     ) -> Result<BuiltPrompt> {
         self.build_with_vars(
             bead,
@@ -817,10 +839,10 @@ impl PromptBuilder {
             "mitosis-timeout",
             &[
                 ("{existing_children}", existing_children),
-                ("{elapsed_duration}", elapsed_duration),
-                ("{timeout_duration}", timeout_duration),
-                ("{elapsed_percent}", elapsed_percent),
-                ("{activity_evidence}", activity_evidence),
+                ("{elapsed_duration}", timeout.elapsed_duration),
+                ("{timeout_duration}", timeout.timeout_duration),
+                ("{elapsed_percent}", timeout.elapsed_percent),
+                ("{activity_evidence}", timeout.activity_evidence),
             ],
         )
     }

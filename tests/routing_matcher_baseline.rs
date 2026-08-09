@@ -19,15 +19,15 @@ fn make_rule(pattern: &str, adapter: &str) -> RoutingRule {
 
 #[test]
 fn routing_baseline_multiple_rules_same_adapter() {
-    /// Baseline test documenting CURRENT matcher behavior when multiple rules
-    /// both match the same model AND route to the same adapter.
-    ///
-    /// This test verifies that the matcher implements "first-match-wins" behavior:
-    /// - When multiple rules match a model, the FIRST matching rule determines the adapter
-    /// - The matcher stops checking rules after the first match
-    /// - Even if later rules would also match, they are not evaluated
-    ///
-    /// Current behavior: The first rule in the list that matches determines routing.
+    // Baseline test documenting CURRENT matcher behavior when multiple rules
+    // both match the same model AND route to the same adapter.
+    //
+    // This test verifies that the matcher implements "first-match-wins" behavior:
+    // - When multiple rules match a model, the FIRST matching rule determines the adapter
+    // - The matcher stops checking rules after the first match
+    // - Even if later rules would also match, they are not evaluated
+    //
+    // Current behavior: The first rule in the list that matches determines routing.
     // Configure two rules that both match "claude-sonnet-4-6" AND route to
     // the same adapter "claude-print":
     // - First rule: "claude-.*" -> claude-print (broad pattern, matches first)
@@ -60,14 +60,14 @@ fn routing_baseline_multiple_rules_same_adapter() {
 
 #[test]
 fn routing_baseline_multiple_rules_different_adapters() {
-    /// Baseline test documenting CURRENT matcher behavior when multiple rules
-    /// match the same model but route to DIFFERENT adapters.
-    ///
-    /// This test verifies that "first-match-wins" is enforced even when
-    /// later rules would route to different adapters.
-    ///
-    /// Current behavior: The first matching rule determines routing, regardless
-    /// of whether later rules might be "more appropriate".
+    // Baseline test documenting CURRENT matcher behavior when multiple rules
+    // match the same model but route to DIFFERENT adapters.
+    //
+    // This test verifies that "first-match-wins" is enforced even when
+    // later rules would route to different adapters.
+    //
+    // Current behavior: The first matching rule determines routing, regardless
+    // of whether later rules might be "more appropriate".
     // Configure three rules that all match "claude-sonnet-4-6":
     // - First rule: "claude-.*" -> claude-print (broad, matches first)
     // - Second rule: "claude-sonnet-.*" -> claude-code (more specific, never checked)
@@ -100,12 +100,12 @@ fn routing_baseline_multiple_rules_different_adapters() {
 
 #[test]
 fn routing_baseline_order_matters() {
-    /// Baseline test documenting that rule ORDER is significant.
-    ///
-    /// This test verifies that swapping rule order changes the outcome,
-    /// confirming that the matcher uses first-match-wins semantics.
-    ///
-    /// Current behavior: Rules are evaluated in order, first match wins.
+    // Baseline test documenting that rule ORDER is significant.
+    //
+    // This test verifies that swapping rule order changes the outcome,
+    // confirming that the matcher uses first-match-wins semantics.
+    //
+    // Current behavior: Rules are evaluated in order, first match wins.
     // Configure rules with specific BEFORE broad:
     // - First rule: "claude-sonnet-.*" -> claude-code (specific, matches first)
     // - Second rule: "claude-.*" -> claude-print (broad, would also match but not checked)
@@ -136,14 +136,14 @@ fn routing_baseline_order_matters() {
 
 #[test]
 fn routing_baseline_first_match_stops_evaluation() {
-    /// Baseline test to verify whether the matcher stops at the first match
-    /// or continues checking all rules.
-    ///
-    /// This test uses counter-like adapters to detect whether all rules are
-    /// checked or only the first match.
-    ///
-    /// Current behavior: The matcher stops evaluation after the first match
-    /// and does not check subsequent rules.
+    // Baseline test to verify whether the matcher stops at the first match
+    // or continues checking all rules.
+    //
+    // This test uses counter-like adapters to detect whether all rules are
+    // checked or only the first match.
+    //
+    // Current behavior: The matcher stops evaluation after the first match
+    // and does not check subsequent rules.
     // Configure rules where first match should stop evaluation:
     // - First rule: specific pattern -> adapter-1
     // - Second rule: broader pattern -> adapter-2 (should NOT be checked)
@@ -178,14 +178,14 @@ fn routing_baseline_first_match_stops_evaluation() {
 
 #[test]
 fn routing_baseline_invalid_pattern_skipped() {
-    /// Baseline test documenting CURRENT matcher behavior when an invalid
-    /// pattern precedes valid matching patterns.
-    ///
-    /// This test verifies that invalid patterns are skipped gracefully and
-    /// the first valid matching pattern determines the adapter.
-    ///
-    /// Current behavior: Invalid regex patterns are logged as warnings and
-    /// skipped, then the next valid pattern is checked.
+    // Baseline test documenting CURRENT matcher behavior when an invalid
+    // pattern precedes valid matching patterns.
+    //
+    // This test verifies that invalid patterns are skipped gracefully and
+    // the first valid matching pattern determines the adapter.
+    //
+    // Current behavior: Invalid regex patterns are logged as warnings and
+    // skipped, then the next valid pattern is checked.
     // Configure rules with invalid pattern in the middle:
     // - First rule: valid pattern, matches
     // - Second rule: INVALID pattern (should be skipped with warning)
@@ -219,17 +219,17 @@ fn routing_baseline_invalid_pattern_skipped() {
 
 #[test]
 fn routing_baseline_specific_rule_wins_when_first() {
-    /// Test that verifies first-match-wins semantics by showing that a
-    /// more-specific rule wins when positioned before a less-specific rule.
-    ///
-    /// This test demonstrates:
-    /// 1. Both rules match the model
-    /// 2. The more-specific rule is positioned first
-    /// 3. The first (more-specific) rule wins
-    /// 4. Rule order matters (different order = different result)
-    ///
-    /// Current behavior: The first matching rule in the list determines routing,
-    /// regardless of whether later rules might be more specific.
+    // Test that verifies first-match-wins semantics by showing that a
+    // more-specific rule wins when positioned before a less-specific rule.
+    //
+    // This test demonstrates:
+    // 1. Both rules match the model
+    // 2. The more-specific rule is positioned first
+    // 3. The first (more-specific) rule wins
+    // 4. Rule order matters (different order = different result)
+    //
+    // Current behavior: The first matching rule in the list determines routing,
+    // regardless of whether later rules might be more specific.
     // Configure rules with specific BEFORE broad:
     // - First rule: "claude-sonnet-.*" -> claude-code (specific, matches first)
     // - Second rule: "claude-.*" -> claude-print (broad, would also match but not checked)
@@ -259,15 +259,15 @@ fn routing_baseline_specific_rule_wins_when_first() {
 
 #[test]
 fn routing_baseline_broad_rule_wins_when_first() {
-    /// Test that verifies first-match-wins semantics by showing that a
-    /// less-specific (broad) rule wins when positioned before a more-specific rule.
-    ///
-    /// This test complements `routing_baseline_specific_rule_wins_when_first`
-    /// by showing the REVERSE case: when the broad rule comes first, the
-    /// specific rule never gets checked.
-    ///
-    /// Current behavior: Rule order is significant - the first matching rule
-    /// wins, even if a later rule would be "better" or more specific.
+    // Test that verifies first-match-wins semantics by showing that a
+    // less-specific (broad) rule wins when positioned before a more-specific rule.
+    //
+    // This test complements `routing_baseline_specific_rule_wins_when_first`
+    // by showing the REVERSE case: when the broad rule comes first, the
+    // specific rule never gets checked.
+    //
+    // Current behavior: Rule order is significant - the first matching rule
+    // wins, even if a later rule would be "better" or more specific.
     // Configure rules with broad BEFORE specific (opposite order):
     // - First rule: "claude-.*" -> claude-print (broad, matches first)
     // - Second rule: "claude-sonnet-.*" -> claude-code (specific, never checked)

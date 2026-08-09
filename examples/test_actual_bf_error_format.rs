@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example test_actual_bf_error_format
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 
 // Import StrandError from the crate
 
@@ -18,7 +18,8 @@ use anyhow::{anyhow, Context, Result};
 fn simulate_actual_bf_error() -> Result<()> {
     let args = ["list", "--json", "--limit", "999999"];
     let code = 1;
-    let stderr = "Error: database is locked\nsqlite error: 5";
+    let stderr = std::env::var("BF_ERROR_EXAMPLE_STDERR")
+        .unwrap_or_else(|_| "Error: database is locked\nsqlite error: 5".to_string());
 
     // This is the ACTUAL current structure
     let base_error = anyhow!("bf {args:?} exited with code {code}");

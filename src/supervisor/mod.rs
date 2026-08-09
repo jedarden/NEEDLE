@@ -848,9 +848,9 @@ mod tests {
 
     #[tokio::test]
     async fn supervisor_emits_binary_resolved_event_on_startup() {
-        use std::sync::{Arc, Mutex};
-        use crate::config::{Config, WorkerConfig, AgentConfig, TelemetryConfig, WorkspaceConfig};
+        use crate::config::{AgentConfig, Config, TelemetryConfig, WorkerConfig, WorkspaceConfig};
         use crate::telemetry::{EventKind, Sink, Telemetry, TelemetryEvent};
+        use std::sync::{Arc, Mutex};
 
         // Create a custom sink that captures events
         #[derive(Clone)]
@@ -930,7 +930,8 @@ mod tests {
 
         // Manually replicate the binary resolution and logging from Supervisor::new()
         // This tests the core logic without requiring full bead store setup
-        let resolved = resolve_worker_binary_with_source(supervisor_config.worker_binary_path.as_ref());
+        let resolved =
+            resolve_worker_binary_with_source(supervisor_config.worker_binary_path.as_ref());
 
         let source_display = match resolved.source {
             BinarySource::ConfigOverride => "config override (worker.worker_binary_path)",
@@ -960,16 +961,30 @@ mod tests {
         // Verify the event data contains expected fields
         assert!(event.data.is_object(), "event data should be an object");
         let data = event.data.as_object().unwrap();
-        assert!(data.contains_key("worker_binary"), "event should contain worker_binary field");
-        assert!(data.contains_key("source"), "event should contain source field");
+        assert!(
+            data.contains_key("worker_binary"),
+            "event should contain worker_binary field"
+        );
+        assert!(
+            data.contains_key("source"),
+            "event should contain source field"
+        );
 
         // Verify the source indicates current_exe() (since we didn't set an override)
         let source = data.get("source").and_then(|v| v.as_str());
-        assert_eq!(source, Some("current_exe()"), "source should be current_exe() when no override is set");
+        assert_eq!(
+            source,
+            Some("current_exe()"),
+            "source should be current_exe() when no override is set"
+        );
 
         // Verify the worker_binary is not just "needle" (the pre-#11 behavior)
         let worker_binary = data.get("worker_binary").and_then(|v| v.as_str());
         assert!(worker_binary.is_some(), "worker_binary should be present");
-        assert_ne!(worker_binary, Some("needle"), "worker_binary should not be bare 'needle' lookup when current_exe() succeeds");
+        assert_ne!(
+            worker_binary,
+            Some("needle"),
+            "worker_binary should not be bare 'needle' lookup when current_exe() succeeds"
+        );
     }
 }

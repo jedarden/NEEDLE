@@ -817,6 +817,7 @@ async fn real_br_mitosis_precondition_checks() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        ..MitosisConfig::default()
     };
     let evaluator = MitosisEvaluator::new(
         disabled_config,
@@ -854,6 +855,7 @@ async fn real_br_mitosis_precondition_checks() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        ..MitosisConfig::default()
     };
     let evaluator2 = MitosisEvaluator::new(
         enabled_config,
@@ -951,6 +953,7 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        ..MitosisConfig::default()
     };
 
     let dispatcher = Arc::new(create_test_dispatcher());

@@ -2505,7 +2505,11 @@ impl ConfigLoader {
                     }
                     "strands.mitosis.timeout_triggered.agent_wallclock_timeout" => {
                         if let Ok(v) = value.parse::<bool>() {
-                            config.strands.mitosis.timeout_triggered.agent_wallclock_timeout = v;
+                            config
+                                .strands
+                                .mitosis
+                                .timeout_triggered
+                                .agent_wallclock_timeout = v;
                             sources.insert(config_path, source);
                         } else {
                             tracing::warn!(
@@ -2529,7 +2533,11 @@ impl ConfigLoader {
                     }
                     "strands.mitosis.timeout_triggered.min_elapsed_fraction" => {
                         if let Ok(v) = value.parse::<f64>() {
-                            config.strands.mitosis.timeout_triggered.min_elapsed_fraction = v;
+                            config
+                                .strands
+                                .mitosis
+                                .timeout_triggered
+                                .min_elapsed_fraction = v;
                             sources.insert(config_path, source);
                         } else {
                             tracing::warn!(
@@ -2732,7 +2740,9 @@ impl ConfigLoader {
             }
 
             // Validate min_elapsed_fraction range.
-            if timeout_policy.min_elapsed_fraction < 0.0 || timeout_policy.min_elapsed_fraction > 1.0 {
+            if timeout_policy.min_elapsed_fraction < 0.0
+                || timeout_policy.min_elapsed_fraction > 1.0
+            {
                 errors.push(ConfigError {
                     field: "strands.mitosis.timeout_triggered.min_elapsed_fraction".to_string(),
                     message: "must be in range [0.0, 1.0]".to_string(),
@@ -2793,7 +2803,12 @@ impl ConfigLoader {
             ),
             (
                 "strands.mitosis.timeout_triggered.handler_timeout",
-                config.strands.mitosis.timeout_triggered.handler_timeout.to_string(),
+                config
+                    .strands
+                    .mitosis
+                    .timeout_triggered
+                    .handler_timeout
+                    .to_string(),
             ),
             (
                 "strands.mitosis.timeout_triggered.min_elapsed_fraction",
@@ -2890,6 +2905,14 @@ fn expand_tilde_option(path: &Option<PathBuf>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static SUPERVISOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_supervisor_env() -> std::sync::MutexGuard<'static, ()> {
+        SUPERVISOR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn default_config_is_valid() {
@@ -4072,6 +4095,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_defaults() {
+        let _guard = lock_supervisor_env();
         // Ensure no env vars are set
         std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
         std::env::remove_var("SUPERVISOR_SOCKET_PATH");
@@ -4083,6 +4107,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_heartbeat_only() {
+        let _guard = lock_supervisor_env();
         std::env::remove_var("SUPERVISOR_SOCKET_PATH");
         std::env::set_var("SUPERVISOR_HEARTBEAT_PATH", "/custom/heartbeat.json");
 
@@ -4098,6 +4123,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_socket_only() {
+        let _guard = lock_supervisor_env();
         std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
         std::env::set_var("SUPERVISOR_SOCKET_PATH", "/tmp/supervisor.sock");
 
@@ -4113,6 +4139,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_both_paths() {
+        let _guard = lock_supervisor_env();
         std::env::set_var(
             "SUPERVISOR_HEARTBEAT_PATH",
             "/var/lib/needle/heartbeat.json",
@@ -4135,6 +4162,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_expands_tilde() {
+        let _guard = lock_supervisor_env();
         std::env::set_var("SUPERVISOR_HEARTBEAT_PATH", "~/heartbeat.json");
         std::env::set_var("SUPERVISOR_SOCKET_PATH", "~/supervisor.sock");
 
@@ -5070,7 +5098,9 @@ agent:
         // Config validation should not fail for invalid paths
         let errors = ConfigLoader::validate(&config);
         assert!(
-            !errors.iter().any(|e| e.field == "worker.worker_binary_path"),
+            !errors
+                .iter()
+                .any(|e| e.field == "worker.worker_binary_path"),
             "worker_binary_path should not be validated during config load, got errors: {:?}",
             errors
         );
@@ -5228,8 +5258,12 @@ agent:
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "strands.mitosis.timeout_triggered"
-                && e.message.contains("at least one of agent_wallclock_timeout or handler_timeout must be true")),
+            errors
+                .iter()
+                .any(|e| e.field == "strands.mitosis.timeout_triggered"
+                    && e.message.contains(
+                        "at least one of agent_wallclock_timeout or handler_timeout must be true"
+                    )),
             "expected validation error for enabled policy without qualifiers, got: {:?}",
             errors
         );
@@ -5239,12 +5273,21 @@ agent:
     fn timeout_triggered_policy_min_elapsed_fraction_out_of_range_fails_validation() {
         let mut config = Config::default();
         config.strands.mitosis.timeout_triggered.enabled = true;
-        config.strands.mitosis.timeout_triggered.agent_wallclock_timeout = true;
-        config.strands.mitosis.timeout_triggered.min_elapsed_fraction = 1.5; // > 1.0
+        config
+            .strands
+            .mitosis
+            .timeout_triggered
+            .agent_wallclock_timeout = true;
+        config
+            .strands
+            .mitosis
+            .timeout_triggered
+            .min_elapsed_fraction = 1.5; // > 1.0
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "strands.mitosis.timeout_triggered.min_elapsed_fraction"
+            errors.iter().any(|e| e.field
+                == "strands.mitosis.timeout_triggered.min_elapsed_fraction"
                 && e.message.contains("must be in range [0.0, 1.0]")),
             "expected validation error for min_elapsed_fraction > 1.0, got: {:?}",
             errors
@@ -5255,12 +5298,21 @@ agent:
     fn timeout_triggered_policy_min_elapsed_fraction_negative_fails_validation() {
         let mut config = Config::default();
         config.strands.mitosis.timeout_triggered.enabled = true;
-        config.strands.mitosis.timeout_triggered.agent_wallclock_timeout = true;
-        config.strands.mitosis.timeout_triggered.min_elapsed_fraction = -0.1; // < 0.0
+        config
+            .strands
+            .mitosis
+            .timeout_triggered
+            .agent_wallclock_timeout = true;
+        config
+            .strands
+            .mitosis
+            .timeout_triggered
+            .min_elapsed_fraction = -0.1; // < 0.0
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "strands.mitosis.timeout_triggered.min_elapsed_fraction"
+            errors.iter().any(|e| e.field
+                == "strands.mitosis.timeout_triggered.min_elapsed_fraction"
                 && e.message.contains("must be in range [0.0, 1.0]")),
             "expected validation error for min_elapsed_fraction < 0.0, got: {:?}",
             errors
@@ -5271,12 +5323,22 @@ agent:
     fn timeout_triggered_policy_valid_configuration_passes_validation() {
         let mut config = Config::default();
         config.strands.mitosis.timeout_triggered.enabled = true;
-        config.strands.mitosis.timeout_triggered.agent_wallclock_timeout = true;
-        config.strands.mitosis.timeout_triggered.min_elapsed_fraction = 0.8;
+        config
+            .strands
+            .mitosis
+            .timeout_triggered
+            .agent_wallclock_timeout = true;
+        config
+            .strands
+            .mitosis
+            .timeout_triggered
+            .min_elapsed_fraction = 0.8;
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            !errors.iter().any(|e| e.field.starts_with("strands.mitosis.timeout_triggered")),
+            !errors
+                .iter()
+                .any(|e| e.field.starts_with("strands.mitosis.timeout_triggered")),
             "expected no validation errors for valid timeout-triggered policy, got: {:?}",
             errors
         );
@@ -5306,7 +5368,13 @@ agent:
         ConfigLoader::apply_env_overrides(&mut config, &mut sources);
         std::env::remove_var(key);
 
-        assert!(config.strands.mitosis.timeout_triggered.agent_wallclock_timeout);
+        assert!(
+            config
+                .strands
+                .mitosis
+                .timeout_triggered
+                .agent_wallclock_timeout
+        );
         assert!(sources.contains_key("strands.mitosis.timeout_triggered.agent_wallclock_timeout"));
     }
 
@@ -5334,7 +5402,14 @@ agent:
         ConfigLoader::apply_env_overrides(&mut config, &mut sources);
         std::env::remove_var(key);
 
-        assert_eq!(config.strands.mitosis.timeout_triggered.min_elapsed_fraction, 0.95);
+        assert_eq!(
+            config
+                .strands
+                .mitosis
+                .timeout_triggered
+                .min_elapsed_fraction,
+            0.95
+        );
         assert!(sources.contains_key("strands.mitosis.timeout_triggered.min_elapsed_fraction"));
     }
 
@@ -5351,7 +5426,10 @@ agent:
         let decoded: TimeoutTriggeredPolicy = serde_yaml::from_str(&yaml).unwrap();
 
         assert_eq!(decoded.enabled, policy.enabled);
-        assert_eq!(decoded.agent_wallclock_timeout, policy.agent_wallclock_timeout);
+        assert_eq!(
+            decoded.agent_wallclock_timeout,
+            policy.agent_wallclock_timeout
+        );
         assert_eq!(decoded.handler_timeout, policy.handler_timeout);
         assert_eq!(decoded.min_elapsed_fraction, policy.min_elapsed_fraction);
     }

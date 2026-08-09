@@ -937,6 +937,7 @@ async fn mitosis_creates_children_on_first_failure() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        ..MitosisConfig::default()
     };
     let telemetry = Telemetry::new("test".to_string());
     let lock_dir = tempfile::tempdir().unwrap();
@@ -959,6 +960,7 @@ async fn mitosis_creates_children_on_first_failure() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        ..MitosisConfig::default()
     };
     let disabled_evaluator = MitosisEvaluator::new(
         disabled_config,
@@ -995,6 +997,7 @@ async fn mitosis_skips_non_first_failure() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        ..MitosisConfig::default()
     };
     let telemetry = Telemetry::new("test".to_string());
     let lock_dir = tempfile::tempdir().unwrap();
@@ -1045,6 +1048,7 @@ async fn mitosis_evaluator_adapter_not_found_skips() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        ..MitosisConfig::default()
     };
     let telemetry = Telemetry::new("test".to_string());
     let lock_dir = tempfile::tempdir().unwrap();
@@ -1454,6 +1458,7 @@ async fn mitosis_splits_multitask_bead_creates_children() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        ..MitosisConfig::default()
     };
     let lock_dir = tempfile::tempdir().unwrap();
     let ws = tempfile::tempdir().unwrap();
@@ -1509,6 +1514,7 @@ async fn mitosis_duplicate_split_creates_zero_new_children() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        ..MitosisConfig::default()
     };
     let lock_dir = tempfile::tempdir().unwrap();
     let ws = tempfile::tempdir().unwrap();
@@ -1588,6 +1594,7 @@ async fn mitosis_concurrent_workers_flock_serializes() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        ..MitosisConfig::default()
     };
     let lock_dir = tempfile::tempdir().unwrap();
     let lock_dir_path = lock_dir.path().to_path_buf();

@@ -31,9 +31,7 @@ impl TestWorkspace {
             .status()?;
 
         if !status.success() {
-            return Err(std::io::Error::other(
-                format!("br init failed: {}", status),
-            ));
+            return Err(std::io::Error::other(format!("br init failed: {}", status)));
         }
 
         Ok(TestWorkspace { path: temp_dir })
@@ -47,9 +45,10 @@ impl TestWorkspace {
             .status()?;
 
         if !status.success() {
-            return Err(std::io::Error::other(
-                format!("br create failed: {}", status),
-            ));
+            return Err(std::io::Error::other(format!(
+                "br create failed: {}",
+                status
+            )));
         }
 
         Ok(())
@@ -124,7 +123,7 @@ fn integration_non_tmux_worker_discoverable() {
     // This simulates the path that might be invisible to status/list
     let needle_binary = std::env::var("NEEDLE_BINARY").unwrap_or_else(|_| "needle".to_string());
 
-    let worker = Command::new(&needle_binary)
+    let mut worker = Command::new(&needle_binary)
         .env("NEEDLE_INNER", "1")
         .args([
             "run",
@@ -261,6 +260,7 @@ fn integration_non_tmux_worker_discoverable() {
     let _ = Command::new(&needle_binary)
         .args(["stop", "--all"])
         .status();
+    let _ = worker.wait();
 
     // Wait for graceful shutdown
     thread::sleep(Duration::from_secs(2));

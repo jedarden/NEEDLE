@@ -249,7 +249,9 @@ where
                 // Add jitter to prevent synchronization
                 let jitter_range = (exponential_delay as f64 * JITTER_PERCENT) as u64;
                 let jitter = rng.gen_range(0..=jitter_range * 2);
-                let delay = exponential_delay.saturating_add(jitter).saturating_sub(jitter_range);
+                let delay = exponential_delay
+                    .saturating_add(jitter)
+                    .saturating_sub(jitter_range);
 
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }
