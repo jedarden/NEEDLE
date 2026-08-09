@@ -193,8 +193,8 @@ pub enum CliCommand {
         #[arg(long)]
         get: Option<String>,
 
-        /// Set a config key to a value (e.g., --set KEY VALUE or --set KEY=VALUE).
-        #[arg(long, num_args = 0.., value_name = "KEY=VALUE", help = "Set a config key to a value (e.g., --set KEY VALUE or --set KEY=VALUE)")]
+        /// Set a config key to a value.
+        #[arg(long, num_args = 0.., value_name = "KEY VALUE", help = "Set a config key to a value. Space-separated: '--set KEY VALUE' (also accepts KEY=VALUE)")]
         set: Option<Vec<String>>,
 
         /// Dump all resolved config values.
@@ -962,6 +962,20 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
 
     // Start the async writer thread after worker.booting is on disk.
     eprintln!("NEEDLE worker boot: starting telemetry writer thread...");
+
+    // Runtime guard audit (2026-08-09):
+    // All tokio::spawn calls before this point are safe because:
+    // - init_tracing_subscriber (line 942): spawn at src/cli/mod.rs:831 is protected by rt.enter() guard (bf-3s2b0)
+    // - Telemetry::from_config (line 946): no spawn calls, only channel creation
+    // - telemetry.emit_sync (line 957): synchronous write, no spawn
+    //
+    // Other tokio::spawn sites in the codebase (all safe, not in startup path):
+    // - src/worker/mod.rs:1213,1855,2362: worker signal handlers and heartbeats, inside worker.run()
+    // - src/dispatch/mod.rs:894,915,953,974: agent dispatch tasks, deep inside async execution
+    // - src/telemetry/mod.rs:3407: test-only code (with_sink feature)
+    // - src/telemetry/otlp.rs:494,1503,2804: OTLP setup, called after runtime established
+    // - src/supervisor/mod.rs:251,274: supervisor signal handlers, separate runtime
+    // - src/commit_hook.rs:413,417: test-only concurrent injection test
     rt.block_on(telemetry.start_and_wait())
         .context("writer thread failed to start")?;
     eprintln!("NEEDLE worker boot: writer thread started");
