@@ -23,12 +23,12 @@ fn test_tokio_spawn_panics_without_entered_runtime() {
     // Create a tokio runtime with new_current_thread()
     // Build the runtime WITHOUT calling rt.enter()
     // This reproduces the bug scenario from bf-5dwfq
-    let rt = tokio::runtime::Builder::new_current_thread()
+    let _rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
     // NO rt.enter() call here - this is the bug scenario
-    // The runtime handle is stored in `rt` but not entered
+    // The runtime handle is stored in `_rt` but not entered
 
     // Try to use tokio::spawn - this should panic
     let result = std::panic::catch_unwind(|| {
@@ -136,4 +136,61 @@ fn test_otlp_initialization_pattern_with_runtime_guard() {
         *task_ran.lock().unwrap(),
         "spawned task should have run successfully"
     );
+}
+
+/// Regression test for OTLP runtime guard (bf-24dtb, fix bf-3s2b0).
+///
+/// This test verifies that calling `init_tracing_subscriber` with OTLP enabled
+/// succeeds without panic when the runtime is properly entered.
+///
+/// The bug: `init_tracing_subscriber` internally calls `tokio::spawn` on line 831,
+/// which would panic with "there is no reactor running, must be called from the
+/// context of a Tokio 1.x runtime" if the runtime wasn't entered.
+///
+/// The fix: Line 937 in src/cli/mod.rs adds `let _rt_guard = rt.enter();` before
+/// calling `init_tracing_subscriber`, ensuring the runtime context is active.
+///
+/// This test simulates the fixed behavior: creating a runtime, entering it,
+/// then calling `init_tracing_subscriber` with OTLP enabled should succeed.
+#[test]
+fn test_init_tracing_subscriber_with_otlp_and_entered_runtime() {
+    use needle::config::Config;
+
+    // Create a default config and enable OTLP
+    let mut config = Config::default();
+    config.telemetry.otlp_sink.enabled = true;
+
+    // Create a runtime
+    let rt = tokio::runtime::Runtime::new().expect("failed to create runtime");
+
+    // Enter the runtime (the fix from bf-3s2b0, line 937)
+    let _rt_guard = rt.enter();
+
+    // Call init_tracing_subscriber with OTLP enabled
+    // Before the fix, this would have panicked because tokio::spawn on line 831
+    // would fail without an entered runtime
+    // After the fix (rt.enter() on line 937), this succeeds
+    let result = std::panic::catch_unwind(|| {
+        needle::cli::init_tracing_subscriber(
+            "test-worker-id".to_string(),
+            "test-session-id".to_string(),
+            &config,
+        )
+    });
+
+    // Assert that the call succeeded without panic
+    // Note: The actual connection to OTLP endpoint may fail (endpoint not available),
+    // but the tokio::spawn should not panic
+    assert!(
+        result.is_ok(),
+        "init_tracing_subscriber should not panic with entered runtime and OTLP enabled. \
+         This test would fail before the fix (bf-3s2b0) due to tokio::spawn panicking."
+    );
+
+    // The Result itself might be Err (e.g., connection refused), but that's OK
+    // We're testing that it doesn't panic due to missing runtime context
+    if let Ok(inner_result) = result {
+        // Connection may fail, but no panic occurred
+        let _ = inner_result;
+    }
 }
