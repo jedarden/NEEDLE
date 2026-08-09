@@ -522,6 +522,8 @@ async fn exhaustion_empty_workspace() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
     let _home_dir = tempfile::tempdir().unwrap();
     let config = test_config("echo-test", _home_dir.path());
+    let session_id = needle::telemetry::generate_session_id();
+    needle::cli::init_tracing_subscriber("test-worker".to_string(), session_id, &config);
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
     let adapter = test_adapter("echo-test", "echo done", 10);
@@ -550,7 +552,13 @@ async fn exhaustion_with_idle_action_exit() {
     config.worker.idle_action = IdleAction::Exit;
     config.agent.default = "echo-test".to_string();
     config.agent.routing = None; // Disable routing in tests - use adapter directly
+    config.self_modification.hot_reload = false;
+    config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
     config.workspace.home = _home_dir.path().to_path_buf();
+    // Isolate Explore strand to prevent scanning real home directory
+    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
 
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -757,6 +765,10 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
     config.workspace.home = _home_dir.path().to_path_buf();
     config.self_modification.hot_reload = false;
     config.workspace.default = std::path::PathBuf::from("/tmp");
+    // Isolate Explore strand to prevent scanning real home directory
+    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
 
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -1024,6 +1036,10 @@ async fn worker_boot_rejects_invalid_config() {
     let mut config = Config::default();
     config.agent.default = String::new(); // Invalid: empty agent name
     config.workspace.home = _home_dir.path().to_path_buf();
+    // Isolate Explore strand to prevent scanning real home directory
+    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
 
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
     let result = worker.run().await;
@@ -1525,7 +1541,9 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     let explore_config = ExploreConfig {
         enabled: true,
         workspaces: vec![remote_workspace.clone()],
-        workspace_root: PathBuf::from("/tmp"),
+        // Isolate Explore strand to prevent scanning real home directory
+        // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+        workspace_root: temp_dir.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
     };
@@ -2237,12 +2255,17 @@ async fn debug_worker_hang() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
 
     eprintln!("DEBUG: Creating config");
+    let _home_dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Exit;
     config.agent.default = "echo-test".to_string();
     config.agent.routing = None;
-    config.workspace.home = PathBuf::from("/tmp");
+    config.workspace.home = _home_dir.path().to_path_buf();
     config.workspace.default = PathBuf::from("/tmp/test-workspace");
+    // Isolate Explore strand to prevent scanning real home directory
+    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
 
     eprintln!("DEBUG: Creating worker");
     let mut worker = Worker::new(config, "debug-worker".to_string(), store.clone());
