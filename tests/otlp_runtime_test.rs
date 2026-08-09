@@ -20,8 +20,15 @@ use std::sync::{Arc, Mutex};
 /// called without an active runtime context in the current thread.
 #[test]
 fn test_tokio_spawn_panics_without_entered_runtime() {
-    // Create a runtime but DO NOT enter it
-    let _rt = tokio::runtime::Runtime::new().expect("failed to create runtime");
+    // Create a tokio runtime with new_current_thread()
+    // Build the runtime WITHOUT calling rt.enter()
+    // This reproduces the bug scenario from bf-5dwfq
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // NO rt.enter() call here - this is the bug scenario
+    // The runtime handle is stored in `rt` but not entered
 
     // Try to use tokio::spawn - this should panic
     let result = std::panic::catch_unwind(|| {
