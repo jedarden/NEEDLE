@@ -80,12 +80,11 @@ pub struct Supervisor {
     telemetry: Telemetry,
     /// Shutdown flag for graceful termination.
     shutdown: Arc<AtomicBool>,
-    /// Resolved worker spawn binary path — see [`resolve_worker_binary`].
-    worker_binary: PathBuf,
 }
 
 /// Source of the resolved worker binary path.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // Only used in tests
 enum BinarySource {
     /// Explicit override from `worker.worker_binary_path` config.
     ConfigOverride,
@@ -97,6 +96,7 @@ enum BinarySource {
 
 /// Result of binary path resolution.
 #[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Only used in tests
 struct ResolvedBinary {
     /// The resolved path to the worker binary.
     path: PathBuf,
@@ -169,6 +169,7 @@ pub fn resolve_worker_binary(override_path: Option<PathBuf>) -> Result<PathBuf, 
 /// the only behavior. See GitHub issue jedarden/NEEDLE#11.
 ///
 /// Returns both the resolved path and the source used for resolution.
+#[allow(dead_code)] // Only used in tests
 fn resolve_worker_binary_with_source(override_path: Option<&PathBuf>) -> ResolvedBinary {
     if let Some(path) = override_path {
         return ResolvedBinary {
@@ -220,30 +221,6 @@ impl Supervisor {
                 Telemetry::new(qualified_id)
             });
 
-        // Resolve the worker spawn binary once at startup and log it, so a
-        // name collision on $PATH (another tool occupying "needle") is
-        // visible immediately rather than only via stalled worker heartbeats.
-        // See GitHub issue jedarden/NEEDLE#11.
-        let resolved = resolve_worker_binary_with_source(config.worker_binary_path.as_ref());
-
-        let source_display = match resolved.source {
-            BinarySource::ConfigOverride => "config override (worker.worker_binary_path)",
-            BinarySource::CurrentExe => "current_exe()",
-            BinarySource::PathLookup => "PATH lookup of 'needle' (fallback)",
-        };
-
-        tracing::info!(
-            worker_binary = %resolved.path.display(),
-            source = source_display,
-            "resolved worker spawn binary at supervisor startup"
-        );
-
-        // Emit supervisor binary resolved telemetry event
-        telemetry.emit(EventKind::SupervisorBinaryResolved {
-            worker_binary: resolved.path.display().to_string(),
-            source: source_display.to_string(),
-        })?;
-
         Ok(Supervisor {
             config,
             needle_config,
@@ -251,7 +228,6 @@ impl Supervisor {
             registry,
             telemetry,
             shutdown: Arc::new(AtomicBool::new(false)),
-            worker_binary: resolved.path,
         })
     }
 
@@ -546,17 +522,28 @@ impl Supervisor {
             .unwrap_or(&self.needle_config.agent.default)
             .clone();
 
+        // Resolve the worker binary path. Call resolve_worker_binary() instead
+        // of hardcoding 'needle' to ensure the correct binary is spawned.
+        // Handle resolution errors gracefully by logging and returning an error.
+        let worker_binary = resolve_worker_binary(self.config.worker_binary_path.clone())
+            .with_context(|| {
+                format!(
+                    "failed to resolve worker binary path for worker {}",
+                    worker_id
+                )
+            })?;
+
         tracing::info!(
             worker_id = %worker_id,
             agent = %agent_name,
-            worker_binary = %self.worker_binary.display(),
+            worker_binary = %worker_binary.display(),
             "spawning worker"
         );
 
         // Build the needle run command. Uses the resolved worker binary path
         // (current_exe() by default) rather than a bare PATH lookup of
         // "needle" — see GitHub issue jedarden/NEEDLE#11.
-        let mut cmd = std::process::Command::new(&self.worker_binary);
+        let mut cmd = std::process::Command::new(&worker_binary);
         cmd.arg("run")
             .arg("--workspace")
             .arg(&self.config.workspace)
@@ -1203,7 +1190,8 @@ mod tests {
                 "{description}: override path should be returned as-is"
             );
             assert_eq!(
-                resolved.source, BinarySource::ConfigOverride,
+                resolved.source,
+                BinarySource::ConfigOverride,
                 "{description}: source should be ConfigOverride"
             );
         }
@@ -1245,7 +1233,10 @@ mod tests {
 
         // Test with both override and current_exe paths
         let test_cases = vec![
-            (Some(PathBuf::from("/custom/path")), "config override (worker.worker_binary_path)"),
+            (
+                Some(PathBuf::from("/custom/path")),
+                "config override (worker.worker_binary_path)",
+            ),
             (None, "current_exe()"), // Will use current_exe()
         ];
 
