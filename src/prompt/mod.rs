@@ -111,6 +111,91 @@ If the bead describes a single task (even if complex or long):
 - Each child title should be concise and start with a verb
 - Do not propose children that duplicate any existing children listed above";
 
+/// Built-in timeout-specific mitosis analysis template.
+///
+/// This template is used when a bead times out after productive work.
+/// The agent must analyze what was completed and decompose remaining work
+/// into independently closable phases.
+const DEFAULT_MITOSIS_TIMEOUT_TEMPLATE: &str = "\
+## Timeout Mitosis Analysis
+
+This bead **timed out** after substantial productive work. Your job is to
+analyze what was accomplished and decompose the REMAINING WORK into independently
+closable phases.
+
+### Bead
+
+**Title:** {bead_title}
+
+**Description:**
+{bead_body}
+
+**Bead ID:** {bead_id}
+
+### Timeout Context
+
+**Elapsed Time:** {elapsed_duration} of {timeout_duration} ({elapsed_percent}% used)
+
+**Evidence of Activity:**
+{activity_evidence}
+
+**Existing Children:**
+{existing_children}
+
+### Your Task
+
+1. **Distinguish completed from remaining work:**
+   - What progress was made before the timeout?
+   - What deliverables are still incomplete?
+   - What work cannot be safely recovered from the partial execution?
+
+2. **Propose child beads for the REMAINING WORK ONLY:**
+   - Each child must be independently completable (no dependencies on timeout-prone work)
+   - Each child must be closable even if earlier phases in the original task timed out
+   - Focus on deliverables that can be completed within normal time limits
+
+3. **Refuse decomposition if appropriate:**
+   - If the bead represents a single atomic task that cannot be safely divided
+   - If the timeout was caused by infrastructure failure (not productive work)
+   - If splitting would require redoing work that may have completed partially
+   - If child tasks would require unsafe overlap with incomplete work
+
+### Output Format
+
+You must output ONLY a JSON object (no markdown fencing, no explanation).
+
+**If the remaining work CAN be decomposed into independent phases:**
+{{\"splittable\": true, \"children\": [{{\"title\": \"Phase 1: remaining work\", \"body\": \"Description of what remains and acceptance criteria\"}}, ...]}}
+
+**If the bead is atomic (cannot be safely divided) OR the timeout was not productive:**
+{{\"splittable\": false, \"reason\": \"Brief explanation why decomposition is inappropriate\"}}
+
+### Rules for Timeout Decomposition
+
+- **Split ONLY if:** Remaining work can be completed independently without redoing completed portions
+- **Each child must:** Be completable within normal time limits (not another timeout)
+- **Each child must:** Have clear acceptance criteria that don't depend on incomplete work
+- **Valid split:** Original task had 3 phases, phase 1 completed, propose children for phases 2-3
+- **Invalid split:** Any child that would require redoing work that may have finished
+- **Invalid split:** Task is atomic (e.g., \"run full test suite\" cannot be split into \"run half\")
+
+### Examples
+
+**Valid timeout split:**
+- Original: \"Implement OAuth flow with tests (3 phases: design, implement, test)\"
+- Timeout evidence: Agent completed design and partial implementation
+- Children: \"Complete OAuth token implementation\", \"Add comprehensive tests\"
+
+**Invalid timeout split (atomic task):**
+- Original: \"Run full integration test suite\"
+- Timeout evidence: Tests were running when timeout occurred
+- Result: NOT splittable (splitting would require rerunning tests from incomplete state)
+
+**Invalid timeout split (infrastructure):**
+- Original: \"Deploy to production\"
+- Timeout evidence: No tool calls, empty output (infrastructure hang)
+- Result: NOT splittable (timeout was not productive work)";
+
 /// Built-in weave template for gap analysis and bead creation.
 const DEFAULT_WEAVE_TEMPLATE: &str = "\
 ## Workspace Documentation
@@ -286,6 +371,7 @@ fn extra_vars_for_template(name: &str) -> Option<&'static [&'static str]> {
         "pluck" => Some(&[]),
         "split" => Some(&["{failure_count}"]),
         "mitosis" => Some(&["{existing_children}"]),
+        "mitosis-timeout" => Some(&["{existing_children}", "{elapsed_duration}", "{timeout_duration}", "{elapsed_percent}", "{activity_evidence}"]),
         "weave" => Some(&["{doc_files}", "{existing_beads}"]),
         "unravel" => Some(&["{human_bead_context}"]),
         "pulse" => Some(&["{scan_results}", "{existing_beads}"]),
@@ -295,7 +381,7 @@ fn extra_vars_for_template(name: &str) -> Option<&'static [&'static str]> {
 
 /// All known built-in template names (used in tests to verify defaults).
 #[cfg(test)]
-const KNOWN_TEMPLATE_NAMES: &[&str] = &["pluck", "split", "mitosis", "weave", "unravel", "pulse"];
+const KNOWN_TEMPLATE_NAMES: &[&str] = &["pluck", "split", "mitosis", "mitosis-timeout", "weave", "unravel", "pulse"];
 
 // ──────────────────────────────────────────────────────────────────────────────
 // BuiltPrompt
@@ -354,6 +440,7 @@ impl PromptBuilder {
         templates.insert("pluck".to_string(), DEFAULT_PLUCK_TEMPLATE.to_string());
         templates.insert("split".to_string(), DEFAULT_SPLIT_TEMPLATE.to_string());
         templates.insert("mitosis".to_string(), DEFAULT_MITOSIS_TEMPLATE.to_string());
+        templates.insert("mitosis-timeout".to_string(), DEFAULT_MITOSIS_TIMEOUT_TEMPLATE.to_string());
         templates.insert("weave".to_string(), DEFAULT_WEAVE_TEMPLATE.to_string());
         templates.insert("unravel".to_string(), DEFAULT_UNRAVEL_TEMPLATE.to_string());
         templates.insert("pulse".to_string(), DEFAULT_PULSE_TEMPLATE.to_string());
@@ -694,6 +781,47 @@ impl PromptBuilder {
             worker_id,
             "mitosis",
             &[("{existing_children}", existing_children)],
+        )
+    }
+
+    /// Build a timeout-specific mitosis prompt.
+    ///
+    /// This variant includes timeout context (elapsed duration, activity evidence)
+    /// to help the agent distinguish completed from remaining work.
+    ///
+    /// # Arguments
+    ///
+    /// * `bead` — The bead being analyzed
+    /// * `workspace` — Workspace path
+    /// * `worker_id` — Worker identifier
+    /// * `existing_children` — Formatted listing of the parent's current children
+    /// * `elapsed_duration` — Human-readable elapsed time (e.g., "59m")
+    /// * `timeout_duration` — Human-readable timeout limit (e.g., "1h")
+    /// * `elapsed_percent` — Percentage of timeout used (e.g., "98%")
+    /// * `activity_evidence` — Description of what the agent was doing when it timed out
+    pub fn build_mitosis_timeout(
+        &self,
+        bead: &Bead,
+        workspace: &Path,
+        worker_id: &str,
+        existing_children: &str,
+        elapsed_duration: &str,
+        timeout_duration: &str,
+        elapsed_percent: &str,
+        activity_evidence: &str,
+    ) -> Result<BuiltPrompt> {
+        self.build_with_vars(
+            bead,
+            workspace,
+            worker_id,
+            "mitosis-timeout",
+            &[
+                ("{existing_children}", existing_children),
+                ("{elapsed_duration}", elapsed_duration),
+                ("{timeout_duration}", timeout_duration),
+                ("{elapsed_percent}", elapsed_percent),
+                ("{activity_evidence}", activity_evidence),
+            ],
         )
     }
 

@@ -158,6 +158,136 @@ where
     spawn_with_etxtbsy_retry(spawn_fn, max_attempts, backoff_ms).await
 }
 
+/// Retry wrapper for subprocess spawns with exponential backoff for ETXTBSY (errno 26).
+///
+/// This variant uses **exponential backoff** with jitter, making it more suitable for
+/// high-concurrency scenarios where multiple processes might race for the same binary.
+/// Exponential backoff prevents thundering herd problems that linear backoff can cause.
+///
+/// The backoff formula is: `base_ms * 2^attempt + random_jitter`, where:
+/// - `base_ms` is the initial delay (default: 20ms)
+/// - `attempt` is the current retry number (0-indexed)
+/// - `random_jitter` is ±25% of the calculated delay to prevent synchronization
+///
+/// Example backoff sequence with base_ms=20:
+/// - Attempt 1: ~20ms (15-25ms with jitter)
+/// - Attempt 2: ~40ms (30-50ms with jitter)
+/// - Attempt 3: ~80ms (60-100ms with jitter)
+/// - Attempt 4: ~160ms (120-200ms with jitter)
+/// - Attempt 5: ~320ms (240-400ms with jitter)
+///
+/// # Parameters
+///
+/// * `spawn_fn` - An async function that attempts to spawn the subprocess
+/// * `max_attempts` - Maximum number of retry attempts (default: 10)
+/// * `base_ms` - Base backoff delay in milliseconds (default: 20)
+///
+/// # Returns
+///
+/// * `Ok(T)` - The subprocess output on success
+/// * `Err(io::Error)` - The last error if all attempts are exhausted
+///
+/// # When to use exponential vs linear backoff
+///
+/// Use exponential backoff when:
+/// - Spawning multiple processes concurrently that might race for the same binary
+/// - Running in high-concurrency environments (CI, parallel tests)
+/// - Dealing with slow filesystems where the race window might be longer
+///
+/// Use linear backoff (`spawn_with_etxtbsy_retry`) when:
+/// - Spawning a single process in isolation
+/// - The race window is known to be very short (<50ms)
+/// - Minimal latency is more important than thundering herd prevention
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use needle::bead_store::spawn_with_etxtbsy_retry_exponential;
+///
+/// # async fn example() -> Result<(), std::io::Error> {
+/// let binary_path = Path::new("/path/to/freshly-written-binary");
+/// let output = spawn_with_etxtbsy_retry_exponential(
+///     || async {
+///         tokio::process::Command::new(binary_path)
+///             .arg("--version")
+///             .output()
+///             .await
+///     },
+///     10,
+///     20,
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn spawn_with_etxtbsy_retry_exponential<F, Fut, T>(
+    spawn_fn: F,
+    max_attempts: u32,
+    base_ms: u64,
+) -> std::io::Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<T>>,
+{
+    use rand::Rng;
+
+    const ETXTBSY_ERRNO: i32 = 26;
+    const JITTER_PERCENT: f64 = 0.25; // ±25% jitter
+
+    let mut last_err = None;
+    let mut rng = rand::thread_rng();
+
+    for attempt in 0..max_attempts {
+        match spawn_fn().await {
+            Ok(output) => return Ok(output),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY_ERRNO) && attempt + 1 < max_attempts => {
+                last_err = Some(e);
+
+                // Calculate exponential backoff: base_ms * 2^attempt
+                let exponential_delay = base_ms * (1 << attempt);
+
+                // Add jitter to prevent synchronization
+                let jitter_range = (exponential_delay as f64 * JITTER_PERCENT) as u64;
+                let jitter = rng.gen_range(0..=jitter_range * 2);
+                let delay = exponential_delay.saturating_add(jitter).saturating_sub(jitter_range);
+
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(last_err.expect("loop always sets last_err before exhausting max_attempts"))
+}
+
+/// Retry wrapper for `Command::spawn()` with exponential backoff for ETXTBSY (errno 26).
+///
+/// Specialized version of `spawn_with_etxtbsy_retry_exponential` for subprocess spawns that
+/// return a `Child` process. Use this when you need to interact with the spawned process
+/// (e.g., for timeout handling with `kill_on_drop`).
+///
+/// # Parameters
+///
+/// * `spawn_fn` - An async function that attempts to spawn the subprocess
+/// * `max_attempts` - Maximum number of retry attempts (default: 10)
+/// * `base_ms` - Base backoff delay in milliseconds (default: 20)
+///
+/// # Returns
+///
+/// * `Ok(Child)` - The spawned child process on success
+/// * `Err(io::Error)` - The last error if all attempts are exhausted
+pub async fn spawn_with_etxtbsy_retry_exponential_child<F, Fut>(
+    spawn_fn: F,
+    max_attempts: u32,
+    base_ms: u64,
+) -> std::io::Result<tokio::process::Child>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::io::Result<tokio::process::Child>>,
+{
+    spawn_with_etxtbsy_retry_exponential(spawn_fn, max_attempts, base_ms).await
+}
+
 /// Result of a version check.
 #[derive(Debug)]
 pub enum VersionCheck {
@@ -2150,6 +2280,10 @@ impl BeadStore for BfCliBeadStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use tokio::time::{Duration, Instant};
 
     #[test]
     fn filters_default_is_empty() {
@@ -2891,5 +3025,332 @@ echo '[]'
         );
 
         // Cleanup handled by tmp_dir drop
+    }
+
+    // ─── ETXTBSY retry tests ───────────────────────────────────────────────────────
+
+    /// Helper function to create an ETXTBSY error (errno 26 on Unix).
+    fn make_etxtbsy_error() -> io::Error {
+        io::Error::from_raw_os_error(26)
+    }
+
+    /// Helper function to create a non-ETXTBSY error.
+    fn make_other_error() -> io::Error {
+        io::Error::new(io::ErrorKind::NotFound, "not found")
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_linear_succeeds_on_first_attempt() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result = spawn_with_etxtbsy_retry(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            5,
+            20,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"success".to_vec());
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_linear_retries_on_etxtbsy() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 2 {
+                        // Fail first 2 attempts with ETXTBSY
+                        Err::<_, io::Error>(make_etxtbsy_error())
+                    } else {
+                        Ok::<_, io::Error>(b"success".to_vec())
+                    }
+                }
+            },
+            5,
+            20,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"success".to_vec());
+        assert_eq!(call_count.load(Ordering::SeqCst), 3); // 2 failures + 1 success
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_linear_exhausts_attempts() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    // Always fail with ETXTBSY
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                }
+            },
+            3,
+            20,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(call_count.load(Ordering::SeqCst), 3); // max attempts
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_linear_fails_fast_on_non_etxtbsy() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    // Fail with non-ETXTBSY error (should not retry)
+                    Err::<_, io::Error>(make_other_error())
+                }
+            },
+            5,
+            20,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1); // Should only be called once
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_exponential_succeeds_on_first_attempt() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result = spawn_with_etxtbsy_retry_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            10,
+            20,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"success".to_vec());
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_exponential_retries_on_etxtbsy() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 3 {
+                        // Fail first 3 attempts with ETXTBSY
+                        Err::<_, io::Error>(make_etxtbsy_error())
+                    } else {
+                        Ok::<_, io::Error>(b"success".to_vec())
+                    }
+                }
+            },
+            10,
+            20,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"success".to_vec());
+        assert_eq!(call_count.load(Ordering::SeqCst), 4); // 3 failures + 1 success
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_exponential_exhausts_attempts() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    // Always fail with ETXTBSY
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                }
+            },
+            5,
+            20,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(call_count.load(Ordering::SeqCst), 5); // max attempts
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_exponential_fails_fast_on_non_etxtbsy() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    // Fail with non-ETXTBSY error (should not retry)
+                    Err::<_, io::Error>(make_other_error())
+                }
+            },
+            10,
+            20,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1); // Should only be called once
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_linear_timing() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        let result = spawn_with_etxtbsy_retry(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 2 {
+                        Err::<_, io::Error>(make_etxtbsy_error())
+                    } else {
+                        Ok::<_, io::Error>(b"success".to_vec())
+                    }
+                }
+            },
+            5,
+            50,
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 3); // 2 failures + 1 success
+
+        // With 2 retries at 50ms each, should take ~100ms
+        assert!(elapsed >= Duration::from_millis(90));
+        assert!(elapsed < Duration::from_millis(200)); // Upper bound with tolerance
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_exponential_timing() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        let result = spawn_with_etxtbsy_retry_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 3 {
+                        Err::<_, io::Error>(make_etxtbsy_error())
+                    } else {
+                        Ok::<_, io::Error>(b"success".to_vec())
+                    }
+                }
+            },
+            10,
+            20,
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 4); // 3 failures + 1 success
+
+        // Exponential backoff: 20ms + 40ms + 80ms = ~140ms with jitter
+        assert!(elapsed >= Duration::from_millis(100));
+        assert!(elapsed < Duration::from_millis(300)); // Upper bound with jitter tolerance
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_child_wrapper_works() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        // Create a mock child process result
+        let result = spawn_with_etxtbsy_retry_child(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    // Return a mock child-like result (we just test the wrapper passes through)
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                }
+            },
+            3,
+            20,
+        )
+        .await;
+
+        // Should fail after exhausting attempts
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_exponential_child_wrapper_works() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result = spawn_with_etxtbsy_retry_exponential_child(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                }
+            },
+            5,
+            20,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(call_count.load(Ordering::SeqCst), 5);
     }
 }

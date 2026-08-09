@@ -194,4 +194,63 @@ mod tests {
             "/home/testuser/archive.tar.gz"
         );
     }
+
+    #[test]
+    fn test_expand_tilde_edge_case_tilde_without_slash() {
+        env::set_var("HOME", "/home/testuser");
+
+        // "~foo" should not be expanded (not a home path pattern)
+        assert_eq!(expand_tilde("~foo"), "~foo");
+        assert_eq!(expand_tilde("~username"), "~username");
+        assert_eq!(expand_tilde("~backup"), "~backup");
+
+        // "~" alone should not be expanded
+        assert_eq!(expand_tilde("~"), "~");
+
+        // "~." should not be expanded
+        assert_eq!(expand_tilde("~."), "~.");
+        assert_eq!(expand_tilde("~.."), "~..");
+    }
+
+    #[test]
+    fn test_expand_tilde_edge_case_multiple_tildes() {
+        env::set_var("HOME", "/home/testuser");
+
+        // Only the first "~/" prefix is expanded
+        assert_eq!(expand_tilde("~/~/path"), "/home/testuser/~/path");
+        assert_eq!(expand_tilde("~/a/~/b"), "/home/testuser/a/~/b");
+
+        // Multiple tildes without slashes are not expanded
+        assert_eq!(expand_tilde("~~/path"), "~~/path");
+        assert_eq!(expand_tilde("~foo~"), "~foo~");
+        assert_eq!(expand_tilde("~~/bar"), "~~/bar");
+
+        // Mixed: first "~/path" expands, remaining tildes don't
+        assert_eq!(expand_tilde("~/path/~other"), "/home/testuser/path/~other");
+        assert_eq!(expand_tilde("~/~foo"), "/home/testuser/~foo");
+    }
+
+    #[test]
+    fn test_expand_tilde_edge_case_empty_and_whitespace() {
+        env::set_var("HOME", "/home/testuser");
+
+        // Empty string
+        assert_eq!(expand_tilde(""), "");
+
+        // Strings that look like they might start with tilde but don't
+        assert_eq!(expand_tilde(" ~"), " ~"); // Space before tilde
+        assert_eq!(expand_tilde("  ~/foo"), "  ~/foo"); // Multiple spaces
+    }
+
+    #[test]
+    fn test_expand_tilde_edge_case_no_home_with_tilde_variants() {
+        env::remove_var("HOME");
+
+        // Without HOME, all tilde variants are returned unchanged
+        assert_eq!(expand_tilde("~"), "~");
+        assert_eq!(expand_tilde("~/"), "~/");
+        assert_eq!(expand_tilde("~/foo"), "~/foo");
+        assert_eq!(expand_tilde("~foo"), "~foo");
+        assert_eq!(expand_tilde("~/~/path"), "~/~/path");
+    }
 }
