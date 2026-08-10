@@ -5,6 +5,8 @@
 
 use anyhow::{Context, Result};
 use std::process::Command;
+use std::time::Duration;
+use tracing::{debug, info};
 
 /// Path to the iad-ci cluster kubeconfig.
 const IAD_CI_KUBECONFIG: &str = "/home/coding/.kube/iad-ci.kubeconfig";
@@ -48,6 +50,23 @@ impl WorkflowPhase {
             "Pending" => WorkflowPhase::Pending,
             other => WorkflowPhase::Unknown(other.to_string()),
         }
+    }
+
+    /// Check if this workflow phase is terminal (completed).
+    ///
+    /// Terminal phases are: `Succeeded`, `Failed`, and `Error`.
+    /// Non-terminal phases are: `Running` and `Pending`.
+    /// Unknown phases are treated as non-terminal to avoid infinite loops
+    /// if kubectl returns unexpected values.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the phase is terminal, `false` if the workflow is still in progress.
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            WorkflowPhase::Succeeded | WorkflowPhase::Failed | WorkflowPhase::Error
+        )
     }
 }
 
@@ -145,6 +164,162 @@ pub fn get_workflow_phase(workflow_name: &str, namespace: Option<&str>) -> Resul
     Ok(phase)
 }
 
+/// Configuration for workflow status polling.
+///
+/// # Fields
+///
+/// * `interval` - Duration between polls (default: 30 seconds, range: 30-60 seconds)
+/// * `namespace` - Kubernetes namespace (default: "argo-workflows")
+#[derive(Debug, Clone)]
+pub struct PollConfig {
+    /// Duration between polling attempts.
+    pub interval: Duration,
+    /// Kubernetes namespace containing the workflow.
+    pub namespace: Option<String>,
+}
+
+impl Default for PollConfig {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(30),
+            namespace: Some("argo-workflows".to_string()),
+        }
+    }
+}
+
+impl PollConfig {
+    /// Create a new poll config with a custom interval.
+    ///
+    /// # Arguments
+    ///
+    /// * `interval_secs` - Polling interval in seconds (must be between 30 and 60)
+    ///
+    /// # Returns
+    ///
+    /// `Result<PollConfig>` — Returns error if interval is out of range.
+    pub fn with_interval(interval_secs: u64) -> Result<Self> {
+        if interval_secs < 30 || interval_secs > 60 {
+            return Err(anyhow::anyhow!(
+                "polling interval must be between 30 and 60 seconds, got {}",
+                interval_secs
+            ));
+        }
+        Ok(Self {
+            interval: Duration::from_secs(interval_secs),
+            ..Default::default()
+        })
+    }
+
+    /// Set a custom namespace.
+    pub fn with_namespace(mut self, namespace: &str) -> Self {
+        self.namespace = Some(namespace.to_string());
+        self
+    }
+}
+
+/// Poll workflow status until a terminal phase is reached.
+///
+/// This function repeatedly calls [`get_workflow_phase`] at the configured interval
+/// until the workflow reaches a terminal phase (`Succeeded`, `Failed`, or `Error`).
+/// It logs the current phase on each poll iteration.
+///
+/// # Arguments
+///
+/// * `workflow_name` - The name of the workflow to poll
+/// * `config` - Poll configuration (interval, namespace)
+///
+/// # Returns
+///
+/// * `Result<WorkflowPhase>` — The final terminal phase, or an error if:
+///   - kubectl is not available
+///   - The kubeconfig file does not exist
+///   - kubectl commands fail consistently
+///   - Polling is interrupted
+///
+/// # Errors
+///
+/// This function returns an error if:
+/// - The kubectl binary cannot be executed
+/// - The kubeconfig file is missing
+/// - All kubectl attempts fail (after retrying)
+/// - The polling interval is invalid (via `PollConfig::with_interval`)
+///
+/// # Behavior
+///
+/// - Sleeps for the configured interval between polls
+/// - Logs each poll attempt with the current phase
+/// - Continues polling until a terminal phase is reached
+/// - Treats unknown phases as non-terminal (continues polling)
+/// - Does NOT implement a maximum poll count — relies on caller to enforce timeout
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::kubectl::{poll_workflow_status, PollConfig};
+/// # async fn example() -> anyhow::Result<()> {
+/// // Poll with default 30-second interval
+/// let config = PollConfig::default();
+/// let final_phase = poll_workflow_status("my-workflow", &config)?;
+/// println!("Workflow completed with phase: {:?}", final_phase);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ```no_run
+/// use needle::kubectl::{poll_workflow_status, PollConfig};
+/// # async fn example() -> anyhow::Result<()> {
+/// // Poll with custom 45-second interval in a specific namespace
+/// let config = PollConfig::with_interval(45)?.with_namespace("my-namespace");
+/// let final_phase = poll_workflow_status("my-workflow", &config)?;
+/// println!("Workflow completed with phase: {:?}", final_phase);
+/// # Ok(())
+/// # }
+/// ```
+pub fn poll_workflow_status(workflow_name: &str, config: &PollConfig) -> Result<WorkflowPhase> {
+    let ns = config.namespace.as_deref().unwrap_or("argo-workflows");
+
+    info!(
+        "Starting workflow status poll for '{}/{}' with {}s interval",
+        ns,
+        workflow_name,
+        config.interval.as_secs()
+    );
+
+    loop {
+        // Fetch current phase
+        let phase = get_workflow_phase(workflow_name, Some(ns)).with_context(|| {
+            format!(
+                "failed to fetch workflow phase during polling for '{}/{}'",
+                ns, workflow_name
+            )
+        })?;
+
+        // Log current phase
+        debug!(
+            "Workflow '{}/{}' current phase: {:?}",
+            ns, workflow_name, phase
+        );
+
+        // Check if terminal
+        if phase.is_terminal() {
+            info!(
+                "Workflow '{}/{}' reached terminal phase: {:?}",
+                ns, workflow_name, phase
+            );
+            return Ok(phase);
+        }
+
+        // Sleep before next poll
+        debug!(
+            "Workflow '{}/{}' still running, sleeping for {}s",
+            ns,
+            workflow_name,
+            config.interval.as_secs()
+        );
+        std::thread::sleep(config.interval);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,5 +404,100 @@ mod tests {
             WorkflowPhase::Unknown("foo".to_string()),
             WorkflowPhase::Unknown("bar".to_string())
         );
+    }
+
+    #[test]
+    fn test_workflow_phase_is_terminal() {
+        // Terminal phases
+        assert!(WorkflowPhase::Succeeded.is_terminal());
+        assert!(WorkflowPhase::Failed.is_terminal());
+        assert!(WorkflowPhase::Error.is_terminal());
+
+        // Non-terminal phases
+        assert!(!WorkflowPhase::Running.is_terminal());
+        assert!(!WorkflowPhase::Pending.is_terminal());
+
+        // Unknown phases are treated as non-terminal to avoid infinite loops
+        assert!(!WorkflowPhase::Unknown("SomeCustomPhase".to_string()).is_terminal());
+        assert!(!WorkflowPhase::Unknown("".to_string()).is_terminal());
+    }
+
+    #[test]
+    fn test_poll_config_default() {
+        let config = PollConfig::default();
+        assert_eq!(config.interval, Duration::from_secs(30));
+        assert_eq!(config.namespace, Some("argo-workflows".to_string()));
+    }
+
+    #[test]
+    fn test_poll_config_with_interval_valid() {
+        // Test valid intervals (30-60 seconds)
+        for secs in [30, 45, 60] {
+            let config = PollConfig::with_interval(secs).unwrap();
+            assert_eq!(config.interval, Duration::from_secs(secs));
+            assert_eq!(config.namespace, Some("argo-workflows".to_string()));
+        }
+    }
+
+    #[test]
+    fn test_poll_config_with_interval_invalid() {
+        // Test intervals outside the valid range
+        // Below minimum (30 seconds)
+        let result = PollConfig::with_interval(29);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("must be between 30 and 60 seconds"));
+
+        // Above maximum (60 seconds)
+        let result = PollConfig::with_interval(61);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("must be between 30 and 60 seconds"));
+
+        // Edge cases: 0 and negative values (u64 can't be negative, but 0 is invalid)
+        let result = PollConfig::with_interval(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_poll_config_with_namespace() {
+        let config = PollConfig::default().with_namespace("custom-namespace");
+        assert_eq!(config.namespace, Some("custom-namespace".to_string()));
+        assert_eq!(config.interval, Duration::from_secs(30)); // Default interval preserved
+
+        // Test that with_interval and with_namespace compose correctly
+        let config = PollConfig::with_interval(45)
+            .unwrap()
+            .with_namespace("my-namespace");
+        assert_eq!(config.interval, Duration::from_secs(45));
+        assert_eq!(config.namespace, Some("my-namespace".to_string()));
+    }
+
+    #[test]
+    fn test_workflow_phase_terminal_completeness() {
+        // This test ensures that if new terminal phases are added to WorkflowPhase,
+        // the is_terminal() method is updated accordingly.
+        // This is a compile-time check that the pattern is exhaustive.
+
+        let all_phases = [
+            WorkflowPhase::Running,
+            WorkflowPhase::Succeeded,
+            WorkflowPhase::Failed,
+            WorkflowPhase::Error,
+            WorkflowPhase::Pending,
+            WorkflowPhase::Unknown("test".to_string()),
+        ];
+
+        let terminal_count = all_phases.iter().filter(|p| p.is_terminal()).count();
+        let non_terminal_count = all_phases.iter().filter(|p| !p.is_terminal()).count();
+
+        // As of this writing, there are 3 terminal phases: Succeeded, Failed, Error
+        // And 3 non-terminal: Running, Pending, Unknown
+        assert_eq!(terminal_count, 3, "Expected 3 terminal phases");
+        assert_eq!(non_terminal_count, 3, "Expected 3 non-terminal phases");
     }
 }

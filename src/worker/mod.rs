@@ -4245,6 +4245,12 @@ mod tests {
         // claiming/mutating real beads across unrelated repos on this
         // server. See bf-2unnq's contamination addendum.
         config.strands.explore.enabled = false;
+        // Pin Explore scan root to a tempdir so the Explore strand cannot
+        // scan the real home directory if it ever runs. Even though Explore
+        // is disabled above, defense-in-depth ensures tests are isolated.
+        let temp_dir = tempfile::tempdir().unwrap();
+        config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
         Worker::new(config, "test-worker".to_string(), store)
     }
 
