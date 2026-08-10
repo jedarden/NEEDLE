@@ -38,6 +38,7 @@ pub mod hoop_hooks;
 /// Enable with `--features integration-t` once the above are resolved.
 #[cfg(feature = "integration-t")]
 pub mod integration_t;
+pub mod kubectl;
 pub mod learning;
 pub mod log_writer;
 pub mod mitosis;
