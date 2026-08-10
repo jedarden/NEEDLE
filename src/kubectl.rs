@@ -5,11 +5,8 @@
 
 use anyhow::{Context, Result};
 use std::process::Command;
-<<<<<<< HEAD
 use std::time::Duration;
 use tracing::{debug, info};
-=======
->>>>>>> b90e301dd5a70b05e65a148843a4f7f583241883
 
 /// Path to the iad-ci cluster kubeconfig.
 const IAD_CI_KUBECONFIG: &str = "/home/coding/.kube/iad-ci.kubeconfig";
@@ -54,7 +51,6 @@ impl WorkflowPhase {
             other => WorkflowPhase::Unknown(other.to_string()),
         }
     }
-<<<<<<< HEAD
 
     /// Check if this workflow phase is terminal (completed).
     ///
@@ -72,8 +68,6 @@ impl WorkflowPhase {
             WorkflowPhase::Succeeded | WorkflowPhase::Failed | WorkflowPhase::Error
         )
     }
-=======
->>>>>>> b90e301dd5a70b05e65a148843a4f7f583241883
 }
 
 /// Fetch the current phase of an Argo Workflow from kubectl.
@@ -204,7 +198,7 @@ impl PollConfig {
     ///
     /// `Result<PollConfig>` — Returns error if interval is out of range.
     pub fn with_interval(interval_secs: u64) -> Result<Self> {
-        if interval_secs < 30 || interval_secs > 60 {
+        if !(30..=60).contains(&interval_secs) {
             return Err(anyhow::anyhow!(
                 "polling interval must be between 30 and 60 seconds, got {}",
                 interval_secs
@@ -410,7 +404,6 @@ mod tests {
             WorkflowPhase::Unknown("bar".to_string())
         );
     }
-<<<<<<< HEAD
 
     #[test]
     fn test_workflow_phase_is_terminal() {
@@ -506,6 +499,4 @@ mod tests {
         assert_eq!(terminal_count, 3, "Expected 3 terminal phases");
         assert_eq!(non_terminal_count, 3, "Expected 3 non-terminal phases");
     }
-=======
->>>>>>> b90e301dd5a70b05e65a148843a4f7f583241883
 }
