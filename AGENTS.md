@@ -22,6 +22,15 @@ documentation that invoke `br`.
   worker changes in a dirty worktree.
 - Multiple NEEDLE workers may share the same repository. Re-check files before
   modifying them and avoid broad rewrites that can overwrite concurrent work.
+- **Do not create per-worker git worktrees to isolate concurrent workers** —
+  a shared checkout is the intended model, not a bug to route around.
+  Worktrees add disk and build-cache duplication without addressing the
+  actual failure mode, which happens at the bead level: the same bead getting
+  claimed and worked twice (confirmed 2026-08-09, commitgraph `cg-l0v0kc` —
+  two byte-identical commits at the same second from two concurrent workers).
+  `bf claim` is atomic, so avoid this by decomposing and dependency-ordering
+  beads so the same unit of work is never independently claimable twice — see
+  the target repo's own `AGENTS.md` for repo-specific guidance.
 - Do not use destructive Git operations (`reset --hard`, forced checkout,
   forced push) to resolve unrelated changes.
 - Forgejo (`git.ardenone.com`) is the authoritative remote. GitHub is a mirror.
