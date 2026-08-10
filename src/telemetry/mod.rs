@@ -46,6 +46,8 @@ pub mod test_utils;
 /// Writes structured events to `<log_dir>/<worker>-<session>.jsonl`.
 pub mod file_sink;
 
+pub use file_sink::FileSink;
+
 // ─── TelemetryEvent ──────────────────────────────────────────────────────────
 
 /// A single structured telemetry record.
@@ -2324,176 +2326,6 @@ impl<T: Sink + ?Sized> Sink for Arc<T> {
     }
 }
 
-// ─── FileSink ────────────────────────────────────────────────────────────────
-
-/// Writes JSONL telemetry to `<log_dir>/<worker>-<session>.jsonl`.
-///
-/// Append-only, one line per event. The log directory is created if it
-/// does not exist.
-pub struct FileSink {
-    path: PathBuf,
-    writer: std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
-}
-
-impl FileSink {
-    /// Construct a sink using the default log directory (`~/.needle/logs/`).
-    pub fn new(worker_id: &str, session_id: &str) -> Result<Self> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let log_dir = PathBuf::from(&home).join(".needle").join("logs");
-        Self::with_dir(&log_dir, worker_id, session_id)
-    }
-
-    /// Construct a sink writing to a specific directory.
-    ///
-    /// Creates the directory (and parents) if it does not exist.
-    pub fn with_dir(log_dir: &Path, worker_id: &str, session_id: &str) -> Result<Self> {
-        std::fs::create_dir_all(log_dir)
-            .with_context(|| format!("failed to create log directory: {}", log_dir.display()))?;
-        let filename = format!("{worker_id}-{session_id}.jsonl");
-        let path = log_dir.join(filename);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .with_context(|| format!("failed to open log file: {}", path.display()))?;
-        Ok(FileSink {
-            path,
-            writer: std::sync::Mutex::new(std::io::BufWriter::new(file)),
-        })
-    }
-
-    /// Return the path to the log file.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Write a boot event directly to the file, bypassing the normal channel.
-    ///
-    /// This is called immediately after FileSink creation to ensure that even if
-    /// the writer thread fails to start, we have a trace in the JSONL file.
-    /// The event is written synchronously and flushed to disk.
-    fn write_boot_event_direct(
-        &self,
-        worker_id: &str,
-        session_id: &str,
-        version: &str,
-    ) -> Result<()> {
-        Self::write_boot_event_direct_impl(
-            &self.writer,
-            &self.path,
-            worker_id,
-            session_id,
-            version,
-            std::time::Duration::from_secs(5), // 5 second timeout
-        )
-    }
-
-    /// Write a boot event directly to the file with a timeout.
-    ///
-    /// This is a timeout-aware variant that prevents indefinite blocking on hung
-    /// filesystems (e.g., network filesystem issues, stale NFS mounts). If the
-    /// write takes longer than the timeout, it returns an error and the caller
-    /// can decide whether to continue or fail.
-    ///
-    /// The timeout is implemented by spawning a thread to do the blocking I/O
-    /// and joining with a timeout. If the timeout expires, the thread is detached
-    /// and will continue running (and eventually complete or be killed by the OS).
-    fn write_boot_event_direct_impl(
-        _writer: &std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
-        path: &Path,
-        worker_id: &str,
-        session_id: &str,
-        version: &str,
-        timeout: std::time::Duration,
-    ) -> Result<()> {
-        use std::io::Write;
-        use std::sync::mpsc;
-        use std::thread;
-
-        let event = TelemetryEvent {
-            timestamp: Utc::now(),
-            event_type: "worker.booting".to_string(),
-            worker_id: worker_id.to_string(),
-            session_id: session_id.to_string(),
-            sequence: 0,
-            bead_id: None,
-            workspace: None,
-            duration_ms: None,
-            data: serde_json::json!({ "worker_name": worker_id, "version": version }),
-            trace_id: None,
-            span_id: None,
-        };
-        let line = serde_json::to_string(&event)?;
-        let path_for_error = path.display().to_string();
-        let path_clone = path.to_path_buf();
-
-        // JoinHandle::join() has no timeout in Rust's std — use a channel with recv_timeout.
-        let (tx, rx) = mpsc::channel::<Result<(), String>>();
-
-        // The JoinHandle is intentionally dropped on timeout: dropping detaches the thread,
-        // which continues running until it completes or the process exits.
-        let _handle = thread::spawn(move || {
-            let result: Result<(), String> = (|| {
-                let file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&path_clone)
-                    .map_err(|e| e.to_string())?;
-                let mut writer = std::io::BufWriter::new(file);
-                writeln!(writer, "{line}").map_err(|e| e.to_string())?;
-                writer.flush().map_err(|e| e.to_string())?;
-                writer.get_ref().sync_all().map_err(|e| e.to_string())?;
-                Ok(())
-            })();
-            // Ignore send error: receiver may have timed out and been dropped.
-            let _ = tx.send(result);
-        });
-
-        match rx.recv_timeout(timeout) {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(anyhow::anyhow!(
-                "failed to write boot event to {}: {}",
-                path_for_error,
-                e
-            )),
-            Err(mpsc::RecvTimeoutError::Timeout) => Err(anyhow::anyhow!(
-                "timed out writing boot event to {} after {:?} (filesystem may be hung)",
-                path_for_error,
-                timeout
-            )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(anyhow::anyhow!(
-                "boot event writer thread disconnected for {}",
-                path_for_error
-            )),
-        }
-    }
-}
-
-impl Sink for FileSink {
-    fn accept(&self, event: &TelemetryEvent) -> Result<()> {
-        use std::io::Write;
-        let line = serde_json::to_string(event)?;
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
-        writeln!(writer, "{line}")?;
-        writer.flush()?;
-        Ok(())
-    }
-
-    fn flush(&self, _deadline: std::time::Duration) -> Result<()> {
-        use std::io::Write;
-        let mut writer = self
-            .writer
-            .lock()
-            .map_err(|e| anyhow::anyhow!("lock poisoned: {}", e))?;
-        writer.flush()?;
-        // fsync to ensure durability before shutdown
-        writer.get_ref().sync_all()?;
-        Ok(())
-    }
-}
 
 // ─── StdoutSink ───────────────────────────────────────────────────────────────
 
@@ -3260,7 +3092,7 @@ impl Telemetry {
         // File sink is always created (fallback)
         // Use configured log_dir if set, otherwise use default
         let file_sink_result = if let Some(ref log_dir) = config.file_sink.log_dir {
-            FileSink::with_dir(log_dir, &worker_id, &session_id)
+            FileSink::with_dir(log_dir.clone(), &worker_id, &session_id)
         } else {
             FileSink::new(&worker_id, &session_id)
         };
@@ -3364,7 +3196,7 @@ impl Telemetry {
         // Fixed session ID so the caller knows the exact file path.
         let session_id = "testbeef".to_string();
         let (sender, receiver) = mpsc::unbounded_channel();
-        let file_sink = FileSink::with_dir(log_dir, &worker_id, &session_id)?;
+        let file_sink = FileSink::with_dir(log_dir.to_path_buf(), &worker_id, &session_id)?;
         let path = file_sink.path().to_path_buf();
         // Write boot event directly to file (for consistency with production code).
         let version = env!("CARGO_PKG_VERSION");
@@ -3652,7 +3484,7 @@ impl Telemetry {
         let (sender, receiver) = mpsc::unbounded_channel();
 
         let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
-        match FileSink::with_dir(log_dir, &worker_id, &session_id) {
+        match FileSink::with_dir(log_dir.to_path_buf(), &worker_id, &session_id) {
             Ok(s) => sinks.push(Box::new(s)),
             Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
@@ -4935,7 +4767,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let sink =
-            FileSink::with_dir(&dir, "test-worker", "deadbeef").expect("should create file sink");
+            FileSink::with_dir(dir.to_path_buf(), "test-worker", "deadbeef").expect("should create file sink");
 
         let event = TelemetryEvent {
             timestamp: Utc::now(),
@@ -4975,7 +4807,7 @@ mod tests {
             .join("nested");
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 
-        let sink = FileSink::with_dir(&dir, "worker", "abcd1234");
+        let sink = FileSink::with_dir(dir.to_path_buf(), "worker", "abcd1234");
         assert!(sink.is_ok(), "should create nested directory");
 
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
@@ -4984,7 +4816,7 @@ mod tests {
     #[test]
     fn file_sink_accept_is_visible_without_explicit_flush() {
         let tmp = tempfile::tempdir().unwrap();
-        let sink = FileSink::with_dir(tmp.path(), "test-worker", "test-session").unwrap();
+        let sink = FileSink::with_dir(tmp.path().to_path_buf(), "test-worker", "test-session").unwrap();
 
         let event = TelemetryEvent {
             timestamp: Utc::now(),
@@ -6318,7 +6150,7 @@ mod tests {
         let file_path = dir.join(format!("{worker_id}-{session_id}.jsonl"));
 
         // Create a FileSink (this creates the file and writes the boot event)
-        let file_sink = FileSink::with_dir(&dir, worker_id, session_id)
+        let file_sink = FileSink::with_dir(dir.to_path_buf(), worker_id, session_id)
             .expect("FileSink::with_dir should succeed");
         assert!(file_path.exists(), "log file should be created");
 
