@@ -5,11 +5,33 @@
 
 use anyhow::{Context, Result};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 /// Path to the iad-ci cluster kubeconfig.
 const IAD_CI_KUBECONFIG: &str = "/home/coding/.kube/iad-ci.kubeconfig";
+
+/// Format a duration in a human-readable format (minutes and seconds).
+///
+/// # Arguments
+///
+/// * `duration` - The duration to format
+///
+/// # Returns
+///
+/// A string in the format "Xm Ys" where X is minutes and Y is seconds.
+/// For durations less than 1 minute, returns only seconds.
+fn format_duration(duration: Duration) -> String {
+    let total_secs = duration.as_secs();
+    let minutes = total_secs / 60;
+    let seconds = total_secs % 60;
+
+    if minutes > 0 {
+        format!("{}m {}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
+    }
+}
 
 /// Represents the phase of an Argo Workflow.
 ///
@@ -278,6 +300,8 @@ impl PollConfig {
 pub fn poll_workflow_status(workflow_name: &str, config: &PollConfig) -> Result<WorkflowPhase> {
     let ns = config.namespace.as_deref().unwrap_or("argo-workflows");
 
+    let start_time = Instant::now();
+
     info!(
         "Starting workflow status poll for '{}/{}' with {}s interval",
         ns,
@@ -302,10 +326,16 @@ pub fn poll_workflow_status(workflow_name: &str, config: &PollConfig) -> Result<
 
         // Check if terminal
         if phase.is_terminal() {
+            let end_time = start_time.elapsed();
+
+            // Format duration in human-readable format
+            let duration_str = format_duration(end_time);
+
             info!(
-                "Workflow '{}/{}' reached terminal phase: {:?}",
-                ns, workflow_name, phase
+                "Workflow '{}/{}' reached terminal phase: {:?} after {}",
+                ns, workflow_name, phase, duration_str
             );
+
             return Ok(phase);
         }
 
@@ -498,5 +528,31 @@ mod tests {
         // And 3 non-terminal: Running, Pending, Unknown
         assert_eq!(terminal_count, 3, "Expected 3 terminal phases");
         assert_eq!(non_terminal_count, 3, "Expected 3 non-terminal phases");
+    }
+
+    #[test]
+    fn test_format_duration_seconds_only() {
+        // Test durations less than 1 minute
+        assert_eq!(format_duration(Duration::from_secs(0)), "0s");
+        assert_eq!(format_duration(Duration::from_secs(1)), "1s");
+        assert_eq!(format_duration(Duration::from_secs(30)), "30s");
+        assert_eq!(format_duration(Duration::from_secs(59)), "59s");
+    }
+
+    #[test]
+    fn test_format_duration_minutes_and_seconds() {
+        // Test durations with minutes and seconds
+        assert_eq!(format_duration(Duration::from_secs(60)), "1m 0s");
+        assert_eq!(format_duration(Duration::from_secs(61)), "1m 1s");
+        assert_eq!(format_duration(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(format_duration(Duration::from_secs(120)), "2m 0s");
+        assert_eq!(format_duration(Duration::from_secs(3661)), "61m 1s");
+    }
+
+    #[test]
+    fn test_format_duration_large_values() {
+        // Test large durations
+        assert_eq!(format_duration(Duration::from_secs(3600)), "60m 0s");
+        assert_eq!(format_duration(Duration::from_secs(7261)), "121m 1s");
     }
 }
