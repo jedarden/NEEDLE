@@ -39,6 +39,13 @@ pub use otlp::{create_tracing_layer, OtlpSink};
 /// `TestHelper` for convenient event querying and assertions in tests.
 pub mod test_utils;
 
+// ─── File Sink ───────────────────────────────────────────────────────────────
+
+/// File-based JSONL telemetry sink.
+///
+/// Writes structured events to `<log_dir>/<worker>-<session>.jsonl`.
+pub mod file_sink;
+
 // ─── TelemetryEvent ──────────────────────────────────────────────────────────
 
 /// A single structured telemetry record.
