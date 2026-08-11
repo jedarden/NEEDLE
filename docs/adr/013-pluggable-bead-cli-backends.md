@@ -1,136 +1,151 @@
-# ADR-013: Pluggable Bead-CLI Backends — Configurable Binary, Discoverable Dialect
+# ADR-013: Pluggable Bead-CLI Backends — Three Upstreams, One Configurable Seam
 
-**Status:** Proposed — 2026-08-11
+**Status:** Proposed — 2026-08-11 (revised same day; see Revision History)
 **Deciders:** operator (jedarden), via Claude Code
 **Tracking:** see Phase 16 in `docs/plan/plan.md`; beads filed under label `bead-cli-backend`
 
 ## Context
 
-The `game-of-life` project runs in the **agent-sandbox** cluster (`needle-pod` namespace) against **bead-rs**, whose CLI binary is `bead` — not `bf` (bead-forge) and not the deprecated `br` shim. Stock NEEDLE cannot drive it. A worker booted there fails at the first claim.
+NEEDLE must drive **three** independently-evolving bead CLIs, not one canonical tool plus legacy debris:
 
-This is not a missing feature so much as an abstraction that was drawn one layer too shallow. `trait BeadStore` (`src/bead_store/mod.rs:546`) already exists, is already `Send + Sync`, and is already what every consumer holds — `Arc<dyn BeadStore>` in `Worker` (`src/worker/mod.rs:306-308`), in `Claimer`, and in every strand. There are already two impls (`BrCliBeadStore` at `:701`, `BfCliBeadStore` at `:1852`). Nothing in the worker or strand layer knows or cares which CLI is underneath. That part of the design is sound and does not need to change.
+| Backend | Binary | Upstream | Installed here |
+|---|---|---|---|
+| **beads_rust** | `br` | `github.com/dicklesworthstone/beads_rust` | `~/.cargo/bin/br`, v0.1.28 |
+| **bead-forge** | `bf` | `git.ardenone.com/jedarden/bead-forge` | `~/.local/bin/bf`, v0.4.1 |
+| **bead-rs** | `bead` | `git.ardenone.com/jedarden/bead-rs` | agent-sandbox `needle-pod`, v0.1.0 |
 
-What breaks is that four things leak past that seam.
+(A fourth, the original Go `beads` — `bd` v0.49.6, `~/go/bin/bd`, the common ancestor of all three — is out of scope for this ADR but is why the three dialects rhyme without matching.)
 
-### 1. Binary resolution is hardcoded in five places, two of which bypass the trait entirely
+The immediate trigger is the `game-of-life` project in the **agent-sandbox** cluster, whose workspace is bead-rs-backed. Stock NEEDLE cannot drive it: a worker booted there fails at the first claim. But the investigation found the problem is broader than one missing backend, and that NEEDLE's *existing* handling of the two backends it nominally supports is already incorrect.
+
+### The seam is right; what leaks past it is not
+
+`trait BeadStore` (`src/bead_store/mod.rs:546`) already exists, is `Send + Sync`, and is what every consumer holds — `Arc<dyn BeadStore>` in `Worker` (`src/worker/mod.rs:306-308`), in `Claimer`, in every strand. Two impls already exist: `BrCliBeadStore` (`:701`) and `BfCliBeadStore` (`:1852`). Nothing in the worker or strand layer knows which CLI is underneath. **That part of the design is sound and does not change.**
+
+Four things leak past it.
+
+### 1. Binary resolution is hardcoded in five places, one of which bypasses the trait
 
 | Site | Behavior |
 |---|---|
-| `src/bead_store/mod.rs:758-775` | `BrCliBeadStore::discover` — fixed chain `bf` → `~/.local/bin/bf` → `br` → `~/.local/bin/br`, error text `"bead CLI not found; install bead-forge (bf)"` |
+| `src/bead_store/mod.rs:758-775` | `BrCliBeadStore::discover` — chain `bf` → `~/.local/bin/bf` → `br` → `~/.local/bin/br` |
 | `src/bead_store/mod.rs:1127-1136` | a **second**, independent `resolve_bf()` used only by `run_bf_batch` / `run_bf_claim` |
-| `src/bead_store/mod.rs:1893-1902` | `BfCliBeadStore::discover` — a third copy of the same chain |
+| `src/bead_store/mod.rs:1893-1902` | `BfCliBeadStore::discover` — a third copy |
 | `src/worker/mod.rs:732-742` | boot-time version handshake, `which::which("bf")` inline |
 | `src/cli/mod.rs:3626-3632` | `needle doctor` preflight — `bf` else `br` else fail `"no bead store CLI found on PATH (checked bf, br)"` |
-| `src/validation/predispatch.rs:128` | `run(workspace, "bf", &["show", bead_id, "--json"])` — **bypasses `BeadStore` altogether** |
+| `src/validation/predispatch.rs:128` | `run(workspace, "bf", &["show", …])` — **bypasses `BeadStore` altogether** |
 
-Five sites, four spellings of the same fallback chain, and one caller that does not go through the trait at all. Even if the store were configurable today, `predispatch` would still shell out to a literal `"bf"`.
+The first row is the load-bearing defect. **`BrCliBeadStore::discover` resolves `bf` first** — so the store that speaks beads_rust dialect is bound, by default, to the bead-forge binary. See §5.
 
-### 2. The *dialect* — not just the binary name — is baked into `BrCliBeadStore`'s method bodies
+### 2. Three dialects, diverged from a common ancestor in three directions
 
-This is the substantive work. `BrCliBeadStore` is not "a CLI-backed store"; it is "a bf-dialect store". Against bead-rs `bead` (surface enumerated from `~/bead-rs/src/cli.rs`, `Command` enum at `:47-131`):
+Enumerated from each installed binary's own `--help` on 2026-08-11. This is the matrix any backend abstraction has to absorb:
 
-| NEEDLE emits | bead-rs `bead` | Outcome |
-|---|---|---|
-| `batch --json '[{"op":"update",…}]'` — used for **claim** (`:1428-1437`), **release** (`:1479-1486`), and **split** (`:1485`, `:1508`) | **no `batch` subcommand exists** | hard fail on the hottest path |
-| `claim --model X --harness Y --harness-version Z --assignee A --json` (`:1206-1220`) | `ClaimOptions` (`cli.rs:370`) accepts only `--assignee/--json/--why/--policy/--lease-ttl/--renew-lease/--fencing-token` | clap rejects unknown args, exit 2 |
-| `create --title T --body B --json --silent --labels a,b` (`:1550-1563`) | `CreateOptions` (`cli.rs:181`) uses `--description`, repeated `--label`, and has **no `--json`** — it prints the bare issue ID on stdout | fail (**and already fails on `bf` — see Addendum**) |
-| `dep add <blocked> <blocker> --type blocks` (`:1579`) | `DepAddOptions` (`cli.rs:975`) spells it `--kind blocks` | fail |
-| `sync --import-only` bare (`:1706`) | requires `--input` **and** exactly one of `--restore-into-empty` / `--merge` (`SyncCommand`, `cli.rs:667`) | fail |
-| `list --json --limit 999999` (`:1357`), `show --json`, `update --status`, `reopen`, `close --reason`, `label add/remove --label`, `doctor [--repair]`, `sync --flush-only` | all present and compatible (`ListOptions` `cli.rs:241` caps `--limit` at 999999; `--ready` also available) | works |
+| Operation | `br` 0.1.28 | `bf` 0.4.1 | `bead` 0.1.0 |
+|---|---|---|---|
+| atomic server-side claim | **absent** | `claim --model --harness --harness-version --assignee --json` | `claim --assignee --json --policy` (no velocity metadata) |
+| transactional batch | **absent** | `batch --json '[…]'` | **absent** |
+| create: description | `-d/--description` (**`--body` is a valid alias**) | `--description` only | `--description` only |
+| create: labels | `-l/--labels` **comma-separated** | repeated `--label` | repeated `--label` |
+| create: quiet ID | `--silent` | absent (bare ID on stdout) | absent (bare ID on stdout) |
+| `dep add` | `<ISSUE> <DEPENDS_ON> -t blocks` — **2 positionals** | `<BLOCKER> --blocks <BLOCKED> -t` — **1 positional** | `<BLOCKED> <BLOCKER> --kind blocks` — **2 positionals** |
+| `update --assignee` | present | **removed in 0.4.1** (`bf-1hmey`) | present, plus `--clear-assignee` |
+| `sync --import-only` | bare | bare | requires `--input` + one of `--restore-into-empty`/`--merge` |
+| ready frontier | `ready --json --limit` | `ready` | `list --ready` |
+| `doctor --repair` | present | present | present |
+| close reason | `-r/--reason` | `--reason` | `--reason` |
+| machine-readable contract | `schema` | `schema`, `robot-docs` | `capabilities --profile` |
 
-Note the direction of the divergence at claim/release. NEEDLE routes those through `bf batch` **only because** bf 0.4.1 dropped `--assignee` from `update` (ADR-referenced bead `bf-1hmey`, commit `ce0134c`). bead-rs's `UpdateOptions` (`cli.rs:444`) *has* both `--assignee` and `--clear-assignee`. So the bead-rs implementation of claim and release is not harder than bf's — it is the straightforward `update` call that bf used to support and no longer does. The two dialects diverged in opposite directions from a common ancestor.
+Two structural facts fall out. **`bf` is the only backend with a transactional `batch`**, so it is the only one that can make mitosis atomic. **`bf` is the only backend that dropped `update --assignee`**, so it is the only one that *needs* `batch` for something as ordinary as claiming. Those two facts are the same fact, and together they are why a shared "argv template table" cannot work: the backends do not differ in flag spelling, they differ in which operations are single commands at all.
 
-`split_bead` is the one place where bead-rs is genuinely weaker: with no `batch`, it cannot commit N creates plus N dependency links in one transaction, so it must fall back to the trait's existing non-atomic default (`src/bead_store/mod.rs:646-668`) and accept the orphaned-child crash window that default already documents.
+Note also that `dep add`'s positional order agrees between `br` and `bead` (blocked first, blocker second) and `bf` is the outlier. Getting this backwards inverts every dependency edge rather than failing loudly — the one place in this ADR where a wrong guess is worse than a crash.
 
-### 3. The prompt hands the agent the dialect as literal text
+### 3. The prompt hands the agent a hardcoded dialect
 
-`src/prompt/mod.rs` embeds `bf update` (`:56`), `bf close` (`:64`), and a whole `bf create` / `bf show` / `bf dep add` / `bf label add` block in the mitosis-split instructions (`:294-325`). A test asserts on the literal string (`:1066-1067`). Even with a perfect store abstraction, the agent inside the sandbox is told to run a binary that is not installed there.
-
-There is already evidence this string lives in the wrong place: `:325` instructs `bf dep add <blocker-id> --blocks <blocked-id>`, while the store at `bead_store/mod.rs:1579` emits `dep add <blocked> <blocker> --type blocks`. The two copies of the dialect disagree, unnoticed, because nothing ties them together — and as the Addendum records, it is the **store** that is wrong here, not the prompt.
+`src/prompt/mod.rs` embeds `bf update` (`:56`), `bf close` (`:64`), and a whole `bf create` / `bf show` / `bf dep add` / `bf label add` block in the mitosis-split instructions (`:294-325`), with a test asserting the literal string (`:1066-1067`). An agent in the bead-rs sandbox is told to run a binary that is not installed there.
 
 ### 4. Version-handshake logic is bead-forge-specific
 
-`check_bead_forge_version` / `run_version_handshake` (`src/bead_store/mod.rs:295-419`) parse bead-forge version strings to detect bf 0.2.0's `--limit 0` bug. Run against `bead --version` this degrades safely to `VersionCheck::Failed` and a warning, but the `--limit 999999` workaround it exists to justify is applied unconditionally at `:1357` and `:2094` regardless of backend.
+`check_bead_forge_version` / `run_version_handshake` (`:295-419`) parse bead-forge version strings to detect bf 0.2.0's `--limit 0` bug. Against `br --version` or `bead --version` this degrades to a warning, but the `--limit 999999` workaround it exists to justify is applied unconditionally at `:1357` and `:2094`.
+
+### 5. `BrCliBeadStore` is a *correct* beads_rust store bound to the wrong binary
+
+This is the finding that reframes the rest. Checked against the real `br` 0.1.28 at `~/.cargo/bin/br`:
+
+```
+create --title T --body B --json --silent --labels a,b      (:1550-1563)
+dep add <blocked> <blocker> --type blocks                   (:1579)
+sync --import-only                                          (:1706)
+list --json --limit 999999                                  (:1357)
+doctor --repair                                             (:1675)
+```
+
+**Every one of these is valid beads_rust.** `--body` is a documented alias of `-d/--description`; `--silent` exists; `-l/--labels` is comma-separated; `dep add` takes two positionals with `-t` defaulting to `blocks`; `sync --import-only` is bare; `list` has `--json` and `--limit`. `BrCliBeadStore` is not stale, drifted, or wrong. It is a faithful beads_rust adapter.
+
+The defect is that **`discover()` (`:758-775`) resolves `bf` before `br`**, so on this host — and on every fleet host, where `~/.local/bin/bf` is present — the beads_rust adapter sends beads_rust argv to the bead-forge binary, which rejects most of it. `bf 0.4.1 create` has no `--body`, no `--silent`, no `--labels`. `bf 0.4.1 dep add` takes one positional, not two.
+
+Compounding it, bf-only calls were grafted *into* the beads_rust store: `claim` (`:1428-1437`), `release` (`:1479-1486`), and `split` (`:1485`, `:1508`) all route through `bf batch` via the second resolver at `:1127`, and `claim_auto` shells to `bf claim` (`:1194-1220`). beads_rust has neither subcommand. So `BrCliBeadStore` is now a chimera: beads_rust argv for create/dep/sync/list, bead-forge argv for claim/release/split, and a resolver that picks whichever binary it finds first regardless of which half is being invoked.
+
+There is exactly one genuine argv bug, and it is in the *other* store: `BfCliBeadStore::add_dependency` (`:2288`) emits two positionals, which is correct for `br` and `bead` but wrong for `bf`.
+
+**Consequence in production:** every worker path constructs `BrCliBeadStore` — `worker/mod.rs:1385`, `supervisor/mod.rs:214`, `strand/explore.rs:71`/`:450`, `strand/splice.rs:747`/`:839`/`:999`. `BfCliBeadStore` is built only in `cli/mod.rs:997` and `:3384`. So the fleet runs the chimera. `create_bead` fails with a clap parse error against `bf`, and through the trait's default `split_bead` (`:646-668`) that takes all of mitosis child creation with it.
 
 ## Decision
 
-**Add a third `BeadStore` implementation; do not genericize the existing two.** Make the binary and backend selection configurable, and use the backend's own capability report to decide which optional paths are available.
+**One `BeadStore` impl per upstream, selected by configuration, with capability negotiation per backend.** Three real backends, three adapters, no shared argv template.
 
-1. **`BeadCliBeadStore`** — a new impl of the existing `BeadStore` trait speaking bead-rs dialect (`src/bead_store/bead_cli.rs`). Claim and release become plain `update --status … --assignee …` / `update --status open --clear-assignee` calls. `create` uses `--description` and parses the bare-ID stdout rather than JSON. `dep add` uses `--kind`. `split_bead` is **not** overridden — it inherits the non-atomic trait default. `full_rebuild` supplies the required `--input` and `--restore-into-empty` arguments that bead-rs's `sync --import-only` demands.
+1. **`BrCliBeadStore` becomes honestly beads_rust-only.** Keep its existing create/dep/sync/list argv — already correct. Remove the grafted `bf batch` and `bf claim` paths and the second resolver at `:1127`. `claim`/`release`/`clear_assignee` use `update -s <status> --assignee …`, which beads_rust has. `claim_auto` has no beads_rust equivalent: implement it as the existing non-atomic `ready` → `claim(id)` sequence and log the downgrade. `split_bead` inherits the non-atomic trait default.
 
-2. **Split `bead_store/mod.rs`.** At 3440 lines carrying two impls, adding a third to the same file is not defensible. `mod.rs` keeps the trait, shared types, parsing helpers, the ETXTBSY spawn retry, and corruption detection; `br_cli.rs`, `bf_cli.rs`, and `bead_cli.rs` each take one impl.
+2. **`BfCliBeadStore` becomes the only store that uses `batch`.** It is the only backend with one, and the only one that needs it (no `update --assignee` since 0.4.1). Fix `add_dependency` (`:2288`) to `dep add <blocker> --blocks <blocked>`. It keeps velocity-aware `claim --model/--harness/--harness-version` and the atomic `split_bead` override — both bf-exclusive.
 
-3. **One resolver, one config knob.** A new `BeadCliConfig` (`src/config/mod.rs`, alongside `WorkspaceConfig` at `:289`) with a `backend` field (`auto` | `bf` | `br` | `bead`) and an optional explicit `path`. A single `resolve_bead_cli(&BeadCliConfig) -> Result<(Backend, PathBuf)>` replaces all five hardcoded chains above. `auto` preserves today's precedence (`bf` → `~/.local/bin/bf` → `br` → `~/.local/bin/br`) and appends `bead` → `~/.local/bin/bead` → `/usr/local/cargo/bin/bead` so existing installs are unaffected. Configurable per workspace via `.needle.yaml`, so a fleet spanning both backends works without per-host global config.
+3. **`BeadCliBeadStore`** — new, for bead-rs. `update --assignee`/`--clear-assignee` for claim and release (bead-rs kept what bf dropped). `create --description` + repeated `--label`, parsing the bare-ID stdout. `dep add <blocked> <blocker> --kind blocks`. `full_rebuild` supplies the `--input` and `--restore-into-empty` that bead-rs requires. `claim_auto` uses `claim --assignee --json`, omitting metadata flags bead-rs does not accept. No `batch`, so no atomic split.
 
-4. **`predispatch` goes through the store.** `src/validation/predispatch.rs:128` stops shelling out to a literal `"bf"` and calls `BeadStore::show` instead. This is a strict simplification — it is already fetching exactly what `show` returns.
+4. **Split `bead_store/mod.rs`** (3440 lines, two impls, soon three). `mod.rs` keeps the trait, shared types, parse helpers, ETXTBSY spawn retry, corruption detection; `br_cli.rs`, `bf_cli.rs`, `bead_cli.rs` take one impl each.
 
-5. **Capability probe, not a version matrix.** bead-rs ships `bead capabilities --profile <p>` (`cli.rs:1116`). Probe it once at discovery and record the result on the store, rather than hardcoding a backend→features table that goes stale the way the bf 0.2.0 workaround did. Backends without a `capabilities` subcommand (bf, br) fall back to today's version handshake, which becomes backend-conditional rather than unconditional.
+5. **One resolver, one config knob.** `BeadCliConfig` in `src/config/mod.rs` (alongside `WorkspaceConfig` at `:289`): `backend` (`auto` | `br` | `bf` | `bead`) and optional explicit `path`. A single `resolve_bead_cli()` replaces all five hardcoded chains and returns *both* the backend identity and the path, so a store can never again be bound to a binary that speaks a different dialect. **`auto` must resolve backend and binary together** — the current bug is precisely that these were decided independently. Per-workspace via `.needle.yaml`, so a fleet spanning backends needs no per-host global config.
 
-6. **Prompt fragments become backend-derived.** The bead-command block in `src/prompt/mod.rs:294-325` and the single-command references at `:56`/`:64` are generated from the resolved backend's dialect rather than hardcoded, so the agent is told to run the binary that is actually present. Fixing the pre-existing `--blocks` / `--type` drift at `:325` falls out of this, because there will be exactly one place the dialect is written down.
+6. **Capability negotiation per backend, not a hardcoded matrix.** Each upstream ships a machine-readable contract surface — `bead capabilities --profile`, `bf schema` / `bf robot-docs`, `br schema`. Probe at discovery and record on the store; gate optional paths (notably atomic split and atomic claim) on the result rather than a table that goes stale the way the bf 0.2.0 `--limit 0` workaround did. Make the bead-forge version handshake backend-conditional.
+
+7. **`predispatch` goes through the store** (`src/validation/predispatch.rs:128` → `BeadStore::show`), removing the last non-trait bead-CLI call site.
+
+8. **Prompt fragments are backend-derived** (`prompt/mod.rs:56`, `:64`, `:294-325`), so the agent is told to run the binary that is present, and the dialect is written down exactly once.
 
 ## Alternatives Considered
 
-- **A `BeadDialect` table of argv templates, with one generic `CliBeadStore` over it.** This is the shape the phrase "make it configurable" suggests, and it is the wrong one. Claim, release, and split differ *structurally* between backends, not lexically: one transactional `batch` call versus one or two sequential `update` calls, with materially different crash-safety guarantees (the atomic split exists specifically to close the orphaned-child window described at `:637-645`). A template table would have to carry behavior, not strings — at which point it is a trait again, but with worse ergonomics and no compile-time exhaustiveness. Rejected.
+- **A `BeadDialect` table of argv templates behind one generic `CliBeadStore`.** This is what "make it configurable" suggests and it is wrong. The backends differ *structurally*: `bf` claims with one `batch` call because it has no `update --assignee`; `br` and `bead` claim with a plain `update`; `br` has no server-side `claim` at all, so `claim_auto` is a two-step read-then-write there and a single atomic call elsewhere — with completely different race properties. A template table would have to carry behavior, not strings, at which point it is a trait again with worse ergonomics and no compile-time exhaustiveness. Rejected.
 
-- **Ship a `bf`-compatible shim in the sandbox image that translates to `bead`.** Fastest possible unblock and requires zero NEEDLE changes. Rejected: it moves the dialect mismatch into an undocumented shell script on one container image, exactly the class of invisible per-host divergence that `reference_agent_rule_surfaces_ex44_lab` records as a recurring failure. It also cannot fix the `batch`-shaped calls, since there is no bead-rs equivalent to translate them into.
+- **Standardize on one CLI and drop the others.** Tempting, and `br` is nominally deprecated here (`~/.local/bin/br` is a shim execing `bf`). Rejected on the operator's explicit requirement: all three upstreams are live, independently maintained, and deployed on different hosts. Making NEEDLE portable across them is the point, not an accident to be normalized away. Note also that the shim is itself part of the hazard — it makes `which br` return something that speaks `bf`, which is how the §5 chimera went unnoticed.
 
-- **Teach bead-rs a `batch` subcommand so the existing `BfCliBeadStore` just works.** Rejected as scope inversion: it makes an external tool's roadmap a blocker for NEEDLE portability, and it would still leave `--body`/`--description`, `--type`/`--kind`, the `claim` metadata flags, and `sync --import-only`'s required arguments unaddressed. Worth doing on its own merits later; not the path to backend support.
+- **Ship a `bf`-compatible shim in the sandbox image translating to `bead`.** Fastest unblock, zero NEEDLE changes. Rejected: it buries the dialect mismatch in an undocumented shell script on one container image — the same shape as the `br` shim that concealed §5 — and it cannot express the `batch`-shaped calls at all, since bead-rs has no equivalent to translate into.
 
-- **Detect the backend purely by probing, with no config knob.** Rejected: a host can legitimately have both `bf` and `bead` on PATH (this workstation nearly does), and silent autodetection makes "which store did that worker actually write to" unanswerable from config alone. `auto` remains the default, but an explicit override must exist.
+- **Teach bead-rs and beads_rust a `batch` subcommand so the bf store just works everywhere.** Scope inversion: makes two external roadmaps a blocker for NEEDLE portability, and still leaves `--body`/`--labels`/`--silent`, `dep add` arity, `claim` metadata, and `sync --import-only` arity unaddressed.
+
+- **Autodetect with no config knob.** Rejected: this host has `br`, `bf`, and `bd` simultaneously, with a shim shadowing one of them. Silent autodetection makes "which store did that worker write to" unanswerable from config alone. `auto` stays the default; an explicit override must exist.
 
 ## Consequences
 
-- NEEDLE can drive bead-rs workspaces, unblocking `game-of-life` in agent-sandbox and any future non-bead-forge deployment.
-- **Mitosis loses transactional atomicity on bead-rs backends.** A crash between a child `create` and its `dep add` leaves an orphaned child and a parent that never unblocks — the exact failure the `batch` path was built to prevent. The trait default already implements and documents this fallback, so this is a known, bounded regression confined to the bead-rs backend, not new risk on bf.
-- **Velocity-aware claim scoring is unavailable on bead-rs.** `--model`/`--harness`/`--harness-version` have no bead-rs equivalent, so the `worker_sessions`/`velocity_stats` rows those flags populate are simply not written. Claim ordering falls back to bead-rs's own `--policy` (default `fifo-v1`). Workers on bead-rs backends will not benefit from model/harness routing.
-- `bead_store/mod.rs` splits into four files. Import paths change across the crate; the public `crate::bead_store::{BeadStore, BrCliBeadStore, BfCliBeadStore}` surface must be re-exported from `mod.rs` so no consumer outside the module needs editing.
-- The prompt test at `src/prompt/mod.rs:1066-1067` — which asserts the literal string `"bf close needle-abc"` — must become backend-parameterized. Its comment ("bead-forge, not the deprecated br alias") documents intent that survives; the hardcoded binary name does not.
-- Adds a third code path through claim/release, the two operations where a bug means duplicate dispatch or a lost bead. Every new path needs the same fixture-CLI coverage the existing two have (`src/bead_store/mod.rs:2809`, `:2858`, `:2960` use a fake-binary fixture pattern that generalizes).
-- `needle doctor` gains the ability to report *which* backend it resolved and why, replacing today's `"checked bf, br"` message that is wrong on any host running bead-rs.
+- NEEDLE drives all three upstreams, unblocking `game-of-life` in agent-sandbox and any future mixed-backend fleet.
+- **`BrCliBeadStore` stops being silently broken.** Once bound to the binary it was written for, its argv is already correct — this is a repair by *unbinding*, not by rewriting argv. Any "fix" that rewrites `--body` → `--description` in that store is wrong and would break real beads_rust.
+- **Atomic mitosis is bf-only.** `br` and `bead` have no transactional batch, so both inherit the non-atomic `split_bead` default and its documented orphaned-child crash window. Bounded, backend-scoped, and logged — not new risk on bf.
+- **Atomic server-side claim is bf- and bead-only.** beads_rust has no `claim`, so its `claim_auto` is a read-then-write with a real TOCTOU window between `ready` and `update`. This matters for multi-worker fleets on beads_rust workspaces and must be documented where operators will see it, not just in code.
+- **Velocity-aware claim scoring is bf-only.** `--model`/`--harness`/`--harness-version` exist on no other backend, so `worker_sessions`/`velocity_stats` rows simply are not written there.
+- `bead_store/mod.rs` splits into four files; the public surface must be re-exported so no consumer outside the module changes.
+- Three code paths through claim and release — the operations where a bug means duplicate dispatch or a lost bead. Each needs the fixture-CLI coverage the existing pattern (`:2809`, `:2858`, `:2960`) generalizes to, with argv assertions per backend.
+- `needle doctor` can finally report *which* backend it resolved and why, replacing a message that is wrong on two of the three.
 
 ## Evidence
 
-- `src/bead_store/mod.rs:546` (`trait BeadStore`), `:701` / `:1852` (the two existing impls), `:646-668` (the non-atomic `split_bead` default and its documented orphaned-child window), `:637-645` (why the atomic override exists).
-- Hardcoded resolution: `src/bead_store/mod.rs:758-775`, `:1127-1136`, `:1893-1902`; `src/worker/mod.rs:732-742`; `src/cli/mod.rs:3626-3632`; `src/validation/predispatch.rs:128` (the trait-bypassing call).
-- bf-dialect call sites: `:1206-1220` (claim metadata flags), `:1357` (`list --json --limit 999999`), `:1428-1437` (claim via `batch`), `:1479-1486` (release via `batch`), `:1485`/`:1508` (split via `batch`), `:1550-1556` (`create --body`), `:1579` (`dep add … --type blocks`), `:1706` (`sync --import-only`).
-- Why claim/release use `batch` at all: commit `ce0134c`, "route claim/release/clear_assignee through bf batch, not bf update --assignee" (bead `bf-1hmey`) — bf 0.4.1 removed `--assignee` from `update`.
-- bead-rs surface (`~/bead-rs`, commit `fa30574`, version 0.1.0): `src/cli.rs:47-131` (`Command` enum — no `batch` variant), `:181` (`CreateOptions`: `--description`, no `--json`), `:241` (`ListOptions`: `--json`, `--ready`, `--limit` 0-999999), `:370` (`ClaimOptions`: no model/harness flags), `:444` (`UpdateOptions`: **has** `--assignee` and `--clear-assignee`), `:667` (`SyncCommand`: `--import-only` requires `--input` plus `--restore-into-empty`|`--merge`), `:975` (`DepAddOptions`: `--kind`, not `--type`), `:1059` (`DoctorOptions`: `--repair` present), `:1116` (`CapabilitiesOptions`).
-- Prompt-embedded dialect and its drift: `src/prompt/mod.rs:56`, `:64`, `:294-325` (`:325` says `dep add <blocker> --blocks <blocked>`, which is correct for bf 0.4.1; the store at `bead_store/mod.rs:1579` emits `dep add <blocked> <blocker> --type blocks`, which is not — see Addendum), `:1066-1067` (test asserting the literal binary name).
-- bead-forge-specific handshake: `src/bead_store/mod.rs:295-419` (`VersionCheck`, `check_bead_forge_version`, `run_version_handshake`), and the `--limit 999999` workaround it justifies at `:1357` and `:2094`.
+- Installed binaries probed 2026-08-11: `~/.cargo/bin/br` → `br 0.1.28` (dicklesworthstone/beads_rust); `~/.local/bin/bf` → `bf 0.4.1` (jedarden/bead-forge); `~/go/bin/bd` → `bd 0.49.6` (Go beads, ancestor). `~/.local/bin/br` is a **shim** that logs the caller and `exec`s `bf` — so `which br` does not find beads_rust, which is how §5 stayed hidden.
+- `br 0.1.28 create --help`: `-d, --description [aliases: --body]`, `-l, --labels` (comma-separated), `--silent`, `--json`. `br dep add --help`: `Usage: br dep add [OPTIONS] <ISSUE> <DEPENDS_ON>`, `-t, --type … [default: blocks]`. `br update --help`: `-s, --status`, `--assignee`, `--notes`. `br sync --help`: `--flush-only`, `--import-only` (both bare). `br --help`: no `claim`, no `batch`; has `ready`, `schema`.
+- `bf 0.4.1 create --help`: `--title --description --type --priority --assignee --label --json --envelope --no-auto-flush --no-progress --workspace` — no `--body`, `--silent`, or `--labels`. `bf dep add --help`: `Usage: bf dep add [OPTIONS] <BLOCKER>` plus `--blocks <BLOCKS>`. Verified empirically: `bf dep add bf-46m05 --blocks bf-2qm6r` → `Added dependency: bf-2qm6r depends on bf-46m05 (blocks)`. `bf --help`: has `ready`, `claim`, `batch`, `schema`, `robot-docs`.
+- `bead` 0.1.0 surface from `~/bead-rs/src/cli.rs` @ `fa30574`: `Command` enum `:47-131` (no `batch`), `CreateOptions` `:181` (`--description`, repeated `--label`, no `--json`), `ListOptions` `:241` (`--json`, `--ready`, `--limit` 0-999999), `ClaimOptions` `:370` (no model/harness flags), `UpdateOptions` `:444` (**has** `--assignee` and `--clear-assignee`), `SyncCommand` `:667` (`--import-only` requires `--input` + `--restore-into-empty`|`--merge`), `DepAddOptions` `:975` (`--kind`), `DoctorOptions` `:1059`, `CapabilitiesOptions` `:1116`.
+- NEEDLE call sites: resolution `:758-775`, `:1127-1136`, `:1893-1902`, `worker/mod.rs:732-742`, `cli/mod.rs:3626-3632`, `validation/predispatch.rs:128`. beads_rust-dialect argv in `BrCliBeadStore`: `:1357`, `:1550-1563`, `:1579`, `:1675`, `:1706`. Grafted bf-only paths in the same store: `:1194-1220` (`bf claim`), `:1428-1437` (claim via `batch`), `:1479-1486` (release via `batch`), `:1485`/`:1508` (split via `batch`). Genuine argv bug in the bf store: `:2288`.
+- Store construction: `BrCliBeadStore` at `worker/mod.rs:1385`, `supervisor/mod.rs:214`, `strand/explore.rs:71`/`:450`, `strand/splice.rs:747`/`:839`/`:999`; `BfCliBeadStore` only at `cli/mod.rs:997`, `:3384`.
+- Why bf needs `batch` for claim: commit `ce0134c` ("route claim/release/clear_assignee through bf batch, not bf update --assignee", bead `bf-1hmey`) — bf 0.4.1 removed `--assignee` from `update`.
+- Prompt-embedded dialect: `prompt/mod.rs:56`, `:64`, `:294-325`, `:1066-1067`. `:325` says `bf dep add <blocker> --blocks <blocked>` — correct for `bf`, wrong for `br` and `bead`, which is exactly the failure mode of writing a dialect down in a second place.
+- bead-forge-specific handshake: `:295-419`, and the unconditional `--limit 999999` workaround it justifies at `:1357`, `:2094`.
 
-## Addendum (2026-08-11): `BrCliBeadStore::create_bead` is already broken against the installed `bf`
+## Revision History
 
-Enumerating `bf create`'s real flag set while filing this ADR's beads turned up a live bug that is not a portability concern at all.
-
-`bf 0.4.1 create` accepts exactly `--title --description --type --priority --assignee --label --json --envelope --no-auto-flush --no-progress --workspace`. It has **no `--body`, no `--silent`, and no `--labels`**.
-
-`BrCliBeadStore::create_bead` (`src/bead_store/mod.rs:1550-1563`) emits all three:
-
-```
-create --title T --body B --json --silent [--labels a,b]
-```
-
-`BfCliBeadStore::create_bead` (`:2267-2280`) gets it right — `--description` plus repeated `--label`. But `BfCliBeadStore` is constructed in only two places, both in `src/cli/mod.rs` (`:997`, `:3384`). **Every worker path uses `BrCliBeadStore`** — `worker/mod.rs:1385`, `supervisor/mod.rs:214`, `strand/explore.rs:71`/`:450`, `strand/splice.rs:747`/`:839`/`:999` — and its `discover` (`:758-775`) resolves `bf` *first*. So the store the fleet actually runs speaks the old `br` dialect at a binary that no longer accepts it.
-
-Consequence: any path that creates a bead through the trait fails with a clap parse error (exit 2) on a current `bf` install. That is `create_bead` itself and, through the trait's default `split_bead` (`:646-668`), **all of mitosis child creation**. Split has presumably been failing silently-ish in fleet logs for as long as bf 0.4.1 has been deployed.
-
-This is the same class of defect ADR-012 documented — code that compiles, lints, and has config and telemetry wired, but whose actual invocation is wrong — and the same root cause this ADR exists to remove: the dialect is written down in more than one place, and the copies drifted. It is filed as its own bead, ahead of the Phase 16 work, and sequenced before the module split so the two do not collide in the same file.
-
-### `add_dependency` is broken in *both* stores, and the prompt was right all along
-
-The same flag-enumeration pass found a second live defect. `bf 0.4.1 dep add` takes **one** positional:
-
-```
-bf dep add [OPTIONS] <BLOCKER> --blocks <BLOCKS>
-```
-
-Verified empirically while filing these beads — `bf dep add bf-46m05 --blocks bf-2qm6r` prints `Added dependency: bf-2qm6r depends on bf-46m05 (blocks)` and moves `bf-2qm6r` to `blocked`.
-
-Both stores emit two positionals instead:
-
-- `BrCliBeadStore::add_dependency` (`:1579`) — `dep add <blocked> <blocker> --type blocks`
-- `BfCliBeadStore::add_dependency` (`:2288`) — identical
-
-`-t, --type` does exist and defaults to `blocks`, so the flag is harmless; the extra positional is not. Unlike the `create_bead` defect, this one is not confined to the `br`-dialect store — the `bf` store has it too, so there is no correct copy in the codebase to copy from.
-
-This also **reverses** the drift claim in §3 above. `src/prompt/mod.rs:325` tells the agent `bf dep add <blocker-id> --blocks <blocked-id>`, which is exactly right for bf 0.4.1. The prompt is the accurate copy of the dialect and the store code is the stale one. That inversion is itself the argument for §6: when the same command is written down in two places, being right in one of them is luck, and you cannot tell which copy to trust without going to the binary. Filed as a separate P1 bead, with an acceptance criterion requiring a real round-trip against a scratch workspace — getting the argument order backwards would invert every dependency edge, which is worse than failing loudly.
+- **2026-08-11, initial draft.** Framed the problem as "add bead-rs support", treating `br` as a deprecated alias of `bf` rather than a live upstream. Diagnosed `BrCliBeadStore`'s `--body`/`--silent`/`--labels` and two-positional `dep add` as stale-drift bugs to be rewritten toward the bf dialect.
+- **2026-08-11, revised** after the operator required first-class support for all three upstreams. Probing the real `~/.cargo/bin/br` (which `which br` does not find, because a shim shadows it) showed that argv is **correct beads_rust** and the actual defect is `discover()` binding that store to the `bf` binary — plus bf-only `batch`/`claim` calls grafted into it. The rewrite-toward-bf fix the first draft proposed would have broken genuine beads_rust support. Only one real argv bug survives, in `BfCliBeadStore::add_dependency` (`:2288`). Recorded here rather than silently amended: the first draft's diagnosis was confidently wrong in a way worth being able to trace.

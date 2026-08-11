@@ -4457,54 +4457,65 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 - Timeout telemetry identifies the firing deadline and contains enough timing evidence to distinguish provider stalls from long-running productive work.
 - Existing adapters retain their current timeout behavior until explicitly migrated.
 
-# Phase 16: Pluggable Bead-CLI Backends — Configurable Binary, Discoverable Dialect
+# Phase 16: Pluggable Bead-CLI Backends — Three Upstreams, One Configurable Seam
 
-**Status:** planned. See `docs/adr/013-pluggable-bead-cli-backends.md` for the full decision record, dialect divergence table, and rejected alternatives.
+**Status:** planned. See `docs/adr/013-pluggable-bead-cli-backends.md` for the full decision record, the three-way dialect matrix, and rejected alternatives.
 
-**Goal:** let a NEEDLE worker drive a bead workspace backed by **bead-rs** (`bead`) as well as bead-forge (`bf`) and the deprecated `br` shim, selected by configuration rather than by a hardcoded PATH probe. Driven by the `game-of-life` project in the agent-sandbox cluster, whose workspace is bead-rs-backed and which stock NEEDLE cannot claim from at all.
+**Goal:** drive all three live bead CLIs from one configurable seam — **beads_rust** (`br`, dicklesworthstone, v0.1.28), **bead-forge** (`bf`, jedarden, v0.4.1), and **bead-rs** (`bead`, jedarden, v0.1.0) — with the backend selected by configuration rather than a hardcoded PATH probe.
 
-The `BeadStore` trait (`src/bead_store/mod.rs:546`) is already the right seam and does not change shape. What changes is everything that leaks past it: five hardcoded copies of the `bf`/`br` resolution chain, a bf-specific command dialect baked into `BrCliBeadStore`'s method bodies, prompt text that hands the agent literal `bf` commands, and a bead-forge-specific version handshake.
+Triggered by the `game-of-life` project in the agent-sandbox cluster, whose workspace is bead-rs-backed and which stock NEEDLE cannot claim from at all. Investigation found the problem is wider: NEEDLE's handling of the two backends it *nominally* supports is already wrong. `BrCliBeadStore` speaks correct beads_rust for create/dep/sync/list, but its `discover()` resolves `bf` first — so the beads_rust adapter is bound to the bead-forge binary, which rejects that argv — and bf-only `batch`/`claim` calls were grafted into the same store. It is a chimera, and the fleet runs it.
+
+The `BeadStore` trait (`src/bead_store/mod.rs:546`) is already the right seam and does not change shape. What changes is everything leaking past it: five hardcoded resolution chains that decide binary and dialect independently, bf-only paths inside the beads_rust store, prompt text handing agents a literal `bf` dialect, and a bead-forge-specific version handshake applied to every backend.
 
 ## Changes
 
-### 16.1 Split `bead_store` into per-backend modules
-- `mod.rs` retains the trait, shared types (`Filters`, `RepairReport`, `NewChild`, `VersionCheck`), JSON parsing helpers, the ETXTBSY spawn-retry wrappers, and corruption detection. Each impl moves to its own file: `br_cli.rs`, `bf_cli.rs`, `bead_cli.rs`.
-- Re-export `BeadStore`, `BrCliBeadStore`, `BfCliBeadStore` from `mod.rs` so no consumer outside the module changes. Pure refactor — no behavior change, existing tests must pass untouched.
+### 16.1 Split `bead_store/mod.rs` into per-backend modules
+- `mod.rs` retains the trait, shared types (`Filters`, `RepairReport`, `NewChild`, `VersionCheck`), JSON parse helpers, the ETXTBSY spawn-retry wrappers, and corruption detection. `br_cli.rs`, `bf_cli.rs`, `bead_cli.rs` take one impl each.
+- Re-export `BeadStore`, `BrCliBeadStore`, `BfCliBeadStore` from `mod.rs` so no consumer outside the module changes. Pure refactor; existing tests pass untouched.
 
 ### 16.2 Single resolver and `bead_cli` configuration
-- New `BeadCliConfig` with `backend` (`auto` | `bf` | `br` | `bead`) and optional explicit `path`. Overridable per workspace in `.needle.yaml`, so a fleet spanning both backends needs no per-host global config.
-- One `resolve_bead_cli()` replaces all five hardcoded chains (`bead_store/mod.rs:758-775`, `:1127-1136`, `:1893-1902`; `worker/mod.rs:732-742`; `cli/mod.rs:3626-3632`).
-- `auto` preserves today's precedence exactly (`bf` → `~/.local/bin/bf` → `br` → `~/.local/bin/br`), then appends `bead` → `~/.local/bin/bead` → `/usr/local/cargo/bin/bead`. Existing installs resolve identically.
-- `needle doctor` reports the resolved backend, its path, and how it was chosen, replacing the `"checked bf, br"` message that is wrong on any bead-rs host.
+- New `BeadCliConfig`: `backend` (`auto` | `br` | `bf` | `bead`) and optional explicit `path`. Overridable per workspace in `.needle.yaml`, so a fleet spanning backends needs no per-host global config.
+- One `resolve_bead_cli()` replaces all five hardcoded chains (`bead_store/mod.rs:758-775`, `:1127-1136`, `:1893-1902`; `worker/mod.rs:732-742`; `cli/mod.rs:3626-3632`). It returns **both** the backend identity and the path — resolving them independently is the current bug.
+- `auto` preserves today's binary precedence so existing installs are unaffected, but binds each store to the backend it actually speaks.
 
 ### 16.3 `BeadCliBeadStore` — the bead-rs dialect
-- `claim`/`release`/`clear_assignee` use `update --status … --assignee …` / `--clear-assignee` directly. bead-rs kept the `update --assignee` that bf 0.4.1 removed, so these are simpler here than on bf, not harder — no `batch` emulation.
-- `claim_auto` uses `claim --assignee A --json`, omitting `--model`/`--harness`/`--harness-version`, which bead-rs's `ClaimOptions` does not accept. Selection falls back to bead-rs's own `--policy` (default `fifo-v1`).
-- `create_bead` uses `--description` (not `--body`) and parses the bare issue ID from stdout — bead-rs `create` has no `--json`.
-- `add_dependency` uses `--kind blocks` (not `--type`). `full_rebuild` supplies the `--input` and `--restore-into-empty` that bead-rs's `sync --import-only` requires.
-- `split_bead` is deliberately **not** overridden; it inherits the non-atomic trait default and its documented orphaned-child crash window. Log at split time that the atomic path is unavailable on this backend.
+- `claim`/`release`/`clear_assignee` via `update --assignee` / `--clear-assignee`; bead-rs kept what bf 0.4.1 dropped, so no batch emulation.
+- `create --description` + repeated `--label`, parsing the bare-ID stdout (no `--json` on bead-rs `create`). `dep add <blocked> <blocker> --kind blocks`. `full_rebuild` supplies the `--input` and `--restore-into-empty` that bead-rs's `sync --import-only` requires.
+- `claim_auto` uses `claim --assignee --json`, omitting the `--model`/`--harness`/`--harness-version` bead-rs does not accept. No `batch`, so `split_bead` inherits the non-atomic trait default.
 
-### 16.4 Capability probe instead of a hardcoded feature matrix
-- Probe `bead capabilities --profile <p>` once at discovery and record the result on the store; use it to gate optional paths (notably the atomic split) rather than a backend→features table that goes stale the way the bf 0.2.0 `--limit 0` workaround did.
-- Make the bead-forge version handshake (`bead_store/mod.rs:295-419`, called from `worker/mod.rs:732-742`) backend-conditional rather than unconditional.
+### 16.4 Capability negotiation per backend
+- Each upstream ships a machine-readable contract surface — `bead capabilities --profile`, `bf schema`/`bf robot-docs`, `br schema`. Probe at discovery and gate optional paths (atomic split, atomic claim) on the result rather than a hardcoded matrix that goes stale.
+- Make the bead-forge version handshake (`bead_store/mod.rs:295-419`) backend-conditional, and revisit the unconditional `--limit 999999` workaround it justifies at `:1357`/`:2094`.
 
 ### 16.5 Route `predispatch` through the store
-- `src/validation/predispatch.rs:128` currently shells out to a literal `"bf"`, bypassing `BeadStore` entirely. Replace with `BeadStore::show` — it already fetches exactly what `show` returns. Strict simplification; removes the last non-trait bead-CLI call site.
+- `src/validation/predispatch.rs:128` shells out to a literal `"bf"`, bypassing the trait. Replace with `BeadStore::show` — it already fetches exactly what `show` returns. Removes the last non-trait bead-CLI call site.
 
 ### 16.6 Backend-derived prompt fragments
-- The bead-command block in `src/prompt/mod.rs:294-325` and the single references at `:56`/`:64` are generated from the resolved backend's dialect instead of hardcoded, so the agent is instructed to run the binary that is actually installed.
-- This collapses the pre-existing drift at `:325` (`dep add <blocker> --blocks <blocked>`) against the store's own `:1579` (`dep add <blocked> <blocker> --type blocks`) — one source of truth for the dialect.
-- The literal-string assertion at `:1066-1067` becomes backend-parameterized.
+- Generate the bead-command block (`prompt/mod.rs:294-325`) and the references at `:56`/`:64` from the resolved backend, so the agent is told to run the binary that is installed and the dialect is written down exactly once. Backend-parameterize the literal-string assertion at `:1066-1067`.
 
-### 16.7 Tests
-- Fixture-CLI coverage for `BeadCliBeadStore` matching the existing fake-binary pattern (`bead_store/mod.rs:2809`, `:2858`, `:2960`): argv assertions for claim, release, create, dep add, and `sync --import-only`, since each differs from bf in a way that fails loudly at runtime and silently in review.
-- Resolver tests: each `backend` value, explicit `path`, `auto` precedence with various binaries present, and the error message when none resolve.
-- A test proving `auto` on a `bf`-only host resolves exactly as it does today — the no-regression guard for every existing deployment.
-- Prompt tests asserting the emitted dialect matches the resolved backend for all three backends.
+### 16.7 `needle doctor` reports the resolved backend
+- Report backend, path, and whether it came from config or auto-detection; correct the `"checked bf, br"` failure message, which is wrong on two of the three backends.
+
+### 16.8 Fixture-CLI test coverage
+- Argv assertions per backend for claim, claim_auto, release, clear_assignee, create, dep add/remove, and `sync --import-only`. Three code paths now run through claim and release — the operations where a bug means duplicate dispatch or a lost bead.
+- Honor the test isolation policy (CLAUDE.md): pin `HOME` and `strands.explore.workspace_root` to a tempdir.
+
+### 16.9 De-graft bf-only paths from `BrCliBeadStore`
+- beads_rust has neither `claim` nor `batch` (verified against `br` 0.1.28). Remove the grafted `bf batch` claim/release/split (`:1428-1437`, `:1479-1486`, `:1485`/`:1508`), the `bf claim` in `claim_auto` (`:1194-1220`), and the second resolver at `:1127`.
+- `claim`/`release`/`clear_assignee` use `update -s <status> --assignee …`. `claim_auto` becomes a non-atomic `ready` → `claim(id)` with the downgrade logged.
+
+### 16.10 Guard against the `br` shim masquerading as beads_rust
+- `~/.local/bin/br` is a shim that `exec`s `bf`; the real beads_rust is `~/.cargo/bin/br`. A resolver that trusts the filename will re-create the exact binding bug this phase exists to fix.
+- Verify backend identity after resolving a candidate, and fail loudly on mismatch naming both paths.
+
+### 16.11 Document per-backend capability gaps
+- Two gaps change fleet **safety**, not convenience: atomic mitosis is bf-only, and atomic server-side claim is bf/bead-only — beads_rust `claim_auto` carries a real TOCTOU window in which two workers can claim the same bead.
+- Capability matrix in `docs/configuration.md`; `needle doctor` surfaces the active backend's gaps so operators see them without reading docs.
 
 ## Exit criteria
-- A worker in a bead-rs workspace claims, dispatches, closes, and releases beads end to end with `bead_cli.backend: bead`.
+- A worker claims, dispatches, closes, and releases end to end on each of the three backends.
 - A worker on an unmodified `bf` host behaves identically to before this phase, with no config change required.
-- No literal `"bf"` or `"br"` string remains outside the resolver and the per-backend dialect modules (`grep -rn '"bf"\|"br"' src/` returns only those).
-- `needle doctor` names the resolved backend and path on all three backends.
+- No store can be bound to a binary speaking a different dialect: identity is verified, not inferred from filename or PATH order.
+- `grep -rn '"bf"\|"br"' src/` returns only the resolver and the per-backend dialect modules.
+- `needle doctor` names the resolved backend, its path, and its capability gaps.
 - The agent prompt names the binary that is actually installed.
