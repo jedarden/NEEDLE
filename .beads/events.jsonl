@@ -1959,3 +1959,16 @@
 {"bead":"bf-68sgx","duration_ms":600429,"event":"timeout","exit_code":124,"outcome":"timeout","strand":"auto","ts":"2026-08-11T14:34:11.721576096+00:00","worker":"glm-needle"}
 {"bead":"bf-68sgx","event":"claim","strand":"auto","ts":"2026-08-11T14:34:11.756824633+00:00","worker":"glm-needle"}
 {"adapter":"claude-code-glm-4.7","bead":"bf-68sgx","event":"dispatch","model":"glm-4.7","strand":"auto","ts":"2026-08-11T14:34:11.762749693+00:00","worker":"glm-needle"}
+{"bead":"bf-68sgx","duration_ms":600220,"event":"timeout","exit_code":124,"outcome":"timeout","strand":"auto","ts":"2026-08-11T14:44:11.995636466+00:00","worker":"glm-needle"}
+{"bead":"bf-68sgx","event":"claim","strand":"auto","ts":"2026-08-11T14:44:12.008801614+00:00","worker":"glm-needle"}
+{"adapter":"claude-code-glm-4.7","bead":"bf-68sgx","event":"dispatch","model":"glm-4.7","strand":"auto","ts":"2026-08-11T14:44:12.011097718+00:00","worker":"glm-needle"}
+{"bead":"bf-68sgx","duration_ms":320870,"event":"complete","exit_code":0,"outcome":"success","strand":"auto","ts":"2026-08-11T14:49:32.885979405+00:00","worker":"glm-needle"}
+{"bead":"bf-34nrd","event":"claim","strand":"auto","ts":"2026-08-11T14:49:32.903022978+00:00","worker":"glm-needle"}
+{"adapter":"claude-code-glm-4.7","bead":"bf-34nrd","event":"dispatch","model":"glm-4.7","strand":"auto","ts":"2026-08-11T14:49:32.905404176+00:00","worker":"glm-needle"}
+{"bead":"needle-test-001","event":"claim","strand":"auto","ts":"2026-08-11T14:51:43.608210488+00:00","worker":"test-worker"}
+{"bead":"bf-34nrd","duration_ms":410970,"event":"complete","exit_code":0,"outcome":"success","strand":"auto","ts":"2026-08-11T14:56:23.881614641+00:00","worker":"glm-needle"}
+{"bead":"bf-oqpna","event":"claim","strand":"auto","ts":"2026-08-11T14:56:23.897198791+00:00","worker":"glm-needle"}
+{"adapter":"claude-code-glm-4.7","bead":"bf-oqpna","event":"dispatch","model":"glm-4.7","strand":"auto","ts":"2026-08-11T14:56:23.899728485+00:00","worker":"glm-needle"}
+{"bead":"bf-oqpna","duration_ms":600229,"event":"timeout","exit_code":124,"outcome":"timeout","strand":"auto","ts":"2026-08-11T15:06:24.134396424+00:00","worker":"glm-needle"}
+{"bead":"bf-oqpna","event":"claim","strand":"auto","ts":"2026-08-11T15:06:24.146225861+00:00","worker":"glm-needle"}
+{"adapter":"claude-code-glm-4.7","bead":"bf-oqpna","event":"dispatch","model":"glm-4.7","strand":"auto","ts":"2026-08-11T15:06:24.149288391+00:00","worker":"glm-needle"}
