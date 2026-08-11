@@ -195,6 +195,20 @@ pub struct AgentAdapter {
     /// Timeout in seconds (0 = use global config timeout).
     #[serde(default)]
     pub timeout_secs: u64,
+    /// Idle timeout in seconds (0 = no idle deadline).
+    ///
+    /// When implemented, will kill the agent if no stdout/stderr activity
+    /// is detected for this duration. This is a data-model-only field;
+    /// validation and enforcement logic will be added in a follow-up.
+    #[serde(default)]
+    pub idle_timeout_secs: u64,
+    /// Hard timeout in seconds (0 = no hard deadline).
+    ///
+    /// When implemented, will enforce an absolute maximum execution time
+    /// regardless of agent activity. This is a data-model-only field;
+    /// enforcement logic will be added in a follow-up.
+    #[serde(default)]
+    pub hard_timeout_secs: u64,
     /// AI provider name (informational).
     #[serde(default)]
     pub provider: Option<String>,
@@ -276,6 +290,8 @@ fn builtin_claude_sonnet() -> AgentAdapter {
         .to_string(),
         environment: HashMap::new(),
         timeout_secs: 3600,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
         provider: Some("anthropic".to_string()),
         model: Some("claude-sonnet-4-6".to_string()),
         token_extraction: TokenExtraction::None,
@@ -301,6 +317,8 @@ fn builtin_claude_opus() -> AgentAdapter {
         .to_string(),
         environment: HashMap::new(),
         timeout_secs: 7200,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-6".to_string()),
         token_extraction: TokenExtraction::None,
@@ -325,6 +343,8 @@ fn builtin_opencode() -> AgentAdapter {
                 .to_string(),
         environment: HashMap::new(),
         timeout_secs: 3600,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
         provider: None,
         model: None,
         token_extraction: TokenExtraction::None,
@@ -353,6 +373,8 @@ fn builtin_codex() -> AgentAdapter {
         .to_string(),
         environment: HashMap::new(),
         timeout_secs: 3600,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
         provider: Some("openai".to_string()),
         model: Some("gpt-5.6-terra".to_string()),
         token_extraction: TokenExtraction::None,
@@ -379,6 +401,8 @@ fn builtin_aider() -> AgentAdapter {
         .to_string(),
         environment: HashMap::new(),
         timeout_secs: 3600,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
         provider: Some("anthropic".to_string()),
         model: Some("claude-sonnet-4-6".to_string()),
         token_extraction: TokenExtraction::Regex {
@@ -403,6 +427,8 @@ fn builtin_generic() -> AgentAdapter {
         invoke_template: "cd {workspace} && my-agent < {prompt_file}".to_string(),
         environment: HashMap::new(),
         timeout_secs: 0,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
         provider: None,
         model: None,
         token_extraction: TokenExtraction::None,
@@ -1653,6 +1679,8 @@ mod tests {
             invoke_template: template.to_string(),
             environment: HashMap::new(),
             timeout_secs: 10,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: None,
             model: None,
             token_extraction: TokenExtraction::None,
