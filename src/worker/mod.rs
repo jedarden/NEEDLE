@@ -4266,6 +4266,10 @@ mod tests {
         let store = Arc::new(MockStore::empty());
         let mut config = Config::default();
         config.agent.default = String::new(); // Invalid
+        // Pin workspace_root to prevent Explore strand from scanning real home
+        let temp_dir = tempfile::tempdir().unwrap();
+        config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
         let result = worker.boot();
         assert!(result.is_err());
@@ -4287,6 +4291,10 @@ mod tests {
         config.worker.idle_action = IdleAction::Exit;
         config.self_modification.hot_reload = false;
         config.strands.explore.enabled = false;
+        // Pin workspace_root to prevent Explore strand from scanning real home
+        let temp_dir = tempfile::tempdir().unwrap();
+        config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
         let result = worker.run().await.unwrap();
@@ -4326,6 +4334,9 @@ mod tests {
         let mut config = Config::default();
         config.self_modification.hot_reload = false;
         config.workspace.home = dir.path().to_path_buf();
+        // Pin workspace_root to prevent Explore strand from scanning real home
+        config.strands.explore.workspace_root = dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
         let worker = Worker::new(config, "test-worker".to_string(), store);
         assert_eq!(worker.beads_processed(), 0);
     }
@@ -4337,6 +4348,10 @@ mod tests {
         config.self_modification.hot_reload = false;
         // Disable Explore strand so it doesn't find beads from the filesystem
         config.strands.explore.enabled = false;
+        // Pin workspace_root to prevent Explore strand from scanning real home
+        let temp_dir = tempfile::tempdir().unwrap();
+        config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
         worker.boot().unwrap();
 
@@ -4357,6 +4372,10 @@ mod tests {
         // reaching do_select()/Explore; disable explicitly rather than rely
         // on that ordering never changing (see bf-2unnq contamination).
         config.strands.explore.enabled = false;
+        // Pin workspace_root to prevent Explore strand from scanning real home
+        let temp_dir = tempfile::tempdir().unwrap();
+        config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
         // Set shutdown before run.
@@ -4688,6 +4707,9 @@ mod tests {
                 config.workspace.default = home.path().to_path_buf();
                 config.self_modification.hot_reload = false;
                 config.strands.explore.enabled = false;
+                // Pin workspace_root to prevent Explore strand from scanning real home
+                config.strands.explore.workspace_root = home.path().to_path_buf();
+                config.strands.explore.workspaces = Vec::new();
                 let mut worker = Worker::new(config, "span-depth".to_string(), store.clone());
                 worker.boot().unwrap();
 
@@ -5042,6 +5064,9 @@ mod tests {
         config.telemetry.file_sink.log_dir = Some(log_dir);
         config.budget.stop_usd = 10.0; // Cost (50) exceeds this threshold.
         config.budget.warn_usd = 5.0;
+        // Pin workspace_root to prevent Explore strand from scanning real home
+        config.strands.explore.workspace_root = dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
 
         let mut worker = Worker::new(config, "test-budget".to_string(), store);
         worker.boot().unwrap();
@@ -5070,6 +5095,9 @@ mod tests {
         config.telemetry.file_sink.log_dir = Some(log_dir);
         config.budget.warn_usd = 5.0; // Cost (8) exceeds warn but not stop.
         config.budget.stop_usd = 20.0;
+        // Pin workspace_root to prevent Explore strand from scanning real home
+        config.strands.explore.workspace_root = dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
 
         let mut worker = Worker::new(config, "test-budget-warn".to_string(), store);
         worker.boot().unwrap();
