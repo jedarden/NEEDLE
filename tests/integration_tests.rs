@@ -222,6 +222,8 @@ fn test_adapter(name: &str, template: &str, timeout_secs: u64) -> AgentAdapter {
         invoke_template: template.to_string(),
         environment: HashMap::new(),
         timeout_secs,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
         provider: None,
         model: None,
         token_extraction: needle::dispatch::TokenExtraction::None,
@@ -523,7 +525,7 @@ async fn exhaustion_empty_workspace() {
     let _home_dir = tempfile::tempdir().unwrap();
     let config = test_config("echo-test", _home_dir.path());
     let session_id = needle::telemetry::generate_session_id();
-    needle::cli::init_tracing_subscriber("test-worker".to_string(), session_id, &config);
+    let _ = needle::cli::init_tracing_subscriber("test-worker".to_string(), session_id, &config);
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
     let adapter = test_adapter("echo-test", "echo done", 10);
@@ -2750,15 +2752,17 @@ async fn worker_binary_path_supervisor_initialization() {
     // Configure supervisor with a custom binary path
     let custom_binary = PathBuf::from("/custom/path/to/needle");
 
-    let mut supervisor_config = SupervisorConfig::default();
-    supervisor_config.workspace = workspace.clone();
-    supervisor_config.worker_binary_path = Some(custom_binary.clone());
+    let supervisor_config = SupervisorConfig {
+        workspace: workspace.clone(),
+        worker_binary_path: Some(custom_binary.clone()),
+        ..Default::default()
+    };
 
     let mut config = Config::default();
     config.workspace.home = temp_dir.path().to_path_buf();
 
     // Supervisor creation should succeed
-    let supervisor = Supervisor::new(supervisor_config, config)
+    let _supervisor = Supervisor::new(supervisor_config, config)
         .expect("supervisor should be created successfully with worker_binary_path");
 
     println!("✓ Supervisor initialization with worker_binary_path succeeded");
@@ -2773,10 +2777,9 @@ async fn worker_binary_path_supervisor_initialization() {
 /// overriding HOME environment variables.
 #[tokio::test]
 async fn worker_binary_path_test_fixture_isolation() {
-    use needle::supervisor::{Supervisor, SupervisorConfig};
+    use needle::supervisor::SupervisorConfig;
     use std::env;
     use std::fs;
-    use std::path::PathBuf;
 
     // Create a completely isolated temp directory for this test
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
@@ -2821,18 +2824,20 @@ exit 0
     // Create isolated registry
     let registry_dir = temp_dir.path().join("registry");
     fs::create_dir_all(&registry_dir).expect("failed to create registry dir");
-    let registry = needle::registry::Registry::new(&registry_dir);
+    let _registry = needle::registry::Registry::new(&registry_dir);
 
     // Configure supervisor to use the isolated paths
-    let telemetry = needle::telemetry::Telemetry::new("isolation-test".to_string());
+    let _telemetry = needle::telemetry::Telemetry::new("isolation-test".to_string());
     let config = needle::config::Config::default();
     let session_id = needle::telemetry::generate_session_id();
-    needle::cli::init_tracing_subscriber("test-worker".to_string(), session_id, &config);
+    let _ = needle::cli::init_tracing_subscriber("test-worker".to_string(), session_id, &config);
 
-    let mut supervisor_config = SupervisorConfig::default();
-    supervisor_config.workspace = isolated_workspace.clone();
-    supervisor_config.worker_binary_path = Some(custom_binary.clone());
-    supervisor_config.max_workers = 1;
+    let _supervisor_config = SupervisorConfig {
+        workspace: isolated_workspace.clone(),
+        worker_binary_path: Some(custom_binary.clone()),
+        max_workers: 1,
+        ..Default::default()
+    };
 
     // Even without a real br workspace, the supervisor should handle paths correctly
     // The important thing is that it's using our isolated custom binary path
@@ -2841,7 +2846,7 @@ exit 0
 
     // Verify the resolved path is within our isolated directory
     assert!(
-        resolved_binary.starts_with(&temp_dir.path()),
+        resolved_binary.starts_with(temp_dir.path()),
         "resolved binary should be within temp directory: {}",
         resolved_binary.display()
     );
@@ -2869,10 +2874,8 @@ exit 0
 /// correctly expanded to the HOME directory during config loading.
 #[tokio::test]
 async fn worker_binary_path_tilde_expansion() {
-    use needle::config::Config;
     use needle::util::expand_tilde;
     use std::env;
-    use std::path::PathBuf;
 
     // Set a known HOME value for testing
     let original_home = env::var("HOME").ok();
@@ -2889,7 +2892,7 @@ async fn worker_binary_path_tilde_expansion() {
 
     // Verify that the expansion works for the configuration
     // The config loading should expand tilde paths automatically
-    let yaml = format!(
+    let _yaml = format!(
         r#"
 worker:
   worker_binary_path: {}
@@ -3031,16 +3034,16 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
             if path_str.contains("integration_tests") {
                 Some(
                     p.parent()
-                        .and_then(|grandparent| {
+                        .map(|grandparent| {
                             let needle_path = grandparent.join("needle");
                             if needle_path.exists() {
-                                Some(needle_path)
+                                needle_path
                             } else {
                                 let debug_path = grandparent.join("debug").join("needle");
                                 if debug_path.exists() {
-                                    Some(debug_path)
+                                    debug_path
                                 } else {
-                                    Some(grandparent.join("release").join("needle"))
+                                    grandparent.join("release").join("needle")
                                 }
                             }
                         })
@@ -3262,16 +3265,16 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
             if path_str.contains("integration_tests") {
                 Some(
                     p.parent()
-                        .and_then(|grandparent| {
+                        .map(|grandparent| {
                             let needle_path = grandparent.join("needle");
                             if needle_path.exists() {
-                                Some(needle_path)
+                                needle_path
                             } else {
                                 let debug_path = grandparent.join("debug").join("needle");
                                 if debug_path.exists() {
-                                    Some(debug_path)
+                                    debug_path
                                 } else {
-                                    Some(grandparent.join("release").join("needle"))
+                                    grandparent.join("release").join("needle")
                                 }
                             }
                         })

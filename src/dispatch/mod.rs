@@ -12,7 +12,7 @@ use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use libc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -166,6 +166,31 @@ fn extract_tokens_regex(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// TimeoutPolicy
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Which timeout configuration mode is active for an adapter.
+///
+/// An adapter can use:
+/// - Legacy single timeout (`timeout_secs`)
+/// - New two-field timeout (`idle_timeout_secs` + `hard_timeout_secs`)
+/// - Global config fallback (no adapter-specific timeout set)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutPolicy {
+    /// Legacy single timeout mode (`timeout_secs` is set).
+    Legacy,
+    /// New two-field timeout mode (at least one of `idle_timeout_secs` or `hard_timeout_secs` is set).
+    New {
+        /// Whether idle timeout is configured (non-zero).
+        idle_enabled: bool,
+        /// Whether hard timeout is configured (non-zero).
+        hard_enabled: bool,
+    },
+    /// No adapter-specific timeout; uses global config default.
+    Global,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // AgentAdapter
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -267,6 +292,109 @@ impl AgentAdapter {
     /// Defaults to "local" if no provider is configured.
     pub fn gen_ai_system(&self) -> &str {
         self.provider.as_deref().unwrap_or("local")
+    }
+
+    /// Active timeout policy for this adapter.
+    ///
+    /// Distinguishes between legacy single timeout and the new two-field
+    /// (idle + hard) timeout model.
+    pub fn timeout_policy(&self) -> TimeoutPolicy {
+        let has_legacy = self.timeout_secs > 0;
+        let has_idle = self.idle_timeout_secs > 0;
+        let has_hard = self.hard_timeout_secs > 0;
+
+        if has_legacy {
+            TimeoutPolicy::Legacy
+        } else if has_idle || has_hard {
+            TimeoutPolicy::New {
+                idle_enabled: has_idle,
+                hard_enabled: has_hard,
+            }
+        } else {
+            TimeoutPolicy::Global
+        }
+    }
+
+    /// Human-readable description of the active timeout policy.
+    ///
+    /// Shows which timeout mode is active and the configured values.
+    pub fn timeout_description(&self, global_timeout_secs: u64) -> String {
+        match self.timeout_policy() {
+            TimeoutPolicy::Legacy => {
+                format!("legacy: {}s (single timeout)", self.timeout_secs)
+            }
+            TimeoutPolicy::New {
+                idle_enabled,
+                hard_enabled,
+            } => {
+                let mut parts = Vec::new();
+                parts.push("new:".to_string());
+                if idle_enabled {
+                    parts.push(format!("idle={}s", self.idle_timeout_secs));
+                }
+                if hard_enabled {
+                    parts.push(format!("hard={}s", self.hard_timeout_secs));
+                }
+                if !idle_enabled && !hard_enabled {
+                    parts.push("both disabled".to_string());
+                }
+                parts.join(" ")
+            }
+            TimeoutPolicy::Global => {
+                if global_timeout_secs > 0 {
+                    format!("global: {}s (from config)", global_timeout_secs)
+                } else {
+                    "global: unlimited (0 = no timeout)".to_string()
+                }
+            }
+        }
+    }
+
+    /// Validate timeout field mutual exclusivity.
+    ///
+    /// Legacy `timeout_secs` and new `idle_timeout_secs`/`hard_timeout_secs`
+    /// cannot both be set. This preserves backward compatibility while allowing
+    /// the new two-field timeout model.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - `timeout_secs` is non-zero AND either `idle_timeout_secs` or `hard_timeout_secs` is non-zero
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// // Valid: legacy timeout alone
+    /// assert!(adapter_with_timeout_secs_only().validate_timeouts().is_ok());
+    ///
+    /// // Valid: new timeout fields together
+    /// assert!(adapter_with_new_timeouts().validate_timeouts().is_ok());
+    ///
+    /// // Valid: new timeout field alone (other set to 0)
+    /// assert!(adapter_with_idle_only().validate_timeouts().is_ok());
+    ///
+    /// // Invalid: mixing legacy and new
+    /// assert!(adapter_with_mixed_timeouts().validate_timeouts().is_err());
+    /// ```
+    pub fn validate_timeouts(&self) -> Result<()> {
+        let has_legacy = self.timeout_secs > 0;
+        let has_idle = self.idle_timeout_secs > 0;
+        let has_hard = self.hard_timeout_secs > 0;
+
+        if has_legacy && (has_idle || has_hard) {
+            bail!(
+                "adapter '{}' has incompatible timeout configuration: \
+                 legacy field 'timeout_secs' ({}) cannot be used together with new fields \
+                 'idle_timeout_secs' ({}) or 'hard_timeout_secs' ({}). \
+                 Use either timeout_secs alone (legacy) or idle_timeout_secs + hard_timeout_secs (new).",
+                self.name,
+                self.timeout_secs,
+                self.idle_timeout_secs,
+                self.hard_timeout_secs
+            );
+        }
+
+        Ok(())
     }
 }
 
@@ -501,9 +629,32 @@ pub fn load_adapters(
                     .with_context(|| format!("failed to read adapter file: {}", path.display()))?;
                 let adapter: AgentAdapter = serde_yaml::from_str(&text)
                     .with_context(|| format!("invalid YAML in adapter file: {}", path.display()))?;
+
+                // Validate timeout field mutual exclusivity
+                adapter.validate_timeouts().with_context(|| {
+                    format!(
+                        "adapter '{}' in file {} has invalid timeout configuration",
+                        adapter.name,
+                        path.display()
+                    )
+                })?;
+
                 adapters.insert(adapter.name.clone(), adapter);
             }
         }
+    }
+
+    // Log timeout policy for all loaded adapters
+    let global_timeout = 3600; // Default, will be overridden by dispatcher
+    for adapter in adapters.values() {
+        let policy = adapter.timeout_policy();
+        let desc = adapter.timeout_description(global_timeout);
+        tracing::debug!(
+            adapter = %adapter.name,
+            timeout_policy = ?policy,
+            timeout_config = %desc,
+            "loaded adapter with timeout configuration"
+        );
     }
 
     Ok(adapters)
@@ -670,6 +821,16 @@ impl Dispatcher {
         if let Some(ref model) = adapter.model {
             tracing::Span::current().record("gen_ai.request.model", model.as_str());
         }
+
+        // Log timeout policy for this dispatch
+        let timeout_policy = adapter.timeout_policy();
+        let timeout_desc = adapter.timeout_description(self.global_timeout_secs);
+        tracing::debug!(
+            adapter = %adapter.name,
+            timeout_policy = ?timeout_policy,
+            timeout_config = %timeout_desc,
+            "dispatching agent with timeout policy"
+        );
 
         self.telemetry.emit(EventKind::DispatchStarted {
             bead_id: bead_id.clone(),
@@ -1408,6 +1569,8 @@ pub struct AgentTestResult {
     pub probe_result: Option<ProbeResult>,
     pub token_extraction_ok: Option<bool>,
     pub output_transform_ok: Option<bool>,
+    pub timeout_policy: TimeoutPolicy,
+    pub timeout_description: String,
     pub status: AgentTestStatus,
     pub errors: Vec<String>,
 }
@@ -1543,6 +1706,10 @@ pub fn test_agent(adapter_name: &str, config: &Config) -> Result<AgentTestResult
         AgentTestStatus::Ready
     };
 
+    // 8. Determine timeout policy.
+    let timeout_policy = adapter.timeout_policy();
+    let timeout_description = adapter.timeout_description(config.agent.timeout);
+
     Ok(AgentTestResult {
         adapter_name: adapter.name.clone(),
         cli_path,
@@ -1551,6 +1718,8 @@ pub fn test_agent(adapter_name: &str, config: &Config) -> Result<AgentTestResult
         probe_result,
         token_extraction_ok,
         output_transform_ok,
+        timeout_policy,
+        timeout_description,
         status,
         errors,
     })
@@ -1641,6 +1810,7 @@ pub fn print_test_result(result: &AgentTestResult) {
         None => println!("Version: unknown"),
     }
     println!("Input:   {}", result.input_method);
+    println!("Timeout: {}", result.timeout_description);
     match &result.probe_result {
         Some(pr) => println!("Probe:   exit {} ({}ms)", pr.exit_code, pr.elapsed_ms),
         None => println!("Probe:   skipped"),
@@ -1863,6 +2033,151 @@ output_transform: "needle-transform-custom"
             ..builtin_generic()
         };
         assert_eq!(adapter.effective_timeout(0), Duration::ZERO);
+    }
+
+    // ── Timeout field validation (legacy vs new mutual exclusivity) ──
+
+    #[test]
+    fn validate_timeouts_timeout_secs_alone_valid() {
+        // Valid: legacy timeout_secs alone (backward compatibility)
+        let adapter = AgentAdapter {
+            name: "test-legacy".to_string(),
+            timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            ..test_adapter("test-legacy", "test template")
+        };
+        assert!(adapter.validate_timeouts().is_ok());
+    }
+
+    #[test]
+    fn validate_timeouts_new_fields_together_valid() {
+        // Valid: both idle_timeout_secs and hard_timeout_secs set
+        let adapter = AgentAdapter {
+            name: "test-new".to_string(),
+            timeout_secs: 0,
+            idle_timeout_secs: 600,
+            hard_timeout_secs: 7200,
+            ..test_adapter("test-new", "test template")
+        };
+        assert!(adapter.validate_timeouts().is_ok());
+    }
+
+    #[test]
+    fn validate_timeouts_idle_only_valid() {
+        // Valid: idle_timeout_secs alone (hard_timeout_secs = 0 disables hard deadline)
+        let adapter = AgentAdapter {
+            name: "test-idle-only".to_string(),
+            timeout_secs: 0,
+            idle_timeout_secs: 900,
+            hard_timeout_secs: 0,
+            ..test_adapter("test-idle-only", "test template")
+        };
+        assert!(adapter.validate_timeouts().is_ok());
+    }
+
+    #[test]
+    fn validate_timeouts_hard_only_valid() {
+        // Valid: hard_timeout_secs alone (idle_timeout_secs = 0 disables idle deadline)
+        let adapter = AgentAdapter {
+            name: "test-hard-only".to_string(),
+            timeout_secs: 0,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 3600,
+            ..test_adapter("test-hard-only", "test template")
+        };
+        assert!(adapter.validate_timeouts().is_ok());
+    }
+
+    #[test]
+    fn validate_timeouts_all_zero_valid() {
+        // Valid: all zero (use global config timeout)
+        let adapter = AgentAdapter {
+            name: "test-all-zero".to_string(),
+            timeout_secs: 0,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            ..test_adapter("test-all-zero", "test template")
+        };
+        assert!(adapter.validate_timeouts().is_ok());
+    }
+
+    #[test]
+    fn validate_timeouts_timeout_with_idle_fails() {
+        // Invalid: mixing legacy timeout_secs with new idle_timeout_secs
+        let adapter = AgentAdapter {
+            name: "test-mixed-1".to_string(),
+            timeout_secs: 3600,
+            idle_timeout_secs: 600,
+            hard_timeout_secs: 0,
+            ..test_adapter("test-mixed-1", "test template")
+        };
+        let result = adapter.validate_timeouts();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("incompatible timeout configuration"));
+        assert!(err_msg.contains("timeout_secs"));
+        assert!(err_msg.contains("idle_timeout_secs"));
+    }
+
+    #[test]
+    fn validate_timeouts_timeout_with_hard_fails() {
+        // Invalid: mixing legacy timeout_secs with new hard_timeout_secs
+        let adapter = AgentAdapter {
+            name: "test-mixed-2".to_string(),
+            timeout_secs: 1800,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 7200,
+            ..test_adapter("test-mixed-2", "test template")
+        };
+        let result = adapter.validate_timeouts();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("incompatible timeout configuration"));
+        assert!(err_msg.contains("timeout_secs"));
+        assert!(err_msg.contains("hard_timeout_secs"));
+    }
+
+    #[test]
+    fn validate_timeouts_timeout_with_both_new_fails() {
+        // Invalid: mixing legacy timeout_secs with both new fields
+        let adapter = AgentAdapter {
+            name: "test-mixed-3".to_string(),
+            timeout_secs: 2400,
+            idle_timeout_secs: 300,
+            hard_timeout_secs: 5400,
+            ..test_adapter("test-mixed-3", "test template")
+        };
+        let result = adapter.validate_timeouts();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("incompatible timeout configuration"));
+        assert!(err_msg.contains("timeout_secs"));
+        assert!(err_msg.contains("idle_timeout_secs"));
+        assert!(err_msg.contains("hard_timeout_secs"));
+        assert!(err_msg.contains("legacy field"));
+        assert!(err_msg.contains("new fields"));
+    }
+
+    #[test]
+    fn validate_timeouts_error_message_actionable() {
+        // Verify error message guides user to correct configuration
+        let adapter = AgentAdapter {
+            name: "test-error-msg".to_string(),
+            timeout_secs: 3600,
+            idle_timeout_secs: 600,
+            hard_timeout_secs: 0,
+            ..test_adapter("test-error-msg", "test template")
+        };
+        let result = adapter.validate_timeouts();
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        // Error message should explain the problem and solution
+        assert!(err_msg.contains("'timeout_secs'"));
+        assert!(err_msg.contains("'idle_timeout_secs'"));
+        assert!(err_msg.contains("cannot be used together"));
+        assert!(err_msg.contains("Use either timeout_secs alone"));
+        assert!(err_msg.contains("idle_timeout_secs + hard_timeout_secs"));
     }
 
     // ── Built-in adapters ──
@@ -2960,5 +3275,149 @@ output_transform: "needle-transform-custom"
     fn gen_ai_system_returns_local_for_adapter_without_provider() {
         let adapter = builtin_opencode();
         assert_eq!(adapter.gen_ai_system(), "local");
+    }
+
+    // ── Timeout policy tests ──
+
+    #[test]
+    fn timeout_policy_returns_legacy_for_legacy_timeout() {
+        let adapter = AgentAdapter {
+            timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            ..test_adapter("test", "test")
+        };
+        assert_eq!(adapter.timeout_policy(), TimeoutPolicy::Legacy);
+    }
+
+    #[test]
+    fn timeout_policy_returns_new_for_idle_only() {
+        let adapter = AgentAdapter {
+            timeout_secs: 0,
+            idle_timeout_secs: 600,
+            hard_timeout_secs: 0,
+            ..test_adapter("test", "test")
+        };
+        assert!(matches!(
+            adapter.timeout_policy(),
+            TimeoutPolicy::New {
+                idle_enabled: true,
+                hard_enabled: false
+            }
+        ));
+    }
+
+    #[test]
+    fn timeout_policy_returns_new_for_hard_only() {
+        let adapter = AgentAdapter {
+            timeout_secs: 0,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 7200,
+            ..test_adapter("test", "test")
+        };
+        assert!(matches!(
+            adapter.timeout_policy(),
+            TimeoutPolicy::New {
+                idle_enabled: false,
+                hard_enabled: true
+            }
+        ));
+    }
+
+    #[test]
+    fn timeout_policy_returns_new_for_both_timeouts() {
+        let adapter = AgentAdapter {
+            timeout_secs: 0,
+            idle_timeout_secs: 600,
+            hard_timeout_secs: 7200,
+            ..test_adapter("test", "test")
+        };
+        assert!(matches!(
+            adapter.timeout_policy(),
+            TimeoutPolicy::New {
+                idle_enabled: true,
+                hard_enabled: true
+            }
+        ));
+    }
+
+    #[test]
+    fn timeout_policy_returns_global_when_all_zero() {
+        let adapter = AgentAdapter {
+            timeout_secs: 0,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            ..test_adapter("test", "test")
+        };
+        assert_eq!(adapter.timeout_policy(), TimeoutPolicy::Global);
+    }
+
+    #[test]
+    fn timeout_description_shows_legacy_mode() {
+        let adapter = AgentAdapter {
+            timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            ..test_adapter("test", "test")
+        };
+        let desc = adapter.timeout_description(1800);
+        assert!(desc.contains("legacy"));
+        assert!(desc.contains("3600s"));
+    }
+
+    #[test]
+    fn timeout_description_shows_new_mode_with_both() {
+        let adapter = AgentAdapter {
+            timeout_secs: 0,
+            idle_timeout_secs: 600,
+            hard_timeout_secs: 7200,
+            ..test_adapter("test", "test")
+        };
+        let desc = adapter.timeout_description(1800);
+        assert!(desc.contains("new"));
+        assert!(desc.contains("idle=600s"));
+        assert!(desc.contains("hard=7200s"));
+    }
+
+    #[test]
+    fn timeout_description_shows_global_fallback() {
+        let adapter = AgentAdapter {
+            timeout_secs: 0,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            ..test_adapter("test", "test")
+        };
+        let desc = adapter.timeout_description(1800);
+        assert!(desc.contains("global"));
+        assert!(desc.contains("1800s"));
+    }
+
+    #[test]
+    fn timeout_description_shows_unlimited_when_global_is_zero() {
+        let adapter = AgentAdapter {
+            timeout_secs: 0,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            ..test_adapter("test", "test")
+        };
+        let desc = adapter.timeout_description(0);
+        assert!(desc.contains("global"));
+        assert!(desc.contains("unlimited"));
+        assert!(desc.contains("0"));
+    }
+
+    #[test]
+    fn timeout_description_shows_idle_only_when_hard_is_zero() {
+        let adapter = AgentAdapter {
+            timeout_secs: 0,
+            idle_timeout_secs: 900,
+            hard_timeout_secs: 0,
+            ..test_adapter("test", "test")
+        };
+        let desc = adapter.timeout_description(1800);
+        assert!(desc.contains("new"));
+        assert!(desc.contains("idle=900s"));
+        // Should not mention hard timeout
+        assert!(!desc.contains("hard"));
     }
 }
