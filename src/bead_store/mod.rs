@@ -1420,17 +1420,22 @@ impl BeadStore for BrCliBeadStore {
         }
 
         // Attempt claim by setting status=in_progress and assignee.
+        //
+        // Routed through `bf batch` (op=update) rather than `bf update ...
+        // --assignee`: bf 0.4.1 dropped --assignee from the `update`
+        // subcommand entirely (bf-1hmey), but `batch`'s update op still
+        // accepts id/status/assignee together.
+        let batch_json = serde_json::to_string(&serde_json::json!([{
+            "op": "update",
+            "id": id_str,
+            "status": "in_progress",
+            "assignee": actor,
+        }]))
+        .context("failed to serialize claim batch payload")?;
         let (code, _stdout) = self
-            .run_br_with_status(&[
-                "update",
-                id_str,
-                "--status",
-                "in_progress",
-                "--assignee",
-                actor,
-            ])
+            .run_br_with_status(&["batch", "--json", &batch_json])
             .await
-            .with_context(|| format!("br update {id_str} (claim) failed to spawn"))?;
+            .with_context(|| format!("br batch update {id_str} (claim) failed to spawn"))?;
 
         match code {
             0 => {
@@ -1462,16 +1467,24 @@ impl BeadStore for BrCliBeadStore {
                 Ok(ClaimResult::RaceLost { claimed_by })
             }
             _ => Ok(ClaimResult::ClaimError {
-                reason: format!("br update exited with code {code}"),
+                reason: format!("br batch update exited with code {code}"),
             }),
         }
     }
 
     async fn release(&self, id: &BeadId) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_br(&["update", id_str, "--status", "open", "--assignee", ""])
+        // See claim() above: --assignee no longer exists on `bf update` (bf-1hmey).
+        let batch_json = serde_json::to_string(&serde_json::json!([{
+            "op": "update",
+            "id": id_str,
+            "status": "open",
+            "assignee": "",
+        }]))
+        .context("failed to serialize release batch payload")?;
+        self.run_br(&["batch", "--json", &batch_json])
             .await
-            .with_context(|| format!("br release {id_str} failed"))?;
+            .with_context(|| format!("br batch release {id_str} failed"))?;
         Ok(())
     }
 
@@ -1485,9 +1498,16 @@ impl BeadStore for BrCliBeadStore {
 
     async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_br(&["update", id_str, "--assignee", ""])
+        // See claim() above: --assignee no longer exists on `bf update` (bf-1hmey).
+        let batch_json = serde_json::to_string(&serde_json::json!([{
+            "op": "update",
+            "id": id_str,
+            "assignee": "",
+        }]))
+        .context("failed to serialize clear_assignee batch payload")?;
+        self.run_br(&["batch", "--json", &batch_json])
             .await
-            .with_context(|| format!("br clear_assignee {id_str} failed"))?;
+            .with_context(|| format!("br batch clear_assignee {id_str} failed"))?;
         Ok(())
     }
 
@@ -2169,9 +2189,18 @@ impl BeadStore for BfCliBeadStore {
 
     async fn release(&self, id: &BeadId) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_bf(&["update", id_str, "--status", "open", "--assignee", ""])
+        // --assignee no longer exists on `bf update` in bf 0.4.1 (bf-1hmey);
+        // `bf batch` (op=update) still accepts status+assignee together.
+        let batch_json = serde_json::to_string(&serde_json::json!([{
+            "op": "update",
+            "id": id_str,
+            "status": "open",
+            "assignee": "",
+        }]))
+        .context("failed to serialize release batch payload")?;
+        self.run_bf(&["batch", "--json", &batch_json])
             .await
-            .with_context(|| format!("bf release {id_str} failed"))?;
+            .with_context(|| format!("bf batch release {id_str} failed"))?;
         Ok(())
     }
 
@@ -2185,9 +2214,17 @@ impl BeadStore for BfCliBeadStore {
 
     async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
         let id_str = id.as_ref();
-        self.run_bf(&["update", id_str, "--assignee", ""])
+        // --assignee no longer exists on `bf update` in bf 0.4.1 (bf-1hmey);
+        // `bf batch` (op=update) still accepts assignee alone.
+        let batch_json = serde_json::to_string(&serde_json::json!([{
+            "op": "update",
+            "id": id_str,
+            "assignee": "",
+        }]))
+        .context("failed to serialize clear_assignee batch payload")?;
+        self.run_bf(&["batch", "--json", &batch_json])
             .await
-            .with_context(|| format!("bf clear_assignee {id_str} failed"))?;
+            .with_context(|| format!("bf batch clear_assignee {id_str} failed"))?;
         Ok(())
     }
 
