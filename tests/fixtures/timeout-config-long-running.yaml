@@ -1,0 +1,29 @@
+# Long-running task timeout configuration
+# For workspaces with deep analysis tasks that can take hours
+#
+# Expected values:
+# - agent.timeout: 14400 (4 hours)
+# - worker.building_timeout: 1800 (30 minutes)
+# - validation.outcome_timeout_seconds: 300 (5 minutes)
+# - strands.mitosis.timeout_triggered.enabled: true
+
+agent:
+  default: claude
+  timeout: 14400  # 4 hours for deep analysis
+
+worker:
+  max_workers: 2
+  building_timeout: 1800  # 30 minutes for complex builds
+
+validation:
+  outcome_timeout_seconds: 300  # 5 minutes for comprehensive tests
+  stderr_cap_bytes: 16384  # Larger cap for detailed test output
+
+strands:
+  mitosis:
+    enabled: true
+    timeout_triggered:
+      enabled: true
+      agent_wallclock_timeout: true
+      handler_timeout: true
+      min_elapsed_fraction: 0.9

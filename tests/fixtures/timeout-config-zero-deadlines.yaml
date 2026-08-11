@@ -1,0 +1,15 @@
+# Zero deadline configuration
+# Tests that zero values correctly disable deadlines
+#
+# Expected values:
+# - agent.timeout: 0 (unlimited)
+# - worker.building_timeout: 0 (unlimited)
+
+agent:
+  timeout: 0  # Disable agent deadline
+
+worker:
+  building_timeout: 0  # Disable building deadline
+
+validation:
+  outcome_timeout_seconds: 120  # Normal validation timeout

@@ -1,0 +1,7 @@
+# INVALID CONFIGURATION - String timeout value
+# This should fail to parse with a clear error message
+#
+# Expected error: "invalid type: expected integer"
+
+agent:
+  timeout: "not a number"  # INVALID: non-integer timeout

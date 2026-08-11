@@ -1,0 +1,14 @@
+# Minimal legacy configuration
+# From before validation and timeout_triggered sections were added
+#
+# Expected behavior: All new fields should use defaults
+# - agent.timeout: 3600 (default)
+# - worker.building_timeout: 600 (default)
+# - validation.outcome_timeout_seconds: 50 (default)
+# - strands.mitosis.timeout_triggered.enabled: false (default)
+
+agent:
+  default: claude
+
+worker:
+  max_workers: 4

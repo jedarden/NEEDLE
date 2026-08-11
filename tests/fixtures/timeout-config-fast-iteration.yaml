@@ -1,0 +1,26 @@
+# Fast iteration timeout configuration
+# For workspaces with quick fixes and rapid iteration
+#
+# Expected values:
+# - agent.timeout: 600 (10 minutes)
+# - worker.building_timeout: 120 (2 minutes)
+# - validation.outcome_timeout_seconds: 30 (30 seconds)
+# - strands.mitosis.timeout_triggered.enabled: false
+
+agent:
+  default: claude
+  timeout: 600  # 10 minutes for quick fixes
+
+worker:
+  max_workers: 6
+  building_timeout: 120  # 2 minutes for fast builds
+
+validation:
+  outcome_timeout_seconds: 30  # 30 seconds for quick checks
+  stderr_cap_bytes: 4096
+
+strands:
+  mitosis:
+    enabled: true
+    timeout_triggered:
+      enabled: false  # Disabled for quick tasks

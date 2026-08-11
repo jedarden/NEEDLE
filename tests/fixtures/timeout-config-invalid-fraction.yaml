@@ -1,0 +1,10 @@
+# Edge case configuration - min_elapsed_fraction outside [0.0, 1.0]
+# This may parse but should be rejected at application level
+#
+# Expected: parses but application should validate and reject
+
+strands:
+  mitosis:
+    timeout_triggered:
+      enabled: true
+      min_elapsed_fraction: 1.5  # INVALID: > 1.0, should be rejected at runtime

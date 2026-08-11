@@ -1,0 +1,18 @@
+# Unlimited timeout configuration
+# For research and exploration workspaces with no time limits
+#
+# Expected values:
+# - agent.timeout: 0 (unlimited)
+# - worker.building_timeout: 0 (unlimited)
+# - validation.outcome_timeout_seconds: 600 (10 minutes)
+
+agent:
+  default: claude
+  timeout: 0  # Unlimited - for deep research
+
+worker:
+  max_workers: 1
+  building_timeout: 0  # Unlimited - for large builds
+
+validation:
+  outcome_timeout_seconds: 600  # 10 minutes

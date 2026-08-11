@@ -1,0 +1,7 @@
+# INVALID CONFIGURATION - Negative timeout
+# This should fail to parse with a clear error message
+#
+# Expected error: "invalid value: negative timeout not allowed"
+
+agent:
+  timeout: -100  # INVALID: negative timeout

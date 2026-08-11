@@ -1,0 +1,10 @@
+# Default timeout configuration
+# All fields at their default values
+#
+# Expected values:
+# - agent.timeout: 3600
+# - worker.building_timeout: 600
+# - validation.outcome_timeout_seconds: 50
+# - strands.mitosis.timeout_triggered.enabled: false
+
+# Empty config - all values should be defaults
