@@ -54,7 +54,7 @@ Enumerated from each installed binary's own `--help` on 2026-08-11. This is the 
 | ready frontier | `ready --json --limit` | `ready` | `list --ready` |
 | `doctor --repair` | present | present | present |
 | close reason | `-r/--reason` | `--reason` | `--reason` |
-| machine-readable contract | `schema` | `schema`, `robot-docs` | `capabilities --profile` |
+| machine-readable contract | `schema`; **`capabilities` + `robot-docs` as of 0.2.22** | `schema`, `robot-docs` | `capabilities --profile` |
 
 Two structural facts fall out. **`bf` is the only backend with a transactional `batch`**, so it is the only one that can make mitosis atomic. **`bf` is the only backend that dropped `update --assignee`**, so it is the only one that *needs* `batch` for something as ordinary as claiming. Those two facts are the same fact, and together they set the bar for any backend abstraction: the backends do not differ only in flag spelling, they differ in which operations are single commands at all. A configuration format that captures only argv cannot express that difference — which is why the Decision below pairs argv templates with a per-operation *strategy*.
 
@@ -89,6 +89,19 @@ Compounding it, bf-only calls were grafted *into* the beads_rust store: `claim` 
 There is exactly one genuine argv bug, and it is in the *other* store: `BfCliBeadStore::add_dependency` (`:2288`) emits two positionals, which is correct for `br` and `bead` but wrong for `bf`.
 
 **Consequence in production:** every worker path constructs `BrCliBeadStore` — `worker/mod.rs:1385`, `supervisor/mod.rs:214`, `strand/explore.rs:71`/`:450`, `strand/splice.rs:747`/`:839`/`:999`. `BfCliBeadStore` is built only in `cli/mod.rs:997` and `:3384`. So the fleet runs the chimera. `create_bead` fails with a clap parse error against `bf`, and through the trait's default `split_bead` (`:646-668`) that takes all of mitosis child creation with it.
+
+### 6. Descriptors must pin the version they were verified against
+
+The `br` binary installed on this host is **v0.1.28, built 2026-03-29**. Upstream beads_rust is at **v0.2.22 (2026-08-06)** — roughly twenty releases and four months ahead. Every dialect fact in §2 was originally derived from the stale local binary.
+
+Downloading `br-0.2.22-linux_x86_64` from the GitHub release and re-probing confirms the dialect is stable across that gap on every point NEEDLE touches: `-d/--description` still carries `[alias: --body]`, `-l/--labels` is still comma-separated, `--silent` survives, `dep add <ISSUE> <DEPENDS_ON> -t` still takes two positionals, `update -s --assignee` is still present, and there is still no `claim` and no `batch`. That is luck, not design — and it is exactly the check a descriptor should force rather than leave to chance.
+
+0.2.22 does add subcommands: `capabilities`, `robot-docs`, `capacity`, `coordination`, `gate`, `scheduler`, `vcs-status`. The first two matter here — **all three backends expose a capabilities-style contract surface**, so §4's negotiation is uniform rather than a bead-rs special case.
+
+Two consequences for the design:
+
+- A descriptor carries `verified_against` (binary version) and the date it was checked. A fleet host running v0.1.28 while upstream ships v0.2.22 is normal; a descriptor that does not say which one it was written for is a guess.
+- **bead-rs is under active development in agent-sandbox**, so its surface is a *moving* target, not a stale one: the local `~/bead-rs` is nine commits past the `fa30574` this ADR cites, including `20853cf`, which fixed a defect that bricked every fresh clone. Its descriptor must be verified against the binary the sandbox actually runs, and re-verified when that moves. Unlike `br` and `bf`, bead-rs publishes **no GitHub releases** — it is Forgejo-only — so there is no release artifact to pin to and the descriptor must name a commit.
 
 ## Decision
 
