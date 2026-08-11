@@ -67,6 +67,8 @@ fn make_test_adapter(name: &str, cli: &str, template: &str) -> AgentAdapter {
         invoke_template: template.to_string(),
         environment: HashMap::new(),
         timeout_secs: 120,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
         provider: None,
         model: None,
         token_extraction: TokenExtraction::None,

@@ -2326,7 +2326,6 @@ impl<T: Sink + ?Sized> Sink for Arc<T> {
     }
 }
 
-
 // ─── StdoutSink ───────────────────────────────────────────────────────────────
 
 /// Human-readable, color-coded telemetry sink for interactive monitoring.
@@ -4766,8 +4765,8 @@ mod tests {
         let dir = std::env::temp_dir().join("needle-test-telem-file");
         let _ = std::fs::remove_dir_all(&dir);
 
-        let sink =
-            FileSink::with_dir(dir.to_path_buf(), "test-worker", "deadbeef").expect("should create file sink");
+        let sink = FileSink::with_dir(dir.to_path_buf(), "test-worker", "deadbeef")
+            .expect("should create file sink");
 
         let event = TelemetryEvent {
             timestamp: Utc::now(),
@@ -4816,7 +4815,8 @@ mod tests {
     #[test]
     fn file_sink_accept_is_visible_without_explicit_flush() {
         let tmp = tempfile::tempdir().unwrap();
-        let sink = FileSink::with_dir(tmp.path().to_path_buf(), "test-worker", "test-session").unwrap();
+        let sink =
+            FileSink::with_dir(tmp.path().to_path_buf(), "test-worker", "test-session").unwrap();
 
         let event = TelemetryEvent {
             timestamp: Utc::now(),

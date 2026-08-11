@@ -671,7 +671,7 @@ mod tests {
             .expect("write failed");
 
         tokio::process::Command::new("git")
-            .args(&["add", "clean.txt"])
+            .args(["add", "clean.txt"])
             .current_dir(workspace)
             .kill_on_drop(true)
             .output()
@@ -712,7 +712,7 @@ mod tests {
             .expect("write failed");
 
         tokio::process::Command::new("git")
-            .args(&["add", "test.txt"])
+            .args(["add", "test.txt"])
             .current_dir(workspace)
             .kill_on_drop(true)
             .output()
@@ -720,7 +720,7 @@ mod tests {
             .expect("git add failed");
 
         tokio::process::Command::new("git")
-            .args(&["commit", "-m", "initial"])
+            .args(["commit", "-m", "initial"])
             .current_dir(workspace)
             .env("GIT_AUTHOR_NAME", "Test")
             .env("GIT_AUTHOR_EMAIL", "test@test.com")

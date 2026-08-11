@@ -146,7 +146,7 @@ async fn run(workspace: &Path, bin: &str, args: &[&str]) -> Option<String> {
             let workspace = workspace.clone();
             async move {
                 tokio::process::Command::new(&bin)
-                    .args(&args.iter().map(String::as_str).collect::<Vec<_>>())
+                    .args(args.iter().map(String::as_str).collect::<Vec<_>>())
                     .current_dir(&workspace)
                     .kill_on_drop(true)
                     .output()

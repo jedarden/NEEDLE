@@ -3055,6 +3055,7 @@ impl Worker {
     /// 2. Re-exec with `--resume` to preserve worker identity
     ///
     /// On re-exec failure, log the error and continue with the current binary.
+    #[allow(dead_code)]
     async fn check_hot_reload(&mut self) -> Result<()> {
         let needle_home = &self.config.workspace.home;
         match upgrade::check_hot_reload(needle_home) {
@@ -4266,7 +4267,7 @@ mod tests {
         let store = Arc::new(MockStore::empty());
         let mut config = Config::default();
         config.agent.default = String::new(); // Invalid
-        // Pin workspace_root to prevent Explore strand from scanning real home
+                                              // Pin workspace_root to prevent Explore strand from scanning real home
         let temp_dir = tempfile::tempdir().unwrap();
         config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
         config.strands.explore.workspaces = Vec::new();
@@ -5491,6 +5492,8 @@ mod tests {
             invoke_template: "echo done".to_string(),
             environment: HashMap::new(),
             timeout_secs: 5,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: None,
             model: None,
             token_extraction: crate::dispatch::TokenExtraction::None,
@@ -5597,6 +5600,8 @@ mod tests {
             invoke_template: "claude {prompt}".to_string(),
             environment: std::collections::HashMap::new(),
             timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: Some("anthropic".to_string()),
             model: Some("gpt-4o".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
@@ -5645,6 +5650,8 @@ mod tests {
             invoke_template: "claude {prompt}".to_string(),
             environment: std::collections::HashMap::new(),
             timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: Some("anthropic".to_string()),
             model: Some("gpt-4o".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
@@ -5686,6 +5693,8 @@ mod tests {
             invoke_template: "claude {prompt}".to_string(),
             environment: std::collections::HashMap::new(),
             timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
@@ -5727,6 +5736,8 @@ mod tests {
             invoke_template: "claude {prompt}".to_string(),
             environment: std::collections::HashMap::new(),
             timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: Some("anthropic".to_string()),
             model: Some("gpt-4o".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
@@ -5807,6 +5818,8 @@ mod tests {
                 invoke_template: "claude {prompt}".to_string(),
                 environment: std::collections::HashMap::new(),
                 timeout_secs: 3600,
+                idle_timeout_secs: 0,
+                hard_timeout_secs: 0,
                 provider: Some("anthropic".to_string()),
                 model: Some(model_name.to_string()),
                 token_extraction: crate::dispatch::TokenExtraction::None,
@@ -5858,6 +5871,8 @@ mod tests {
                 invoke_template: "claude {prompt}".to_string(),
                 environment: std::collections::HashMap::new(),
                 timeout_secs: 3600,
+                idle_timeout_secs: 0,
+                hard_timeout_secs: 0,
                 provider: Some("anthropic".to_string()),
                 model: Some(model_name.to_string()),
                 token_extraction: crate::dispatch::TokenExtraction::None,
@@ -5927,6 +5942,8 @@ mod tests {
             invoke_template: "claude {prompt}".to_string(),
             environment: std::collections::HashMap::new(),
             timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
@@ -5991,6 +6008,8 @@ mod tests {
             invoke_template: "claude {prompt}".to_string(),
             environment: std::collections::HashMap::new(),
             timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
@@ -6064,6 +6083,8 @@ mod tests {
             invoke_template: "claude {prompt}".to_string(),
             environment: std::collections::HashMap::new(),
             timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
@@ -6140,6 +6161,8 @@ mod tests {
             invoke_template: "claude {prompt}".to_string(),
             environment: std::collections::HashMap::new(),
             timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
@@ -6220,6 +6243,8 @@ mod tests {
             invoke_template: "claude {prompt}".to_string(),
             environment: std::collections::HashMap::new(),
             timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,
@@ -6303,6 +6328,8 @@ mod tests {
             invoke_template: "claude {prompt}".to_string(),
             environment: std::collections::HashMap::new(),
             timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
             provider: Some("anthropic".to_string()),
             model: Some("claude-sonnet-4-6".to_string()),
             token_extraction: crate::dispatch::TokenExtraction::None,

@@ -435,6 +435,7 @@ impl MitosisEvaluator {
     ///
     /// * `Ok(MitosisResult)` - Outcome of the evaluation (Split, NotSplittable, Skipped, OutOfScope)
     /// * `Err(e)` - Error during evaluation (non-fatal, bead is already released)
+    #[allow(clippy::too_many_arguments)]
     pub async fn evaluate_timeout(
         &self,
         store: &dyn BeadStore,

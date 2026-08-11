@@ -35,7 +35,7 @@ fn test_tokio_spawn_panics_without_entered_runtime() {
         // This simulates what init_tracing_subscriber does on line 831
         let (_tx, mut _rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         tokio::spawn(async move {
-            while let Some(_) = _rx.recv().await {
+            while _rx.recv().await.is_some() {
                 // Handle drop events
             }
         });
@@ -70,7 +70,7 @@ fn test_tokio_spawn_succeeds_with_entered_runtime() {
 
         // This spawn should now succeed because runtime is entered
         tokio::spawn(async move {
-            while let Some(_) = _rx.recv().await {
+            while _rx.recv().await.is_some() {
                 // Handle events
                 *spawn_completed_clone.lock().unwrap() = true;
             }

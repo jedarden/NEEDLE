@@ -218,7 +218,10 @@ pub fn get_workflow_phase(workflow_name: &str, namespace: Option<&str>) -> Resul
 /// - **Does NOT retry** "workflow not found" errors — treated as graceful failure
 /// - Uses exponential backoff: 1s, 2s, 4s between retries
 /// - Logs each retry attempt with context
-fn get_workflow_phase_with_retry(workflow_name: &str, namespace: Option<&str>) -> Result<WorkflowPhase> {
+fn get_workflow_phase_with_retry(
+    workflow_name: &str,
+    namespace: Option<&str>,
+) -> Result<WorkflowPhase> {
     let ns = namespace.unwrap_or("argo-workflows");
 
     for attempt in 1..=MAX_RETRY_ATTEMPTS {
@@ -227,10 +230,10 @@ fn get_workflow_phase_with_retry(workflow_name: &str, namespace: Option<&str>) -
             Err(e) => {
                 // Check if this is a "workflow not found" error
                 let error_msg = e.to_string().to_lowercase();
-                let is_not_found = error_msg.contains("not found") ||
-                                  error_msg.contains("NotFound") ||
-                                  error_msg.contains("couldn't find") ||
-                                  error_msg.contains("no such");
+                let is_not_found = error_msg.contains("not found")
+                    || error_msg.contains("NotFound")
+                    || error_msg.contains("couldn't find")
+                    || error_msg.contains("no such");
 
                 if is_not_found {
                     // Workflow not found — don't retry, treat as graceful failure
@@ -264,7 +267,9 @@ fn get_workflow_phase_with_retry(workflow_name: &str, namespace: Option<&str>) -
     // This should be unreachable, but handle it for completeness
     Err(anyhow::anyhow!(
         "exhausted {} retry attempts for workflow '{}/{}'",
-        MAX_RETRY_ATTEMPTS, ns, workflow_name
+        MAX_RETRY_ATTEMPTS,
+        ns,
+        workflow_name
     ))
 }
 
@@ -438,9 +443,9 @@ pub fn poll_workflow_status(workflow_name: &str, config: &PollConfig) -> Result<
 
                 // Check if workflow was not found (graceful failure)
                 let error_msg = e.to_string().to_lowercase();
-                let is_not_found = error_msg.contains("not found") ||
-                                  error_msg.contains("NotFound") ||
-                                  error_msg.contains("couldn't find");
+                let is_not_found = error_msg.contains("not found")
+                    || error_msg.contains("NotFound")
+                    || error_msg.contains("couldn't find");
 
                 if is_not_found {
                     warn!(
@@ -472,7 +477,11 @@ pub fn poll_workflow_status(workflow_name: &str, config: &PollConfig) -> Result<
                 // Log warning but continue polling
                 warn!(
                     "Workflow '{}/{}' poll failed (failure {}/{}): {}. Retrying in {}s...",
-                    ns, workflow_name, consecutive_failures, MAX_FAILED_POLLS, e,
+                    ns,
+                    workflow_name,
+                    consecutive_failures,
+                    MAX_FAILED_POLLS,
+                    e,
                     config.interval.as_secs()
                 );
 
@@ -692,8 +701,11 @@ mod tests {
     #[test]
     fn test_constants_defined() {
         // Verify that the retry and failure limit constants are defined
-        assert!(MAX_RETRY_ATTEMPTS > 0, "MAX_RETRY_ATTEMPTS must be positive");
-        assert!(MAX_FAILED_POLLS > 0, "MAX_FAILED_POLLS must be positive");
+        const _: () = assert!(
+            MAX_RETRY_ATTEMPTS > 0,
+            "MAX_RETRY_ATTEMPTS must be positive"
+        );
+        const _: () = assert!(MAX_FAILED_POLLS > 0, "MAX_FAILED_POLLS must be positive");
     }
 
     #[test]

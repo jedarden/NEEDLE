@@ -1681,6 +1681,8 @@ fn create_mitosis_dispatcher(json_response: &str) -> needle::dispatch::Dispatche
         invoke_template: format!("echo '{json_response}'"),
         environment: HashMap::new(),
         timeout_secs: 10,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
         provider: None,
         model: None,
         token_extraction: needle::dispatch::TokenExtraction::None,
