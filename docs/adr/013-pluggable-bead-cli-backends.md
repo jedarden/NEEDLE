@@ -33,7 +33,7 @@ This is the substantive work. `BrCliBeadStore` is not "a CLI-backed store"; it i
 |---|---|---|
 | `batch --json '[{"op":"update",…}]'` — used for **claim** (`:1428-1437`), **release** (`:1479-1486`), and **split** (`:1485`, `:1508`) | **no `batch` subcommand exists** | hard fail on the hottest path |
 | `claim --model X --harness Y --harness-version Z --assignee A --json` (`:1206-1220`) | `ClaimOptions` (`cli.rs:370`) accepts only `--assignee/--json/--why/--policy/--lease-ttl/--renew-lease/--fencing-token` | clap rejects unknown args, exit 2 |
-| `create --title T --body B` (`:1550-1556`) | `CreateOptions` (`cli.rs:181`) uses `--description`, not `--body`; and `create` has **no `--json`** — it prints the bare issue ID on stdout | fail |
+| `create --title T --body B --json --silent --labels a,b` (`:1550-1563`) | `CreateOptions` (`cli.rs:181`) uses `--description`, repeated `--label`, and has **no `--json`** — it prints the bare issue ID on stdout | fail (**and already fails on `bf` — see Addendum**) |
 | `dep add <blocked> <blocker> --type blocks` (`:1579`) | `DepAddOptions` (`cli.rs:975`) spells it `--kind blocks` | fail |
 | `sync --import-only` bare (`:1706`) | requires `--input` **and** exactly one of `--restore-into-empty` / `--merge` (`SyncCommand`, `cli.rs:667`) | fail |
 | `list --json --limit 999999` (`:1357`), `show --json`, `update --status`, `reopen`, `close --reason`, `label add/remove --label`, `doctor [--repair]`, `sync --flush-only` | all present and compatible (`ListOptions` `cli.rs:241` caps `--limit` at 999999; `--ready` also available) | works |
@@ -46,7 +46,7 @@ Note the direction of the divergence at claim/release. NEEDLE routes those throu
 
 `src/prompt/mod.rs` embeds `bf update` (`:56`), `bf close` (`:64`), and a whole `bf create` / `bf show` / `bf dep add` / `bf label add` block in the mitosis-split instructions (`:294-325`). A test asserts on the literal string (`:1066-1067`). Even with a perfect store abstraction, the agent inside the sandbox is told to run a binary that is not installed there.
 
-There is already evidence this string lives in the wrong place: `:325` instructs `bf dep add <blocker-id> --blocks <blocked-id>`, while the code path immediately below it (`:1579`) emits `dep add <blocked> <blocker> --type blocks`. The prompt's copy of the dialect has drifted from the store's copy, unnoticed, because nothing ties them together.
+There is already evidence this string lives in the wrong place: `:325` instructs `bf dep add <blocker-id> --blocks <blocked-id>`, while the store at `bead_store/mod.rs:1579` emits `dep add <blocked> <blocker> --type blocks`. The two copies of the dialect disagree, unnoticed, because nothing ties them together — and as the Addendum records, it is the **store** that is wrong here, not the prompt.
 
 ### 4. Version-handshake logic is bead-forge-specific
 
@@ -95,5 +95,42 @@ There is already evidence this string lives in the wrong place: `:325` instructs
 - bf-dialect call sites: `:1206-1220` (claim metadata flags), `:1357` (`list --json --limit 999999`), `:1428-1437` (claim via `batch`), `:1479-1486` (release via `batch`), `:1485`/`:1508` (split via `batch`), `:1550-1556` (`create --body`), `:1579` (`dep add … --type blocks`), `:1706` (`sync --import-only`).
 - Why claim/release use `batch` at all: commit `ce0134c`, "route claim/release/clear_assignee through bf batch, not bf update --assignee" (bead `bf-1hmey`) — bf 0.4.1 removed `--assignee` from `update`.
 - bead-rs surface (`~/bead-rs`, commit `fa30574`, version 0.1.0): `src/cli.rs:47-131` (`Command` enum — no `batch` variant), `:181` (`CreateOptions`: `--description`, no `--json`), `:241` (`ListOptions`: `--json`, `--ready`, `--limit` 0-999999), `:370` (`ClaimOptions`: no model/harness flags), `:444` (`UpdateOptions`: **has** `--assignee` and `--clear-assignee`), `:667` (`SyncCommand`: `--import-only` requires `--input` plus `--restore-into-empty`|`--merge`), `:975` (`DepAddOptions`: `--kind`, not `--type`), `:1059` (`DoctorOptions`: `--repair` present), `:1116` (`CapabilitiesOptions`).
-- Prompt-embedded dialect and its drift: `src/prompt/mod.rs:56`, `:64`, `:294-325` (`:325` says `dep add <blocker> --blocks <blocked>`; the store at `bead_store/mod.rs:1579` emits `dep add <blocked> <blocker> --type blocks` — the two disagree today), `:1066-1067` (test asserting the literal binary name).
+- Prompt-embedded dialect and its drift: `src/prompt/mod.rs:56`, `:64`, `:294-325` (`:325` says `dep add <blocker> --blocks <blocked>`, which is correct for bf 0.4.1; the store at `bead_store/mod.rs:1579` emits `dep add <blocked> <blocker> --type blocks`, which is not — see Addendum), `:1066-1067` (test asserting the literal binary name).
 - bead-forge-specific handshake: `src/bead_store/mod.rs:295-419` (`VersionCheck`, `check_bead_forge_version`, `run_version_handshake`), and the `--limit 999999` workaround it justifies at `:1357` and `:2094`.
+
+## Addendum (2026-08-11): `BrCliBeadStore::create_bead` is already broken against the installed `bf`
+
+Enumerating `bf create`'s real flag set while filing this ADR's beads turned up a live bug that is not a portability concern at all.
+
+`bf 0.4.1 create` accepts exactly `--title --description --type --priority --assignee --label --json --envelope --no-auto-flush --no-progress --workspace`. It has **no `--body`, no `--silent`, and no `--labels`**.
+
+`BrCliBeadStore::create_bead` (`src/bead_store/mod.rs:1550-1563`) emits all three:
+
+```
+create --title T --body B --json --silent [--labels a,b]
+```
+
+`BfCliBeadStore::create_bead` (`:2267-2280`) gets it right — `--description` plus repeated `--label`. But `BfCliBeadStore` is constructed in only two places, both in `src/cli/mod.rs` (`:997`, `:3384`). **Every worker path uses `BrCliBeadStore`** — `worker/mod.rs:1385`, `supervisor/mod.rs:214`, `strand/explore.rs:71`/`:450`, `strand/splice.rs:747`/`:839`/`:999` — and its `discover` (`:758-775`) resolves `bf` *first*. So the store the fleet actually runs speaks the old `br` dialect at a binary that no longer accepts it.
+
+Consequence: any path that creates a bead through the trait fails with a clap parse error (exit 2) on a current `bf` install. That is `create_bead` itself and, through the trait's default `split_bead` (`:646-668`), **all of mitosis child creation**. Split has presumably been failing silently-ish in fleet logs for as long as bf 0.4.1 has been deployed.
+
+This is the same class of defect ADR-012 documented — code that compiles, lints, and has config and telemetry wired, but whose actual invocation is wrong — and the same root cause this ADR exists to remove: the dialect is written down in more than one place, and the copies drifted. It is filed as its own bead, ahead of the Phase 16 work, and sequenced before the module split so the two do not collide in the same file.
+
+### `add_dependency` is broken in *both* stores, and the prompt was right all along
+
+The same flag-enumeration pass found a second live defect. `bf 0.4.1 dep add` takes **one** positional:
+
+```
+bf dep add [OPTIONS] <BLOCKER> --blocks <BLOCKS>
+```
+
+Verified empirically while filing these beads — `bf dep add bf-46m05 --blocks bf-2qm6r` prints `Added dependency: bf-2qm6r depends on bf-46m05 (blocks)` and moves `bf-2qm6r` to `blocked`.
+
+Both stores emit two positionals instead:
+
+- `BrCliBeadStore::add_dependency` (`:1579`) — `dep add <blocked> <blocker> --type blocks`
+- `BfCliBeadStore::add_dependency` (`:2288`) — identical
+
+`-t, --type` does exist and defaults to `blocks`, so the flag is harmless; the extra positional is not. Unlike the `create_bead` defect, this one is not confined to the `br`-dialect store — the `bf` store has it too, so there is no correct copy in the codebase to copy from.
+
+This also **reverses** the drift claim in §3 above. `src/prompt/mod.rs:325` tells the agent `bf dep add <blocker-id> --blocks <blocked-id>`, which is exactly right for bf 0.4.1. The prompt is the accurate copy of the dialect and the store code is the stale one. That inversion is itself the argument for §6: when the same command is written down in two places, being right in one of them is luck, and you cannot tell which copy to trust without going to the binary. Filed as a separate P1 bead, with an acceptance criterion requiring a real round-trip against a scratch workspace — getting the argument order backwards would invert every dependency edge, which is worse than failing loudly.
