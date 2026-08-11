@@ -1552,33 +1552,31 @@ impl BeadStore for BrCliBeadStore {
             "create".into(),
             "--title".into(),
             title.into(),
-            "--body".into(),
+            "--description".into(),
             body.into(),
-            "--json".into(),
-            "--silent".into(),
         ];
-        if !labels.is_empty() {
-            args.push("--labels".into());
-            args.push(labels.join(","));
+        for label in labels {
+            args.push("--label".into());
+            args.push((*label).into());
         }
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let stdout = self.run_br(&arg_refs).await?;
         let id_str = stdout.trim();
         if id_str.is_empty() {
-            bail!("br create --silent returned empty ID");
+            bail!("br create returned empty ID");
         }
         Ok(BeadId::from(id_str))
     }
 
     async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
         // blocker_id blocks blocked_id (child blocks parent)
-        // br dep add <ISSUE> <DEPENDS_ON> --type blocks
-        // ISSUE depends on DEPENDS_ON, so blocked_id depends on blocker_id
+        // bf dep add <BLOCKER> --blocks <BLOCKED>
+        // BLOCKED depends on BLOCKER, so blocked_id depends on blocker_id
         let blocker = blocker_id.as_ref();
         let blocked = blocked_id.as_ref();
-        self.run_br(&["dep", "add", blocked, blocker, "--type", "blocks"])
+        self.run_br(&["dep", "add", blocker, "--blocks", blocked])
             .await
-            .with_context(|| format!("br dep add {blocked} {blocker} --type blocks failed"))?;
+            .with_context(|| format!("br dep add {blocker} --blocks {blocked} failed"))?;
         Ok(())
     }
 
@@ -2288,9 +2286,9 @@ impl BeadStore for BfCliBeadStore {
     async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
         let blocker = blocker_id.as_ref();
         let blocked = blocked_id.as_ref();
-        self.run_bf(&["dep", "add", blocked, blocker, "--type", "blocks"])
+        self.run_bf(&["dep", "add", blocker, "--blocks", blocked])
             .await
-            .with_context(|| format!("bf dep add {blocked} {blocker} --type blocks failed"))?;
+            .with_context(|| format!("bf dep add {blocker} --blocks {blocked} failed"))?;
         Ok(())
     }
 
