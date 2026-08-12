@@ -118,4 +118,42 @@ fn each_workspace_invokes_only_its_explicit_backend() {
     let bf_invocations = fs::read_to_string(&invocation_log).unwrap();
     assert!(bf_invocations.lines().any(|line| line.starts_with("bf ")));
     assert!(!bf_invocations.lines().any(|line| line.starts_with("bead ")));
+
+    for (name, yaml) in [
+        ("unbound", ""),
+        ("unknown", "bead_cli:\n  backend: does-not-exist\n"),
+    ] {
+        let workspace = root.path().join(name);
+        fs::create_dir_all(workspace.join(".beads")).unwrap();
+        if !yaml.is_empty() {
+            fs::write(workspace.join(".needle.yaml"), yaml).unwrap();
+        }
+        fs::write(&invocation_log, "").unwrap();
+        let output = run(Command::new(&needle)
+            .args(["doctor", "--workspace", workspace.to_str().unwrap()])
+            .env("HOME", &home)
+            .env("PATH", &path));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("[FAIL]  Bead store"));
+        assert_eq!(fs::read_to_string(&invocation_log).unwrap(), "");
+    }
+
+    let mismatch = root.path().join("identity-mismatch");
+    fs::create_dir_all(mismatch.join(".beads")).unwrap();
+    fs::write(
+        mismatch.join(".needle.yaml"),
+        format!(
+            "bead_cli:\n  backend: bead-rs\n  explicit_path: {}\n",
+            bin.join("bf").display()
+        ),
+    )
+    .unwrap();
+    fs::write(&invocation_log, "").unwrap();
+    let output = run(Command::new(&needle)
+        .args(["doctor", "--workspace", mismatch.to_str().unwrap()])
+        .env("HOME", &home)
+        .env("PATH", &path));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("identity mismatch"));
+    let mismatch_invocations = fs::read_to_string(&invocation_log).unwrap();
+    assert_eq!(mismatch_invocations.lines().count(), 1);
+    assert!(mismatch_invocations.starts_with("bf --version"));
 }
