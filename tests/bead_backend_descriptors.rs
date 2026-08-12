@@ -25,6 +25,44 @@ fn shipped_descriptors_are_valid_and_ordered_primary_first() {
 }
 
 #[test]
+fn shipped_descriptors_encode_the_observed_dialect_and_capability_differences() {
+    let builtins = builtin_bead_backends();
+    let bead = builtins
+        .iter()
+        .find(|backend| backend.name == "bead-rs")
+        .unwrap();
+    let forge = builtins
+        .iter()
+        .find(|backend| backend.name == "bead-forge")
+        .unwrap();
+
+    assert_eq!(bead.identity_pattern, r"^bead\s");
+    assert_eq!(forge.identity_pattern, r"^bf\s");
+    assert_eq!(
+        bead.operations["dep_add"].argv,
+        ["dep", "add", "{blocked}", "{blocker}", "--kind", "blocks"]
+    );
+    assert_eq!(
+        forge.operations["dep_add"].argv,
+        ["dep", "add", "{blocker}", "--blocks", "{blocked}"]
+    );
+    assert_eq!(
+        bead.operations["split"].strategy.as_deref(),
+        Some("sequential")
+    );
+    assert_eq!(
+        forge.operations["split"].strategy.as_deref(),
+        Some("transactional_batch")
+    );
+    assert!(bead.capabilities.atomic_claim);
+    assert!(!bead.capabilities.transactional_batch);
+    assert!(!bead.capabilities.velocity_metadata);
+    assert!(forge.capabilities.atomic_claim);
+    assert!(forge.capabilities.transactional_batch);
+    assert!(forge.capabilities.velocity_metadata);
+}
+
+#[test]
 fn user_yaml_overrides_builtin_by_name() {
     let directory = tempfile::tempdir().unwrap();
     let builtins = builtin_bead_backends();
