@@ -257,6 +257,12 @@ fn update_atexit_state(last_state: String) {
     }
 }
 
+/// Disarm the last-resort exit report after graceful shutdown has completed.
+#[cfg(unix)]
+fn clear_atexit_state() {
+    *ATEXIT_WORKER_STATE.lock().unwrap() = None;
+}
+
 /// Stub implementations for non-Unix platforms.
 /// These functions are no-ops on platforms where Unix signals are not available.
 #[cfg(not(unix))]
@@ -283,6 +289,11 @@ fn register_atexit_handler(
 
 #[cfg(not(unix))]
 fn update_atexit_state(_last_state: String) {
+    // No-op on non-Unix platforms
+}
+
+#[cfg(not(unix))]
+fn clear_atexit_state() {
     // No-op on non-Unix platforms
 }
 
@@ -2380,7 +2391,6 @@ impl Worker {
         let bead_id_clone = bead.id.clone();
         let store_clone = self.store.clone();
         let telemetry_clone = self.telemetry.clone();
-        let cancelled_clone = cancelled.clone();
 
         // Wrap the entire HANDLING state in a timeout to prevent indefinite hangs.
         // Even if the Tokio runtime gets blocked by a synchronous operation, this
@@ -2496,24 +2506,11 @@ impl Worker {
         }
         .instrument(outcome_span);
 
-        // Wrap the entire HANDLING state in a 90-second timeout using spawn_blocking.
-        // This provides a safety net that can fire even if the tokio runtime becomes wedged.
-        // The blocking thread runs independently of the async runtime, so the timeout will
-        // trigger even if all async tasks are blocked. The 90s limit allows the inner 60s
-        // timeout to fire first under normal conditions, but provides a fallback if needed.
-
-        // Use a channel to signal timeout from the blocking thread.
-        let (timeout_tx, timeout_rx) = tokio::sync::oneshot::channel::<()>();
-
-        // Spawn a blocking thread that will send a timeout signal after 90 seconds.
-        let cancelled_for_timeout = cancelled_clone.clone();
-        tokio::task::spawn_blocking(move || {
-            std::thread::sleep(std::time::Duration::from_secs(90));
-            // Only send timeout signal if not already cancelled.
-            if !cancelled_for_timeout.load(Ordering::Relaxed) {
-                let _ = timeout_tx.send(());
-            }
-        });
+        // The watchdog thread above covers a genuinely wedged runtime. Keep the
+        // 90-second async safety net cancellable so a successful handler does
+        // not leave a sleeping blocking task that delays runtime shutdown.
+        let timeout = tokio::time::sleep(std::time::Duration::from_secs(90));
+        tokio::pin!(timeout);
 
         // Use tokio::select! to race between the handling future and the timeout signal.
         let handler_result = tokio::select! {
@@ -2534,7 +2531,7 @@ impl Worker {
                     }
                 }
             }
-            _ = timeout_rx => {
+            _ = &mut timeout => {
                 // Outer timeout fired after 90 seconds - this is a critical failure.
                 tracing::error!(
                     bead_id = %bead.id,
@@ -3599,6 +3596,8 @@ impl Worker {
         // Clear the global shutdown flag to prevent dangling pointers.
         #[cfg(unix)]
         clear_global_shutdown_flag();
+
+        clear_atexit_state();
 
         // Stop heartbeat emitter and remove heartbeat file.
         self.health.stop();
