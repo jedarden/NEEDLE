@@ -175,8 +175,8 @@ pub fn discover_default(
 
 // Re-export operation strategies for backend descriptors
 pub use strategies::{
-    ClaimAutoStrategy, ClaimStrategy, CreateIdStrategy, ImportStrategy, LabelsStrategy,
-    SplitStrategy,
+    validate_strategy_name, ClaimAutoStrategy, ClaimStrategy, CreateIdStrategy, ImportStrategy,
+    LabelsStrategy, OperationStrategy, ParsedStrategy, SplitStrategy,
 };
 
 // ─── Corruption detection ────────────────────────────────────────────────────

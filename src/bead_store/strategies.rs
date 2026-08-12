@@ -8,7 +8,21 @@
 //! among them via their descriptors. A backend needing genuinely new behavior
 //! adds ONE enum variant — available to every backend — not a BeadStore impl.
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+/// Common metadata exposed by every operation strategy.
+///
+/// Execution remains operation-specific, but descriptors and diagnostics need
+/// a uniform way to name the operation and selected variant.
+pub trait OperationStrategy {
+    /// Descriptor operation that selects this strategy type.
+    const OPERATION: &'static str;
+
+    /// Stable snake-case name used in descriptor files.
+    fn name(self) -> &'static str;
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Claim strategies
@@ -178,6 +192,107 @@ pub enum ImportStrategy {
     ///
     /// **Used by:** `bead` (bead-rs, via `--input` + `--restore-into-empty`/`--merge`)
     InputPlusMode,
+}
+
+macro_rules! impl_operation_strategy {
+    ($type:ty, $operation:literal, { $($variant:path => $name:literal),+ $(,)? }) => {
+        impl OperationStrategy for $type {
+            const OPERATION: &'static str = $operation;
+
+            fn name(self) -> &'static str {
+                match self {
+                    $($variant => $name),+
+                }
+            }
+        }
+    };
+}
+
+impl_operation_strategy!(ClaimStrategy, "claim", {
+    ClaimStrategy::CompareAndSet => "compare_and_set",
+    ClaimStrategy::BatchOp => "batch_op",
+});
+impl_operation_strategy!(ClaimAutoStrategy, "claim_auto", {
+    ClaimAutoStrategy::AtomicSubcommand => "atomic_subcommand",
+    ClaimAutoStrategy::NonAtomicScan => "non_atomic_scan",
+});
+impl_operation_strategy!(SplitStrategy, "split", {
+    SplitStrategy::TransactionalBatch => "transactional_batch",
+    SplitStrategy::Sequential => "sequential",
+});
+impl_operation_strategy!(CreateIdStrategy, "create_id", {
+    CreateIdStrategy::BareId => "bare_id",
+    CreateIdStrategy::JsonField => "json_field",
+});
+impl_operation_strategy!(LabelsStrategy, "labels", {
+    LabelsStrategy::Csv => "csv",
+    LabelsStrategy::Repeated => "repeated",
+});
+impl_operation_strategy!(ImportStrategy, "import", {
+    ImportStrategy::Bare => "bare",
+    ImportStrategy::InputPlusMode => "input_plus_mode",
+});
+
+/// Type-erased strategy returned while validating descriptor operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParsedStrategy {
+    Claim(ClaimStrategy),
+    ClaimAuto(ClaimAutoStrategy),
+    Split(SplitStrategy),
+    CreateId(CreateIdStrategy),
+    Labels(LabelsStrategy),
+    Import(ImportStrategy),
+}
+
+/// Parse and validate one descriptor strategy with actionable source context.
+///
+/// Descriptor loading must call this before a backend can be selected. This
+/// prevents a misspelled strategy from surviving until the first live claim.
+pub fn validate_strategy_name(
+    descriptor_path: &Path,
+    operation: &str,
+    strategy: &str,
+) -> Result<ParsedStrategy, anyhow::Error> {
+    fn parse<T: DeserializeOwned>(
+        descriptor_path: &Path,
+        operation: &str,
+        strategy: &str,
+    ) -> Result<T, anyhow::Error> {
+        serde_json::from_value(serde_json::Value::String(strategy.to_string())).map_err(|_| {
+            anyhow::anyhow!(
+                "unknown strategy '{}' for operation '{}' in {}",
+                strategy,
+                operation,
+                descriptor_path.display()
+            )
+        })
+    }
+
+    match operation {
+        ClaimStrategy::OPERATION => {
+            parse(descriptor_path, operation, strategy).map(ParsedStrategy::Claim)
+        }
+        ClaimAutoStrategy::OPERATION => {
+            parse(descriptor_path, operation, strategy).map(ParsedStrategy::ClaimAuto)
+        }
+        SplitStrategy::OPERATION => {
+            parse(descriptor_path, operation, strategy).map(ParsedStrategy::Split)
+        }
+        CreateIdStrategy::OPERATION => {
+            parse(descriptor_path, operation, strategy).map(ParsedStrategy::CreateId)
+        }
+        LabelsStrategy::OPERATION => {
+            parse(descriptor_path, operation, strategy).map(ParsedStrategy::Labels)
+        }
+        ImportStrategy::OPERATION => {
+            parse(descriptor_path, operation, strategy).map(ParsedStrategy::Import)
+        }
+        _ => Err(anyhow::anyhow!(
+            "unknown strategy operation '{}' in {}",
+            operation,
+            descriptor_path.display()
+        )),
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -523,6 +638,79 @@ pub fn execute_import_strategy(strategy: ImportStrategy, input_file: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_every_operation_strategy_type() {
+        let path = Path::new("descriptor.yaml");
+        let cases = [
+            (
+                "claim",
+                "compare_and_set",
+                ParsedStrategy::Claim(ClaimStrategy::CompareAndSet),
+            ),
+            (
+                "claim_auto",
+                "atomic_subcommand",
+                ParsedStrategy::ClaimAuto(ClaimAutoStrategy::AtomicSubcommand),
+            ),
+            (
+                "split",
+                "sequential",
+                ParsedStrategy::Split(SplitStrategy::Sequential),
+            ),
+            (
+                "create_id",
+                "bare_id",
+                ParsedStrategy::CreateId(CreateIdStrategy::BareId),
+            ),
+            (
+                "labels",
+                "repeated",
+                ParsedStrategy::Labels(LabelsStrategy::Repeated),
+            ),
+            (
+                "import",
+                "input_plus_mode",
+                ParsedStrategy::Import(ImportStrategy::InputPlusMode),
+            ),
+        ];
+
+        for (operation, strategy, expected) in cases {
+            assert_eq!(
+                validate_strategy_name(path, operation, strategy).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_strategy_error_names_value_operation_and_file() {
+        let error =
+            validate_strategy_name(Path::new("/tmp/backends/descriptor.yaml"), "claim", "foo")
+                .unwrap_err()
+                .to_string();
+
+        assert_eq!(
+            error,
+            "unknown strategy 'foo' for operation 'claim' in /tmp/backends/descriptor.yaml"
+        );
+    }
+
+    #[test]
+    fn unknown_operation_error_names_operation_and_file() {
+        let error = validate_strategy_name(
+            Path::new("/tmp/backends/descriptor.yaml"),
+            "teleport",
+            "atomic",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(
+            error,
+            "unknown strategy operation 'teleport' in /tmp/backends/descriptor.yaml"
+        );
+    }
 
     // ──────────────────────────────────────────────────────────────────────────
     // ClaimStrategy tests
