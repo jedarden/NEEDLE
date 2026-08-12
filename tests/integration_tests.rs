@@ -43,10 +43,8 @@ fn configured_forge_store(workspace: PathBuf) -> needle::bead_store::CliBeadStor
         let home = std::env::var("HOME").unwrap_or_default();
         PathBuf::from(format!("{home}/.local/bin/bf"))
     });
-    needle::bead_store::CliBeadStore::new(
-        backend, binary, workspace, None, None, None,
-    )
-    .expect("configured bead-forge test store")
+    needle::bead_store::CliBeadStore::new(backend, binary, workspace, None, None, None)
+        .expect("configured bead-forge test store")
 }
 
 /// Mock BeadStore that tracks all operations and returns configurable beads.
