@@ -4459,7 +4459,7 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 
 # Phase 16: Configurable Bead-CLI Backends — Descriptors, Not Hardcoded Harnesses
 
-**Status:** planned. See `docs/adr/013-pluggable-bead-cli-backends.md` for the decision record, the three-way dialect matrix, and rejected alternatives.
+**Status:** accepted, not yet implemented. `docs/adr/013-pluggable-bead-cli-backends.md` was **accepted 2026-08-12** and carries the decision record, the dialect matrix, the backend priority (§7), and the rejected alternatives. Phase 16 is authorized work.
 
 **Goal:** make NEEDLE interoperable with **bead-rs (primary)**, **bead-forge (secondary)**, **beads_rust (tertiary)**, *and other bead systems that exist in the world* — the last being a requirement, not a side effect. That is achieved by making the bead-CLI layer configurable the way the agent layer already is: a bead backend becomes a **descriptor** — a serde struct loaded from YAML — not a Rust impl. `builtin_bead_backends()` ships **bead-rs** (`bead` v0.1.1), **bead-forge** (`bf` v0.4.1), and **beads_rust** (`br` v0.1.28, dicklesworthstone) as data; user files in `~/.config/needle/bead-backends/` override by name. A fourth CLI — the Go `bd`, a fork, something not yet written — is a YAML file, not a release.
 
