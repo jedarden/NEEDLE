@@ -550,45 +550,55 @@ impl Supervisor {
             "spawning worker"
         );
 
-        // Build the needle run command. Uses the resolved worker binary path
-        // (current_exe() by default) rather than a bare PATH lookup of
-        // "needle" — see GitHub issue jedarden/NEEDLE#11.
-        let mut cmd = std::process::Command::new(&worker_binary);
-        cmd.arg("run")
-            .arg("--workspace")
-            .arg(&self.config.workspace)
-            .arg("--agent")
-            .arg(&agent_name)
-            .arg("--identifier")
-            .arg(&worker_id)
-            .arg("--count")
-            .arg("1");
+        // Spawn the worker process (platform-agnostic) with retry wrapper to
+        // handle ETXTBSY (errno 26) which can occur when spawning a worker binary
+        // that was written to disk immediately before execution (race condition
+        // between write close and kernel page cache sync). This is especially
+        // common after hot-reload or upgrade.
+        //
+        // Uses the resolved worker binary path (current_exe() by default) rather
+        // than a bare PATH lookup of "needle" — see GitHub issue jedarden/NEEDLE#11.
+        let _child = crate::bead_store::spawn_with_etxtbsy_retry_sync_exponential_child(
+            || {
+                let mut cmd = std::process::Command::new(&worker_binary);
+                cmd.arg("run")
+                    .arg("--workspace")
+                    .arg(&self.config.workspace)
+                    .arg("--agent")
+                    .arg(&agent_name)
+                    .arg("--identifier")
+                    .arg(&worker_id)
+                    .arg("--count")
+                    .arg("1");
 
-        if let Some(timeout) = self.config.agent_timeout {
-            cmd.arg("--timeout").arg(timeout.to_string());
-        }
+                if let Some(timeout) = self.config.agent_timeout {
+                    cmd.arg("--timeout").arg(timeout.to_string());
+                }
 
-        // Spawn in background (detached process)
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+                // Spawn in background (detached process)
+                cmd.stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    cmd.process_group(0);
 
-            // On Unix, use setsid to create a new session
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::setsid();
-                    Ok(())
-                });
-            }
-        }
+                    // On Unix, use setsid to create a new session
+                    unsafe {
+                        cmd.pre_exec(|| {
+                            libc::setsid();
+                            Ok(())
+                        });
+                    }
+                }
 
-        // Spawn the worker process (platform-agnostic)
-        cmd.spawn()?;
+                cmd.spawn()
+            },
+            10,
+            20,
+        )?;
 
         // Emit worker spawned event
         self.telemetry.emit(EventKind::SupervisorWorkerSpawned {

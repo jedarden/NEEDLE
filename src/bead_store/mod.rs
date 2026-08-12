@@ -305,6 +305,157 @@ where
     spawn_with_etxtbsy_retry_exponential(spawn_fn, max_attempts, base_ms).await
 }
 
+// ─── Synchronous ETXTBSY retry helpers ──────────────────────────────────────────────
+
+/// Synchronous retry wrapper for subprocess spawns that handle ETXTBSY (errno 26).
+///
+/// This is the sync equivalent of `spawn_with_etxtbsy_retry`, using `std::thread::sleep`
+/// instead of `tokio::time::sleep`. Use this for synchronous `std::process::Command` spawns
+/// in non-async contexts.
+///
+/// # Parameters
+///
+/// * `spawn_fn` - A function that attempts to spawn the subprocess
+/// * `max_attempts` - Maximum number of retry attempts (default: 5)
+/// * `backoff_ms` - Backoff delay between retries in milliseconds (default: 20)
+///
+/// # Returns
+///
+/// * `Ok(T)` - The subprocess output on success
+/// * `Err(io::Error)` - The last error if all attempts are exhausted
+pub fn spawn_with_etxtbsy_retry_sync<F, T>(
+    spawn_fn: F,
+    max_attempts: u32,
+    backoff_ms: u64,
+) -> std::io::Result<T>
+where
+    F: Fn() -> std::io::Result<T>,
+{
+    let mut last_err = None;
+    for attempt in 0..max_attempts {
+        match spawn_fn() {
+            Ok(output) => return Ok(output),
+            Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < max_attempts => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.expect("loop always sets last_err before exhausting MAX_ATTEMPTS"))
+}
+
+/// Synchronous retry wrapper for `Command::spawn()` calls that handle ETXTBSY (errno 26).
+///
+/// Specialized version of `spawn_with_etxtbsy_retry_sync` for subprocess spawns that
+/// return a `std::process::Child` process. Use this when you need to interact with the spawned
+/// process (e.g., for timeout handling) in synchronous contexts.
+///
+/// # Parameters
+///
+/// * `spawn_fn` - A function that attempts to spawn the subprocess
+/// * `max_attempts` - Maximum number of retry attempts (default: 5)
+/// * `backoff_ms` - Backoff delay between retries in milliseconds (default: 20)
+///
+/// # Returns
+///
+/// * `Ok(Child)` - The spawned child process on success
+/// * `Err(io::Error)` - The last error if all attempts are exhausted
+pub fn spawn_with_etxtbsy_retry_sync_child<F>(
+    spawn_fn: F,
+    max_attempts: u32,
+    backoff_ms: u64,
+) -> std::io::Result<std::process::Child>
+where
+    F: Fn() -> std::io::Result<std::process::Child>,
+{
+    spawn_with_etxtbsy_retry_sync(spawn_fn, max_attempts, backoff_ms)
+}
+
+/// Synchronous retry wrapper for subprocess spawns with exponential backoff for ETXTBSY (errno 26).
+///
+/// This is the sync equivalent of `spawn_with_etxtbsy_retry_exponential`, using `std::thread::sleep`
+/// instead of `tokio::time::sleep`. Use this for synchronous `std::process::Command` spawns
+/// in non-async contexts.
+///
+/// # Parameters
+///
+/// * `spawn_fn` - A function that attempts to spawn the subprocess
+/// * `max_attempts` - Maximum number of retry attempts (default: 10)
+/// * `base_ms` - Base backoff delay in milliseconds (default: 20)
+///
+/// # Returns
+///
+/// * `Ok(T)` - The subprocess output on success
+/// * `Err(io::Error)` - The last error if all attempts are exhausted
+pub fn spawn_with_etxtbsy_retry_sync_exponential<F, T>(
+    spawn_fn: F,
+    max_attempts: u32,
+    base_ms: u64,
+) -> std::io::Result<T>
+where
+    F: Fn() -> std::io::Result<T>,
+{
+    use rand::Rng;
+
+    const ETXTBSY_ERRNO: i32 = 26;
+    const JITTER_PERCENT: f64 = 0.25; // ±25% jitter
+
+    let mut last_err = None;
+    let mut rng = rand::thread_rng();
+
+    for attempt in 0..max_attempts {
+        match spawn_fn() {
+            Ok(output) => return Ok(output),
+            Err(e) if e.raw_os_error() == Some(ETXTBSY_ERRNO) && attempt + 1 < max_attempts => {
+                last_err = Some(e);
+
+                // Calculate exponential backoff: base_ms * 2^attempt
+                let exponential_delay = base_ms * (1 << attempt);
+
+                // Add jitter to prevent synchronization
+                let jitter_range = (exponential_delay as f64 * JITTER_PERCENT) as u64;
+                let jitter = rng.gen_range(0..=jitter_range * 2);
+                let delay = exponential_delay
+                    .saturating_add(jitter)
+                    .saturating_sub(jitter_range);
+
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(last_err.expect("loop always sets last_err before exhausting max_attempts"))
+}
+
+/// Synchronous retry wrapper for `Command::spawn()` with exponential backoff for ETXTBSY (errno 26).
+///
+/// Specialized version of `spawn_with_etxtbsy_retry_sync_exponential` for subprocess spawns that
+/// return a `std::process::Child` process. Use this when you need to interact with the spawned
+/// process (e.g., for timeout handling) in synchronous contexts.
+///
+/// # Parameters
+///
+/// * `spawn_fn` - A function that attempts to spawn the subprocess
+/// * `max_attempts` - Maximum number of retry attempts (default: 10)
+/// * `base_ms` - Base backoff delay in milliseconds (default: 20)
+///
+/// # Returns
+///
+/// * `Ok(Child)` - The spawned child process on success
+/// * `Err(io::Error)` - The last error if all attempts are exhausted
+pub fn spawn_with_etxtbsy_retry_sync_exponential_child<F>(
+    spawn_fn: F,
+    max_attempts: u32,
+    base_ms: u64,
+) -> std::io::Result<std::process::Child>
+where
+    F: Fn() -> std::io::Result<std::process::Child>,
+{
+    spawn_with_etxtbsy_retry_sync_exponential(spawn_fn, max_attempts, base_ms)
+}
+
 /// Result of a version check.
 #[derive(Debug)]
 pub enum VersionCheck {

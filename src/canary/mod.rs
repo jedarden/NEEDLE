@@ -381,23 +381,32 @@ impl CanaryRunner {
         //
         // Pin the scan root to the canary workspace and switch Explore off, so a
         // canary run can only ever touch beads that live in the canary.
-        let mut child = match Command::new(testing_binary)
-            .args([
-                "run",
-                "--workspace",
-                &self.canary_workspace.display().to_string(),
-                "--identifier",
-                &format!("canary-{bead_id}"),
-                "--count",
-                "1",
-            ])
-            .env("NEEDLE_STRANDS__EXPLORE__ENABLED", "false")
-            .env(
-                "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT",
-                &self.canary_workspace,
-            )
-            .spawn()
-        {
+        //
+        // Use retry wrapper to handle ETXTBSY (errno 26) which can occur when
+        // spawning a testing binary that was written to disk immediately before
+        // execution (race condition between write close and kernel page cache sync).
+        let mut child = match crate::bead_store::spawn_with_etxtbsy_retry_sync_exponential_child(
+            || {
+                Command::new(testing_binary)
+                    .args([
+                        "run",
+                        "--workspace",
+                        &self.canary_workspace.display().to_string(),
+                        "--identifier",
+                        &format!("canary-{bead_id}"),
+                        "--count",
+                        "1",
+                    ])
+                    .env("NEEDLE_STRANDS__EXPLORE__ENABLED", "false")
+                    .env(
+                        "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT",
+                        &self.canary_workspace,
+                    )
+                    .spawn()
+            },
+            10,
+            20,
+        ) {
             Ok(c) => c,
             Err(e) => {
                 return CanaryTestResult::Error {
