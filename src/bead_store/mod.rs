@@ -15,6 +15,7 @@
 
 mod bf_cli;
 mod br_cli;
+mod strategies;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -30,6 +31,12 @@ use crate::types::{Bead, BeadId, ClaimResult};
 // Re-export the implementations so consumers don't need to change their imports
 pub use bf_cli::BfCliBeadStore;
 pub use br_cli::BrCliBeadStore;
+
+// Re-export operation strategies for backend descriptors
+pub use strategies::{
+    ClaimAutoStrategy, ClaimStrategy, CreateIdStrategy, ImportStrategy, LabelsStrategy,
+    SplitStrategy,
+};
 
 // ─── Corruption detection ────────────────────────────────────────────────────
 

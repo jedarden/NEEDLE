@@ -2213,14 +2213,47 @@ async fn dead_worker_cleanup_integration() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let output = cmd.output().unwrap();
+    // Spawn the process and wait with timeout to prevent hangs
+    let mut child = cmd.spawn().expect("Failed to spawn worker");
+
+    // ProcessGuard ensures cleanup if test panics
+    struct ProcessGuard(Option<std::process::Child>);
+
+    impl Drop for ProcessGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let _guard = ProcessGuard(Some(child));
+
+    // Wait with timeout
+    let timeout_duration = Duration::from_secs(60);
+    let start_time = Instant::now();
+
+    let exit_status = loop {
+        if start_time.elapsed() > timeout_duration {
+            panic!(
+                "Worker did not complete within {:?} - possible hang or deadlock",
+                timeout_duration
+            );
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => panic!("Failed to wait for worker process: {}", e),
+        }
+    };
 
     // The worker should exit successfully.
     assert!(
-        output.status.success(),
-        "needle worker failed: stdout: {}, stderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        exit_status.success(),
+        "needle worker failed with exit status: {:?}",
+        exit_status
     );
 
     // Verify the dead worker was removed from the registry.
@@ -2528,6 +2561,41 @@ fn heartbeat_cleanup_on_signal_integration() {
     let worker_pid = child.id();
     println!("Worker PID: {}", worker_pid);
 
+    // Register cleanup handler IMMEDIATELY after spawning to ensure cleanup
+    // even if early operations fail. This prevents zombie processes.
+    struct ProcessGuard {
+        inner: Option<std::process::Child>,
+        pid: u32,
+    }
+
+    impl ProcessGuard {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            if let Some(ref mut child) = self.inner {
+                child.try_wait()
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn pid(&self) -> u32 {
+            self.pid
+        }
+    }
+
+    impl Drop for ProcessGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.inner.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let mut child_guard = ProcessGuard {
+        inner: Some(child),
+        pid: worker_pid,
+    };
+
     // Give the worker time to start up and create its heartbeat file
     let heartbeat_dir = workspace.join("state").join("heartbeats");
     let heartbeat_file = heartbeat_dir.join("claude-echo-signal-test-worker.json");
@@ -2536,24 +2604,24 @@ fn heartbeat_cleanup_on_signal_integration() {
 
     let start = Instant::now();
     let heartbeat_timeout = Duration::from_secs(30);
+    let poll_interval = Duration::from_millis(200);
     let mut heartbeat_found = false;
 
-    // Wait up to 30 seconds for the heartbeat file to appear
+    // Wait up to 30 seconds for the heartbeat file to appear with proper timeout handling.
+    // ProcessGuard ensures cleanup even if we panic here.
     while start.elapsed() < heartbeat_timeout {
         if heartbeat_file.exists() {
             heartbeat_found = true;
             println!("✓ Heartbeat file created after {:?}", start.elapsed());
             break;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(poll_interval);
     }
 
+    // Explicit timeout check with clear error message
     if !heartbeat_found {
-        // Kill the child process before failing
-        let _ = child.kill();
-        let _ = child.wait();
         panic!(
-            "Heartbeat file not found after {:?}, test failed",
+            "Heartbeat file not found after {:?} - worker failed to create heartbeat within timeout. ProcessGuard will clean up the process.",
             heartbeat_timeout
         );
     }
@@ -2629,19 +2697,17 @@ fn heartbeat_cleanup_on_signal_integration() {
     let shutdown_start = Instant::now();
 
     let exit_status = loop {
-        match child.try_wait() {
+        match child_guard.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if shutdown_start.elapsed() < shutdown_timeout {
                     std::thread::sleep(Duration::from_millis(100));
                 } else {
-                    // Worker didn't exit in time, kill it forcefully
+                    // Worker didn't exit in time - ProcessGuard will handle cleanup
                     println!(
-                        "Worker did not exit within {:?}, killing forcefully",
+                        "Worker did not exit within {:?}, ProcessGuard will clean up",
                         shutdown_timeout
                     );
-                    let _ = child.kill();
-                    let _ = child.wait();
                     panic!(
                         "Worker did not exit gracefully within {:?}, test failed",
                         shutdown_timeout
@@ -2650,8 +2716,7 @@ fn heartbeat_cleanup_on_signal_integration() {
             }
             Err(e) => {
                 println!("Error checking worker status: {}", e);
-                let _ = child.kill();
-                let _ = child.wait();
+                // ProcessGuard will handle cleanup when it drops
                 return;
             }
         }
@@ -2871,28 +2936,67 @@ exit 0
 /// Test tilde expansion in worker_binary_path configuration.
 ///
 /// This test validates that tilde-prefixed paths in worker_binary_path are
-/// correctly expanded to the HOME directory during config loading.
+/// correctly expanded to the HOME directory during config loading, with proper
+/// tempdir isolation to avoid contaminating the real user environment.
 #[tokio::test]
 async fn worker_binary_path_tilde_expansion() {
+    use needle::config::Config;
     use needle::util::expand_tilde;
     use std::env;
+    use std::fs;
+    use std::path::PathBuf;
 
-    // Set a known HOME value for testing
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create a custom bin directory in the isolated home
+    let bin_dir = isolated_home.join("bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
+
+    // Create a dummy binary in the isolated location
+    let custom_binary = bin_dir.join("custom-needle");
+    let script = r#"#!/bin/bash
+# Custom test worker binary
+exit 0
+"#;
+    fs::write(&custom_binary, script).expect("failed to write custom binary");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&custom_binary).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&custom_binary, perms).unwrap();
+    }
+
+    // Save the original HOME and set our isolated home
     let original_home = env::var("HOME").ok();
-    env::set_var("HOME", "/home/testuser");
 
-    // Test tilde expansion
+    // Verify our test is using isolated HOME
+    let real_home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    assert_ne!(
+        isolated_home.as_path(),
+        PathBuf::from(real_home.clone()),
+        "test should use isolated temp directory, not real HOME"
+    );
+
+    env::set_var("HOME", &isolated_home);
+
+    // Test basic tilde expansion function
     let tilde_path = "~/bin/custom-needle";
     let expanded = expand_tilde(tilde_path);
 
     assert_eq!(
-        expanded, "/home/testuser/bin/custom-needle",
-        "tilde path should be expanded correctly"
+        expanded,
+        isolated_home.join("bin/custom-needle").to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
     );
 
-    // Verify that the expansion works for the configuration
-    // The config loading should expand tilde paths automatically
-    let _yaml = format!(
+    // Test that tilde expansion works in config context
+    // Create a config with tilde path
+    let yaml = format!(
         r#"
 worker:
   worker_binary_path: {}
@@ -2900,12 +3004,28 @@ worker:
         tilde_path
     );
 
-    // Test that the raw path gets expanded during config processing
-    let manual_expand = expand_tilde(tilde_path);
-    assert_eq!(
-        manual_expand, "/home/testuser/bin/custom-needle",
-        "config should expand tilde paths in worker_binary_path"
-    );
+    // Load config - this should trigger tilde expansion
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+
+    // The config should expand tildes
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    // Verify the worker_binary_path was expanded
+    if let Some(worker_path) = &config_expanded.worker.worker_binary_path {
+        assert!(
+            worker_path.starts_with(&isolated_home),
+            "worker_binary_path should be expanded to isolated home, got: {}",
+            worker_path.display()
+        );
+
+        assert_eq!(
+            worker_path, &custom_binary,
+            "worker_binary_path should point to our custom binary"
+        );
+    } else {
+        panic!("worker_binary_path should be set after expansion");
+    }
 
     // Restore original HOME
     if let Some(home) = original_home {
@@ -2915,6 +3035,8 @@ worker:
     }
 
     println!("✓ Worker binary path tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Expanded path: {}", custom_binary.display());
 }
 
 /// Test absolute and relative paths in worker_binary_path configuration.
@@ -3104,7 +3226,7 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
 
     // Spawn the worker process
     println!("Spawning worker process for normal exit test...");
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
             println!("Skipping test: failed to spawn worker: {}", e);
@@ -3115,6 +3237,40 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
     let worker_pid = child.id();
     println!("Worker PID: {}", worker_pid);
 
+    // ProcessGuard ensures cleanup if test panics
+    struct ProcessGuard {
+        inner: Option<std::process::Child>,
+        pid: u32,
+    }
+
+    impl ProcessGuard {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            if let Some(ref mut child) = self.inner {
+                child.try_wait()
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn pid(&self) -> u32 {
+            self.pid
+        }
+    }
+
+    impl Drop for ProcessGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.inner.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    let mut child_guard = ProcessGuard {
+        inner: Some(child),
+        pid: worker_pid,
+    };
+
     // Give the worker time to start up and create its heartbeat file
     let heartbeat_dir = workspace.join("state").join("heartbeats");
     let heartbeat_file = heartbeat_dir.join("claude-echo-normal-exit-test-worker.json");
@@ -3123,23 +3279,23 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
 
     let start = Instant::now();
     let heartbeat_timeout = Duration::from_secs(30);
+    let poll_interval = Duration::from_millis(200);
     let mut heartbeat_found = false;
 
-    // Wait up to 30 seconds for the heartbeat file to appear
+    // Wait up to 30 seconds for the heartbeat file to appear with proper timeout handling
     while start.elapsed() < heartbeat_timeout {
         if heartbeat_file.exists() {
             heartbeat_found = true;
             println!("✓ Heartbeat file created after {:?}", start.elapsed());
             break;
         }
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(poll_interval);
     }
 
+    // Explicit timeout check with clear error message
     if !heartbeat_found {
-        let _ = child.kill();
-        let _ = child.wait();
         panic!(
-            "Heartbeat file not found after {:?}, test failed",
+            "Heartbeat file not found after {:?} - worker failed to create heartbeat. ProcessGuard will clean up.",
             heartbeat_timeout
         );
     }
@@ -3167,25 +3323,22 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
     let exit_start = Instant::now();
 
     let exit_status = loop {
-        match child.try_wait() {
+        match child_guard.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if exit_start.elapsed() < exit_timeout {
                     std::thread::sleep(Duration::from_millis(100));
                 } else {
-                    println!("Worker did not exit within {:?}, killing", exit_timeout);
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    // ProcessGuard will handle cleanup
                     panic!(
-                        "Worker did not exit naturally within {:?}, test failed",
+                        "Worker did not exit naturally within {:?}, test failed. ProcessGuard will clean up.",
                         exit_timeout
                     );
                 }
             }
             Err(e) => {
                 println!("Error checking worker status: {}", e);
-                let _ = child.kill();
-                let _ = child.wait();
+                // ProcessGuard will handle cleanup
                 return;
             }
         }

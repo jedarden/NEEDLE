@@ -260,6 +260,10 @@ pub enum EventKind {
         agent: String,
         model: Option<String>,
     },
+    AgentTimeout {
+        bead_id: BeadId,
+        reason: crate::dispatch::TimeoutReason,
+    },
     RoutingDecision {
         bead_id: BeadId,
         /// The model name that was matched (e.g., "claude-sonnet-4-6").
@@ -814,6 +818,7 @@ impl EventKind {
             EventKind::BeadQuarantined { .. } => "bead.quarantined",
             EventKind::DispatchStarted { .. } => "agent.dispatched",
             EventKind::DispatchCompleted { .. } => "agent.completed",
+            EventKind::AgentTimeout { .. } => "agent.timeout",
             EventKind::RoutingDecision { .. } => "agent.routing_decision",
             EventKind::RoutingFailed { .. } => "agent.routing_failed",
             EventKind::BuildTimeout { .. } => "build.timeout",
@@ -960,7 +965,8 @@ impl EventKind {
             | EventKind::ReflectDecisionExtracted { bead_id, .. }
             | EventKind::ReflectAdrCreated { bead_id, .. }
             | EventKind::SplitSkipped { bead_id, .. }
-            | EventKind::BeadQuarantined { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::BeadQuarantined { bead_id, .. }
+            | EventKind::AgentTimeout { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::MitosisOutOfScope { bead_id } => Some(bead_id.clone()),
@@ -1289,6 +1295,15 @@ impl EventKind {
                     "bead_id": bead_id.as_ref(),
                     "model": model,
                     "rules_tried": rules_tried,
+                })
+            }
+            EventKind::AgentTimeout {
+                bead_id,
+                reason,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "reason": format!("{reason}"),
                 })
             }
             EventKind::BuildTimeout {
@@ -2283,6 +2298,7 @@ impl EventKind {
             | EventKind::IdleSleepEntered { .. }
             | EventKind::RoutingDecision { .. }
             | EventKind::RoutingFailed { .. }
+            | EventKind::AgentTimeout { .. }
             | EventKind::BeadStoreError { .. }
             | EventKind::WorkerFoundButExcluded { .. }
             | EventKind::EventDrivenWakeup { .. }

@@ -1824,6 +1824,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/test"),
             dependencies: deps,
             dependents: vec![],
+            comments: vec![],
             created_at: dt,
             updated_at: dt,
         }
@@ -1852,6 +1853,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: dt,
             updated_at: dt,
         }
@@ -1870,6 +1872,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: dt,
             updated_at: dt,
         }
@@ -2267,6 +2270,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: dt,
             updated_at: dt,
         };

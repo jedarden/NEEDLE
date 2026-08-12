@@ -15,12 +15,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use tempfile::TempDir;
 use needle::config::{
     AgentConfig, Config, MendConfig, SelfModificationConfig, TimeoutTriggeredPolicy,
     ValidationConfig, WorkerConfig,
 };
 use serde_yaml;
+use tempfile::TempDir;
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Test fixtures and helpers
@@ -183,30 +183,28 @@ fn default_config_loads_with_builtin_defaults() {
 fn explicit_timeouts_parse_correctly() {
     let config: Config = serde_yaml::from_str(EXPLICIT_TIMEOUTS_YAML).unwrap();
 
-    assert_eq!(config.agent.timeout, 7200, "agent.timeout should be 7200s (2 hours)");
     assert_eq!(
-        config.worker.idle_timeout,
-        120,
+        config.agent.timeout, 7200,
+        "agent.timeout should be 7200s (2 hours)"
+    );
+    assert_eq!(
+        config.worker.idle_timeout, 120,
         "worker.idle_timeout should be 120s"
     );
     assert_eq!(
-        config.worker.building_timeout,
-        1800,
+        config.worker.building_timeout, 1800,
         "worker.building_timeout should be 1800s (30 minutes)"
     );
     assert_eq!(
-        config.strands.mend.idle_timeout,
-        300,
+        config.strands.mend.idle_timeout, 300,
         "strands.mend.idle_timeout should be 300s"
     );
     assert_eq!(
-        config.validation.outcome_timeout_seconds,
-        100,
+        config.validation.outcome_timeout_seconds, 100,
         "validation.outcome_timeout_seconds should be 100s"
     );
     assert_eq!(
-        config.self_modification.canary_timeout,
-        3600,
+        config.self_modification.canary_timeout, 3600,
         "self_modification.canary_timeout should be 3600s (1 hour)"
     );
 }
@@ -217,28 +215,23 @@ fn zero_timeouts_represent_unlimited_behavior() {
 
     assert_eq!(config.agent.timeout, 0, "agent.timeout=0 means unlimited");
     assert_eq!(
-        config.worker.idle_timeout,
-        0,
+        config.worker.idle_timeout, 0,
         "worker.idle_timeout=0 means unlimited"
     );
     assert_eq!(
-        config.worker.building_timeout,
-        0,
+        config.worker.building_timeout, 0,
         "worker.building_timeout=0 means unlimited"
     );
     assert_eq!(
-        config.strands.mend.idle_timeout,
-        0,
+        config.strands.mend.idle_timeout, 0,
         "strands.mend.idle_timeout=0 means unlimited"
     );
     assert_eq!(
-        config.validation.outcome_timeout_seconds,
-        0,
+        config.validation.outcome_timeout_seconds, 0,
         "validation.outcome_timeout_seconds=0 means unlimited"
     );
     assert_eq!(
-        config.self_modification.canary_timeout,
-        0,
+        config.self_modification.canary_timeout, 0,
         "self_modification.canary_timeout=0 means unlimited"
     );
 }
@@ -275,7 +268,10 @@ fn timeout_triggered_mitosis_policy_default_is_disabled() {
     let config: Config = serde_yaml::from_str(DEFAULT_CONFIG_YAML).unwrap();
 
     let policy = &config.strands.mitosis.timeout_triggered;
-    assert!(!policy.enabled, "timeout-triggered mitosis should be disabled by default");
+    assert!(
+        !policy.enabled,
+        "timeout-triggered mitosis should be disabled by default"
+    );
     assert!(
         !policy.agent_wallclock_timeout,
         "agent_wallclock_timeout should be disabled by default"
@@ -285,8 +281,7 @@ fn timeout_triggered_mitosis_policy_default_is_disabled() {
         "handler_timeout should be disabled by default"
     );
     assert_eq!(
-        policy.min_elapsed_fraction,
-        0.9,
+        policy.min_elapsed_fraction, 0.9,
         "min_elapsed_fraction should default to 0.9"
     );
 }
@@ -322,8 +317,7 @@ fn timeout_triggered_mitosis_policy_explicit_enabled() {
         "handler_timeout should be true when enabled"
     );
     assert_eq!(
-        policy.min_elapsed_fraction,
-        0.85,
+        policy.min_elapsed_fraction, 0.85,
         "min_elapsed_fraction should be 0.85 (custom value)"
     );
 }
@@ -390,10 +384,7 @@ agent:
 "#;
 
     let result: Result<Config, _> = serde_yaml::from_str(invalid_yaml);
-    assert!(
-        result.is_err(),
-        "non-numeric timeout should fail to parse"
-    );
+    assert!(result.is_err(), "non-numeric timeout should fail to parse");
 }
 
 #[test]
@@ -496,23 +487,19 @@ fn legacy_config_behavior_matches_new_config_defaults() {
 
     // All timeout fields should match
     assert_eq!(
-        legacy.agent.timeout,
-        default.agent.timeout,
+        legacy.agent.timeout, default.agent.timeout,
         "legacy config should match default agent.timeout"
     );
     assert_eq!(
-        legacy.worker.idle_timeout,
-        default.worker.idle_timeout,
+        legacy.worker.idle_timeout, default.worker.idle_timeout,
         "legacy config should match default worker.idle_timeout"
     );
     assert_eq!(
-        legacy.worker.building_timeout,
-        default.worker.building_timeout,
+        legacy.worker.building_timeout, default.worker.building_timeout,
         "legacy config should match default worker.building_timeout"
     );
     assert_eq!(
-        legacy.strands.mend.idle_timeout,
-        default.strands.mend.idle_timeout,
+        legacy.strands.mend.idle_timeout, default.strands.mend.idle_timeout,
         "legacy config should match default strands.mend.idle_timeout"
     );
 }
@@ -587,10 +574,7 @@ fn timeout_mitosis_policy_disabled_never_qualifies() {
     let policy = &config.strands.mitosis.timeout_triggered;
 
     // Even with valid reasons and high elapsed fraction, disabled policy should reject
-    assert!(
-        !policy.enabled,
-        "policy should be disabled"
-    );
+    assert!(!policy.enabled, "policy should be disabled");
     assert!(
         !policy.qualifies("agent_wallclock_timeout", 0.99),
         "disabled policy should NOT qualify any timeout"
@@ -639,28 +623,23 @@ fn boundary_u64_values_parse_correctly() {
     let config: Config = serde_yaml::from_str(BOUNDARY_TIMEOUTS_YAML).unwrap();
 
     assert_eq!(
-        config.agent.timeout,
-        18_446_744_073_709_551_615,
+        config.agent.timeout, 18_446_744_073_709_551_615,
         "max u64 value should parse correctly"
     );
     assert_eq!(
-        config.worker.idle_timeout,
-        18_446_744_073_709_551_615,
+        config.worker.idle_timeout, 18_446_744_073_709_551_615,
         "max u64 value should parse correctly"
     );
     assert_eq!(
-        config.worker.building_timeout,
-        18_446_744_073_709_551_615,
+        config.worker.building_timeout, 18_446_744_073_709_551_615,
         "max u64 value should parse correctly"
     );
     assert_eq!(
-        config.validation.outcome_timeout_seconds,
-        18_446_744_073_709_551_615,
+        config.validation.outcome_timeout_seconds, 18_446_744_073_709_551_615,
         "max u64 value should parse correctly"
     );
     assert_eq!(
-        config.self_modification.canary_timeout,
-        18_446_744_073_709_551_615,
+        config.self_modification.canary_timeout, 18_446_744_073_709_551_615,
         "max u64 value should parse correctly"
     );
 }
@@ -693,33 +672,27 @@ fn config_roundtrip_serialization_preserves_timeouts() {
 
     // All timeout fields should match
     assert_eq!(
-        restored.agent.timeout,
-        original.agent.timeout,
+        restored.agent.timeout, original.agent.timeout,
         "agent.timeout should survive roundtrip"
     );
     assert_eq!(
-        restored.worker.idle_timeout,
-        original.worker.idle_timeout,
+        restored.worker.idle_timeout, original.worker.idle_timeout,
         "worker.idle_timeout should survive roundtrip"
     );
     assert_eq!(
-        restored.worker.building_timeout,
-        original.worker.building_timeout,
+        restored.worker.building_timeout, original.worker.building_timeout,
         "worker.building_timeout should survive roundtrip"
     );
     assert_eq!(
-        restored.strands.mend.idle_timeout,
-        original.strands.mend.idle_timeout,
+        restored.strands.mend.idle_timeout, original.strands.mend.idle_timeout,
         "strands.mend.idle_timeout should survive roundtrip"
     );
     assert_eq!(
-        restored.validation.outcome_timeout_seconds,
-        original.validation.outcome_timeout_seconds,
+        restored.validation.outcome_timeout_seconds, original.validation.outcome_timeout_seconds,
         "validation.outcome_timeout_seconds should survive roundtrip"
     );
     assert_eq!(
-        restored.self_modification.canary_timeout,
-        original.self_modification.canary_timeout,
+        restored.self_modification.canary_timeout, original.self_modification.canary_timeout,
         "self_modification.canary_timeout should survive roundtrip"
     );
 
@@ -730,13 +703,29 @@ fn config_roundtrip_serialization_preserves_timeouts() {
         "timeout_triggered.enabled should survive roundtrip"
     );
     assert_eq!(
-        restored.strands.mitosis.timeout_triggered.agent_wallclock_timeout,
-        original.strands.mitosis.timeout_triggered.agent_wallclock_timeout,
+        restored
+            .strands
+            .mitosis
+            .timeout_triggered
+            .agent_wallclock_timeout,
+        original
+            .strands
+            .mitosis
+            .timeout_triggered
+            .agent_wallclock_timeout,
         "timeout_triggered.agent_wallclock_timeout should survive roundtrip"
     );
     assert_eq!(
-        restored.strands.mitosis.timeout_triggered.min_elapsed_fraction,
-        original.strands.mitosis.timeout_triggered.min_elapsed_fraction,
+        restored
+            .strands
+            .mitosis
+            .timeout_triggered
+            .min_elapsed_fraction,
+        original
+            .strands
+            .mitosis
+            .timeout_triggered
+            .min_elapsed_fraction,
         "timeout_triggered.min_elapsed_fraction should survive roundtrip"
     );
 }
@@ -747,10 +736,7 @@ fn empty_config_uses_all_defaults() {
     let config: Config = serde_yaml::from_str(empty_yaml).unwrap();
 
     // Should use all built-in defaults
-    assert_eq!(
-        config.agent.timeout,
-        AgentConfig::default_timeout()
-    );
+    assert_eq!(config.agent.timeout, AgentConfig::default_timeout());
     assert_eq!(
         config.worker.idle_timeout,
         WorkerConfig::default_idle_timeout()
@@ -827,8 +813,14 @@ strands:
 
     assert!(policy.enabled);
     assert!(policy.agent_wallclock_timeout);
-    assert!(!policy.handler_timeout, "omitted field should default to false");
-    assert_eq!(policy.min_elapsed_fraction, 0.9, "omitted field should default to 0.9");
+    assert!(
+        !policy.handler_timeout,
+        "omitted field should default to false"
+    );
+    assert_eq!(
+        policy.min_elapsed_fraction, 0.9,
+        "omitted field should default to 0.9"
+    );
 }
 
 #[test]

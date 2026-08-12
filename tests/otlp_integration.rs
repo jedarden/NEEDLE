@@ -637,6 +637,10 @@ fn make_config(workspace_home: &Path) -> Config {
     config.workspace.default = PathBuf::from("/tmp/test-workspace");
     config.workspace.home = workspace_home.to_path_buf();
     config.self_modification.hot_reload = false;
+    // Isolate Explore strand to prevent scanning real home directory
+    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    config.strands.explore.workspace_root = workspace_home.to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
     config
 }
 

@@ -29,6 +29,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::cargo_test::TestMetrics;
+use crate::dispatch::TimeoutReason;
 use crate::sanitize::Sanitizer;
 use crate::types::BeadId;
 
@@ -80,6 +81,8 @@ pub struct TraceMetadata {
     pub pruned: bool,
     /// SHA-256 hex digest of the rendered prompt (identifies template version).
     pub template_version: Option<String>,
+    /// Structured timeout reason if terminated by timeout (exit_code 124).
+    pub timeout_reason: Option<TimeoutReason>,
 }
 
 /// Adapter-specific trace format identifier.

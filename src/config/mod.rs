@@ -2644,6 +2644,9 @@ impl Config {
         // agent section
         self.agent.adapters_dir = expand_tilde(&self.agent.adapters_dir);
 
+        // bead_cli section
+        self.bead_cli.explicit_path = expand_tilde_option(&self.bead_cli.explicit_path);
+
         // strands.explore section
         self.strands.explore.workspace_root = expand_tilde(&self.strands.explore.workspace_root);
         self.strands.explore.workspaces = expand_tilde_vec(&self.strands.explore.workspaces);
@@ -5792,6 +5795,25 @@ agent:
     }
 
     #[test]
+    fn bead_cli_explicit_path_tilde_is_expanded() {
+        let mut config = Config {
+            bead_cli: BeadCliConfig {
+                explicit_path: Some(PathBuf::from("~/local/bin/bf")),
+                ..BeadCliConfig::default()
+            },
+            ..Config::default()
+        };
+        config.expand_tildes();
+        let expanded = config.bead_cli.explicit_path.unwrap();
+        assert!(
+            !expanded.starts_with("~"),
+            "tilde was not expanded: {:?}",
+            expanded
+        );
+        assert!(expanded.ends_with("local/bin/bf"));
+    }
+
+    #[test]
     fn worker_binary_path_accepts_any_path_without_validation() {
         // Invalid paths should be accepted during deserialization
         // Validation happens at runtime when spawning the worker, not during config load
@@ -6149,5 +6171,341 @@ agent:
         assert!(!config.timeout_triggered.agent_wallclock_timeout);
         assert!(!config.timeout_triggered.handler_timeout);
         assert_eq!(config.timeout_triggered.min_elapsed_fraction, 0.9);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tilde expansion tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_expand_tilde_str_with_slash() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~/docs");
+        std::env::remove_var("HOME");
+        assert_eq!(result, "/home/testuser/docs");
+    }
+
+    #[test]
+    fn test_expand_tilde_str_bare_tilde() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~");
+        std::env::remove_var("HOME");
+        assert_eq!(result, "/home/testuser");
+    }
+
+    #[test]
+    fn test_expand_tilde_str_nested_path() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~/config/needle/file.yaml");
+        std::env::remove_var("HOME");
+        assert_eq!(result, "/home/testuser/config/needle/file.yaml");
+    }
+
+    #[test]
+    fn test_expand_tilde_str_without_tilde_unchanged() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("/absolute/path");
+        std::env::remove_var("HOME");
+        assert_eq!(result, "/absolute/path");
+    }
+
+    #[test]
+    fn test_expand_tilde_str_relative_path_unchanged() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("relative/path");
+        std::env::remove_var("HOME");
+        assert_eq!(result, "relative/path");
+    }
+
+    #[test]
+    fn test_expand_tilde_str_other_user_tilde_unchanged() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~otheruser/path");
+        std::env::remove_var("HOME");
+        assert_eq!(result, "~otheruser/path");
+    }
+
+    #[test]
+    fn test_expand_tilde_str_empty_string() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("");
+        std::env::remove_var("HOME");
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_expand_tilde_str_missing_home() {
+        std::env::remove_var("HOME");
+        let result = expand_tilde_str("~/docs");
+        assert_eq!(result, "~/docs"); // No HOME, return unchanged
+    }
+
+    #[test]
+    fn test_expand_tilde_str_missing_home_bare_tilde() {
+        std::env::remove_var("HOME");
+        let result = expand_tilde_str("~");
+        assert_eq!(result, "~"); // No HOME, return unchanged
+    }
+
+    #[test]
+    fn test_expand_tilde_pathbuf_with_slash() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(Path::new("~/docs"));
+        std::env::remove_var("HOME");
+        assert_eq!(result, PathBuf::from("/home/testuser/docs"));
+    }
+
+    #[test]
+    fn test_expand_tilde_pathbuf_bare_tilde() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(Path::new("~"));
+        std::env::remove_var("HOME");
+        assert_eq!(result, PathBuf::from("/home/testuser"));
+    }
+
+    #[test]
+    fn test_expand_tilde_pathbuf_nested_path() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(Path::new("~/config/needle/file.yaml"));
+        std::env::remove_var("HOME");
+        assert_eq!(result, PathBuf::from("/home/testuser/config/needle/file.yaml"));
+    }
+
+    #[test]
+    fn test_expand_tilde_pathbuf_absolute_path_unchanged() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(Path::new("/absolute/path"));
+        std::env::remove_var("HOME");
+        assert_eq!(result, PathBuf::from("/absolute/path"));
+    }
+
+    #[test]
+    fn test_expand_tilde_pathbuf_relative_path_unchanged() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(Path::new("relative/path"));
+        std::env::remove_var("HOME");
+        assert_eq!(result, PathBuf::from("relative/path"));
+    }
+
+    #[test]
+    fn test_expand_tilde_pathbuf_missing_home() {
+        std::env::remove_var("HOME");
+        let result = expand_tilde(Path::new("~/docs"));
+        assert_eq!(result, PathBuf::from("~/docs")); // No HOME, return unchanged
+    }
+
+    #[test]
+    fn test_expand_tilde_pathbuf_empty_string() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(Path::new(""));
+        std::env::remove_var("HOME");
+        assert_eq!(result, PathBuf::from(""));
+    }
+
+    #[test]
+    fn test_expand_tilde_pathbuf_trailing_slash() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(Path::new("~/"));
+        std::env::remove_var("HOME");
+        assert_eq!(result, PathBuf::from("/home/testuser"));
+    }
+
+    #[test]
+    fn test_expand_tilde_pathbuf_parent_path() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(Path::new("~/../"));
+        std::env::remove_var("HOME");
+        assert_eq!(result, PathBuf::from("/home/testuser/../"));
+    }
+
+    #[test]
+    fn test_expand_tilde_option_some() {
+        std::env::set_var("HOME", "/home/testuser");
+        let input = Some(PathBuf::from("~/docs"));
+        let result = expand_tilde_option(&input);
+        std::env::remove_var("HOME");
+        assert_eq!(result, Some(PathBuf::from("/home/testuser/docs")));
+    }
+
+    #[test]
+    fn test_expand_tilde_option_none() {
+        let input: Option<PathBuf> = None;
+        let result = expand_tilde_option(&input);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_expand_tilde_vec_empty() {
+        let input: Vec<PathBuf> = vec![];
+        let result = expand_tilde_vec(&input);
+        assert_eq!(result, vec![]);
+    }
+
+    #[test]
+    fn test_expand_tilde_vec_single() {
+        std::env::set_var("HOME", "/home/testuser");
+        let input = vec![PathBuf::from("~/docs")];
+        let result = expand_tilde_vec(&input);
+        std::env::remove_var("HOME");
+        assert_eq!(result, vec![PathBuf::from("/home/testuser/docs")]);
+    }
+
+    #[test]
+    fn test_expand_tilde_vec_multiple() {
+        std::env::set_var("HOME", "/home/testuser");
+        let input = vec![
+            PathBuf::from("~/docs"),
+            PathBuf::from("~/config"),
+            PathBuf::from("/absolute"),
+        ];
+        let result = expand_tilde_vec(&input);
+        std::env::remove_var("HOME");
+        assert_eq!(
+            result,
+            vec![
+                PathBuf::from("/home/testuser/docs"),
+                PathBuf::from("/home/testuser/config"),
+                PathBuf::from("/absolute"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_dirs_or_home_with_home() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = dirs_or_home(".config/needle");
+        std::env::remove_var("HOME");
+        assert_eq!(result, PathBuf::from("/home/testuser/.config/needle"));
+    }
+
+    #[test]
+    fn test_dirs_or_home_without_home_fallback() {
+        std::env::remove_var("HOME");
+        let result = dirs_or_home(".config/needle");
+        assert_eq!(result, PathBuf::from("/tmp/.config/needle"));
+    }
+
+    #[test]
+    fn test_config_expand_tildes_global_config() {
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.workspace.default = PathBuf::from("~/workspace");
+        config.workspace.home = PathBuf::from("~/.needle");
+        config.agent.adapters_dir = PathBuf::from("~/adapters");
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.workspace.default,
+            PathBuf::from("/home/testuser/workspace")
+        );
+        assert_eq!(
+            config.workspace.home,
+            PathBuf::from("/home/testuser/.needle")
+        );
+        assert_eq!(
+            config.agent.adapters_dir,
+            PathBuf::from("/home/testuser/adapters")
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_workspace_config() {
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.strands.explore.workspace_root = PathBuf::from("~/workspaces");
+        config.strands.explore.workspaces = vec![
+            PathBuf::from("~/project1"),
+            PathBuf::from("~/project2"),
+        ];
+        config.strands.weave.exclude_workspaces = vec![PathBuf::from("~/private")];
+        config.strands.splice.report_workspace = Some(PathBuf::from("~/reports"));
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.strands.explore.workspace_root,
+            PathBuf::from("/home/testuser/workspaces")
+        );
+        assert_eq!(
+            config.strands.explore.workspaces,
+            vec![
+                PathBuf::from("/home/testuser/project1"),
+                PathBuf::from("/home/testuser/project2"),
+            ]
+        );
+        assert_eq!(
+            config.strands.weave.exclude_workspaces,
+            vec![PathBuf::from("/home/testuser/private")]
+        );
+        assert_eq!(
+            config.strands.splice.report_workspace,
+            Some(PathBuf::from("/home/testuser/reports"))
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_env_var_paths() {
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.strands.learning.global_learnings_file = PathBuf::from("~/global-learnings.md");
+        config.health.heartbeat_dir = Some(PathBuf::from("~/heartbeats"));
+        config.supervisor.heartbeat_path = Some(PathBuf::from("~/supervisor-heartbeat.json"));
+        config.supervisor.socket_path = Some(PathBuf::from("~/supervisor.sock"));
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.strands.learning.global_learnings_file,
+            PathBuf::from("/home/testuser/global-learnings.md")
+        );
+        assert_eq!(
+            config.health.heartbeat_dir,
+            Some(PathBuf::from("/home/testuser/heartbeats"))
+        );
+        assert_eq!(
+            config.supervisor.heartbeat_path,
+            Some(PathBuf::from("/home/testuser/supervisor-heartbeat.json"))
+        );
+        assert_eq!(
+            config.supervisor.socket_path,
+            Some(PathBuf::from("/home/testuser/supervisor.sock"))
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_mixed_paths() {
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.workspace.default = PathBuf::from("~/workspace");
+        config.workspace.home = PathBuf::from("/absolute/needle");
+        config.agent.adapters_dir = PathBuf::from("relative/adapters");
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.workspace.default,
+            PathBuf::from("/home/testuser/workspace")
+        );
+        assert_eq!(config.workspace.home, PathBuf::from("/absolute/needle"));
+        assert_eq!(config.agent.adapters_dir, PathBuf::from("relative/adapters"));
+    }
+
+    #[test]
+    fn test_config_expand_tildes_missing_home() {
+        std::env::remove_var("HOME");
+        let mut config = Config::default();
+        config.workspace.default = PathBuf::from("~/workspace");
+        config.workspace.home = PathBuf::from("~/.needle");
+
+        config.expand_tildes();
+
+        // Without HOME, paths should remain unchanged
+        assert_eq!(config.workspace.default, PathBuf::from("~/workspace"));
+        assert_eq!(config.workspace.home, PathBuf::from("~/.needle"));
     }
 }

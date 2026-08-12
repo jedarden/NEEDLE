@@ -335,6 +335,8 @@ impl MitosisEvaluator {
             .context("failed to build mitosis prompt")?;
 
         // Acquire workspace flock for atomicity.
+        // The lock is automatically released when _lock goes out of scope.
+        // Note: Lock file persists but the file lock is released on drop.
         let lock_path = self.lock_dir.join(format!(
             "needle-mitosis-{}.lock",
             sanitize_path_component(&workspace.display().to_string())
@@ -576,7 +578,9 @@ impl MitosisEvaluator {
             )
             .context("failed to build timeout mitosis prompt")?;
 
-        // Step 9: Acquire workspace flock for atomicity
+        // Step 9: Acquire workspace flock for atomicity.
+        // The lock is automatically released when _lock goes out of scope.
+        // Note: Lock file persists but the file lock is released on drop.
         let lock_path = self.lock_dir.join(format!(
             "needle-mitosis-timeout-{}.lock",
             sanitize_path_component(&workspace.display().to_string())
@@ -1385,6 +1389,7 @@ mod tests {
                 workspace: PathBuf::from("/tmp/test"),
                 dependencies: vec![],
                 dependents: vec![],
+                comments: vec![],
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })
@@ -1475,6 +1480,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -2104,6 +2110,7 @@ End of response."#;
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

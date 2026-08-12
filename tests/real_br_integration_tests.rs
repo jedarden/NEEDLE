@@ -59,11 +59,11 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
         .args(["init"])
         .current_dir(dir.path())
         .output()
-        .context("failed to run br init")?;
+        .context("failed to run bf init")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "br init failed: {}",
+            "bf init failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -73,7 +73,7 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
 
 /// Create a bead in the test workspace.
 ///
-/// Retries once with `br sync --flush-only` on FrankenSQLite sync conflicts.
+/// Retries once with `bf sync --flush-only` on FrankenSQLite sync conflicts.
 fn create_bead(workspace: &Path, title: &str, priority: u8) -> Result<BeadId> {
     let br = bf_path();
     let do_create = || {
@@ -87,7 +87,7 @@ fn create_bead(workspace: &Path, title: &str, priority: u8) -> Result<BeadId> {
             ])
             .current_dir(workspace)
             .output()
-            .context("failed to run br create")
+            .context("failed to run bf create")
     };
 
     let mut output = do_create()?;
@@ -106,7 +106,7 @@ fn create_bead(workspace: &Path, title: &str, priority: u8) -> Result<BeadId> {
 
     if !output.status.success() {
         anyhow::bail!(
-            "br create failed: {}",
+            "bf create failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -126,7 +126,7 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
     let br = bf_path();
     let do_add = || {
         std::process::Command::new(&br)
-            .args(["label", "add", "--label", label, bead_id.as_ref()])
+            .args(["label", "add", bead_id.as_ref(), "--label", label])
             .current_dir(workspace)
             .output()
             .context("failed to run br label add")
@@ -1430,7 +1430,7 @@ async fn real_br_database_corruption_auto_recovery() {
         .unwrap();
     assert!(
         init.status.success(),
-        "br init failed: {}",
+        "bf init failed: {}",
         String::from_utf8_lossy(&init.stderr)
     );
     let store = store_for_workspace(workspace.path()).unwrap();

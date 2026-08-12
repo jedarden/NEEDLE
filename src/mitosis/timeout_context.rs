@@ -396,9 +396,12 @@ async fn git_dirty_paths(workspace: &Path) -> BTreeSet<String> {
 
 /// Run a git command and return stdout if successful.
 async fn run_git(workspace: &Path, args: &[&str]) -> Option<String> {
+    let git_dir = workspace.join(".git");
     let output = tokio::process::Command::new("git")
         .args(args)
         .current_dir(workspace)
+        .env("GIT_DIR", &git_dir)
+        .env("GIT_WORK_TREE", workspace)
         .kill_on_drop(true)
         .output()
         .await
@@ -542,6 +545,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -654,11 +658,14 @@ mod tests {
     async fn git_dirty_paths_filters_untracked() {
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
+        let git_dir = workspace.join(".git");
 
-        // Initialize git repo
+        // Initialize git repo with proper isolation
         tokio::process::Command::new("git")
             .args(["init"])
             .current_dir(workspace)
+            .env("GIT_DIR", &git_dir)
+            .env("GIT_WORK_TREE", workspace)
             .kill_on_drop(true)
             .output()
             .await
@@ -673,6 +680,8 @@ mod tests {
         tokio::process::Command::new("git")
             .args(["add", "clean.txt"])
             .current_dir(workspace)
+            .env("GIT_DIR", &git_dir)
+            .env("GIT_WORK_TREE", workspace)
             .kill_on_drop(true)
             .output()
             .await
@@ -695,11 +704,14 @@ mod tests {
     async fn git_dirty_paths_captures_modified() {
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
+        let git_dir = workspace.join(".git");
 
-        // Initialize git repo
+        // Initialize git repo with proper isolation
         tokio::process::Command::new("git")
             .args(["init"])
             .current_dir(workspace)
+            .env("GIT_DIR", &git_dir)
+            .env("GIT_WORK_TREE", workspace)
             .kill_on_drop(true)
             .output()
             .await
@@ -714,6 +726,8 @@ mod tests {
         tokio::process::Command::new("git")
             .args(["add", "test.txt"])
             .current_dir(workspace)
+            .env("GIT_DIR", &git_dir)
+            .env("GIT_WORK_TREE", workspace)
             .kill_on_drop(true)
             .output()
             .await
@@ -722,6 +736,8 @@ mod tests {
         tokio::process::Command::new("git")
             .args(["commit", "-m", "initial"])
             .current_dir(workspace)
+            .env("GIT_DIR", &git_dir)
+            .env("GIT_WORK_TREE", workspace)
             .env("GIT_AUTHOR_NAME", "Test")
             .env("GIT_AUTHOR_EMAIL", "test@test.com")
             .kill_on_drop(true)

@@ -4227,6 +4227,7 @@ mod tests {
             workspace: std::path::PathBuf::from("/tmp/test-workspace"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -5238,6 +5239,7 @@ mod tests {
             workspace: remote_ws.clone(),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

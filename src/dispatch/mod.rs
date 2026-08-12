@@ -17,6 +17,7 @@ use libc;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+use tokio::sync::watch;
 
 use crate::config::Config;
 use crate::process_guard::ProcessGroupKillGuard;
@@ -30,6 +31,29 @@ use crate::types::{BeadId, InputMethod, Outcome};
 // ──────────────────────────────────────────────────────────────────────────────
 // ExecutionResult
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Reason why a process was terminated by timeout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutReason {
+    /// No stdout/stderr activity for the configured idle timeout duration.
+    Idle {
+        /// Configured idle timeout in seconds.
+        timeout_secs: u64,
+        /// Time since last output byte when idle deadline expired.
+        last_output_age_secs: u64,
+    },
+    /// Absolute wall-clock time exceeded the configured hard deadline.
+    Hard {
+        /// Configured hard timeout in seconds.
+        timeout_secs: u64,
+    },
+    /// Legacy single timeout (backward compatibility).
+    Legacy {
+        /// Configured timeout in seconds.
+        timeout_secs: u64,
+    },
+}
 
 /// Raw output from an agent process execution.
 #[derive(Debug, Clone)]
@@ -46,6 +70,8 @@ pub struct ExecutionResult {
     pub pid: u32,
     /// Path to trace directory if trace capture was enabled.
     pub trace_path: Option<std::path::PathBuf>,
+    /// Structured reason if terminated by timeout (exit_code 124).
+    pub timeout_reason: Option<TimeoutReason>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -878,6 +904,14 @@ impl Dispatcher {
                     agent: agent_name,
                     model: agent_model,
                 });
+
+                // Emit structured timeout event if applicable.
+                if let Some(ref reason) = exec.timeout_reason {
+                    let _ = self.telemetry.emit(EventKind::AgentTimeout {
+                        bead_id: bead_id.clone(),
+                        reason: reason.clone(),
+                    });
+                }
             }
             Err(_) => {
                 // Set span status on error
@@ -1137,70 +1171,251 @@ impl Dispatcher {
             (None, None, None, None, None)
         };
 
-        let stdout_task = tokio::spawn(async move {
-            let mut captured = String::new();
-            if let Some(pipe) = stdout_pipe {
-                let reader = tokio::io::BufReader::new(pipe);
-                let mut lines = reader.lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    captured.push_str(&line);
-                    captured.push('\n');
-                    if let Some(ref tx) = transform_tx {
-                        // Non-blocking: if the channel is full, drop this line
-                        // for the transform rather than back-pressuring the agent.
-                        let _ = tx.try_send(line);
+        // Activity tracking for idle timeout detection.
+        // We use a watch channel to broadcast activity timestamps to the
+        // main select loop, which resets the idle deadline on each update.
+        let (activity_tx, activity_rx) = watch::channel(Instant::now());
+
+        let stdout_task = tokio::spawn({
+            let activity_tx = activity_tx.clone();
+            async move {
+                let mut captured = String::new();
+                if let Some(pipe) = stdout_pipe {
+                    // Read stdout in chunks to detect activity on every byte,
+                    // not just at newlines. This ensures idle timeout resets
+                    // continuously on stdout output, before line parsing.
+                    let mut reader = tokio::io::BufReader::new(pipe);
+                    let mut chunk = [0u8; 8192];
+                    let mut line_buffer = Vec::new();
+
+                    while let Ok(n) = AsyncReadExt::read(&mut reader, &mut chunk).await {
+                        if n == 0 {
+                            break; // EOF
+                        }
+
+                        // Report activity on every chunk read (before any parsing).
+                        let _ = activity_tx.send(Instant::now());
+
+                        // Process bytes to extract lines for transform and capture.
+                        let chunk_bytes = &chunk[..n];
+                        captured.push_str(&String::from_utf8_lossy(chunk_bytes));
+
+                        // Extract complete lines and send to transform.
+                        // Partial lines stay in line_buffer for the next chunk.
+                        for byte in chunk_bytes.iter() {
+                            line_buffer.push(*byte);
+                            if *byte == b'\n' {
+                                if let Some(ref tx) = transform_tx {
+                                    // Convert line to String (without the newline for transform).
+                                    let line = String::from_utf8_lossy(&line_buffer)
+                                        .trim_end_matches('\n')
+                                        .to_string();
+                                    // Non-blocking: drop if channel is full rather than back-pressuring.
+                                    let _ = tx.try_send(line);
+                                }
+                                line_buffer.clear();
+                            }
+                        }
+                    }
+
+                    // Handle any remaining partial line at EOF (without trailing newline).
+                    if !line_buffer.is_empty() {
+                        if let Some(ref tx) = transform_tx {
+                            let line = String::from_utf8_lossy(&line_buffer).to_string();
+                            let _ = tx.try_send(line);
+                        }
                     }
                 }
+                // Dropping transform_tx here closes the channel; the feeder task
+                // sees rx.recv() == None and shuts down the transform process.
+                drop(transform_tx);
+                drop(activity_tx);
+                captured
             }
-            // Dropping transform_tx here closes the channel; the feeder task
-            // sees rx.recv() == None and shuts down the transform process.
-            drop(transform_tx);
-            captured
         });
 
-        let stderr_task = tokio::spawn(async move {
-            let mut buf = Vec::new();
-            if let Some(mut pipe) = stderr_pipe {
-                let _ = AsyncReadExt::read_to_end(&mut pipe, &mut buf).await;
+        let stderr_task = tokio::spawn({
+            let activity_tx = activity_tx.clone();
+            async move {
+                let mut buf = Vec::new();
+                if let Some(pipe) = stderr_pipe {
+                    // Read stderr in chunks to detect activity on every byte,
+                    // not just at EOF. This ensures idle timeout resets
+                    // continuously on stderr output.
+                    let mut reader = tokio::io::BufReader::new(pipe);
+                    let mut chunk = [0u8; 8192];
+                    while let Ok(n) = AsyncReadExt::read(&mut reader, &mut chunk).await {
+                        if n == 0 {
+                            break; // EOF
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        // Report activity on every chunk read.
+                        let _ = activity_tx.send(Instant::now());
+                    }
+                }
+                drop(activity_tx);
+                String::from_utf8_lossy(&buf).into_owned()
             }
-            String::from_utf8_lossy(&buf).into_owned()
         });
 
-        // Wait for exit with optional timeout enforcement.
-        let timeout_dur = adapter.effective_timeout(self.global_timeout_secs);
+        // Compute timeout configuration based on adapter policy.
+        let (idle_dur, hard_dur, use_legacy) = match adapter.timeout_policy() {
+            TimeoutPolicy::Legacy => {
+                // Legacy mode: single timeout, treated as both idle and hard.
+                let legacy_dur = adapter.effective_timeout(self.global_timeout_secs);
+                (legacy_dur, legacy_dur, true)
+            }
+            TimeoutPolicy::New {
+                idle_enabled,
+                hard_enabled,
+            } => {
+                // New mode: separate idle and hard timeouts.
+                let idle = if idle_enabled {
+                    Duration::from_secs(adapter.idle_timeout_secs)
+                } else {
+                    Duration::ZERO
+                };
+                let hard = if hard_enabled {
+                    Duration::from_secs(adapter.hard_timeout_secs)
+                } else {
+                    Duration::ZERO
+                };
+                (idle, hard, false)
+            }
+            TimeoutPolicy::Global => {
+                // No adapter-specific timeout; fall back to global config.
+                let global_dur = Duration::from_secs(self.global_timeout_secs);
+                (global_dur, global_dur, global_dur.is_zero())
+            }
+        };
 
-        let exit_code = if timeout_dur.is_zero() {
+        // Determine which deadlines are active.
+        let has_idle_deadline = !idle_dur.is_zero();
+        let has_hard_deadline = !hard_dur.is_zero();
+        let has_any_deadline = has_idle_deadline || has_hard_deadline;
+
+        // Exit code and optional timeout reason.
+        let (exit_code, timeout_reason) = if !has_any_deadline {
+            // No deadlines: wait indefinitely.
             let status = child
                 .wait()
                 .await
                 .context("failed to wait for agent process")?;
             kill_guard.disarm();
-            status.code().unwrap_or(-1)
+            (status.code().unwrap_or(-1), None)
         } else {
-            match tokio::time::timeout(timeout_dur, child.wait()).await {
-                Ok(Ok(status)) => {
-                    kill_guard.disarm();
-                    status.code().unwrap_or(-1)
-                }
-                Ok(Err(e)) => {
-                    kill_guard.disarm();
-                    return Err(e).context("failed to wait for agent process");
-                }
-                Err(_) => {
-                    // Timeout: kill the entire process group so subprocesses
-                    // spawned by the agent (subshells, background jobs) are
-                    // also reaped, not just the direct bash child.
-                    if pid > 0 {
-                        unsafe {
-                            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-                        }
+            // At least one deadline is active: use select! to concurrently
+            // observe child exit, idle deadline, hard deadline, and cancellation.
+            use tokio::select;
+
+            // Idle deadline state: resets on activity.
+            let mut idle_deadline = if has_idle_deadline {
+                Some(tokio::time::Instant::now() + idle_dur)
+            } else {
+                None
+            };
+
+            // Hard deadline state: never resets.
+            let hard_deadline = if has_hard_deadline {
+                Some(tokio::time::Instant::now() + hard_dur)
+            } else {
+                None
+            };
+
+            // Activity receiver for idle deadline resets.
+            let mut activity_rcv = activity_rx;
+
+            // Outcome: (exit_code, timeout_reason).
+            // We loop to handle idle deadline resets on activity.
+            let outcome: (i32, Option<TimeoutReason>) = loop {
+                // Determine the next deadline to wait for (if any).
+                let next_idle = idle_deadline;
+                let next_hard = hard_deadline;
+                let _next_deadline = match (next_idle, next_hard) {
+                    (Some(idle), Some(hard)) => Some(idle.min(hard)),
+                    (Some(idle), None) => Some(idle),
+                    (None, Some(hard)) => Some(hard),
+                    (None, None) => None,
+                };
+
+                select! {
+                    // Branch 1: child exited (natural or signaled)
+                    status = child.wait() => {
+                        let status = status.context("failed to wait for agent process")?;
+                        kill_guard.disarm();
+                        break (status.code().unwrap_or(-1), None);
                     }
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                    kill_guard.disarm();
-                    124
+
+                    // Branch 2: activity detected (stdout/stderr byte read)
+                    _result = activity_rcv.changed() => {
+                        // Reset idle deadline on activity (if active).
+                        if has_idle_deadline {
+                            idle_deadline = Some(tokio::time::Instant::now() + idle_dur);
+                        }
+                        // Continue the loop to re-evaluate deadlines.
+                        continue;
+                    }
+
+                    // Branch 3: idle deadline expired
+                    () = async {
+                        if let Some(deadline) = next_idle {
+                            tokio::time::sleep_until(deadline).await;
+                        } else {
+                            std::future::pending().await
+                        }
+                    }, if has_idle_deadline => {
+                        // Idle timeout: kill the process group.
+                        if pid > 0 {
+                            unsafe {
+                                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                            }
+                        }
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
+                        kill_guard.disarm();
+
+                        // Compute last output age for telemetry.
+                        let last_output_age = activity_rcv.borrow().elapsed();
+                        let reason = if use_legacy {
+                            TimeoutReason::Legacy {
+                                timeout_secs: idle_dur.as_secs(),
+                            }
+                        } else {
+                            TimeoutReason::Idle {
+                                timeout_secs: idle_dur.as_secs(),
+                                last_output_age_secs: last_output_age.as_secs(),
+                            }
+                        };
+                        break (124, Some(reason));
+                    }
+
+                    // Branch 4: hard deadline expired
+                    () = async {
+                        if let Some(deadline) = next_hard {
+                            tokio::time::sleep_until(deadline).await;
+                        } else {
+                            std::future::pending().await
+                        }
+                    }, if has_hard_deadline => {
+                        // Hard timeout: kill the process group.
+                        if pid > 0 {
+                            unsafe {
+                                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                            }
+                        }
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
+                        kill_guard.disarm();
+
+                        let reason = TimeoutReason::Hard {
+                            timeout_secs: hard_dur.as_secs(),
+                        };
+                        break (124, Some(reason));
+                    }
                 }
-            }
+            };
+
+            outcome
         };
 
         tracing::Span::current().record("needle.agent.exit_code", exit_code);
@@ -1397,6 +1612,7 @@ impl Dispatcher {
                 trace_format: detect_trace_format(&adapter.name),
                 pruned: false,
                 template_version: None,
+                timeout_reason: timeout_reason.clone(),
             };
             let _ = capture.write_metadata(&metadata);
 
@@ -1417,6 +1633,7 @@ impl Dispatcher {
             elapsed,
             pid,
             trace_path,
+            timeout_reason,
         })
     }
 }

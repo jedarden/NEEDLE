@@ -199,6 +199,9 @@ fn bench_sanitize_10kb(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_10KB);
 
+    // Measure skip rate before latency measurement
+    let skip_stats = sanitizer.measure_skip_stats(&content);
+
     // Warm-up
     for _ in 0..5 {
         let _ = sanitizer.sanitize(&content);
@@ -220,8 +223,8 @@ fn bench_sanitize_10kb(c: &mut Criterion) {
     let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "10KB trace - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms ({} samples)",
-        median_ms, p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
+        "10KB trace - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms, Skip rate: {:.1}% ({} samples)",
+        median_ms, p95_ms, p99_ms, skip_stats.skip_rate * 100.0, ASSERTION_SAMPLE_COUNT
     );
 
     let mut group = c.benchmark_group("sanitize_10kb");
@@ -256,6 +259,9 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_100KB);
 
+    // Measure skip rate before latency measurement
+    let skip_stats = sanitizer.measure_skip_stats(&content);
+
     // Warm-up
     for _ in 0..5 {
         let _ = sanitizer.sanitize(&content);
@@ -277,8 +283,8 @@ fn bench_sanitize_100kb(c: &mut Criterion) {
     let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "100KB trace - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms ({} samples)",
-        median_ms, p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
+        "100KB trace - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms, Skip rate: {:.1}% ({} samples)",
+        median_ms, p95_ms, p99_ms, skip_stats.skip_rate * 100.0, ASSERTION_SAMPLE_COUNT
     );
 
     let mut group = c.benchmark_group("sanitize_100kb");
@@ -313,6 +319,9 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_1MB);
 
+    // Measure skip rate before latency measurement
+    let skip_stats = sanitizer.measure_skip_stats(&content);
+
     // Warm-up
     for _ in 0..5 {
         let _ = sanitizer.sanitize(&content);
@@ -334,8 +343,8 @@ fn bench_sanitize_1mb(c: &mut Criterion) {
     let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "1MB trace - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms ({} samples)",
-        median_ms, p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
+        "1MB trace - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms, Skip rate: {:.1}% ({} samples)",
+        median_ms, p95_ms, p99_ms, skip_stats.skip_rate * 100.0, ASSERTION_SAMPLE_COUNT
     );
 
     let mut group = c.benchmark_group("sanitize_1mb");
@@ -462,6 +471,9 @@ fn bench_median_latency(c: &mut Criterion) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
     let content = generate_trace_content(SIZE_100KB);
 
+    // Measure skip rate before latency measurement
+    let skip_stats = sanitizer.measure_skip_stats(&content);
+
     // Warm-up.
     for _ in 0..5 {
         let _ = sanitizer.sanitize(&content);
@@ -482,8 +494,8 @@ fn bench_median_latency(c: &mut Criterion) {
     let p99_ms = p99_us as f64 / 1000.0;
 
     eprintln!(
-        "100KB trace latency - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms ({} samples)",
-        median_ms, p95_ms, p99_ms, ASSERTION_SAMPLE_COUNT
+        "100KB trace latency - Median: {:.2} ms, p95: {:.2} ms, p99: {:.2} ms, Skip rate: {:.1}% ({} samples)",
+        median_ms, p95_ms, p99_ms, skip_stats.skip_rate * 100.0, ASSERTION_SAMPLE_COUNT
     );
 
     // Report to criterion for plotting with proper p95 measurement configuration.

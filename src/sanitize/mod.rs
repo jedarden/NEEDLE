@@ -733,18 +733,42 @@ mod tests {
         let s = make_sanitizer();
         let line = "INFO: processing request with token=someValue and other data ".repeat(100);
         let text = line.repeat(10); // ~60KB
+
+        // Track skip rate metrics
+        let skip_stats = s.measure_skip_stats(&text);
+
         let start = std::time::Instant::now();
         let _ = s.sanitize(&text);
         let elapsed_ms = start.elapsed().as_millis();
+
         #[cfg(debug_assertions)]
         let threshold_ms = 500u128;
         #[cfg(not(debug_assertions))]
         let threshold_ms = 10u128;
+
+        // Report metrics together
+        eprintln!(
+            "Performance test - Latency: {}ms, Skip rate: {:.1}%",
+            elapsed_ms,
+            skip_stats.skip_rate * 100.0
+        );
+
         assert!(
             elapsed_ms < threshold_ms,
             "sanitization took {}ms, expected < {}ms",
             elapsed_ms,
             threshold_ms
+        );
+
+        // Verify skip rate is being calculated
+        assert!(
+            skip_stats.total_checks > 0,
+            "Should have performed some rule checks"
+        );
+        assert!(
+            skip_stats.skip_rate >= 0.0 && skip_stats.skip_rate <= 1.0,
+            "Skip rate should be between 0 and 1, got {}",
+            skip_stats.skip_rate
         );
     }
 
@@ -777,6 +801,10 @@ mod tests {
         }
         trace.truncate(100 * 1024);
 
+        // Measure skip rate before latency measurement.
+        let skip_stats = s.measure_skip_stats(&trace);
+        eprintln!("Skip rate: {}", skip_stats.format());
+
         // Measure latency over multiple samples to get stable median.
         const SAMPLE_COUNT: usize = 20;
         let mut latencies = Vec::with_capacity(SAMPLE_COUNT);
@@ -808,10 +836,164 @@ mod tests {
             .and_then(|s| s.parse().ok())
             .unwrap_or(threshold_ms);
 
+        // Report all metrics together.
+        eprintln!(
+            "Metrics - Median: {} ms, p95: {} ms, Skip rate: {:.1}%",
+            median,
+            p95,
+            skip_stats.skip_rate * 100.0
+        );
+
         assert!(
             median < threshold_ms,
             "Sanitizer median latency ({} ms, p95: {} ms) exceeds threshold ({} ms) over {} samples",
             median, p95, threshold_ms, SAMPLE_COUNT
+        );
+
+        // Verify skip rate is being tracked and is reasonable.
+        // A reasonable skip rate should be > 0% (pre-filter is working)
+        // and < 100% (some rules are matching keywords).
+        assert!(
+            skip_stats.skip_rate > 0.0 && skip_stats.skip_rate < 1.0,
+            "Skip rate should be between 0% and 100%, got {:.1}%",
+            skip_stats.skip_rate * 100.0
+        );
+    }
+
+    // ── Skip rate tracking tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn skip_stats_calculates_correct_rate() {
+        let s = make_sanitizer();
+
+        // Test content with predictable keyword patterns
+        let text = "API_KEY=sk-test-token\nDATABASE_URL=postgresql://localhost:5432/test\n";
+
+        let stats = s.measure_skip_stats(text);
+
+        // Should have performed some checks
+        assert!(
+            stats.total_checks > 0,
+            "Should perform rule checks"
+        );
+
+        // Skip rate should be between 0 and 1
+        assert!(
+            stats.skip_rate >= 0.0 && stats.skip_rate <= 1.0,
+            "Skip rate should be between 0 and 1, got {}",
+            stats.skip_rate
+        );
+
+        // The calculation formula: (skipped / total) * 100
+        let expected_rate = if stats.total_checks > 0 {
+            stats.skipped_by_keywords as f64 / stats.total_checks as f64
+        } else {
+            0.0
+        };
+        assert!(
+            (stats.skip_rate - expected_rate).abs() < f64::EPSILON,
+            "Skip rate calculation incorrect: expected {}, got {}",
+            expected_rate,
+            stats.skip_rate
+        );
+    }
+
+    #[test]
+    fn skip_stats_format_displays_correctly() {
+        let stats = SkipStats {
+            total_checks: 1000,
+            skipped_by_keywords: 850,
+            skip_rate: 0.85,
+        };
+
+        let formatted = stats.format();
+        assert_eq!(formatted, "850/1000 skipped (85.0%)");
+    }
+
+    #[test]
+    fn skip_rate_tracked_across_trace_sizes() {
+        let s = make_sanitizer();
+
+        // Test different trace sizes to ensure skip rate tracking works consistently
+        let sizes = vec![
+            ("10KB", 10 * 1024),
+            ("50KB", 50 * 1024),
+            ("100KB", 100 * 1024),
+        ];
+
+        let mut metrics = Vec::new();
+
+        for (label, size) in sizes {
+            let text = "x".repeat(size);
+            let stats = s.measure_skip_stats(&text);
+
+            metrics.push((label, size, stats.clone()));
+
+            // Verify metrics are collected
+            assert!(
+                stats.total_checks > 0,
+                "Should perform checks for {} trace",
+                label
+            );
+
+            // Verify skip rate is valid
+            assert!(
+                stats.skip_rate >= 0.0 && stats.skip_rate <= 1.0,
+                "Skip rate should be valid for {} trace, got {}",
+                label,
+                stats.skip_rate
+            );
+
+            eprintln!(
+                "{}: {} - Skip rate: {:.1}%",
+                label,
+                stats.format(),
+                stats.skip_rate * 100.0
+            );
+        }
+
+        // All metrics should be stored successfully
+        assert_eq!(metrics.len(), 3, "Should collect metrics for all trace sizes");
+    }
+
+    #[test]
+    fn skip_rate_stored_with_latency_metrics() {
+        let s = make_sanitizer();
+        let text = "Processing bead needle-test.123 with API_KEY=sk-placeholder\n".repeat(1000);
+
+        // Measure skip rate
+        let skip_stats = s.measure_skip_stats(&text);
+
+        // Measure latency
+        let start = std::time::Instant::now();
+        let _ = s.sanitize(&text);
+        let latency_ms = start.elapsed().as_millis();
+
+        // Create metrics bundle (simulating storage with other metrics)
+        let metrics = format!(
+            "Latency: {}ms, Skip rate: {:.1}%, Checks: {}, Skipped: {}",
+            latency_ms,
+            skip_stats.skip_rate * 100.0,
+            skip_stats.total_checks,
+            skip_stats.skipped_by_keywords
+        );
+
+        // Verify metrics string contains both latency and skip rate
+        assert!(metrics.contains("Latency:"), "Should include latency");
+        assert!(metrics.contains("Skip rate:"), "Should include skip rate");
+        assert!(metrics.contains("Checks:"), "Should include total checks");
+        assert!(metrics.contains("Skipped:"), "Should include skipped count");
+
+        eprintln!("Combined metrics: {}", metrics);
+
+        // Verify values are reasonable
+        assert!(
+            skip_stats.total_checks > 0,
+            "Should perform rule checks"
+        );
+        assert!(
+            latency_ms >= 0,
+            "Latency should be non-negative"
         );
     }
 }

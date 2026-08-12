@@ -1103,6 +1103,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/test-workspace"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
