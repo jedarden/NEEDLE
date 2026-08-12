@@ -4459,11 +4459,11 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 
 # Phase 16: Configurable Bead-CLI Backends — Descriptors, Not Hardcoded Harnesses
 
-**Status:** accepted, not yet implemented. `docs/adr/013-pluggable-bead-cli-backends.md` was **accepted 2026-08-12** and carries the decision record, the dialect matrix, the backend priority (§7), and the rejected alternatives. Phase 16 is authorized work.
+**Status:** accepted, not yet implemented. `docs/adr/013-pluggable-bead-cli-backends.md` was **accepted 2026-08-12** and carries the descriptor decision, dialect matrix, backend priority, and rejected alternatives. `docs/adr/014-explicit-workspace-bead-backend-binding.md` was **accepted 2026-08-12** and supersedes ADR-013's ordered `auto` rule for worker selection: repository configuration, not executable availability, owns backend choice. Phase 16 is authorized work.
 
 **Goal:** make NEEDLE interoperable with **bead-rs (primary)**, **bead-forge (secondary)**, **beads_rust (tertiary)**, *and other bead systems that exist in the world* — the last being a requirement, not a side effect. That is achieved by making the bead-CLI layer configurable the way the agent layer already is: a bead backend becomes a **descriptor** — a serde struct loaded from YAML — not a Rust impl. `builtin_bead_backends()` ships **bead-rs** (`bead` v0.1.1), **bead-forge** (`bf` v0.4.1), and **beads_rust** (`br` v0.1.28, dicklesworthstone) as data; user files in `~/.config/needle/bead-backends/` override by name. A fourth CLI — the Go `bd`, a fork, something not yet written — is a YAML file, not a release.
 
-The priority ordering sets defaults and authoring order, not tiers of support: `auto` detection prefers `bead`, then `bf`, then `br`, and the primary backend's descriptor is written first. All three remain first-class. See ADR-013 §7 for the decision and for the two capability gaps the primary backend carries — no transactional `batch` (so mitosis is **not** atomic on bead-rs, a real regression against today's `bf` default) and no velocity metadata on `claim`.
+The priority ordering sets descriptor authoring order, not workspace ownership or tiers of support: the primary backend's descriptor is written first, but every repository binds explicitly to a descriptor in `.needle.yaml`. Installing a higher-priority binary never changes an existing repository. All three remain first-class. See ADR-013 §7 for capability gaps and ADR-014 for selection semantics.
 
 This mirrors `AgentAdapter` + `load_adapters` (`src/dispatch/mod.rs:570-660`) exactly — the pattern NEEDLE already uses to add agent harnesses without recompiling.
 
@@ -4496,7 +4496,7 @@ Six enums cover every divergence across three upstreams plus their Go ancestor. 
 ### 16.4 Builtin descriptors, primary first
 Authored in priority order, so the backend furthest from NEEDLE's baked-in `bf` assumptions surfaces missing strategy variants earliest.
 
-- **`bead-rs` (primary)**: `--description` + repeated `--label` (no `--json` on create), `dep add <blocked> <blocker> --kind blocks`, `update --assignee`/`--clear-assignee`, `import: input_plus_mode`, `claim_auto: atomic_subcommand`, `split: sequential`. Verify against the binary agent-sandbox actually runs — the ADR's matrix cites 0.1.0 at `fa30574`; 0.1.1 added `--lease-ttl`/`--renew-lease`/`--fencing-token` on `claim` plus `why`, `query`, `policy`, `compare`, `data`, `recurrence`, `migrate`. bead-rs publishes no GitHub releases, so `verified_against` names a **commit**, and must be re-verified when the sandbox moves.
+- **`bead-rs` (primary)**: `--description` + repeated `--label` (no `--json` on create), `dep add <blocked> <blocker> --kind blocks`, `update --assignee`/`--clear-assignee`, `import: input_plus_mode`, `claim_auto: atomic_subcommand`, `split: sequential`. Verify against the exact binary deployed: annotated `v0.1.0` and `v0.1.1` tags now exist, while current HEAD `3122b85` is newer than `v0.1.1` and accepted ADR-002 removed cross-tool migration/profile adapters. `verified_against` therefore names the exact tag or commit actually exercised, and conformance must be re-run when it moves.
 - **`bead-forge` (secondary)**: `--description` + repeated `--label`, `dep add <blocker> --blocks <blocked>`, `claim: batch_op`, `claim_auto: atomic_subcommand` with velocity metadata, `split: transactional_batch`.
 - **`beads_rust` (tertiary)**: `--body`/`--silent`/`-l --labels` (csv), `dep add <blocked> <blocker> -t blocks`, bare `sync --import-only`, `ready --json --limit`; `claim: compare_and_set`, `claim_auto: non_atomic_scan` (no `claim` subcommand exists), `split: sequential`.
 - Each argv pinned to the installed binary's own `--help`, not inferred.
@@ -4505,7 +4505,9 @@ Authored in priority order, so the backend furthest from NEEDLE's baked-in `bf` 
 ### 16.5 Identity verification and one resolver
 - `resolve_bead_cli()` returns a descriptor plus a verified path, replacing all five hardcoded chains (`bead_store/mod.rs:758-775`, `:1127-1136`, `:1893-1902`; `worker/mod.rs:732-742`; `cli/mod.rs:3626-3632`).
 - Match the resolved binary's `--version` against `identity_pattern`. `~/.local/bin/br` is a shim that `exec`s `bf` and reports `bf <version>`, so it fails `beads_rust`'s `^br ` check instead of silently supplying the wrong dialect. Mismatch fails loudly, naming path and identity found.
-- `bead_cli.backend` (`auto` | descriptor name) plus optional explicit `path`; overridable per workspace in `.needle.yaml`.
+- `bead_cli.backend` names a descriptor explicitly, plus an optional explicit `path`; it is workspace-scoped in `.needle.yaml`.
+- Production workers fail closed when the binding is missing, unknown, or identity-mismatched. `auto` may propose a binding in doctor/onboarding output but is never authority to open a store.
+- Every construction path—including Explore targets—uses the target workspace's binding rather than a host-wide preference or the home workspace's backend.
 
 ### 16.6 Capability declaration and reconciliation
 - Descriptors declare capabilities. Where an upstream exposes a contract surface (`bead capabilities --profile`, `bf schema`/`robot-docs`, `br schema`), probe at discovery and reconcile against the declaration, warning on mismatch — so drift is visible rather than silently wrong.
@@ -4531,10 +4533,19 @@ Authored in priority order, so the backend furthest from NEEDLE's baked-in `bf` 
 - Two gaps change fleet **safety**: atomic mitosis is bf-only, and atomic server-side claim is bf/bead-only — beads_rust `claim_auto` carries a real TOCTOU window in which two workers can claim the same bead, the duplicate-claim hazard CLAUDE.md already names as the real fleet failure mode.
 - Capability matrix in `docs/configuration.md`, plus a "writing a bead backend descriptor" section so a fourth CLI can be added without reading NEEDLE source.
 
+### 16.12 Explicit workspace binding and transition audit
+- Add `bead_cli.backend: <descriptor-name>` to repository `.needle.yaml`; existing bead-forge repositories bind to `bead-forge`, while verified native bead-rs repositories bind to `bead-rs`.
+- Add a read-only audit/onboarding command that reports unbound workspaces, resolved descriptor/path/version, identity result, and a proposed binding without writing it.
+- Add an explicit bind command that updates only the selected repository configuration after operator invocation; it must state that binding is routing, not data migration.
+- Remove independent PATH-probe chains from worker, supervisor, strands, validation, prompts, recovery, and doctor. All receive one resolved backend context.
+- Gate rollout on mixed-backend tests with all three binaries installed, plus fail-closed tests for missing/unknown/mismatched bindings.
+
 ## Exit criteria
 - Adding a bead CLI that fits the existing strategies requires **no Rust change** — a YAML descriptor and `needle bead-backend <name>` to verify it.
 - A worker claims, dispatches, closes, and releases end to end on all three builtin backends.
-- A worker on an unmodified `bf` host behaves identically to before this phase, with no config change required.
+- With all backend binaries installed, each workspace invokes only the descriptor explicitly bound in its own `.needle.yaml`; PATH ordering cannot change the result.
+- An unbound or identity-mismatched workspace is ineligible for dispatch and no bead CLI is spawned against its store.
+- A bead-forge workspace with an explicit `bead-forge` binding behaves identically to before this phase; the transition audit identifies every unbound legacy workspace before enforcement is enabled.
 - No store can bind to a binary speaking a different dialect: identity is verified against the descriptor that supplies the argv.
 - `grep -rn '"bf"\|"br"' src/` returns nothing outside descriptor definitions and their tests.
 - `needle doctor` names the resolved backend, its path, and its capability gaps.

@@ -419,7 +419,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
     match config.backend.as_str() {
         "bf" => {
             // bf only: PATH → ~/.local/bin/bf
-            let path = which::which("bf")
+            let path = find_on_path("bf")
                 .or_else(|_| {
                     let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
                     if candidate.exists() {
@@ -433,7 +433,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
         }
         "br" => {
             // br only: PATH → ~/.local/bin/br
-            let path = which::which("br")
+            let path = find_on_path("br")
                 .or_else(|_| {
                     let candidate = PathBuf::from(format!("{home}/.local/bin/br"));
                     if candidate.exists() {
@@ -447,7 +447,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
         }
         "bead" => {
             // bead only: PATH → ~/.local/bin/bead → /usr/local/cargo/bin/bead
-            let path = which::which("bead")
+            let path = find_on_path("bead")
                 .or_else(|_| {
                     let candidate = PathBuf::from(format!("{home}/.local/bin/bead"));
                     if candidate.exists() {
@@ -474,7 +474,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
             // bf → ~/.local/bin/bf → br → ~/.local/bin/br → bead → ~/.local/bin/bead → /usr/local/cargo/bin/bead
 
             // Try bf first
-            if let Ok(path) = which::which("bf") {
+            if let Ok(path) = find_on_path("bf") {
                 return Ok((Backend::Bf, path));
             }
             let bf_local = PathBuf::from(format!("{home}/.local/bin/bf"));
@@ -483,7 +483,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
             }
 
             // Then br
-            if let Ok(path) = which::which("br") {
+            if let Ok(path) = find_on_path("br") {
                 return Ok((Backend::Br, path));
             }
             let br_local = PathBuf::from(format!("{home}/.local/bin/br"));
@@ -492,7 +492,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
             }
 
             // Then bead
-            if let Ok(path) = which::which("bead") {
+            if let Ok(path) = find_on_path("bead") {
                 return Ok((Backend::Bead, path));
             }
             let bead_local = PathBuf::from(format!("{home}/.local/bin/bead"));
@@ -516,6 +516,31 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
     }
 }
 
+/// Resolve an executable against the current `PATH` without process-global
+/// caching. Backend selection is workspace-scoped, and tests and embedders may
+/// intentionally resolve different environments in one NEEDLE process.
+fn find_on_path(binary: &str) -> Result<PathBuf> {
+    let path = std::env::var_os("PATH").ok_or_else(|| anyhow!("PATH is not set"))?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(binary))
+        .find(|candidate| is_executable(candidate))
+        .ok_or_else(|| anyhow!("{binary} not found on PATH"))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
+
 /// Detect the backend type from a binary path.
 ///
 /// Infers the backend from the filename: "bf" → Backend::Bf, "br" → Backend::Br,
@@ -536,6 +561,43 @@ fn detect_backend_from_path(path: &Path) -> Result<Backend> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static BEAD_CLI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct BeadCliEnvGuard {
+        home: Option<std::ffi::OsString>,
+        path: Option<std::ffi::OsString>,
+    }
+
+    impl BeadCliEnvGuard {
+        fn capture() -> Self {
+            Self {
+                home: std::env::var_os("HOME"),
+                path: std::env::var_os("PATH"),
+            }
+        }
+    }
+
+    impl Drop for BeadCliEnvGuard {
+        fn drop(&mut self) {
+            match self.home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.path.take() {
+                Some(value) => std::env::set_var("PATH", value),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    fn isolate_bead_cli_env() -> (std::sync::MutexGuard<'static, ()>, BeadCliEnvGuard) {
+        let lock = BEAD_CLI_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let env = BeadCliEnvGuard::capture();
+        (lock, env)
+    }
 
     #[test]
     fn test_detect_backend_from_path() {
@@ -645,6 +707,7 @@ mod tests {
 
     #[test]
     fn test_resolve_bead_cli_auto_precedence_bf_first() {
+        let (_lock, _env) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -657,6 +720,7 @@ mod tests {
 
         // Set HOME to tmp_dir
         std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", "");
 
         let config = BeadCliConfig {
             backend: "auto".to_string(),
@@ -670,6 +734,7 @@ mod tests {
 
     #[test]
     fn test_resolve_bead_cli_auto_precedence_br_second() {
+        let (_lock, _env) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -682,6 +747,7 @@ mod tests {
 
         // Set HOME to tmp_dir
         std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", "");
 
         let config = BeadCliConfig {
             backend: "auto".to_string(),
@@ -695,6 +761,7 @@ mod tests {
 
     #[test]
     fn test_resolve_bead_cli_auto_precedence_bead_third() {
+        let (_lock, _env) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -707,6 +774,7 @@ mod tests {
 
         // Set HOME to tmp_dir
         std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", "");
 
         let config = BeadCliConfig {
             backend: "auto".to_string(),
@@ -720,6 +788,7 @@ mod tests {
 
     #[test]
     fn test_resolve_bead_cli_auto_no_binary_error() {
+        let (_lock, _env) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -742,6 +811,7 @@ mod tests {
 
     #[test]
     fn test_resolve_bead_cli_bf_backend_not_found() {
+        let (_lock, _env) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -785,6 +855,7 @@ mod tests {
     /// it must resolve to the exact same path that the current hardcoded chain produces.
     #[test]
     fn test_regression_auto_bf_only_host_matches_hardcoded_chain() {
+        let (_lock, _env) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2538,6 +2609,9 @@ pub struct WorkspaceOverrides {
     /// these labels are injected into prompts alongside local skills.
     #[serde(default)]
     pub workspace: Option<WorkspaceLabelsOverride>,
+    /// Workspace-owned bead backend binding.
+    #[serde(default)]
+    pub bead_cli: Option<BeadCliConfig>,
 }
 
 /// Agent fields overridable at the workspace level.
@@ -2871,7 +2945,15 @@ impl ConfigLoader {
         if let Some(ref ws) = overrides.workspace {
             if !ws.labels.is_empty() {
                 config.workspace.labels = ws.labels.clone();
-                sources.insert("workspace.labels".to_string(), source);
+                sources.insert("workspace.labels".to_string(), source.clone());
+            }
+        }
+
+        if let Some(ref bead_cli) = overrides.bead_cli {
+            config.bead_cli = bead_cli.clone();
+            sources.insert("bead_cli.backend".to_string(), source.clone());
+            if bead_cli.explicit_path.is_some() {
+                sources.insert("bead_cli.explicit_path".to_string(), source);
             }
         }
     }
@@ -3793,6 +3875,35 @@ mod config_tests {
             config.prompt.instructions.as_deref(),
             Some("test instructions")
         );
+    }
+
+    #[test]
+    fn workspace_config_overrides_bead_cli_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "bead_cli:\n  backend: bead\n  explicit_path: /opt/bead-rs/bin/bead\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert_eq!(config.bead_cli.backend, "bead");
+        assert_eq!(
+            config.bead_cli.explicit_path,
+            Some(PathBuf::from("/opt/bead-rs/bin/bead"))
+        );
+        assert!(matches!(
+            sources.get("bead_cli.backend"),
+            Some(ConfigSource::WorkspaceFile(_))
+        ));
+        assert!(matches!(
+            sources.get("bead_cli.explicit_path"),
+            Some(ConfigSource::WorkspaceFile(_))
+        ));
     }
 
     #[test]
