@@ -2363,6 +2363,43 @@ async fn debug_worker_hang() {
 // consecutive_race_lost) is not observable externally.
 
 // ═════════════════════════════════════════════════════════════════════════════
+// MockProcess: Test infrastructure for process mocking
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Mock process for testing process management without real subprocesses.
+///
+/// This struct wraps an optional `std::process::Child` and provides methods
+/// for process management. When the inner process is `None`, methods return
+/// sensible defaults for testing scenarios.
+pub struct MockProcess {
+    inner: Option<std::process::Child>,
+}
+
+impl MockProcess {
+    /// Create a new MockProcess with no inner child process.
+    pub fn new() -> Self {
+        MockProcess { inner: None }
+    }
+
+    /// Create a new MockProcess wrapping a real child process.
+    pub fn with_child(child: std::process::Child) -> Self {
+        MockProcess { inner: Some(child) }
+    }
+
+    /// Kill the mock process.
+    ///
+    /// If an inner child process exists, delegates to its `kill()` method.
+    /// Otherwise, returns Ok(()) as a no-op for testing.
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut child) = self.inner {
+            child.kill()
+        } else {
+            Ok(())
+        }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // Phase 12.2: Load-adaptive stagger tests
 // ═════════════════════════════════════════════════════════════════════════════
 
