@@ -4461,7 +4461,9 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 
 **Status:** planned. See `docs/adr/013-pluggable-bead-cli-backends.md` for the decision record, the three-way dialect matrix, and rejected alternatives.
 
-**Goal:** make the bead-CLI layer configurable the way the agent layer already is. A bead backend becomes a **descriptor** — a serde struct loaded from YAML — not a Rust impl. `builtin_bead_backends()` ships **beads_rust** (`br` v0.1.28, dicklesworthstone), **bead-forge** (`bf` v0.4.1), and **bead-rs** (`bead` v0.1.0) as data; user files in `~/.config/needle/bead-backends/` override by name. A fourth CLI is a YAML file, not a release.
+**Goal:** make NEEDLE interoperable with **bead-rs (primary)**, **bead-forge (secondary)**, **beads_rust (tertiary)**, *and other bead systems that exist in the world* — the last being a requirement, not a side effect. That is achieved by making the bead-CLI layer configurable the way the agent layer already is: a bead backend becomes a **descriptor** — a serde struct loaded from YAML — not a Rust impl. `builtin_bead_backends()` ships **bead-rs** (`bead` v0.1.1), **bead-forge** (`bf` v0.4.1), and **beads_rust** (`br` v0.1.28, dicklesworthstone) as data; user files in `~/.config/needle/bead-backends/` override by name. A fourth CLI — the Go `bd`, a fork, something not yet written — is a YAML file, not a release.
+
+The priority ordering sets defaults and authoring order, not tiers of support: `auto` detection prefers `bead`, then `bf`, then `br`, and the primary backend's descriptor is written first. All three remain first-class. See ADR-013 §7 for the decision and for the two capability gaps the primary backend carries — no transactional `batch` (so mitosis is **not** atomic on bead-rs, a real regression against today's `bf` default) and no velocity metadata on `claim`.
 
 This mirrors `AgentAdapter` + `load_adapters` (`src/dispatch/mod.rs:570-660`) exactly — the pattern NEEDLE already uses to add agent harnesses without recompiling.
 
@@ -4491,11 +4493,14 @@ Six enums cover every divergence across three upstreams plus their Go ancestor. 
 - One `BeadStore` impl driven by a `BeadBackend`. Renders argv from templates, dispatches on strategy, parses per the declared shape.
 - Delete `BrCliBeadStore` and `BfCliBeadStore`; their behavior survives as builtin descriptors. Their test suites must be re-expressed as descriptor conformance tests or coverage silently drops on claim/release.
 
-### 16.4 Builtin descriptors for the three upstreams
-- `beads_rust`: `--body`/`--silent`/`-l --labels` (csv), `dep add <blocked> <blocker> -t blocks`, bare `sync --import-only`, `ready --json --limit`; `claim: compare_and_set`, `claim_auto: non_atomic_scan` (no `claim` subcommand exists), `split: sequential`.
-- `bead-forge`: `--description` + repeated `--label`, `dep add <blocker> --blocks <blocked>`, `claim: batch_op`, `claim_auto: atomic_subcommand` with velocity metadata, `split: transactional_batch`.
-- `bead-rs`: `--description` + repeated `--label` (no `--json` on create), `dep add <blocked> <blocker> --kind blocks`, `update --assignee`/`--clear-assignee`, `import: input_plus_mode`, `split: sequential`.
+### 16.4 Builtin descriptors, primary first
+Authored in priority order, so the backend furthest from NEEDLE's baked-in `bf` assumptions surfaces missing strategy variants earliest.
+
+- **`bead-rs` (primary)**: `--description` + repeated `--label` (no `--json` on create), `dep add <blocked> <blocker> --kind blocks`, `update --assignee`/`--clear-assignee`, `import: input_plus_mode`, `claim_auto: atomic_subcommand`, `split: sequential`. Verify against the binary agent-sandbox actually runs — the ADR's matrix cites 0.1.0 at `fa30574`; 0.1.1 added `--lease-ttl`/`--renew-lease`/`--fencing-token` on `claim` plus `why`, `query`, `policy`, `compare`, `data`, `recurrence`, `migrate`. bead-rs publishes no GitHub releases, so `verified_against` names a **commit**, and must be re-verified when the sandbox moves.
+- **`bead-forge` (secondary)**: `--description` + repeated `--label`, `dep add <blocker> --blocks <blocked>`, `claim: batch_op`, `claim_auto: atomic_subcommand` with velocity metadata, `split: transactional_batch`.
+- **`beads_rust` (tertiary)**: `--body`/`--silent`/`-l --labels` (csv), `dep add <blocked> <blocker> -t blocks`, bare `sync --import-only`, `ready --json --limit`; `claim: compare_and_set`, `claim_auto: non_atomic_scan` (no `claim` subcommand exists), `split: sequential`.
 - Each argv pinned to the installed binary's own `--help`, not inferred.
+- **Open world:** a backend with no shipped descriptor must still be drivable from user YAML alone. That makes the six strategy enums a published extension point rather than an internal detail, and capability negotiation (16.x) the discovery path when nobody has written the descriptor yet — all three current backends expose a capabilities-style surface, and bead-rs's is a full JSON contract (`contract: native-v1`, `atomic_claim`, statuses, checkpoint formats, schema refs).
 
 ### 16.5 Identity verification and one resolver
 - `resolve_bead_cli()` returns a descriptor plus a verified path, replacing all five hardcoded chains (`bead_store/mod.rs:758-775`, `:1127-1136`, `:1893-1902`; `worker/mod.rs:732-742`; `cli/mod.rs:3626-3632`).

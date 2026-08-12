@@ -1,6 +1,6 @@
 # ADR-013: Pluggable Bead-CLI Backends — Three Upstreams, One Configurable Seam
 
-**Status:** Proposed — 2026-08-11 (revised same day; see Revision History)
+**Status:** Proposed — 2026-08-11 (revised 2026-08-12; see Revision History)
 **Deciders:** operator (jedarden), via Claude Code
 **Tracking:** see Phase 16 in `docs/plan/plan.md`; beads filed under label `bead-cli-backend`
 
@@ -8,13 +8,22 @@
 
 NEEDLE must drive **three** independently-evolving bead CLIs, not one canonical tool plus legacy debris:
 
-| Backend | Binary | Upstream | Installed here |
-|---|---|---|---|
-| **beads_rust** | `br` | `github.com/dicklesworthstone/beads_rust` | `~/.cargo/bin/br`, v0.1.28 |
-| **bead-forge** | `bf` | `git.ardenone.com/jedarden/bead-forge` | `~/.local/bin/bf`, v0.4.1 |
-| **bead-rs** | `bead` | `git.ardenone.com/jedarden/bead-rs` | agent-sandbox `needle-pod`, v0.1.0 |
+| Priority | Backend | Binary | Upstream | Installed here |
+|---|---|---|---|---|
+| **primary** | **bead-rs** | `bead` | `git.ardenone.com/jedarden/bead-rs` | agent-sandbox `needle-pod`, v0.1.1 |
+| **secondary** | **bead-forge** | `bf` | `git.ardenone.com/jedarden/bead-forge` | `~/.local/bin/bf`, v0.4.1 |
+| **tertiary** | **beads_rust** | `br` | `github.com/dicklesworthstone/beads_rust` | `~/.cargo/bin/br`, v0.1.28 |
+| *(open world)* | any other | — | third-party, future, forks | not installed |
 
-(A fourth, the original Go `beads` — `bd` v0.49.6, `~/go/bin/bd`, the common ancestor of all three — is out of scope for this ADR but is why the three dialects rhyme without matching.)
+The priority column is an operator decision recorded in draft 4; see §7. It sets
+which backend the defaults favour and which descriptor is written first — it does
+**not** reduce the others to second-class. All three stay first-class, and the
+open-world row is a requirement, not a courtesy: NEEDLE must be able to drive a
+bead CLI that did not exist when NEEDLE was compiled.
+
+(The original Go `beads` — `bd` v0.49.6, `~/go/bin/bd`, the common ancestor of all
+three — is the nearest concrete instance of that fourth row, and is why the three
+dialects rhyme without matching.)
 
 The immediate trigger is the `game-of-life` project in the **agent-sandbox** cluster, whose workspace is bead-rs-backed. Stock NEEDLE cannot drive it: a worker booted there fails at the first claim. But the investigation found the problem is broader than one missing backend, and that NEEDLE's *existing* handling of the two backends it nominally supports is already incorrect.
 
@@ -172,6 +181,84 @@ A single `BeadStore` impl driven by a `BeadBackend`. `BrCliBeadStore` and `BfCli
 - **Prompt fragments render from the active descriptor** (`prompt/mod.rs:56`, `:64`, `:294-325`), so the agent is told to run the binary that is present and the dialect is written down exactly once — in the descriptor.
 - **`needle bead-backend <name>`**, mirroring the existing `needle test-agent`: resolve, verify identity, probe capabilities, print the resolved argv for each operation. A new descriptor is testable without dispatching a worker.
 
+### 7. Backend priority: bead-rs primary, bead-forge secondary, beads_rust tertiary, open world beyond
+
+Operator decision, 2026-08-12. Three consequences, none of which change the
+mechanism above — the descriptor design was already priority-agnostic, which is
+why this is a sequencing and defaults decision rather than a redesign.
+
+**Sequencing inverts.** Phase 16 currently authors descriptors 16.4a beads_rust →
+16.4b bead-forge → 16.4c bead-rs, so the primary backend lands last. Reorder to
+bead-rs first. Its descriptor is also the only one that cannot be written from a
+released artifact — bead-rs is Forgejo-only with no GitHub releases and is under
+active development in agent-sandbox, so its `verified_against` names a commit and
+must be re-verified when that moves.
+
+**`auto` detection prefers `bead`, then `bf`, then `br`.** Today every discovery
+chain resolves `bf` first, which is §5's defect in a different costume: the
+default should express the intended ordering rather than whatever the fleet host
+happens to have installed.
+
+**The primary backend is the weakest on two capabilities, and that must be
+declared rather than discovered in production.** Re-probed against `bead` 0.1.1
+on 2026-08-12 (the ADR's original evidence was `fa30574`, since superseded):
+
+- **No transactional `batch`.** `bf` remains the only backend that can make
+  mitosis atomic. With bead-rs primary, `split` runs the `sequential` strategy
+  for the default backend, so a SIGKILL, OOM, or pod eviction between child
+  creation and dependency wiring leaves orphaned children — the exact hazard
+  `bead_store` already documents for the non-atomic path. This is a real
+  regression against the current bf default and belongs in 16.11's operator-facing
+  capability-gap doc, not in a log line.
+- **No velocity metadata on `claim`.** `bf claim` takes `--model --harness
+  --harness-version`; `bead claim` does not. Telemetry that NEEDLE records today
+  is simply absent for the primary backend.
+
+Against that, bead-rs is *stronger* where it matters most for fleet correctness,
+and the priority decision buys these:
+
+- **Fenced, TTL'd leases** — `claim --lease-ttl --renew-lease --fencing-token`.
+  This is a direct mechanism for the orphaned-claim class tracked in `bf-1e0`
+  ("Self-healing fleet: recover from worker death, exhaustion & orphaned
+  claims"); four NEEDLE beads were found on 2026-08-12 still assigned to workers
+  that no longer exist. A TTL expires the claim without a janitor, and the
+  fencing token stops a resurrected worker from writing after its lease lapsed.
+- **Cycles rejected at insertion**, inside the transaction — the defect class
+  that required a manual graph repair of this very workspace on 2026-08-12.
+- **Readiness derived from the edge set**, with no stored `blocked` status to go
+  stale, and the unfinished-blocker test embedded in the eligibility query so
+  `ready` cannot disagree with the graph.
+- `bead why` and `claim --why`, giving reason codes the other two cannot produce.
+
+**Two axes of interoperability, only one of which is on this critical path.**
+Worth separating because they are easy to conflate:
+
+- *NEEDLE → any bead CLI* — this ADR. Needs descriptors and nothing else.
+- *bead-rs ↔ other implementations' stored data* — bead-rs F012 profiles
+  (`br-v1`, `bf-v1`), which `bead capabilities` currently reports as absent and
+  which its own plan records as externally blocked on independently approved
+  fixtures.
+
+Making bead-rs NEEDLE's primary backend **does not depend on F012**. NEEDLE
+drives a CLI; it does not ask one backend to read another's store. Only
+migrating a workspace between backends needs the profiles.
+
+**The open-world row is the requirement that fixes the design.** "Other bead
+systems that exist in the world" is not satisfied by three good descriptors — it
+is satisfied only if a fourth backend needs no NEEDLE change. That is the property
+§1 and §2 deliver, and it is the reason the hardcoded-impl-per-upstream drafts are
+rejected rather than merely inelegant. Two obligations follow: the six strategy
+enums must be treated as a published extension point rather than an internal
+detail, and capability negotiation (§4) is the discovery mechanism for a backend
+nobody wrote a descriptor for — all three current backends already expose a
+capabilities-style surface, and bead-rs's is a full JSON contract
+(`contract: native-v1`, `atomic_claim`, statuses, checkpoint formats, schema refs).
+
+Minor defect found while re-probing: `bead capabilities` reports
+`"version": "0.1.0"` while `bead --version` reports `0.1.1`. A descriptor's
+`verified_against` must read one of these deliberately, and the disagreement
+should be filed upstream.
+
 ## Alternatives Considered
 
 - **One hardcoded `BeadStore` impl per upstream** (this ADR's first two drafts). Rejected on the operator's requirement: it hardcodes three harnesses, so a fourth bead CLI needs a Rust file, a code review, and a NEEDLE release. It also duplicates the ~20 operations three times, which is how the two existing impls drifted apart in the first place — `add_dependency` is correct in one and wrong in the other precisely because the same command is written twice. The strategy-enum design above answers the objection those drafts raised (that a flat argv table cannot express structural difference) without paying the duplication cost.
@@ -213,3 +300,4 @@ A single `BeadStore` impl driven by a `BeadBackend`. `BrCliBeadStore` and `BfCli
 - **2026-08-11, draft 1.** Framed the task as "add bead-rs support", treating `br` as a deprecated alias of `bf` rather than a live upstream. Diagnosed `BrCliBeadStore`'s `--body`/`--silent`/`--labels` and two-positional `dep add` as stale drift to be rewritten toward the bf dialect.
 - **2026-08-11, draft 2** — after the operator required first-class support for all three upstreams. Probing the real `~/.cargo/bin/br` (which `which br` does not find, because a shim shadows it) showed that argv is **correct beads_rust**, and the actual defect is `discover()` binding that store to the `bf` binary, plus bf-only `batch`/`claim` calls grafted into it. Draft 1's proposed fix would have broken genuine beads_rust support. Only one real argv bug survived: `BfCliBeadStore::add_dependency` (`:2288`).
 - **2026-08-11, draft 3 (current)** — after the operator required the bead-CLI component be genuinely configurable rather than hardcoding harnesses for three named CLIs. Drafts 1 and 2 both landed on one Rust impl per upstream, and draft 2 explicitly argued against a data-driven design on the grounds that an argv table cannot express structural divergence. That objection was right about argv tables and wrong about the conclusion: a per-operation *strategy* enum parameterized by argv templates expresses the divergence exactly, and NEEDLE already runs this pattern for agent harnesses (`AgentAdapter` + `load_adapters`, `src/dispatch/mod.rs:570-660`) — a precedent both earlier drafts missed while proposing a parallel mechanism for the same problem one layer down.
+- **2026-08-12, draft 4** — after the operator set the interop goal explicitly: **bead-rs primary, bead-forge secondary, beads_rust tertiary, and other bead systems that exist in the world.** The mechanism in drafts 1-3 needed no change; the data-driven design was already priority-agnostic, which is the evidence that draft 3 chose correctly. What changed is §7: descriptor authoring order inverts so the primary backend is written first rather than last, `auto` detection prefers `bead` over the incumbent `bf`, and the primary backend's two capability gaps (no transactional `batch`, no velocity metadata on claim) become declared operator-facing facts instead of surprises — non-atomic mitosis is a real regression against today's bf default. Re-probed `bead` 0.1.1 rather than trusting draft 3's `fa30574` evidence, which surfaced the fenced-lease claim surface (`--lease-ttl`/`--renew-lease`/`--fencing-token`) that drafts 1-3 did not know existed and that bears directly on `bf-1e0`. Also separated the two interop axes: NEEDLE→CLI (this ADR) does not depend on bead-rs F012 profiles, which `bead capabilities` reports as absent and which bead-rs's own plan records as externally blocked. The open-world row is promoted from an incidental benefit to a stated requirement, which makes the six strategy enums a published extension point rather than an internal detail.
