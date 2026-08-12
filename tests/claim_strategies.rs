@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use chrono::Utc;
 use needle::bead_store::{
     execute_claim_auto_strategy, execute_claim_strategy, ClaimAutoStrategy, ClaimStrategy,
     ClaimStrategyOperations, CompareAndSetOutcome,
@@ -77,30 +76,29 @@ impl ClaimStrategyOperations for MockOperations {
 }
 
 fn open_bead() -> Bead {
-    Bead {
-        id: BeadId::from("test-1"),
-        title: "test".to_string(),
-        body: None,
-        priority: 2,
-        status: BeadStatus::Open,
-        assignee: None,
-        labels: Vec::new(),
-        workspace: Default::default(),
-        dependencies: Vec::new(),
-        dependents: Vec::new(),
-        comments: Vec::new(),
-        notes: String::new(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-    }
+    serde_json::from_value(serde_json::json!({
+        "id": "test-1",
+        "title": "test",
+        "description": null,
+        "priority": 2,
+        "status": "open",
+        "assignee": null,
+        "labels": [],
+        "source_repo": "",
+        "dependencies": [],
+        "dependents": [],
+        "comments": [],
+        "created_at": "2026-08-12T00:00:00Z",
+        "updated_at": "2026-08-12T00:00:00Z"
+    }))
+    .unwrap()
 }
 
 fn claimed_bead(actor: &str) -> Bead {
-    Bead {
-        status: BeadStatus::InProgress,
-        assignee: Some(actor.to_string()),
-        ..open_bead()
-    }
+    let mut bead = open_bead();
+    bead.status = BeadStatus::InProgress;
+    bead.assignee = Some(actor.to_string());
+    bead
 }
 
 #[tokio::test]
