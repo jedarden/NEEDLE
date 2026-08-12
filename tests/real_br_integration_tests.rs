@@ -158,15 +158,15 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
 
 /// Add a dependency between two beads (issue depends on dep).
 ///
-/// Retries once with `br sync --flush-only` on FrankenSQLite sync conflicts.
+/// Retries once with `bf sync --flush-only` on SQLite sync conflicts.
 fn add_dependency(workspace: &Path, issue_id: &BeadId, dep_id: &BeadId) -> Result<()> {
-    let br = bf_path();
+    let bf = bf_path();
     let do_add = || {
-        std::process::Command::new(&br)
-            .args(["dep", "add", issue_id.as_ref(), dep_id.as_ref()])
+        std::process::Command::new(&bf)
+            .args(["dep", "add", dep_id.as_ref(), "--blocks", issue_id.as_ref()])
             .current_dir(workspace)
             .output()
-            .context("failed to run br dep add")
+            .context("failed to run bf dep add")
     };
 
     let mut output = do_add()?;
@@ -175,7 +175,7 @@ fn add_dependency(workspace: &Path, issue_id: &BeadId, dep_id: &BeadId) -> Resul
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
-            let _ = std::process::Command::new(&br)
+            let _ = std::process::Command::new(&bf)
                 .args(["sync", "--flush-only"])
                 .current_dir(workspace)
                 .output();
@@ -185,7 +185,7 @@ fn add_dependency(workspace: &Path, issue_id: &BeadId, dep_id: &BeadId) -> Resul
 
     if !output.status.success() {
         anyhow::bail!(
-            "br dep add failed: {}",
+            "bf dep add failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -912,8 +912,7 @@ async fn real_br_mitosis_dedup_skips_existing_children() {
     let existing_child_id = create_bead(workspace.path(), "Existing Task", 1).unwrap();
 
     // Add dependency: parent depends on child (child blocks parent).
-    // br dep add syntax: br dep add <issue> <depends_on> means issue depends on depends_on.
-    // So "parent depends on child" = "child blocks parent".
+    // bead-forge names the blocker first and the blocked issue via --blocks.
     add_dependency(workspace.path(), &parent_id, &existing_child_id).unwrap();
 
     // Verify the parent has the child as a dependency.
@@ -926,7 +925,7 @@ async fn real_br_mitosis_dedup_skips_existing_children() {
     // The mitosis evaluator's create_children method will check existing
     // children and skip duplicates. This is tested via the unit tests in
     // mitosis/mod.rs (create_children_with_dedup, create_children_all_deduped).
-    // Here we verify the integration: reading dependencies via br works.
+    // Here we verify descriptor-driven dependency reads.
     let titles: Vec<String> = parent
         .dependencies
         .iter()
