@@ -872,10 +872,23 @@ impl OtlpSink {
             headers_map.insert(key, value);
         }
 
+        // opentelemetry-otlp only auto-appends the per-signal path
+        // (/v1/traces, /v1/metrics, /v1/logs) when the endpoint is resolved from
+        // an OTEL_EXPORTER_OTLP_*_ENDPOINT env var. When `.with_endpoint()` is
+        // called programmatically (as we do here, from config.endpoint), the
+        // SDK uses it verbatim with no path appended - so without this, every
+        // HTTP export request hits the collector's bare root and gets a 404.
+        // Confirmed live 2026-08-12 (bf-6a617): reqwest::Error { kind: Status(404,
+        // None), url: ".../4318/" }, and NEEDLE's own OTLP telemetry has never
+        // once reached the dashboard as a result.
+        let http_signal_endpoint = |path: &str| {
+            format!("{}{}", config.endpoint.trim_end_matches('/'), path)
+        };
+
         // Build span exporter, then wrap for resilience
         let base_span_exporter = SpanExporter::builder()
             .with_http()
-            .with_endpoint(config.endpoint.clone())
+            .with_endpoint(http_signal_endpoint("/v1/traces"))
             .with_timeout(timeout)
             .with_headers(headers_map.clone())
             .build()?;
@@ -896,7 +909,7 @@ impl OtlpSink {
         // The PeriodicReader handles retries internally, so we use the exporter directly
         let metric_exporter = MetricExporter::builder()
             .with_http()
-            .with_endpoint(config.endpoint.clone())
+            .with_endpoint(http_signal_endpoint("/v1/metrics"))
             .with_timeout(timeout)
             .with_headers(headers_map.clone())
             .build()?;
@@ -914,7 +927,7 @@ impl OtlpSink {
         // Build log exporter, then wrap for resilience
         let base_log_exporter = LogExporter::builder()
             .with_http()
-            .with_endpoint(config.endpoint.clone())
+            .with_endpoint(http_signal_endpoint("/v1/logs"))
             .with_timeout(timeout)
             .with_headers(headers_map)
             .build()?;
