@@ -175,9 +175,11 @@ pub fn discover_default(
 
 // Re-export operation strategies for backend descriptors
 pub use strategies::{
-    execute_claim_auto_strategy, execute_claim_strategy, validate_strategy_name, ClaimAutoStrategy,
-    ClaimStrategy, ClaimStrategyOperations, CompareAndSetOutcome, CreateIdStrategy, ImportStrategy,
-    LabelsStrategy, OperationStrategy, ParsedStrategy, SplitStrategy,
+    execute_claim_auto_strategy, execute_claim_strategy, execute_create_id_strategy,
+    execute_split_strategy, validate_strategy_name, ClaimAutoStrategy, ClaimStrategy,
+    ClaimStrategyOperations, CompareAndSetOutcome, CreateIdStrategy, ImportStrategy,
+    LabelsStrategy, OperationStrategy, ParsedStrategy, SequentialSplitError, SplitStrategy,
+    SplitStrategyOperations,
 };
 
 // ─── Corruption detection ────────────────────────────────────────────────────

@@ -535,28 +535,85 @@ pub async fn execute_claim_auto_strategy(
 /// the split can be retried.
 ///
 /// Example: Loop calling `br create` then `br dep add` for each child.
-#[allow(dead_code)]
+#[async_trait]
+pub trait SplitStrategyOperations: Send + Sync {
+    /// Create and link every child in one backend transaction.
+    ///
+    /// On error the backend guarantees that no child or dependency was
+    /// committed, so the caller may safely retry the whole operation.
+    async fn transactional_split(
+        &self,
+        parent_id: &BeadId,
+        children: &[crate::bead_store::NewChild<'_>],
+    ) -> anyhow::Result<Vec<BeadId>>;
+
+    /// Create one child as its own mutation.
+    async fn create_split_child(
+        &self,
+        title: &str,
+        body: &str,
+        labels: &[&str],
+    ) -> anyhow::Result<BeadId>;
+
+    /// Link an already-created child as a blocker of its parent.
+    async fn link_split_child(&self, child_id: &BeadId, parent_id: &BeadId) -> anyhow::Result<()>;
+}
+
+/// A sequential split failed after committing some children.
+///
+/// The created IDs are returned explicitly because a sequential backend has
+/// no transaction spanning the whole split. Operators can reconcile those
+/// children instead of silently retrying and creating duplicates.
+#[derive(Debug, thiserror::Error)]
+#[error("sequential split failed after creating {created_count} child bead(s): {source}")]
+pub struct SequentialSplitError {
+    pub created: Vec<BeadId>,
+    created_count: usize,
+    #[source]
+    pub source: anyhow::Error,
+}
+
 pub async fn execute_split_strategy(
+    operations: &dyn SplitStrategyOperations,
     strategy: SplitStrategy,
-    _binary_path: &std::path::Path,
-    _workspace: &std::path::Path,
-    _parent_id: &str,
-    _children: &[crate::bead_store::NewChild<'_>],
-) -> Result<Vec<String>, anyhow::Error> {
+    parent_id: &BeadId,
+    children: &[crate::bead_store::NewChild<'_>],
+) -> anyhow::Result<Vec<BeadId>> {
     match strategy {
         SplitStrategy::TransactionalBatch => {
-            // All child beads created in one atomic operation.
-            // No race - if any fails, entire batch is rolled back.
-
-            Err(anyhow::anyhow!(
-                "TransactionalBatch execution not yet implemented"
-            ))
+            operations.transactional_split(parent_id, children).await
         }
         SplitStrategy::Sequential => {
-            // Children created one at a time.
-            // If creation fails partway through, partial children may exist.
+            let mut created = Vec::with_capacity(children.len());
+            for child in children {
+                let child_id = match operations
+                    .create_split_child(child.title, child.body, child.labels)
+                    .await
+                {
+                    Ok(child_id) => child_id,
+                    Err(source) => {
+                        return Err(SequentialSplitError {
+                            created_count: created.len(),
+                            created,
+                            source,
+                        }
+                        .into());
+                    }
+                };
 
-            Err(anyhow::anyhow!("Sequential execution not yet implemented"))
+                if let Err(source) = operations.link_split_child(&child_id, parent_id).await {
+                    created.push(child_id);
+                    return Err(SequentialSplitError {
+                        created_count: created.len(),
+                        created,
+                        source,
+                    }
+                    .into());
+                }
+                created.push(child_id);
+            }
+
+            Ok(created)
         }
     }
 }
@@ -601,14 +658,16 @@ pub fn execute_create_id_strategy(
             Ok(id)
         }
         CreateIdStrategy::JsonField => {
-            // Parse JSON output and extract ID field
+            // Accept both a direct response and the standard CLI envelope.
             let json: serde_json::Value =
                 serde_json::from_str(output).map_err(|e| anyhow::anyhow!("invalid JSON: {}", e))?;
 
             json.get("id")
+                .or_else(|| json.pointer("/data/id"))
                 .and_then(|id| id.as_str())
                 .map(|s| s.to_string())
-                .ok_or_else(|| anyhow::anyhow!("JSON missing 'id' field"))
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("JSON missing non-empty string 'id' field"))
         }
     }
 }
