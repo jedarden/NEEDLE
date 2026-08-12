@@ -25,7 +25,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use tempfile::TempDir;
 
-use needle::bead_store::{BeadStore, BrCliBeadStore, Filters, NewChild};
+use needle::bead_store::{builtin_bead_backends, BeadStore, CliBeadStore, Filters, NewChild};
 use needle::claim::Claimer;
 use needle::config::{ExploreConfig, MendConfig, MitosisConfig};
 use needle::mitosis::{MitosisEvaluator, MitosisResult};
@@ -194,8 +194,19 @@ fn add_dependency(workspace: &Path, issue_id: &BeadId, dep_id: &BeadId) -> Resul
 }
 
 /// Get bead store for a workspace.
-fn store_for_workspace(workspace: &Path) -> Result<BrCliBeadStore> {
-    BrCliBeadStore::new(bf_path(), workspace.to_path_buf(), None, None, None)
+fn store_for_workspace(workspace: &Path) -> Result<CliBeadStore> {
+    let backend = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-forge")
+        .ok_or_else(|| anyhow::anyhow!("built-in bead-forge descriptor missing"))?;
+    CliBeadStore::new(
+        backend,
+        bf_path(),
+        workspace.to_path_buf(),
+        None,
+        None,
+        None,
+    )
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

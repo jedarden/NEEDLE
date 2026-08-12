@@ -62,7 +62,7 @@ trait StoreFactory: Send + Sync {
     async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error>;
 }
 
-/// Default factory that creates real bead store instances (bf -> br -> bead).
+/// Default factory that creates explicitly configured bead store instances.
 struct DefaultStoreFactory;
 
 #[async_trait::async_trait]
@@ -444,7 +444,7 @@ impl ExploreStrand {
         rotated
     }
 
-    /// Create a bead store (bf -> br -> bead) for a given workspace path.
+    /// Create a bead store for a workspace's explicit backend binding.
     #[allow(dead_code)]
     async fn store_for_workspace(workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
         discover_default(
@@ -455,7 +455,7 @@ impl ExploreStrand {
         )
     }
 
-    /// Create a BrCliBeadStore for a given workspace path.
+    /// Create the descriptor-bound store for a workspace path.
     ///
     /// This internal version is marked pub(crate) to allow testing with store injection.
     #[cfg(test)]

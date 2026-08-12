@@ -513,11 +513,11 @@ impl BeadStore for CliBeadStore {
     }
     async fn doctor_repair(&self) -> Result<RepairReport> {
         let stdout = self.run_operation("doctor_repair", &HashMap::new()).await?;
-        Ok(super::br_cli::BrCliBeadStore::parse_doctor_output(&stdout))
+        Ok(parse_doctor_output(&stdout))
     }
     async fn doctor_check(&self) -> Result<RepairReport> {
         let stdout = self.run_operation("doctor_check", &HashMap::new()).await?;
-        Ok(super::br_cli::BrCliBeadStore::parse_doctor_output(&stdout))
+        Ok(parse_doctor_output(&stdout))
     }
     async fn full_rebuild(&self) -> Result<()> {
         if !matches!(self.backend.name.as_str(), "bead-rs" | "bead-forge") {
@@ -619,6 +619,23 @@ impl CliBeadStore {
         .await?;
         Ok(())
     }
+
+    /// Attempt public-CLI recovery, escalating from doctor repair to the
+    /// backend-specific checkpoint rebuild path.
+    pub async fn recover_db(&self) -> super::RecoveryOutcome {
+        match self.doctor_repair().await {
+            Ok(report) => super::RecoveryOutcome::Repaired(report),
+            Err(repair_error) => match self.full_rebuild().await {
+                Ok(()) => super::RecoveryOutcome::Rebuilt,
+                Err(rebuild_error) => {
+                    super::RecoveryOutcome::Failed(rebuild_error.context(format!(
+                        "{} doctor repair failed before rebuild: {repair_error:#}",
+                        self.backend.name
+                    )))
+                }
+            },
+        }
+    }
 }
 
 fn parse_batch_created_ids(output: &str) -> Vec<BeadId> {
@@ -631,6 +648,21 @@ fn parse_batch_created_ids(output: &str) -> Vec<BeadId> {
             (!id.is_empty()).then(|| BeadId::from(id))
         })
         .collect()
+}
+
+fn parse_doctor_output(output: &str) -> RepairReport {
+    let mut report = RepairReport::default();
+    for line in output.lines() {
+        if let Some(message) = line.strip_prefix("WARN ") {
+            if !message.contains("sqlite3 not available") && !message.contains("recovery_artifacts")
+            {
+                report.warnings.push(message.to_string());
+            }
+        } else if let Some(message) = line.strip_prefix("FIXED ") {
+            report.fixed.push(message.to_string());
+        }
+    }
+    report
 }
 
 fn is_optional_placeholder(name: &str) -> bool {

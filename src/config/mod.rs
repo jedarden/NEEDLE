@@ -375,9 +375,7 @@ impl BeadCliConfig {
 pub enum Backend {
     /// bead-forge (canonical CLI, atomic claiming)
     Bf,
-    /// Deprecated br alias (legacy shim)
-    Br,
-    /// Original bead CLI (legacy)
+    /// bead-rs native CLI
     Bead,
 }
 
@@ -389,9 +387,8 @@ pub enum Backend {
 /// # Resolution Order
 ///
 /// - If `explicit_path` is set, uses that path directly (backend detection skipped)
-/// - `auto` backend: tries bf → ~/.local/bin/bf → br → ~/.local/bin/br → bead → ~/.local/bin/bead → /usr/local/cargo/bin/bead
+/// - `auto` backend: tries bead-rs and bead-forge candidates for diagnostics
 /// - `bf` backend: tries bf → ~/.local/bin/bf
-/// - `br` backend: tries br → ~/.local/bin/br
 /// - `bead` backend: tries bead → ~/.local/bin/bead → /usr/local/cargo/bin/bead
 ///
 /// # Errors
@@ -406,12 +403,11 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
         if explicit_path.exists() {
             let backend = match config.backend.as_str() {
                 "bf" | "bead-forge" => Backend::Bf,
-                "br" | "beads-rust" => Backend::Br,
                 "bead" | "bead-rs" => Backend::Bead,
                 "auto" | "" => detect_backend_from_path(explicit_path)?,
                 _ => {
                     bail!(
-                        "invalid bead CLI backend: {} (must be: bead-forge, bead-rs, beads-rust, or auto for diagnostics)",
+                        "invalid bead CLI backend: {} (must be: bead-forge, bead-rs, or auto for diagnostics)",
                         config.backend
                     )
                 }
@@ -442,20 +438,6 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
                 .context("bf CLI not found (checked PATH, ~/.local/bin/bf)")?;
             Ok((Backend::Bf, path))
         }
-        "br" | "beads-rust" => {
-            // br only: PATH → ~/.local/bin/br
-            let path = find_on_path("br")
-                .or_else(|_| {
-                    let candidate = PathBuf::from(format!("{home}/.local/bin/br"));
-                    if candidate.exists() {
-                        Ok(candidate)
-                    } else {
-                        Err(anyhow!("br not found"))
-                    }
-                })
-                .context("br CLI not found (checked PATH, ~/.local/bin/br)")?;
-            Ok((Backend::Br, path))
-        }
         "bead" | "bead-rs" => {
             // bead only: PATH → ~/.local/bin/bead → /usr/local/cargo/bin/bead
             let path = find_on_path("bead")
@@ -481,8 +463,8 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
             Ok((Backend::Bead, path))
         }
         "auto" | "" => {
-            // Auto mode: preserve TODAY's exact precedence
-            // bf → ~/.local/bin/bf → br → ~/.local/bin/br → bead → ~/.local/bin/bead → /usr/local/cargo/bin/bead
+            // Auto is diagnostics-only; explicit workspace binding remains
+            // mandatory for production store construction.
 
             // Try bf first
             if let Ok(path) = find_on_path("bf") {
@@ -491,15 +473,6 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
             let bf_local = PathBuf::from(format!("{home}/.local/bin/bf"));
             if bf_local.exists() {
                 return Ok((Backend::Bf, bf_local));
-            }
-
-            // Then br
-            if let Ok(path) = find_on_path("br") {
-                return Ok((Backend::Br, path));
-            }
-            let br_local = PathBuf::from(format!("{home}/.local/bin/br"));
-            if br_local.exists() {
-                return Ok((Backend::Br, br_local));
             }
 
             // Then bead
@@ -517,11 +490,11 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
 
             // Nothing found
             bail!(
-                "no bead CLI found (tried: bf on PATH, {home}/.local/bin/bf, br on PATH, {home}/.local/bin/br, bead on PATH, {home}/.local/bin/bead, /usr/local/cargo/bin/bead)"
+                "no bead CLI found (tried: bf on PATH, {home}/.local/bin/bf, bead on PATH, {home}/.local/bin/bead, /usr/local/cargo/bin/bead)"
             )
         }
         _ => bail!(
-            "invalid bead CLI backend: {} (must be: bead-forge, bead-rs, beads-rust, or auto for diagnostics)",
+            "invalid bead CLI backend: {} (must be: bead-forge, bead-rs, or auto for diagnostics)",
             config.backend
         ),
     }
@@ -554,8 +527,8 @@ fn is_executable(path: &Path) -> bool {
 
 /// Detect the backend type from a binary path.
 ///
-/// Infers the backend from the filename: "bf" → Backend::Bf, "br" → Backend::Br,
-/// otherwise defaults to Backend::Bead.
+/// Infers the backend from the filename: "bf" selects bead-forge; every other
+/// name selects bead-rs.
 fn detect_backend_from_path(path: &Path) -> Result<Backend> {
     let file_name = path
         .file_name()
@@ -564,7 +537,6 @@ fn detect_backend_from_path(path: &Path) -> Result<Backend> {
 
     match file_name {
         "bf" => Ok(Backend::Bf),
-        "br" => Ok(Backend::Br),
         _ => Ok(Backend::Bead), // Default to Bead for unknown names
     }
 }
@@ -617,10 +589,6 @@ mod tests {
             Backend::Bf
         );
         assert_eq!(
-            detect_backend_from_path(PathBuf::from("/usr/bin/br").as_path()).unwrap(),
-            Backend::Br
-        );
-        assert_eq!(
             detect_backend_from_path(PathBuf::from("/usr/bin/bead").as_path()).unwrap(),
             Backend::Bead
         );
@@ -650,23 +618,6 @@ mod tests {
         let (backend, path) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bf);
         assert_eq!(path, bf_bin);
-    }
-
-    #[test]
-    fn test_resolve_bead_cli_br_backend() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let br_bin = tmp_dir.path().join("br");
-        std::fs::write(&br_bin, "#!/bin/sh\necho test").unwrap();
-        make_executable(&br_bin);
-
-        let config = BeadCliConfig {
-            backend: "br".to_string(),
-            explicit_path: Some(br_bin.clone()),
-        };
-
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(backend, Backend::Br);
-        assert_eq!(path, br_bin);
     }
 
     #[test]
@@ -744,17 +695,20 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_bead_cli_auto_precedence_br_second() {
+    fn test_resolve_bead_cli_auto_ignores_deprecated_br() {
         let (_lock, _env) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
-        // Create ~/.local/bin/br (no bf)
+        // A deprecated br shim must not become a candidate. bead-rs wins.
         let bin_dir = home.join(".local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let br_bin = bin_dir.join("br");
         std::fs::write(&br_bin, "#!/bin/sh\necho test").unwrap();
         make_executable(&br_bin);
+        let bead_bin = bin_dir.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_bin);
 
         // Set HOME to tmp_dir
         std::env::set_var("HOME", &home);
@@ -766,8 +720,8 @@ mod tests {
         };
 
         let (backend, path) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(backend, Backend::Br);
-        assert_eq!(path, br_bin);
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
     }
 
     #[test]

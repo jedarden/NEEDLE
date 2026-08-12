@@ -7,17 +7,12 @@
 //!
 //! The trait is `Send + Sync` because it is called from async worker tasks.
 //!
-//! The module provides three implementations:
-//! - `BrCliBeadStore` - Legacy `br` CLI-backed store (in `br_cli.rs`)
-//! - `BfCliBeadStore` - `bf` CLI-backed store with atomic claiming (in `bf_cli.rs`)
-//! - `BeadCliBeadStore` - `bead` (bead-rs) CLI-backed store (in `bead_cli.rs`)
+//! `CliBeadStore` binds one backend descriptor to one executable, preventing
+//! command grammar and binary identity from being mixed accidentally.
 //!
 //! Depends on: `types`.
 
 mod backend;
-mod bead_cli;
-mod bf_cli;
-mod br_cli;
 mod cli_store;
 mod strategies;
 
@@ -36,9 +31,6 @@ pub use backend::{
     builtin_bead_backends, load_bead_backends, BeadBackend, BeadBackendCapabilities,
     BeadBackendErrorMarkers, BeadBackendQuirk, BeadOperationSpec, ParseShape,
 };
-pub use bead_cli::BeadCliBeadStore;
-pub use bf_cli::BfCliBeadStore;
-pub use br_cli::BrCliBeadStore;
 pub use cli_store::CliBeadStore;
 
 /// Open the bead store explicitly bound by the target workspace's resolved
@@ -82,13 +74,6 @@ pub fn open_configured(
                 harness_version,
             )?))
         }
-        crate::config::Backend::Br => Ok(Arc::new(BrCliBeadStore::new(
-            binary,
-            workspace,
-            model,
-            harness,
-            harness_version,
-        )?)),
         crate::config::Backend::Bead => {
             let descriptor = builtin_bead_backends()
                 .into_iter()
@@ -159,7 +144,6 @@ fn verify_backend_identity(
     let identity = format!("{stdout}{stderr}");
     let expected_prefix = match backend {
         crate::config::Backend::Bf => "bf ",
-        crate::config::Backend::Br => "br ",
         crate::config::Backend::Bead => "bead ",
     };
 

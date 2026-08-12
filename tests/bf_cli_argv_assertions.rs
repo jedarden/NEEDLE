@@ -154,7 +154,7 @@ impl BeadStore for FixtureCliStore {
     }
 
     async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
-        // Record the exact argv that BrCliBeadStore/BfCliBeadStore would emit
+        // Record the exact argv that the bead-forge descriptor emits.
         let mut args: Vec<String> = vec![
             "create".to_string(),
             "--title".to_string(),

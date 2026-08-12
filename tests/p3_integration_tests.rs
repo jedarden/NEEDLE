@@ -19,7 +19,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
-use needle::bead_store::{BeadStore, BrCliBeadStore};
+use needle::bead_store::{builtin_bead_backends, BeadStore, CliBeadStore};
 use needle::canary::CanaryRunner;
 use needle::config::{HookConfig, PulseConfig, ScannerConfig, UnravelConfig, WeaveConfig};
 use needle::strand::pulse::PulseStrand;
@@ -35,11 +35,11 @@ use needle::validation::ValidationGate;
 // Test infrastructure
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Path to the br binary.
-fn br_path() -> PathBuf {
-    which::which("br").unwrap_or_else(|_| {
+/// Path to the bead-forge binary.
+fn bf_path() -> PathBuf {
+    which::which("bf").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(format!("{home}/.local/bin/br"))
+        PathBuf::from(format!("{home}/.local/bin/bf"))
     })
 }
 
@@ -50,16 +50,16 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
         .tempdir()
         .context("failed to create temp dir")?;
 
-    let br = br_path();
-    let output = std::process::Command::new(&br)
+    let bf = bf_path();
+    let output = std::process::Command::new(&bf)
         .args(["init"])
         .current_dir(dir.path())
         .output()
-        .context("failed to run br init")?;
+        .context("failed to run bf init")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "br init failed: {}",
+            "bf init failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -69,13 +69,13 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
 
 /// Create a bead in the test workspace and return its ID.
 fn create_bead(workspace: &Path, title: &str) -> Result<BeadId> {
-    let br = br_path();
+    let bf = bf_path();
     let do_create = || {
-        std::process::Command::new(&br)
+        std::process::Command::new(&bf)
             .args(["create", "--title", title, "--description", title])
             .current_dir(workspace)
             .output()
-            .context("failed to run br create")
+            .context("failed to run bf create")
     };
 
     let mut output = do_create()?;
@@ -84,7 +84,7 @@ fn create_bead(workspace: &Path, title: &str) -> Result<BeadId> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
-            let _ = std::process::Command::new(&br)
+            let _ = std::process::Command::new(&bf)
                 .args(["sync", "--flush-only"])
                 .current_dir(workspace)
                 .output();
@@ -94,7 +94,7 @@ fn create_bead(workspace: &Path, title: &str) -> Result<BeadId> {
 
     if !output.status.success() {
         anyhow::bail!(
-            "br create failed: {}",
+            "bf create failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -105,15 +105,15 @@ fn create_bead(workspace: &Path, title: &str) -> Result<BeadId> {
 
 /// Add a label to a bead.
 ///
-/// Retries once with `br sync --flush-only` on FrankenSQLite sync conflicts.
+/// Retries once with `bf sync --flush-only` on SQLite sync conflicts.
 fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
-    let br = br_path();
+    let bf = bf_path();
     let do_add = || {
-        std::process::Command::new(&br)
-            .args(["label", "add", "--label", label, bead_id.as_ref()])
+        std::process::Command::new(&bf)
+            .args(["label", "add", bead_id.as_ref(), "--label", label])
             .current_dir(workspace)
             .output()
-            .context("failed to run br label add")
+            .context("failed to run bf label add")
     };
 
     let mut output = do_add()?;
@@ -122,7 +122,7 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
-            let _ = std::process::Command::new(&br)
+            let _ = std::process::Command::new(&bf)
                 .args(["sync", "--flush-only"])
                 .current_dir(workspace)
                 .output();
@@ -132,7 +132,7 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
 
     if !output.status.success() {
         anyhow::bail!(
-            "br label add failed: {}",
+            "bf label add failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -141,8 +141,19 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
 }
 
 /// Get a bead store for a workspace.
-fn store_for_workspace(workspace: &Path) -> Result<BrCliBeadStore> {
-    BrCliBeadStore::new(br_path(), workspace.to_path_buf(), None, None, None)
+fn store_for_workspace(workspace: &Path) -> Result<CliBeadStore> {
+    let backend = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-forge")
+        .ok_or_else(|| anyhow::anyhow!("built-in bead-forge descriptor missing"))?;
+    CliBeadStore::new(
+        backend,
+        bf_path(),
+        workspace.to_path_buf(),
+        None,
+        None,
+        None,
+    )
 }
 
 /// Mock WeaveAgent that returns fixed JSON.
@@ -183,6 +194,7 @@ fn make_test_bead(id: &str) -> Bead {
         dependencies: vec![],
         dependents: vec![],
         comments: vec![],
+        notes: String::new(),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }

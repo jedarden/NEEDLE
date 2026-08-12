@@ -34,6 +34,21 @@ use needle::worker::Worker;
 
 // ─── Shared test infrastructure ──────────────────────────────────────────────
 
+fn configured_forge_store(workspace: PathBuf) -> needle::bead_store::CliBeadStore {
+    let backend = needle::bead_store::builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-forge")
+        .expect("built-in bead-forge descriptor");
+    let binary = which::which("bf").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_default();
+        PathBuf::from(format!("{home}/.local/bin/bf"))
+    });
+    needle::bead_store::CliBeadStore::new(
+        backend, binary, workspace, None, None, None,
+    )
+    .expect("configured bead-forge test store")
+}
+
 /// Mock BeadStore that tracks all operations and returns configurable beads.
 ///
 /// Key behaviors:
@@ -243,7 +258,7 @@ fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
     config.agent.routing = None; // Disable routing in tests - use adapter directly
     config.self_modification.hot_reload = false;
     // Match the test bead workspace so the remote-store-switch logic
-    // doesn't fire (it would try to create a BrCliBeadStore).
+    // doesn't fire (it would try to create a real CLI store).
     config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
     // Isolate workspace home so the registry doesn't leak between tests.
     config.workspace.home = workspace_home.to_path_buf();
@@ -1188,7 +1203,7 @@ async fn worker_processes_high_priority_beads_first() {
 // Test 11: Cross-workspace mend: two-workspace zombie scenario
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Mock BeadStore that simulates real BrCliBeadStore behavior for zombie scenarios.
+/// Mock BeadStore that simulates real CLI-store behavior for zombie scenarios.
 ///
 /// This mock properly simulates the behavior where:
 /// - In-progress beads don't appear in ready()
@@ -1516,13 +1531,7 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     );
 
     // Verify the bead is now in-progress and not in ready().
-    let remote_store = needle::bead_store::BrCliBeadStore::discover(
-        remote_workspace.clone().to_path_buf(),
-        None,
-        None,
-        None,
-    )
-    .unwrap();
+    let remote_store = configured_forge_store(remote_workspace.clone().to_path_buf());
     let filters = Filters {
         assignee: None,
         exclude_labels: vec![
@@ -1720,13 +1729,7 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     }
 
     // Verify the bead is still assigned to the live worker.
-    let remote_store = needle::bead_store::BrCliBeadStore::discover(
-        remote_workspace.to_path_buf(),
-        None,
-        None,
-        None,
-    )
-    .unwrap();
+    let remote_store = configured_forge_store(remote_workspace.to_path_buf());
     let bead = remote_store.show(&bead_id).await.unwrap();
     assert_eq!(
         bead.assignee,
@@ -1832,13 +1835,7 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     }
 
     // Verify the bead is still assigned to us.
-    let remote_store = needle::bead_store::BrCliBeadStore::discover(
-        remote_workspace.to_path_buf(),
-        None,
-        None,
-        None,
-    )
-    .unwrap();
+    let remote_store = configured_forge_store(remote_workspace.to_path_buf());
     let bead = remote_store.show(&bead_id).await.unwrap();
     assert_eq!(
         bead.assignee,
@@ -1916,9 +1913,7 @@ async fn mend_removes_stale_dependency_links() {
     assert!(dep_output.status.success(), "br dep add failed");
 
     // Verify the dependency exists and the blocked bead is... blocked.
-    let store =
-        needle::bead_store::BrCliBeadStore::discover(workspace.to_path_buf(), None, None, None)
-            .unwrap();
+    let store = configured_forge_store(workspace.to_path_buf());
     let blocked_bead = store
         .show(&needle::types::BeadId::from(blocked_id.clone()))
         .await
@@ -2104,9 +2099,7 @@ async fn idle_worker_flagging_detects_stuck_workers() {
         .expect("br init failed");
     assert!(init_output.status.success(), "br init failed");
 
-    let store =
-        needle::bead_store::BrCliBeadStore::discover(ws_path.to_path_buf(), None, None, None)
-            .unwrap();
+    let store = configured_forge_store(ws_path.to_path_buf());
 
     let registry2 = Registry::new(reg_dir.path());
     let mend = MendStrand::new(
