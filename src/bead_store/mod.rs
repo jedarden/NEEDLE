@@ -1486,4 +1486,376 @@ echo "bf 0.2.0-github"
         assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
         assert_eq!(call_count.load(Ordering::SeqCst), 5);
     }
+
+    // ─── Sync ETXTBSY retry tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn etxtbsy_retry_sync_linear_succeeds_on_first_attempt() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result = spawn_with_etxtbsy_retry_sync(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, io::Error>(b"success".to_vec())
+            },
+            5,
+            20,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"success".to_vec());
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_linear_retries_on_etxtbsy() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_sync(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 2 {
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                } else {
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            5,
+            20,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"success".to_vec());
+        assert_eq!(call_count.load(Ordering::SeqCst), 3); // 2 failures + 1 success
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_linear_exhausts_attempts() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_sync(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<_, io::Error>(make_etxtbsy_error())
+            },
+            3,
+            20,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(call_count.load(Ordering::SeqCst), 3); // max attempts
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_linear_fails_fast_on_non_etxtbsy() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_sync(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<_, io::Error>(make_other_error())
+            },
+            5,
+            20,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1); // Should only be called once
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_linear_timing() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        let result = spawn_with_etxtbsy_retry_sync(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 2 {
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                } else {
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            5,
+            50,
+        );
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 3); // 2 failures + 1 success
+
+        // With 2 retries at 50ms each, should take ~100ms
+        assert!(elapsed >= Duration::from_millis(90));
+        assert!(elapsed < Duration::from_millis(200)); // Upper bound with tolerance
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_succeeds_on_first_attempt() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Ok::<_, io::Error>(b"success".to_vec())
+            },
+            10,
+            20,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"success".to_vec());
+        assert_eq!(call_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_retries_on_etxtbsy() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 3 {
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                } else {
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            10,
+            20,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"success".to_vec());
+        assert_eq!(call_count.load(Ordering::SeqCst), 4); // 3 failures + 1 success
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_exhausts_attempts() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<_, io::Error>(make_etxtbsy_error())
+            },
+            5,
+            20,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(call_count.load(Ordering::SeqCst), 5); // max attempts
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_fails_fast_on_non_etxtbsy() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<_, io::Error>(make_other_error())
+            },
+            10,
+            20,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(call_count.load(Ordering::SeqCst), 1); // Should only be called once
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_timing() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        let result = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 3 {
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                } else {
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            10,
+            20,
+        );
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 4); // 3 failures + 1 success
+
+        // Exponential backoff: 20ms + 40ms + 80ms = ~140ms with jitter
+        assert!(elapsed >= Duration::from_millis(100));
+        assert!(elapsed < Duration::from_millis(300)); // Upper bound with jitter tolerance
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_linear_child_wrapper_works() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        // Create a mock child process result
+        let result = spawn_with_etxtbsy_retry_sync_child(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<_, io::Error>(make_etxtbsy_error())
+            },
+            3,
+            20,
+        );
+
+        // Should fail after exhausting attempts
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_child_wrapper_works() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result = spawn_with_etxtbsy_retry_sync_exponential_child(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<_, io::Error>(make_etxtbsy_error())
+            },
+            5,
+            20,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(call_count.load(Ordering::SeqCst), 5);
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_linear_max_attempts_of_one() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_sync(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<_, io::Error>(make_etxtbsy_error())
+            },
+            1, // Only one attempt - should fail immediately without retry
+            20,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(call_count.load(Ordering::SeqCst), 1); // Only called once
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_max_attempts_of_one() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<_, io::Error>(make_etxtbsy_error())
+            },
+            1, // Only one attempt - should fail immediately without retry
+            20,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(26));
+        assert_eq!(call_count.load(Ordering::SeqCst), 1); // Only called once
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_linear_zero_backoff() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        let result = spawn_with_etxtbsy_retry_sync(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 2 {
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                } else {
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            5,
+            0, // Zero backoff - should retry immediately
+        );
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+        // With zero backoff, should complete very quickly (< 10ms)
+        assert!(elapsed < Duration::from_millis(50));
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_zero_base_backoff() {
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        let result = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 2 {
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                } else {
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            5,
+            0, // Zero base backoff - exponential backoff with 0 base means no delay
+        );
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 3);
+        // With zero base backoff, should complete very quickly
+        assert!(elapsed < Duration::from_millis(50));
+    }
 }
