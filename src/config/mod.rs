@@ -106,7 +106,7 @@ impl AgentConfig {
     fn default_agent() -> String {
         "claude".to_string()
     }
-    fn default_timeout() -> u64 {
+    pub fn default_timeout() -> u64 {
         3600
     }
     fn default_adapters_dir() -> PathBuf {
@@ -246,7 +246,7 @@ impl WorkerConfig {
     fn default_launch_stagger_seconds() -> u64 {
         2
     }
-    fn default_idle_timeout() -> u64 {
+    pub fn default_idle_timeout() -> u64 {
         60
     }
     fn default_max_claim_retries() -> u32 {
@@ -264,7 +264,7 @@ impl WorkerConfig {
     fn default_memory_free_warn_mb() -> u64 {
         512
     }
-    fn default_building_timeout() -> u64 {
+    pub fn default_building_timeout() -> u64 {
         600
     }
     fn default_idle_backoff_min() -> u64 {
@@ -956,7 +956,7 @@ impl MendConfig {
     fn default_db_check_interval() -> u64 {
         50
     }
-    fn default_idle_timeout() -> u64 {
+    pub fn default_idle_timeout() -> u64 {
         120
     }
 }
@@ -2345,7 +2345,7 @@ impl SelfModificationConfig {
         dirs_or_home(".needle/canary")
     }
 
-    fn default_canary_timeout() -> u64 {
+    pub fn default_canary_timeout() -> u64 {
         // 30 minutes. A canary test is a full agent dispatch against a real
         // bead — clone, reason, edit, run gates, commit — not a unit test. The
         // previous 5-minute budget was shorter than a routine dispatch, so every
@@ -2458,7 +2458,7 @@ impl Default for ValidationConfig {
 }
 
 impl ValidationConfig {
-    fn default_outcome_timeout_seconds() -> u64 {
+    pub fn default_outcome_timeout_seconds() -> u64 {
         50
     }
     fn default_stderr_cap_bytes() -> usize {
