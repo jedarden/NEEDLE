@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::cost::{BudgetConfig, PricingConfig};
@@ -332,6 +332,551 @@ pub struct WorkspaceLabelsOverride {
     /// Domain labels for this workspace (e.g., `[rust, api, trading]`).
     #[serde(default)]
     pub labels: Vec<String>,
+}
+
+/// Bead CLI backend configuration.
+///
+/// Controls which bead store CLI (bf/br/bead) is used and how to resolve it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BeadCliConfig {
+    /// Backend selection: auto (default), bf, br, or bead.
+    ///
+    /// - `auto`: Discover bf → ~/.local/bin/bf → br → ~/.local/bin/br → bead → ~/.local/bin/bead → /usr/local/cargo/bin/bead
+    /// - `bf`: Use bead-forge (bf) explicitly
+    /// - `br`: Use deprecated br alias (legacy shim)
+    /// - `bead`: Use original bead CLI
+    #[serde(default = "BeadCliConfig::default_backend")]
+    pub backend: String,
+
+    /// Optional explicit path to the CLI binary.
+    ///
+    /// When set, bypasses all discovery and uses this path directly.
+    /// Useful for testing or non-standard installations.
+    #[serde(default)]
+    pub explicit_path: Option<PathBuf>,
+}
+
+impl Default for BeadCliConfig {
+    fn default() -> Self {
+        BeadCliConfig {
+            backend: Self::default_backend(),
+            explicit_path: None,
+        }
+    }
+}
+
+impl BeadCliConfig {
+    fn default_backend() -> String {
+        "auto".to_string()
+    }
+}
+
+/// Backend identifier for the resolved bead CLI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Backend {
+    /// bead-forge (canonical CLI, atomic claiming)
+    Bf,
+    /// Deprecated br alias (legacy shim)
+    Br,
+    /// Original bead CLI (legacy)
+    Bead,
+}
+
+/// Resolve the bead CLI binary path from configuration.
+///
+/// Takes a `BeadCliConfig` and returns the backend type and binary path.
+/// This replaces all five hardcoded resolution sites across the codebase.
+///
+/// # Resolution Order
+///
+/// - If `explicit_path` is set, uses that path directly (backend detection skipped)
+/// - `auto` backend: tries bf → ~/.local/bin/bf → br → ~/.local/bin/br → bead → ~/.local/bin/bead → /usr/local/cargo/bin/bead
+/// - `bf` backend: tries bf → ~/.local/bin/bf
+/// - `br` backend: tries br → ~/.local/bin/br
+/// - `bead` backend: tries bead → ~/.local/bin/bead → /usr/local/cargo/bin/bead
+///
+/// # Errors
+///
+/// Returns an error if no matching binary is found. The error message lists
+/// all attempted paths.
+pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
+    // If explicit path is set, use it directly (backend detection is skipped)
+    if let Some(ref explicit_path) = config.explicit_path {
+        if explicit_path.exists() {
+            // Detect backend from the binary name
+            let backend = detect_backend_from_path(explicit_path)?;
+            return Ok((backend, explicit_path.clone()));
+        } else {
+            bail!(
+                "explicit bead CLI path does not exist: {}",
+                explicit_path.display()
+            );
+        }
+    }
+
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    match config.backend.as_str() {
+        "bf" => {
+            // bf only: PATH → ~/.local/bin/bf
+            let path = which::which("bf")
+                .or_else(|_| {
+                    let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
+                    if candidate.exists() {
+                        Ok(candidate)
+                    } else {
+                        Err(anyhow!("bf not found"))
+                    }
+                })
+                .context("bf CLI not found (checked PATH, ~/.local/bin/bf)")?;
+            Ok((Backend::Bf, path))
+        }
+        "br" => {
+            // br only: PATH → ~/.local/bin/br
+            let path = which::which("br")
+                .or_else(|_| {
+                    let candidate = PathBuf::from(format!("{home}/.local/bin/br"));
+                    if candidate.exists() {
+                        Ok(candidate)
+                    } else {
+                        Err(anyhow!("br not found"))
+                    }
+                })
+                .context("br CLI not found (checked PATH, ~/.local/bin/br)")?;
+            Ok((Backend::Br, path))
+        }
+        "bead" => {
+            // bead only: PATH → ~/.local/bin/bead → /usr/local/cargo/bin/bead
+            let path = which::which("bead")
+                .or_else(|_| {
+                    let candidate = PathBuf::from(format!("{home}/.local/bin/bead"));
+                    if candidate.exists() {
+                        Ok(candidate)
+                    } else {
+                        Err(anyhow!("bead not found"))
+                    }
+                })
+                .or_else(|_| {
+                    let candidate = PathBuf::from("/usr/local/cargo/bin/bead");
+                    if candidate.exists() {
+                        Ok(candidate)
+                    } else {
+                        Err(anyhow!("bead not found"))
+                    }
+                })
+                .context(
+                    "bead CLI not found (checked PATH, ~/.local/bin/bead, /usr/local/cargo/bin/bead)",
+                )?;
+            Ok((Backend::Bead, path))
+        }
+        "auto" | "" => {
+            // Auto mode: preserve TODAY's exact precedence
+            // bf → ~/.local/bin/bf → br → ~/.local/bin/br → bead → ~/.local/bin/bead → /usr/local/cargo/bin/bead
+
+            // Try bf first
+            if let Ok(path) = which::which("bf") {
+                return Ok((Backend::Bf, path));
+            }
+            let bf_local = PathBuf::from(format!("{home}/.local/bin/bf"));
+            if bf_local.exists() {
+                return Ok((Backend::Bf, bf_local));
+            }
+
+            // Then br
+            if let Ok(path) = which::which("br") {
+                return Ok((Backend::Br, path));
+            }
+            let br_local = PathBuf::from(format!("{home}/.local/bin/br"));
+            if br_local.exists() {
+                return Ok((Backend::Br, br_local));
+            }
+
+            // Then bead
+            if let Ok(path) = which::which("bead") {
+                return Ok((Backend::Bead, path));
+            }
+            let bead_local = PathBuf::from(format!("{home}/.local/bin/bead"));
+            if bead_local.exists() {
+                return Ok((Backend::Bead, bead_local));
+            }
+            let bead_cargo = PathBuf::from("/usr/local/cargo/bin/bead");
+            if bead_cargo.exists() {
+                return Ok((Backend::Bead, bead_cargo));
+            }
+
+            // Nothing found
+            bail!(
+                "no bead CLI found (tried: bf on PATH, {home}/.local/bin/bf, br on PATH, {home}/.local/bin/br, bead on PATH, {home}/.local/bin/bead, /usr/local/cargo/bin/bead)"
+            )
+        }
+        _ => bail!(
+            "invalid bead CLI backend: {} (must be: auto, bf, br, bead)",
+            config.backend
+        ),
+    }
+}
+
+/// Detect the backend type from a binary path.
+///
+/// Infers the backend from the filename: "bf" → Backend::Bf, "br" → Backend::Br,
+/// otherwise defaults to Backend::Bead.
+fn detect_backend_from_path(path: &Path) -> Result<Backend> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("invalid binary path: no filename"))?;
+
+    match file_name {
+        "bf" => Ok(Backend::Bf),
+        "br" => Ok(Backend::Br),
+        _ => Ok(Backend::Bead), // Default to Bead for unknown names
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_backend_from_path() {
+        assert_eq!(
+            detect_backend_from_path(PathBuf::from("/usr/bin/bf").as_path()).unwrap(),
+            Backend::Bf
+        );
+        assert_eq!(
+            detect_backend_from_path(PathBuf::from("/usr/bin/br").as_path()).unwrap(),
+            Backend::Br
+        );
+        assert_eq!(
+            detect_backend_from_path(PathBuf::from("/usr/bin/bead").as_path()).unwrap(),
+            Backend::Bead
+        );
+        assert_eq!(
+            detect_backend_from_path(PathBuf::from("/usr/bin/my-custom-bead").as_path()).unwrap(),
+            Backend::Bead
+        );
+    }
+
+    #[test]
+    fn test_detect_backend_from_path_no_filename() {
+        assert!(detect_backend_from_path(PathBuf::from("/").as_path()).is_err());
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_bf_backend() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let bf_bin = tmp_dir.path().join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_bin);
+
+        let config = BeadCliConfig {
+            backend: "bf".to_string(),
+            explicit_path: Some(bf_bin.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bf);
+        assert_eq!(path, bf_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_br_backend() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let br_bin = tmp_dir.path().join("br");
+        std::fs::write(&br_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&br_bin);
+
+        let config = BeadCliConfig {
+            backend: "br".to_string(),
+            explicit_path: Some(br_bin.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Br);
+        assert_eq!(path, br_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_bead_backend() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let bead_bin = tmp_dir.path().join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_bin);
+
+        let config = BeadCliConfig {
+            backend: "bead".to_string(),
+            explicit_path: Some(bead_bin.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_explicit_path_takes_precedence() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let custom_bin = tmp_dir.path().join("my-bead-cli");
+        std::fs::write(&custom_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&custom_bin);
+
+        let config = BeadCliConfig {
+            backend: "auto".to_string(),
+            explicit_path: Some(custom_bin.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead); // Detected from filename
+        assert_eq!(path, custom_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_explicit_path_nonexistent() {
+        let config = BeadCliConfig {
+            backend: "auto".to_string(),
+            explicit_path: Some(PathBuf::from("/nonexistent/binary")),
+        };
+
+        let result = resolve_bead_cli(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("explicit bead CLI path does not exist"));
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_precedence_bf_first() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create ~/.local/bin/bf
+        let bin_dir = home.join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bf_bin = bin_dir.join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_bin);
+
+        // Set HOME to tmp_dir
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: "auto".to_string(),
+            explicit_path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bf);
+        assert_eq!(path, bf_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_precedence_br_second() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create ~/.local/bin/br (no bf)
+        let bin_dir = home.join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let br_bin = bin_dir.join("br");
+        std::fs::write(&br_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&br_bin);
+
+        // Set HOME to tmp_dir
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: "auto".to_string(),
+            explicit_path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Br);
+        assert_eq!(path, br_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_precedence_bead_third() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create ~/.local/bin/bead (no bf or br)
+        let bin_dir = home.join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bead_bin = bin_dir.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_bin);
+
+        // Set HOME to tmp_dir
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: "auto".to_string(),
+            explicit_path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_no_binary_error() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Set HOME to empty tmp_dir (no binaries)
+        std::env::set_var("HOME", &home);
+
+        // Clear PATH to prevent finding system binaries
+        std::env::set_var("PATH", "");
+
+        let config = BeadCliConfig {
+            backend: "auto".to_string(),
+            explicit_path: None,
+        };
+
+        let result = resolve_bead_cli(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no bead CLI found"));
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_bf_backend_not_found() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Set HOME to empty tmp_dir (no bf binary)
+        std::env::set_var("HOME", &home);
+
+        // Clear PATH to prevent finding system binaries
+        std::env::set_var("PATH", "");
+
+        let config = BeadCliConfig {
+            backend: "bf".to_string(),
+            explicit_path: None,
+        };
+
+        let result = resolve_bead_cli(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bf CLI not found"));
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_invalid_backend() {
+        let config = BeadCliConfig {
+            backend: "invalid".to_string(),
+            explicit_path: None,
+        };
+
+        let result = resolve_bead_cli(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid bead CLI backend"));
+    }
+
+    /// Regression test: auto on bf-only host resolves exactly as today's hardcoded chain.
+    ///
+    /// This is the no-regression guard for every existing deployment.
+    /// Today's chain (src/bead_store/bf_cli.rs:71-80):
+    ///   which::which("bf").or_else(|_| { ~/.local/bin/bf })
+    ///
+    /// When auto mode is used on a host with only bf installed (no br, no bead),
+    /// it must resolve to the exact same path that the current hardcoded chain produces.
+    #[test]
+    fn test_regression_auto_bf_only_host_matches_hardcoded_chain() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Scenario 1: bf on PATH (today's common case)
+        {
+            let bin_dir = home.join("path-bin");
+            std::fs::create_dir_all(&bin_dir).unwrap();
+            let bf_bin = bin_dir.join("bf");
+            std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
+            make_executable(&bf_bin);
+
+            // Set PATH to include bf, HOME to tmp_dir
+            std::env::set_var("PATH", &bin_dir);
+            std::env::set_var("HOME", &home);
+
+            // Today's hardcoded chain result
+            let hardcoded_result = which::which("bf")
+                .or_else(|_| {
+                    let candidate = PathBuf::from(format!("{}/.local/bin/bf", home.display()));
+                    if candidate.exists() {
+                        Ok(candidate)
+                    } else {
+                        Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
+                    }
+                })
+                .unwrap();
+
+            // New auto mode result
+            let config = BeadCliConfig {
+                backend: "auto".to_string(),
+                explicit_path: None,
+            };
+            let (backend, auto_path) = resolve_bead_cli(&config).unwrap();
+
+            // Must match exactly
+            assert_eq!(backend, Backend::Bf);
+            assert_eq!(auto_path, hardcoded_result);
+        }
+
+        // Scenario 2: bf NOT on PATH, but at ~/.local/bin/bf
+        {
+            // Clear PATH
+            std::env::set_var("PATH", "");
+
+            // Create ~/.local/bin/bf
+            let local_bin = home.join(".local/bin");
+            std::fs::create_dir_all(&local_bin).unwrap();
+            let bf_local = local_bin.join("bf");
+            std::fs::write(&bf_local, "#!/bin/sh\necho test").unwrap();
+            make_executable(&bf_local);
+
+            std::env::set_var("HOME", &home);
+
+            // Today's hardcoded chain result
+            let hardcoded_result = which::which("bf")
+                .or_else(|_| {
+                    let candidate = PathBuf::from(format!("{}/.local/bin/bf", home.display()));
+                    if candidate.exists() {
+                        Ok(candidate)
+                    } else {
+                        Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
+                    }
+                })
+                .unwrap();
+
+            // New auto mode result
+            let config = BeadCliConfig {
+                backend: "auto".to_string(),
+                explicit_path: None,
+            };
+            let (backend, auto_path) = resolve_bead_cli(&config).unwrap();
+
+            // Must match exactly
+            assert_eq!(backend, Backend::Bf);
+            assert_eq!(auto_path, hardcoded_result);
+        }
+    }
+
+    /// Helper to make a file executable on Unix
+    fn make_executable(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            // No-op on non-Unix
+        }
+    }
 }
 
 /// Pluck strand configuration (primary bead selection).
@@ -2035,6 +2580,9 @@ pub struct Config {
     pub worker: WorkerConfig,
     #[serde(default)]
     pub workspace: WorkspaceConfig,
+    /// Bead CLI backend configuration.
+    #[serde(default)]
+    pub bead_cli: BeadCliConfig,
     #[serde(default)]
     pub strands: StrandsConfig,
     #[serde(default)]
@@ -2893,6 +3441,62 @@ fn expand_tilde(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Expand a leading tilde (~) in a string path to the HOME environment variable.
+///
+/// This is a string-based helper that returns a String, useful for string manipulation
+/// without PathBuf conversions. For Path-based operations, use the private
+/// `expand_tilde(path: &Path) -> PathBuf` function.
+///
+/// # Behavior
+///
+/// - `~/path` → `$HOME/path`
+/// - `~` → `$HOME`
+/// - `/absolute/path` → unchanged
+/// - `relative/path` → unchanged
+/// - `~user/path` → unchanged (only expands ~ for current user)
+///
+/// # Examples
+///
+/// ```rust
+/// use needle::config::expand_tilde_str;
+///
+/// std::env::set_var("HOME", "/home/user");
+/// assert_eq!(expand_tilde_str("~/docs"), "/home/user/docs");
+/// assert_eq!(expand_tilde_str("~"), "/home/user");
+/// assert_eq!(expand_tilde_str("/tmp"), "/tmp");
+/// assert_eq!(expand_tilde_str("relative"), "relative");
+///
+/// std::env::remove_var("HOME");
+/// assert_eq!(expand_tilde_str("~/docs"), "~/docs"); // HOME missing, unchanged
+/// ```
+///
+/// # Returns
+///
+/// * `Some(String)` - Expanded path or original if no tilde
+/// * Never panics - falls back to original path if HOME is unset
+pub fn expand_tilde_str(path: &str) -> String {
+    // Check if path is exactly ~
+    if path == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return home;
+        }
+        // HOME not set, return original
+        return path.to_string();
+    }
+
+    // Check if path starts with ~/
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{}/{}", home, rest);
+        }
+        // HOME not set, return original
+        return path.to_string();
+    }
+
+    // No tilde prefix, return unchanged
+    path.to_string()
+}
+
 /// Expand tildes in a vector of PathBufs.
 fn expand_tilde_vec(paths: &[PathBuf]) -> Vec<PathBuf> {
     paths.iter().map(|p| expand_tilde(p)).collect()
@@ -2904,11 +3508,11 @@ fn expand_tilde_option(path: &Option<PathBuf>) -> Option<PathBuf> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Tests
+// Config loading tests (separate from CLI detection tests)
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+mod config_tests {
     use super::*;
 
     static SUPERVISOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -2987,6 +3591,104 @@ mod tests {
         // Spot-check a few values
         assert_eq!(config.agent.default, decoded.agent.default);
         assert_eq!(config.worker.max_workers, decoded.worker.max_workers);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // expand_tilde_str tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn expand_tilde_str_with_tilde_slash() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~/docs");
+        assert_eq!(result, "/home/testuser/docs");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_bare_tilde() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~");
+        assert_eq!(result, "/home/testuser");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_absolute_path_unchanged() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("/tmp/file.txt");
+        assert_eq!(result, "/tmp/file.txt");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_relative_path_unchanged() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("relative/path");
+        assert_eq!(result, "relative/path");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_empty_string() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("");
+        assert_eq!(result, "");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_missing_home_returns_original() {
+        std::env::remove_var("HOME");
+        let result = expand_tilde_str("~/docs");
+        assert_eq!(result, "~/docs");
+    }
+
+    #[test]
+    fn expand_tilde_str_missing_home_bare_tilde() {
+        std::env::remove_var("HOME");
+        let result = expand_tilde_str("~");
+        assert_eq!(result, "~");
+    }
+
+    #[test]
+    fn expand_tilde_str_nested_path() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~/docs/notes/file.md");
+        assert_eq!(result, "/home/testuser/docs/notes/file.md");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_with_spaces() {
+        std::env::set_var("HOME", "/home/test user");
+        let result = expand_tilde_str("~/my docs");
+        assert_eq!(result, "/home/test user/my docs");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_tilde_in_middle_unchanged() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("/path/~user/docs");
+        assert_eq!(result, "/path/~user/docs");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_tilde_user_prefix_unchanged() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~otheruser/docs");
+        assert_eq!(result, "~otheruser/docs");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_no_panic_on_missing_home() {
+        std::env::remove_var("HOME");
+        // This should not panic
+        let result = expand_tilde_str("~/any/path");
+        assert_eq!(result, "~/any/path");
     }
 
     // ── Workspace config tests ──
