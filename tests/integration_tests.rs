@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -201,6 +202,7 @@ fn make_bead_with_id(id: &str) -> Bead {
         workspace: PathBuf::from("/tmp/test-workspace"),
         dependencies: vec![],
         dependents: vec![],
+        comments: vec![],
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -746,6 +748,7 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         workspace: std::path::PathBuf::from("/tmp"),
         dependencies: vec![],
         dependents: vec![],
+        comments: vec![],
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
@@ -2219,16 +2222,45 @@ async fn dead_worker_cleanup_integration() {
     // ProcessGuard ensures cleanup if test panics
     struct ProcessGuard(Option<std::process::Child>);
 
-    impl Drop for ProcessGuard {
-        fn drop(&mut self) {
-            if let Some(mut child) = self.0.take() {
-                let _ = child.kill();
-                let _ = child.wait();
+    impl ProcessGuard {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            if let Some(ref mut child) = self.0 {
+                child.try_wait()
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            if let Some(ref mut child) = self.0 {
+                child.kill()
+            } else {
+                Ok(())
+            }
+        }
+
+        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            if let Some(ref mut child) = self.0 {
+                child.wait()
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "No child process to wait for",
+                ))
             }
         }
     }
 
-    let _guard = ProcessGuard(Some(child));
+    impl Drop for ProcessGuard {
+        fn drop(&mut self) {
+            let _ = self.kill();
+            let _ = self.wait();
+            // Prevent double-wait by consuming the child after our methods handle it
+            let _ = self.0.take();
+        }
+    }
+
+    let mut guard = ProcessGuard(Some(child));
 
     // Wait with timeout
     let timeout_duration = Duration::from_secs(60);
@@ -2242,7 +2274,7 @@ async fn dead_worker_cleanup_integration() {
             );
         }
 
-        match child.try_wait() {
+        match guard.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => panic!("Failed to wait for worker process: {}", e),
@@ -2580,6 +2612,25 @@ fn heartbeat_cleanup_on_signal_integration() {
         fn pid(&self) -> u32 {
             self.pid
         }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            if let Some(ref mut child) = self.inner {
+                child.kill()
+            } else {
+                Ok(())
+            }
+        }
+
+        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            if let Some(ref mut child) = self.inner {
+                child.wait()
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "No child process to wait for",
+                ))
+            }
+        }
     }
 
     impl Drop for ProcessGuard {
@@ -2674,8 +2725,8 @@ fn heartbeat_cleanup_on_signal_integration() {
                     "Failed to send SIGTERM to worker {} (errno: {})",
                     worker_pid, errno
                 );
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = child_guard.kill();
+                let _ = child_guard.wait();
                 return;
             }
         }
@@ -2685,8 +2736,8 @@ fn heartbeat_cleanup_on_signal_integration() {
     {
         // On non-Unix platforms, just kill the process
         println!("Skipping signal test on non-Unix platform");
-        let _ = child.kill();
-        let _ = child.wait();
+        let _ = child_guard.kill();
+        let _ = child_guard.wait();
         return;
     }
 
@@ -3254,6 +3305,25 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
 
         fn pid(&self) -> u32 {
             self.pid
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            if let Some(ref mut child) = self.inner {
+                child.kill()
+            } else {
+                Ok(())
+            }
+        }
+
+        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            if let Some(ref mut child) = self.inner {
+                child.wait()
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "No child process to wait for",
+                ))
+            }
         }
     }
 
