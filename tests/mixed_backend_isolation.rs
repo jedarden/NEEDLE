@@ -137,6 +137,24 @@ fn each_workspace_invokes_only_its_explicit_backend() {
         assert_eq!(fs::read_to_string(&invocation_log).unwrap(), "");
     }
 
+    let missing_path = root.path().join("missing-explicit-path");
+    fs::create_dir_all(missing_path.join(".beads")).unwrap();
+    fs::write(
+        missing_path.join(".needle.yaml"),
+        format!(
+            "bead_cli:\n  backend: bead-rs\n  explicit_path: {}\n",
+            root.path().join("does-not-exist").display()
+        ),
+    )
+    .unwrap();
+    fs::write(&invocation_log, "").unwrap();
+    let output = run(Command::new(&needle)
+        .args(["doctor", "--workspace", missing_path.to_str().unwrap()])
+        .env("HOME", &home)
+        .env("PATH", &path));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("does not exist"));
+    assert_eq!(fs::read_to_string(&invocation_log).unwrap(), "");
+
     let mismatch = root.path().join("identity-mismatch");
     fs::create_dir_all(mismatch.join(".beads")).unwrap();
     fs::write(
