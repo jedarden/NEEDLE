@@ -18,6 +18,7 @@ mod backend;
 mod bead_cli;
 mod bf_cli;
 mod br_cli;
+mod cli_store;
 mod strategies;
 
 use std::collections::HashSet;
@@ -38,6 +39,7 @@ pub use backend::{
 pub use bead_cli::BeadCliBeadStore;
 pub use bf_cli::BfCliBeadStore;
 pub use br_cli::BrCliBeadStore;
+pub use cli_store::CliBeadStore;
 
 /// Open the bead store explicitly bound by the target workspace's resolved
 /// configuration. This is the production entry point: executable discovery
