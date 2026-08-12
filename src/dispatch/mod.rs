@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
+use crate::bead_store::spawn_with_etxtbsy_retry_child;
 use crate::config::Config;
 use crate::process_guard::ProcessGroupKillGuard;
 use crate::prompt::BuiltPrompt;
@@ -1009,21 +1010,45 @@ impl Dispatcher {
             inject_identity_env(identity, &self.tsnet_config, &mut child_env);
         }
 
-        // Safety: setpgid(0,0) is async-signal-safe and idempotent.
-        let mut child = unsafe {
-            tokio::process::Command::new("bash")
-                .arg("-c")
-                .arg(&rendered)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .envs(&child_env)
-                .pre_exec(|| {
-                    libc::setpgid(0, 0);
-                    Ok(())
-                })
-                .spawn()
-                .with_context(|| format!("failed to spawn agent: {}", adapter.name))?
-        };
+        // Spawn the agent process with ETXTBSY retry handling.
+        // This wrapper retries with backoff if the kernel returns ETXTBSY (errno 26),
+        // which can occur when a binary has been written to disk and immediately executed.
+        let rendered_clone = rendered.clone();
+        let child_env_clone = child_env.clone();
+        let adapter_name_clone = adapter.name.clone();
+        let mut child = spawn_with_etxtbsy_retry_child(
+            || {
+                let rendered = rendered_clone.clone();
+                let child_env = child_env_clone.clone();
+                let adapter_name = adapter_name_clone.clone();
+                async move {
+                    // Safety: setpgid(0,0) is async-signal-safe and idempotent.
+                    unsafe {
+                        tokio::process::Command::new("bash")
+                            .arg("-c")
+                            .arg(&rendered)
+                            .stdout(std::process::Stdio::piped())
+                            .stderr(std::process::Stdio::piped())
+                            .envs(&child_env)
+                            .pre_exec(|| {
+                                libc::setpgid(0, 0);
+                                Ok(())
+                            })
+                            .spawn()
+                    }
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("failed to spawn agent: {}: {}", adapter_name, e),
+                        )
+                    })
+                }
+            },
+            5,  // max_attempts
+            20, // backoff_ms
+        )
+        .await
+        .with_context(|| format!("failed to spawn agent: {}", adapter.name))?;
 
         let pid = child.id().unwrap_or(0);
         tracing::Span::current().record("needle.agent.pid", pid);
@@ -1081,19 +1106,42 @@ impl Dispatcher {
                 // subprocess IT forked (e.g. a `sleep` from a hung shell
                 // pipeline) alive and holding the stdout pipe open, which would
                 // wedge write_transform_log's EOF read forever.
-                match unsafe {
-                    tokio::process::Command::new("bash")
-                        .arg("-c")
-                        .arg(transform_cmd)
-                        .stdin(std::process::Stdio::piped())
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::inherit())
-                        .pre_exec(|| {
-                            libc::setpgid(0, 0);
-                            Ok(())
-                        })
-                        .spawn()
-                } {
+                //
+                // Spawn with ETXTBSY retry handling - the transform binary may
+                // have been recently written/installed and can transiently fail
+                // with "text file busy" (errno 26) on immediate execution.
+                let transform_cmd_clone = transform_cmd.clone();
+                match spawn_with_etxtbsy_retry_child(
+                    || {
+                        let transform_cmd = transform_cmd_clone.clone();
+                        async move {
+                            // Safety: setpgid(0,0) is async-signal-safe and idempotent.
+                            unsafe {
+                                tokio::process::Command::new("bash")
+                                    .arg("-c")
+                                    .arg(&transform_cmd)
+                                    .stdin(std::process::Stdio::piped())
+                                    .stdout(std::process::Stdio::piped())
+                                    .stderr(std::process::Stdio::inherit())
+                                    .pre_exec(|| {
+                                        libc::setpgid(0, 0);
+                                        Ok(())
+                                    })
+                                    .spawn()
+                            }
+                            .map_err(|e| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    format!("failed to spawn transform: {}", e),
+                                )
+                            })
+                        }
+                    },
+                    5,  // max_attempts
+                    20, // backoff_ms
+                )
+                .await
+                {
                     Ok(mut transform_child) => {
                         match transform_child.stdin.take() {
                             Some(transform_stdin) => {
