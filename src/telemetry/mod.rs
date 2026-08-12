@@ -1303,7 +1303,7 @@ impl EventKind {
             } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
-                    "reason": format!("{reason}"),
+                    "reason": format!("{reason:?}"),
                 })
             }
             EventKind::BuildTimeout {
@@ -3679,8 +3679,8 @@ impl Telemetry {
                         WriterMessage::Flush(reply) => {
                             for sink in &sinks {
                                 if let Err(e) = sink.flush(deadline) {
-                                    eprintln!("NEEDLE telemetry: sink flush failed: {}", e);
-                                    tracing::warn!(error = %e, "telemetry sink flush on demand failed");
+                                    eprintln!("NEEDLE telemetry: sink flush failed: {:#}", e);
+                                    tracing::warn!(error = ?e, "telemetry sink flush on demand failed");
                                 }
                             }
                             reply.send(()).ok();
@@ -3689,7 +3689,7 @@ impl Telemetry {
                 }
                 for sink in &sinks {
                     if let Err(e) = sink.flush(deadline) {
-                        tracing::warn!(error = %e, "telemetry sink flush failed");
+                        tracing::warn!(error = ?e, "telemetry sink flush failed");
                     }
                 }
             })
