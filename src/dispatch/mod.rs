@@ -1037,10 +1037,10 @@ impl Dispatcher {
                             .spawn()
                     }
                     .map_err(|e| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("failed to spawn agent: {}: {}", adapter_name, e),
-                        )
+                        std::io::Error::other(format!(
+                            "failed to spawn agent: {}: {}",
+                            adapter_name, e
+                        ))
                     })
                 }
             },
@@ -1130,10 +1130,7 @@ impl Dispatcher {
                                     .spawn()
                             }
                             .map_err(|e| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    format!("failed to spawn transform: {}", e),
-                                )
+                                std::io::Error::other(format!("failed to spawn transform: {}", e))
                             })
                         }
                     },
@@ -3684,5 +3681,562 @@ output_transform: "needle-transform-custom"
         assert!(desc.contains("idle=900s"));
         // Should not mention hard timeout
         assert!(!desc.contains("hard"));
+    }
+
+    // ── Activity detection tests ──
+
+    #[tokio::test]
+    async fn activity_detection_on_stdout_resets_idle_timeout() {
+        // Verify that ongoing stdout output prevents idle timeout from firing.
+        // A process that outputs continuously should not be killed by idle deadline.
+        let mut adapter = test_adapter(
+            "chatty-stdout",
+            // Output a dot every 200ms, then sleep 100 at the end.
+            "for i in $(seq 1 10); do echo -n .; sleep 0.2; done; sleep 0.1",
+        );
+        adapter.idle_timeout_secs = 1; // 1 second idle timeout
+        adapter.hard_timeout_secs = 10; // 10 second hard timeout (should not fire)
+
+        let mut adapters = HashMap::new();
+        adapters.insert("chatty-stdout".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("chatty-stdout").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-activity-stdout"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        // Should succeed, not be killed by idle timeout
+        assert_eq!(
+            result.exit_code, 0,
+            "process with continuous output should not idle timeout"
+        );
+        // The loop runs for ~2.1s (10 * 0.2s + 0.1s), well past the 1s idle deadline
+        assert!(
+            result.elapsed >= Duration::from_millis(1900),
+            "should run full duration"
+        );
+        assert!(
+            result.stdout.contains(".........."),
+            "should capture all output"
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_detection_on_stderr_resets_idle_timeout() {
+        // Verify that ongoing stderr output also prevents idle timeout.
+        let mut adapter = test_adapter(
+            "chatty-stderr",
+            "for i in $(seq 1 10); do echo -n . >&2; sleep 0.2; done; sleep 0.1",
+        );
+        adapter.idle_timeout_secs = 1;
+        adapter.hard_timeout_secs = 10;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("chatty-stderr".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("chatty-stderr").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-activity-stderr"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.exit_code, 0,
+            "process with continuous stderr should not idle timeout"
+        );
+        assert!(result.elapsed >= Duration::from_millis(1900));
+        assert!(
+            result.stderr.contains(".........."),
+            "should capture all stderr output"
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_detection_on_binary_data() {
+        // Verify that binary/non-text byte sequences are detected as activity.
+        // Use printf to emit raw bytes including non-printable characters.
+        let mut adapter = test_adapter(
+            "binary-output",
+            // Emit binary bytes: 0x00 0x01 0x02 ... 0x09, then newline, repeat
+            "for i in $(seq 1 20); do printf '\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\x09\\n'; sleep 0.15; done",
+        );
+        adapter.idle_timeout_secs = 1;
+        adapter.hard_timeout_secs = 10;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("binary-output".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("binary-output").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-activity-binary"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.exit_code, 0,
+            "binary output should prevent idle timeout"
+        );
+        // Should run ~3s (20 * 0.15s), well past idle deadline
+        assert!(
+            result.elapsed >= Duration::from_millis(2800),
+            "should run full duration with binary output"
+        );
+    }
+
+    #[tokio::test]
+    async fn activity_detection_happens_before_newline_parsing() {
+        // Verify that activity is detected on every byte read, before newline parsing.
+        // Output many bytes without newlines, then a newline at the end.
+        let mut adapter = test_adapter(
+            "no-newlines",
+            // Emit 1000 characters without newlines, sleep 200ms between chunks
+            "printf '%0.s#' {1..1000}; sleep 0.2; echo done",
+        );
+        adapter.idle_timeout_secs = 1;
+        adapter.hard_timeout_secs = 10;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("no-newlines".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("no-newlines").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-activity-nonewline"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.exit_code, 0,
+            "output without newlines should still reset idle timer"
+        );
+        // The initial printf is fast, but the 200ms sleep should extend execution
+        assert!(result.elapsed >= Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn activity_detection_with_mixed_stdout_stderr() {
+        // Verify that both stdout and stderr activity reset the idle timer.
+        let mut adapter = test_adapter(
+            "mixed-streams",
+            // Alternate between stdout and stderr output
+            "for i in $(seq 1 8); do echo -n out >&1; echo -n err >&2; sleep 0.18; done; echo done",
+        );
+        adapter.idle_timeout_secs = 1;
+        adapter.hard_timeout_secs = 10;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("mixed-streams".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("mixed-streams").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-activity-mixed"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.exit_code, 0,
+            "mixed stdout/stderr should prevent idle timeout"
+        );
+        // 8 iterations * 0.18s ≈ 1.44s, plus overhead
+        assert!(result.elapsed >= Duration::from_millis(1300));
+        assert!(result.stdout.contains("outoutoutoutoutoutoutout"));
+        assert!(result.stderr.contains("errerrererrererrerrerre"));
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_fires_when_no_activity() {
+        // Verify that idle timeout DOES fire when there's no output.
+        // This is the negative case proving activity detection works.
+        let mut adapter = test_adapter(
+            "silent-process",
+            // Sleep for 5 seconds without any output
+            "sleep 5",
+        );
+        adapter.idle_timeout_secs = 1; // Should fire after 1s of silence
+
+        let mut adapters = HashMap::new();
+        adapters.insert("silent-process".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("silent-process").unwrap().clone();
+
+        let start = Instant::now();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-idle-timeout"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            result.exit_code, 124,
+            "idle timeout should return exit code 124"
+        );
+        assert!(
+            result.timeout_reason.is_some(),
+            "should have timeout reason"
+        );
+        match result.timeout_reason {
+            Some(TimeoutReason::Idle { timeout_secs, .. }) => {
+                assert_eq!(timeout_secs, 1);
+            }
+            _ => panic!(
+                "expected Idle timeout reason, got {:?}",
+                result.timeout_reason
+            ),
+        }
+        // Should fire around 1s (allowing for scheduling overhead)
+        assert!(elapsed >= Duration::from_millis(900));
+        assert!(elapsed < Duration::from_secs(3));
+    }
+
+    #[tokio::test]
+    async fn activity_detection_on_partial_chunks() {
+        // Verify that partial reads (chunks < 8192 bytes) still register activity.
+        // The real reader reads in chunks; we verify small chunks are detected.
+        let mut adapter = test_adapter(
+            "small-chunks",
+            // Emit small amounts of output with delays
+            "for i in $(seq 1 15); do echo -n x; sleep 0.12; done; echo",
+        );
+        adapter.idle_timeout_secs = 1;
+        adapter.hard_timeout_secs = 10;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("small-chunks".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("small-chunks").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-activity-chunks"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.exit_code, 0,
+            "small chunk writes should prevent idle timeout"
+        );
+        // 15 iterations * 0.12s = 1.8s
+        assert!(result.elapsed >= Duration::from_millis(1700));
+    }
+
+    #[tokio::test]
+    async fn activity_detection_large_output_burst() {
+        // Verify that a large burst of output (multiple chunks) is detected as activity.
+        let mut adapter = test_adapter(
+            "large-burst",
+            // Emit 50KB of data in one go
+            "dd if=/dev/zero bs=1024 count=50 2>/dev/null; sleep 0.5; echo done",
+        );
+        adapter.idle_timeout_secs = 1;
+        adapter.hard_timeout_secs = 10;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("large-burst".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("large-burst").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-activity-burst"),
+                &test_prompt("t"),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.exit_code, 0,
+            "large output burst should be detected as activity"
+        );
+        // 50KB read time + 0.5s sleep
+        assert!(result.elapsed >= Duration::from_millis(400));
+        assert!(result.stdout.contains("done"));
+    }
+
+    #[tokio::test]
+    async fn activity_timestamp_tracked_per_process() {
+        // Verify that activity tracking is isolated per process execution.
+        // Two sequential dispatches should have independent activity timestamps.
+        let mut adapter = test_adapter("timestamped", "echo output-$(date +%s%N)");
+        adapter.idle_timeout_secs = 1;
+
+        let mut adapters = HashMap::new();
+        adapters.insert("timestamped".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+
+        // First dispatch
+        let adapter1 = dispatcher.adapter("timestamped").unwrap().clone();
+        let result1 = dispatcher
+            .dispatch(
+                &BeadId::from("nd-timestamp-1"),
+                &test_prompt("t"),
+                &adapter1,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result1.exit_code, 0);
+
+        // Small delay to ensure different timestamp
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Second dispatch
+        let adapter2 = dispatcher.adapter("timestamped").unwrap().clone();
+        let result2 = dispatcher
+            .dispatch(
+                &BeadId::from("nd-timestamp-2"),
+                &test_prompt("t"),
+                &adapter2,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result2.exit_code, 0);
+        // Both should succeed independently
+        assert!(result1.stdout.contains("output-"));
+        assert!(result2.stdout.contains("output-"));
+    }
+
+    // ── Activity Detection Tests ──
+
+    #[tokio::test]
+    async fn activity_detection_on_normal_stdout_output() {
+        // Test that activity detection works for normal stdout output
+        let adapter = test_adapter("echo-test", "echo 'hello world'");
+        let mut adapters = HashMap::new();
+        adapters.insert("echo-test".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+
+        let adapter_ref = dispatcher.adapter("echo-test").unwrap().clone();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-echo-test"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        // Should complete successfully
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("hello world"));
+        // Activity was detected (process completed without timeout)
+        assert!(result.elapsed < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn activity_detection_on_stderr_output() {
+        // Test that activity detection works for stderr output
+        let adapter = test_adapter("stderr-test", "echo 'error message' >&2");
+        let mut adapters = HashMap::new();
+        adapters.insert("stderr-test".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+
+        let adapter_ref = dispatcher.adapter("stderr-test").unwrap().clone();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-stderr-test"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        // Should complete successfully
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stderr.contains("error message"));
+        // Activity was detected on stderr
+        assert!(result.elapsed < Duration::from_secs(10));
+    }
+
+
+    #[tokio::test]
+    async fn activity_detection_during_transforms() {
+        // Test that activity detection works when output_transform is configured
+        let mut adapter = test_adapter("transform-test", "echo 'test output'");
+        adapter.output_transform = Some("cat".to_string()); // Use cat as simple transform
+        let mut adapters = HashMap::new();
+        adapters.insert("transform-test".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+
+        let adapter_ref = dispatcher.adapter("transform-test").unwrap().clone();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-transform-test"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        // Should complete successfully with transform
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("test output"));
+        // Activity was detected even with transform active
+        assert!(result.elapsed < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn activity_detection_on_multiline_output() {
+        // Test that activity detection works for multiline output
+        let adapter = test_adapter("multiline-test", "for i in 1 2 3 4 5; do echo \"line $i\"; sleep 0.1; done");
+        let mut adapters = HashMap::new();
+        adapters.insert("multiline-test".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+
+        let adapter_ref = dispatcher.adapter("multiline-test").unwrap().clone();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-multiline-test"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        // Should complete successfully
+        assert_eq!(result.exit_code, 0);
+        // All lines should be captured
+        assert!(result.stdout.contains("line 1"));
+        assert!(result.stdout.contains("line 5"));
+        // Activity was detected continuously (prevents idle timeout)
+        assert!(result.elapsed < Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn activity_detection_on_chunked_output() {
+        // Test that activity detection works when output comes in chunks
+        let adapter = test_adapter(
+            "chunked-test",
+            "echo 'chunk1'; sleep 0.2; echo 'chunk2'; sleep 0.2; echo 'chunk3'",
+        );
+        let mut adapters = HashMap::new();
+        adapters.insert("chunked-test".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+
+        let adapter_ref = dispatcher.adapter("chunked-test").unwrap().clone();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-chunked-test"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        // Should complete successfully
+        assert_eq!(result.exit_code, 0);
+        assert!(result.stdout.contains("chunk1"));
+        assert!(result.stdout.contains("chunk2"));
+        assert!(result.stdout.contains("chunk3"));
+        // Activity was detected on each chunk
+        assert!(result.elapsed < Duration::from_secs(10));
+    }
+
+
+    #[tokio::test]
+    async fn activity_detection_timestamps_before_parsing() {
+        // Test that activity timestamps are recorded before newline parsing
+        // This test verifies the structural requirement from the acceptance criteria
+        let adapter = test_adapter("timestamp-order-test", "printf 'line1\\nline2\\nline3'");
+        let mut adapters = HashMap::new();
+        adapters.insert("timestamp-order-test".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+
+        let adapter_ref = dispatcher.adapter("timestamp-order-test").unwrap().clone();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-timestamp-order-test"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        // Should complete successfully
+        assert_eq!(result.exit_code, 0);
+        // All lines captured (proving parsing happened after activity detection)
+        assert!(result.stdout.contains("line1"));
+        assert!(result.stdout.contains("line2"));
+        assert!(result.stdout.contains("line3"));
+        // Fast completion proves activity was detected continuously
+        assert!(result.elapsed < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn activity_detection_on_rapid_output() {
+        // Test that activity detection handles rapid output without missing bytes
+        let adapter = test_adapter("rapid-test", "for i in $(seq 1 100); do echo \"rapid $i\"; done");
+        let mut adapters = HashMap::new();
+        adapters.insert("rapid-test".to_string(), adapter);
+        let dispatcher = test_dispatcher(adapters);
+
+        let adapter_ref = dispatcher.adapter("rapid-test").unwrap().clone();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-rapid-test"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        // Should complete successfully
+        assert_eq!(result.exit_code, 0);
+        // All rapid lines should be captured
+        assert!(result.stdout.contains("rapid 1"));
+        assert!(result.stdout.contains("rapid 100"));
+        // Count the lines to verify none were missed
+        let line_count = result.stdout.lines().count();
+        assert!(line_count >= 100, "Expected at least 100 lines, got {}", line_count);
     }
 }

@@ -11,15 +11,12 @@
 //! 4. Timeout-triggered mitosis policy configuration
 //! 5. Edge cases (boundary values, conflicting overrides)
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
 use needle::config::{
-    AgentConfig, Config, MendConfig, SelfModificationConfig, TimeoutTriggeredPolicy,
-    ValidationConfig, WorkerConfig,
+    AgentConfig, Config, MendConfig, SelfModificationConfig, ValidationConfig, WorkerConfig,
 };
-use serde_yaml;
 use tempfile::TempDir;
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -27,6 +24,7 @@ use tempfile::TempDir;
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Create a temp dir for test config files.
+#[allow(dead_code)]
 fn test_temp_dir() -> Result<TempDir> {
     tempfile::tempdir_in("/tmp").map_err(Into::into)
 }
