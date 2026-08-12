@@ -703,7 +703,18 @@ pub fn execute_labels_strategy(strategy: LabelsStrategy, labels: &[&str]) -> Vec
             if labels.is_empty() {
                 vec![]
             } else {
-                vec!["--labels".to_string(), labels.join(",")]
+                let encoded = labels
+                    .iter()
+                    .map(|label| {
+                        if label.contains(',') || label.contains('"') || label.trim() != *label {
+                            format!("\"{}\"", label.replace('"', "\"\""))
+                        } else {
+                            (*label).to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                vec!["--labels".to_string(), encoded]
             }
         }
         LabelsStrategy::Repeated => labels
@@ -713,12 +724,90 @@ pub fn execute_labels_strategy(strategy: LabelsStrategy, labels: &[&str]) -> Vec
     }
 }
 
+/// Parse descriptor label values according to the selected input strategy.
+///
+/// CSV follows the conventional doubled-quote escaping rule. Empty fields and
+/// whitespace-only repeated occurrences are ignored so descriptors cannot
+/// accidentally create an empty label.
+pub fn parse_labels_strategy(
+    strategy: LabelsStrategy,
+    values: &[&str],
+) -> anyhow::Result<Vec<String>> {
+    match strategy {
+        LabelsStrategy::Repeated => Ok(values
+            .iter()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()),
+        LabelsStrategy::Csv => {
+            let mut labels = Vec::new();
+            for value in values {
+                let mut field = String::new();
+                let mut chars = value.chars().peekable();
+                let mut in_quotes = false;
+                let mut quoted_field = false;
+                let mut after_quote = false;
+                while let Some(character) = chars.next() {
+                    match character {
+                        '"' if in_quotes && chars.peek() == Some(&'"') => {
+                            chars.next();
+                            field.push('"');
+                        }
+                        '"' if in_quotes => {
+                            in_quotes = false;
+                            after_quote = true;
+                        }
+                        '"' if field.trim().is_empty() => {
+                            field.clear();
+                            in_quotes = true;
+                            quoted_field = true;
+                        }
+                        '"' => anyhow::bail!("unexpected quote in CSV label value {value:?}"),
+                        ',' if !in_quotes => {
+                            let label = if quoted_field {
+                                field.as_str()
+                            } else {
+                                field.trim()
+                            };
+                            if !label.is_empty() {
+                                labels.push(label.to_string());
+                            }
+                            field.clear();
+                            quoted_field = false;
+                            after_quote = false;
+                        }
+                        whitespace if after_quote && whitespace.is_whitespace() => {}
+                        _ if after_quote => {
+                            anyhow::bail!("unexpected content after quoted CSV label in {value:?}")
+                        }
+                        other => field.push(other),
+                    }
+                }
+                if in_quotes {
+                    anyhow::bail!("unterminated quoted label in CSV value {value:?}");
+                }
+                let label = if quoted_field {
+                    field.as_str()
+                } else {
+                    field.trim()
+                };
+                if !label.is_empty() {
+                    labels.push(label.to_string());
+                }
+            }
+            Ok(labels)
+        }
+    }
+}
+
 /// Format import command arguments using the specified strategy.
 ///
 /// # Arguments
 ///
 /// * `strategy` - Which import strategy to use
-/// * `input_file` - Optional input file path
+/// * `input_file` - Input file or checkpoint directory path
+/// * `mode` - Mode flag (for example `--restore-into-empty`) when required
 ///
 /// # Returns
 ///
@@ -728,7 +817,7 @@ pub fn execute_labels_strategy(strategy: LabelsStrategy, labels: &[&str]) -> Vec
 ///
 /// ## Bare
 ///
-/// The `sync --import-only` command takes no additional flags.
+/// The input path is passed as the sole strategy-specific argument.
 ///
 /// Example: `["sync", "--import-only"]`
 ///
@@ -736,21 +825,25 @@ pub fn execute_labels_strategy(strategy: LabelsStrategy, labels: &[&str]) -> Vec
 ///
 /// The import command requires an input file and a mode flag specifying how to merge.
 ///
-/// Example: `["sync", "--import-only", "--input", "backup.jsonl", "--restore-into-empty"]`
-#[allow(dead_code)]
-pub fn execute_import_strategy(strategy: ImportStrategy, input_file: Option<&str>) -> Vec<String> {
+/// Example: `["--input", "backup.jsonl", "--restore-into-empty"]`
+pub fn execute_import_strategy(
+    strategy: ImportStrategy,
+    input_file: &Path,
+    mode: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
+    let input = input_file.to_string_lossy().into_owned();
     match strategy {
-        ImportStrategy::Bare => {
-            vec!["--import-only".to_string()]
-        }
+        ImportStrategy::Bare => Ok(vec![input]),
         ImportStrategy::InputPlusMode => {
-            let mut args = vec!["--import-only".to_string()];
-            if let Some(file) = input_file {
-                args.push("--input".to_string());
-                args.push(file.to_string());
-                args.push("--restore-into-empty".to_string());
-            }
-            args
+            let mode = mode.ok_or_else(|| {
+                anyhow::anyhow!("input_plus_mode import strategy requires a mode")
+            })?;
+            let mode = if mode.starts_with("--") {
+                mode.to_string()
+            } else {
+                format!("--mode={mode}")
+            };
+            Ok(vec!["--input".to_string(), input, mode])
         }
     }
 }
@@ -1304,13 +1397,13 @@ mod tests {
 
     #[test]
     fn bare_import_documents_formatting_contract() {
-        // Bare import strategy uses no additional flags.
+        // Bare import strategy passes the input path directly.
         //
         // The contract:
-        // 1. Only --import-only is added to the command.
-        // 2. No input file or mode flags are added.
+        // 1. The input path is the only strategy-specific argument.
+        // 2. No mode flag is added.
         //
-        // Example: `["sync", "--import-only"]`
+        // Example: `["backup.jsonl"]`
 
         let strategy = ImportStrategy::Bare;
         assert!(
@@ -1319,12 +1412,8 @@ mod tests {
         );
 
         // Test the formatting function
-        let args = execute_import_strategy(strategy, None);
-        assert_eq!(args, vec!["--import-only"]);
-
-        // Input file is ignored for bare strategy
-        let args = execute_import_strategy(strategy, Some("backup.jsonl"));
-        assert_eq!(args, vec!["--import-only"]);
+        let args = execute_import_strategy(strategy, Path::new("backup.jsonl"), None).unwrap();
+        assert_eq!(args, vec!["backup.jsonl"]);
     }
 
     #[test]
@@ -1336,7 +1425,7 @@ mod tests {
         // 2. Requires a mode flag (--restore-into-empty or --merge).
         // 3. This implementation uses --restore-into-empty by default.
         //
-        // Example: `["sync", "--import-only", "--input", "backup.jsonl", "--restore-into-empty"]`
+        // Example: `["--input", "backup.jsonl", "--restore-into-empty"]`
 
         let strategy = ImportStrategy::InputPlusMode;
         assert!(
@@ -1345,20 +1434,19 @@ mod tests {
         );
 
         // Test the formatting function with input file
-        let args = execute_import_strategy(strategy, Some("backup.jsonl"));
+        let args = execute_import_strategy(
+            strategy,
+            Path::new("backup.jsonl"),
+            Some("--restore-into-empty"),
+        )
+        .unwrap();
         assert_eq!(
             args,
-            vec![
-                "--import-only",
-                "--input",
-                "backup.jsonl",
-                "--restore-into-empty"
-            ]
+            vec!["--input", "backup.jsonl", "--restore-into-empty"]
         );
 
-        // No input file produces incomplete args (caller's responsibility)
-        let args = execute_import_strategy(strategy, None);
-        assert_eq!(args, vec!["--import-only"]);
+        let result = execute_import_strategy(strategy, Path::new("backup.jsonl"), None);
+        assert!(result.is_err());
     }
 
     // ──────────────────────────────────────────────────────────────────────────

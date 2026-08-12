@@ -176,7 +176,8 @@ pub fn discover_default(
 // Re-export operation strategies for backend descriptors
 pub use strategies::{
     execute_claim_auto_strategy, execute_claim_strategy, execute_create_id_strategy,
-    execute_split_strategy, validate_strategy_name, ClaimAutoStrategy, ClaimStrategy,
+    execute_import_strategy, execute_labels_strategy, execute_split_strategy,
+    parse_labels_strategy, validate_strategy_name, ClaimAutoStrategy, ClaimStrategy,
     ClaimStrategyOperations, CompareAndSetOutcome, CreateIdStrategy, ImportStrategy,
     LabelsStrategy, OperationStrategy, ParsedStrategy, SequentialSplitError, SplitStrategy,
     SplitStrategyOperations,
