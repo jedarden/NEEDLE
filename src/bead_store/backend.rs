@@ -496,7 +496,7 @@ fn builtin_bead_forge() -> BeadBackend {
         operation(
             &["ready", "--json", "--limit", "{limit}"],
             None,
-            Some(ParseShape::JsonArray),
+            Some(ParseShape::JsonLines),
         ),
     );
     operations.insert(
@@ -504,7 +504,7 @@ fn builtin_bead_forge() -> BeadBackend {
         operation(
             &["list", "--json", "--limit", "{limit}"],
             None,
-            Some(ParseShape::JsonArray),
+            Some(ParseShape::JsonLines),
         ),
     );
     operations.insert(

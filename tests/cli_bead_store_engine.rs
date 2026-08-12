@@ -105,6 +105,24 @@ fn missing_required_runtime_value_fails_before_process_execution() {
     assert!(!root.path().join("invocations.log").exists());
 }
 
+#[test]
+#[cfg(unix)]
+fn bead_forge_list_shape_matches_installed_json_lines_contract() {
+    let root = tempfile::tempdir().unwrap();
+    let record = |id: &str| {
+        format!(
+            r#"{{"id":"{id}","title":"fixture","description":"","priority":2,"status":"open","assignee":null,"labels":[],"source_repo":".","dependencies":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}}"#
+        )
+    };
+    let output = format!("{}\n{}\n", record("bf-a"), record("bf-b"));
+    let beads = store(root.path(), "bead-forge")
+        .parse_beads("list_all", &output)
+        .unwrap();
+    assert_eq!(beads.len(), 2);
+    assert_eq!(beads[0].id, BeadId::from("bf-a"));
+    assert_eq!(beads[1].id, BeadId::from("bf-b"));
+}
+
 #[tokio::test]
 #[cfg(unix)]
 async fn explicit_bead_rs_claim_uses_revision_guard() {
