@@ -12,6 +12,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use async_trait::async_trait;
+
+use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
+
 /// Common metadata exposed by every operation strategy.
 ///
 /// Execution remains operation-specific, but descriptors and diagnostics need
@@ -299,6 +303,49 @@ pub fn validate_strategy_name(
 // Strategy execution functions
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Result of one backend compare-and-set mutation.
+#[derive(Debug, Clone)]
+pub enum CompareAndSetOutcome {
+    /// The conditional mutation succeeded and returned the claimed bead.
+    Claimed(Bead),
+    /// The version changed while the issue was still claimable; reread and retry.
+    VersionChanged,
+    /// Another actor won the claim race.
+    RaceLost { claimed_by: String },
+    /// The issue cannot currently be claimed for a non-race reason.
+    NotClaimable { reason: String },
+}
+
+/// Backend primitives required by the claim strategy engine.
+///
+/// A descriptor-driven store implements these primitives using rendered argv.
+/// The strategy engine owns sequencing and retry semantics so those rules are
+/// not reimplemented independently for every CLI dialect.
+#[async_trait]
+pub trait ClaimStrategyOperations: Send + Sync {
+    /// Read one issue, including its current version (`updated_at`).
+    async fn show_for_claim(&self, bead_id: &BeadId) -> anyhow::Result<Bead>;
+
+    /// Conditionally claim only if `expected_version` still matches.
+    async fn compare_and_set_claim(
+        &self,
+        bead_id: &BeadId,
+        actor: &str,
+        expected_version: &str,
+    ) -> anyhow::Result<CompareAndSetOutcome>;
+
+    /// Claim one explicit issue in a single backend transaction.
+    async fn batch_claim(&self, bead_id: &BeadId, actor: &str) -> anyhow::Result<ClaimResult>;
+
+    /// Atomically select and claim the next ready issue.
+    async fn atomic_claim_auto(&self, actor: &str) -> anyhow::Result<ClaimResult>;
+
+    /// Read the ordered ready frontier without claiming it.
+    async fn ready_for_claim(&self) -> anyhow::Result<Vec<Bead>>;
+}
+
+const MAX_COMPARE_AND_SET_ATTEMPTS: usize = 3;
+
 /// Execute a claim operation using the specified strategy.
 ///
 /// This function implements each claim strategy variant exactly once. Callers
@@ -307,11 +354,8 @@ pub fn validate_strategy_name(
 /// # Arguments
 ///
 /// * `strategy` - Which claim strategy to use
-/// * `binary_path` - Path to the bead CLI binary
-/// * `workspace` - Workspace directory containing `.beads/`
 /// * `bead_id` - The bead to claim
 /// * `actor` - The actor claiming the bead
-/// * `argv_template` - Optional argv template for the operation
 ///
 /// # Returns
 ///
@@ -341,37 +385,55 @@ pub fn validate_strategy_name(
 ///
 /// Used by bead-forge's `bf batch` which runs multiple operations in a single
 /// `BEGIN IMMEDIATE` transaction.
-#[allow(dead_code)]
 pub async fn execute_claim_strategy(
+    operations: &dyn ClaimStrategyOperations,
     strategy: ClaimStrategy,
-    _binary_path: &std::path::Path,
-    _workspace: &std::path::Path,
-    _bead_id: &str,
-    _actor: &str,
-    _argv_template: Option<&[&str]>,
-) -> crate::types::ClaimResult {
-    use crate::types::ClaimResult;
-
+    bead_id: &BeadId,
+    actor: &str,
+) -> anyhow::Result<ClaimResult> {
     match strategy {
         ClaimStrategy::CompareAndSet => {
-            // Read current state, verify assignee is unset, then update.
-            // This implementation MUST be atomic at the backend level for correctness.
+            for _ in 0..MAX_COMPARE_AND_SET_ATTEMPTS {
+                let bead = operations.show_for_claim(bead_id).await?;
+                if bead.status != BeadStatus::Open {
+                    return Ok(ClaimResult::NotClaimable {
+                        reason: format!("bead is {}, not open", bead.status),
+                    });
+                }
+                if let Some(claimed_by) = bead.assignee {
+                    return Ok(ClaimResult::RaceLost { claimed_by });
+                }
 
-            // For now, return a placeholder - the actual implementation will be in CliBeadStore
-            // This function documents the contract and race semantics
-            ClaimResult::NotClaimable {
-                reason: "CompareAndSet execution not yet implemented".to_string(),
+                let expected_version = bead.updated_at.to_rfc3339();
+                match operations
+                    .compare_and_set_claim(bead_id, actor, &expected_version)
+                    .await?
+                {
+                    CompareAndSetOutcome::Claimed(bead) => {
+                        return Ok(ClaimResult::Claimed(bead));
+                    }
+                    CompareAndSetOutcome::VersionChanged => continue,
+                    CompareAndSetOutcome::RaceLost { claimed_by } => {
+                        return Ok(ClaimResult::RaceLost { claimed_by });
+                    }
+                    CompareAndSetOutcome::NotClaimable { reason } => {
+                        return Ok(ClaimResult::NotClaimable { reason });
+                    }
+                }
+            }
+
+            let latest = operations.show_for_claim(bead_id).await?;
+            if let Some(claimed_by) = latest.assignee {
+                Ok(ClaimResult::RaceLost { claimed_by })
+            } else {
+                Ok(ClaimResult::ClaimError {
+                    reason: format!(
+                        "bead version changed during all {MAX_COMPARE_AND_SET_ATTEMPTS} compare-and-set attempts"
+                    ),
+                })
             }
         }
-        ClaimStrategy::BatchOp => {
-            // Single atomic batch operation.
-            // No race - backend guarantees atomicity.
-
-            // Placeholder - will be implemented in CliBeadStore
-            ClaimResult::NotClaimable {
-                reason: "BatchOp execution not yet implemented".to_string(),
-            }
-        }
+        ClaimStrategy::BatchOp => operations.batch_claim(bead_id, actor).await,
     }
 }
 
@@ -380,8 +442,6 @@ pub async fn execute_claim_strategy(
 /// # Arguments
 ///
 /// * `strategy` - Which claim_auto strategy to use
-/// * `binary_path` - Path to the bead CLI binary
-/// * `workspace` - Workspace directory containing `.beads/`
 /// * `actor` - The actor claiming beads
 ///
 /// # Returns
@@ -413,31 +473,32 @@ pub async fn execute_claim_strategy(
 /// attempt to claim it. One wins; the other MUST retry, not assume success.
 ///
 /// Example: `br ready --json --limit 1` → parse → `br update {id} --assignee worker`
-#[allow(dead_code)]
 pub async fn execute_claim_auto_strategy(
+    operations: &dyn ClaimStrategyOperations,
     strategy: ClaimAutoStrategy,
-    _binary_path: &std::path::Path,
-    _workspace: &std::path::Path,
-    _actor: &str,
-) -> crate::types::ClaimResult {
-    use crate::types::ClaimResult;
-
+    explicit_claim_strategy: ClaimStrategy,
+    actor: &str,
+) -> anyhow::Result<ClaimResult> {
     match strategy {
-        ClaimAutoStrategy::AtomicSubcommand => {
-            // Single atomic subcommand: backend handles scanning and claiming.
-            // No race between scan and claim.
-
-            ClaimResult::NotClaimable {
-                reason: "AtomicSubcommand execution not yet implemented".to_string(),
-            }
-        }
+        ClaimAutoStrategy::AtomicSubcommand => operations.atomic_claim_auto(actor).await,
         ClaimAutoStrategy::NonAtomicScan => {
-            // Non-atomic scan loop: list ready beads, then claim the first.
-            // REAL TOCTOU window between ready() and update().
-
-            ClaimResult::NotClaimable {
-                reason: "NonAtomicScan execution not yet implemented".to_string(),
+            // The read and mutation are intentionally separate. Every candidate
+            // can disappear in this TOCTOU window, so a race-lost result advances
+            // to the next candidate instead of dispatching duplicate work.
+            for bead in operations.ready_for_claim().await? {
+                match execute_claim_strategy(operations, explicit_claim_strategy, &bead.id, actor)
+                    .await?
+                {
+                    claimed @ ClaimResult::Claimed(_) => return Ok(claimed),
+                    ClaimResult::RaceLost { .. } | ClaimResult::NotClaimable { .. } => continue,
+                    error @ ClaimResult::ClaimError { .. }
+                    | error @ ClaimResult::Suspect { .. } => return Ok(error),
+                }
             }
+
+            Ok(ClaimResult::NotClaimable {
+                reason: "no claimable beads remained after ready scan".to_string(),
+            })
         }
     }
 }
