@@ -5615,6 +5615,7 @@ mod tests {
             trace_format: TraceFormat::ClaudeJson,
             pruned: false,
             template_version: None,
+            timeout_reason: None,
         };
         let metadata_path = trace_dir.join("metadata.json");
         std::fs::write(
@@ -5687,6 +5688,7 @@ mod tests {
             trace_format: TraceFormat::ClaudeJson,
             pruned: false,
             template_version: None,
+            timeout_reason: None,
         };
         let metadata_path = trace_dir.join("metadata.json");
         std::fs::write(
@@ -5763,6 +5765,7 @@ mod tests {
             trace_format: TraceFormat::ClaudeJson,
             pruned: false,
             template_version: None,
+            timeout_reason: None,
         };
         let metadata_path = trace_dir.join("metadata.json");
         std::fs::write(
@@ -5829,6 +5832,7 @@ mod tests {
             trace_format: TraceFormat::ClaudeJson,
             pruned: false,
             template_version: None,
+            timeout_reason: None,
         };
         std::fs::write(
             failed_trace_dir.join("metadata.json"),
@@ -5856,6 +5860,7 @@ mod tests {
             trace_format: TraceFormat::ClaudeJson,
             pruned: false,
             template_version: None,
+            timeout_reason: None,
         };
         std::fs::write(
             success_trace_dir.join("metadata.json"),

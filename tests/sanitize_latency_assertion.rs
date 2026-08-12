@@ -271,7 +271,10 @@ fn sanitize_comprehensive_metrics_10kb() {
     let throughput_bytes_per_sec = (SIZE_10KB as f64 / median_ms) * 1000.0;
     let throughput_mb_per_sec = throughput_bytes_per_sec / (1024.0 * 1024.0);
 
-    eprintln!("Comprehensive metrics test (10KB trace, {} iterations):", latencies.len());
+    eprintln!(
+        "Comprehensive metrics test (10KB trace, {} iterations):",
+        latencies.len()
+    );
     eprintln!("  Latency:");
     eprintln!("    Min:     {:.2} ms", min_ms);
     eprintln!("    Median:  {:.2} ms", median_ms);
@@ -283,9 +286,15 @@ fn sanitize_comprehensive_metrics_10kb() {
     eprintln!("  Skip rate: {}", skip_stats.format());
 
     // Validate skip rate is measured
-    assert!(skip_stats.total_checks > 0, "Should have performed rule checks");
-    assert!(skip_stats.skip_rate >= 0.0 && skip_stats.skip_rate <= 1.0,
-        "Skip rate should be between 0.0 and 1.0, got {}", skip_stats.skip_rate);
+    assert!(
+        skip_stats.total_checks > 0,
+        "Should have performed rule checks"
+    );
+    assert!(
+        skip_stats.skip_rate >= 0.0 && skip_stats.skip_rate <= 1.0,
+        "Skip rate should be between 0.0 and 1.0, got {}",
+        skip_stats.skip_rate
+    );
 }
 
 /// Comprehensive metrics test for 100KB traces.
@@ -314,7 +323,10 @@ fn sanitize_comprehensive_metrics_100kb() {
     let throughput_bytes_per_sec = (SIZE_100KB as f64 / median_ms) * 1000.0;
     let throughput_mb_per_sec = throughput_bytes_per_sec / (1024.0 * 1024.0);
 
-    eprintln!("Comprehensive metrics test (100KB trace, {} iterations):", latencies.len());
+    eprintln!(
+        "Comprehensive metrics test (100KB trace, {} iterations):",
+        latencies.len()
+    );
     eprintln!("  Latency:");
     eprintln!("    Min:     {:.2} ms", min_ms);
     eprintln!("    Median:  {:.2} ms", median_ms);
@@ -326,9 +338,15 @@ fn sanitize_comprehensive_metrics_100kb() {
     eprintln!("  Skip rate: {}", skip_stats.format());
 
     // Validate skip rate is measured
-    assert!(skip_stats.total_checks > 0, "Should have performed rule checks");
-    assert!(skip_stats.skip_rate >= 0.0 && skip_stats.skip_rate <= 1.0,
-        "Skip rate should be between 0.0 and 1.0, got {}", skip_stats.skip_rate);
+    assert!(
+        skip_stats.total_checks > 0,
+        "Should have performed rule checks"
+    );
+    assert!(
+        skip_stats.skip_rate >= 0.0 && skip_stats.skip_rate <= 1.0,
+        "Skip rate should be between 0.0 and 1.0, got {}",
+        skip_stats.skip_rate
+    );
 }
 
 /// Comprehensive metrics test for 1MB traces.
@@ -357,7 +375,10 @@ fn sanitize_comprehensive_metrics_1mb() {
     let throughput_bytes_per_sec = (SIZE_1MB as f64 / median_ms) * 1000.0;
     let throughput_mb_per_sec = throughput_bytes_per_sec / (1024.0 * 1024.0);
 
-    eprintln!("Comprehensive metrics test (1MB trace, {} iterations):", latencies.len());
+    eprintln!(
+        "Comprehensive metrics test (1MB trace, {} iterations):",
+        latencies.len()
+    );
     eprintln!("  Latency:");
     eprintln!("    Min:     {:.2} ms", min_ms);
     eprintln!("    Median:  {:.2} ms", median_ms);
@@ -369,9 +390,15 @@ fn sanitize_comprehensive_metrics_1mb() {
     eprintln!("  Skip rate: {}", skip_stats.format());
 
     // Validate skip rate is measured
-    assert!(skip_stats.total_checks > 0, "Should have performed rule checks");
-    assert!(skip_stats.skip_rate >= 0.0 && skip_stats.skip_rate <= 1.0,
-        "Skip rate should be between 0.0 and 1.0, got {}", skip_stats.skip_rate);
+    assert!(
+        skip_stats.total_checks > 0,
+        "Should have performed rule checks"
+    );
+    assert!(
+        skip_stats.skip_rate >= 0.0 && skip_stats.skip_rate <= 1.0,
+        "Skip rate should be between 0.0 and 1.0, got {}",
+        skip_stats.skip_rate
+    );
 }
 
 /// Test that the environment variable parsing works correctly.

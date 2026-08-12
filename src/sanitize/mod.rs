@@ -872,10 +872,7 @@ mod tests {
         let stats = s.measure_skip_stats(text);
 
         // Should have performed some checks
-        assert!(
-            stats.total_checks > 0,
-            "Should perform rule checks"
-        );
+        assert!(stats.total_checks > 0, "Should perform rule checks");
 
         // Skip rate should be between 0 and 1
         assert!(
@@ -953,7 +950,11 @@ mod tests {
         }
 
         // All metrics should be stored successfully
-        assert_eq!(metrics.len(), 3, "Should collect metrics for all trace sizes");
+        assert_eq!(
+            metrics.len(),
+            3,
+            "Should collect metrics for all trace sizes"
+        );
     }
 
     #[test]
@@ -987,13 +988,7 @@ mod tests {
         eprintln!("Combined metrics: {}", metrics);
 
         // Verify values are reasonable
-        assert!(
-            skip_stats.total_checks > 0,
-            "Should perform rule checks"
-        );
-        assert!(
-            latency_ms >= 0,
-            "Latency should be non-negative"
-        );
+        assert!(skip_stats.total_checks > 0, "Should perform rule checks");
+        assert!(latency_ms >= 0, "Latency should be non-negative");
     }
 }

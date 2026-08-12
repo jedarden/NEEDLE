@@ -1297,10 +1297,7 @@ impl EventKind {
                     "rules_tried": rules_tried,
                 })
             }
-            EventKind::AgentTimeout {
-                bead_id,
-                reason,
-            } => {
+            EventKind::AgentTimeout { bead_id, reason } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
                     "reason": format!("{reason:?}"),

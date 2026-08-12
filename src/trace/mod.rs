@@ -726,6 +726,7 @@ mod tests {
             trace_format: TraceFormat::ClaudeJson,
             pruned: false,
             template_version: Some("abc123".to_string()),
+            timeout_reason: None,
         };
         capture.write_metadata(&metadata).unwrap();
 
@@ -802,6 +803,7 @@ mod tests {
             trace_format: TraceFormat::RawText,
             pruned: false,
             template_version: None,
+            timeout_reason: None,
         };
         capture.write_metadata(&metadata).unwrap();
 
@@ -868,6 +870,7 @@ mod tests {
             trace_format: TraceFormat::ClaudeJson,
             pruned: false,
             template_version: Some("deadbeef".to_string()),
+            timeout_reason: None,
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
@@ -913,6 +916,7 @@ mod tests {
             trace_format: TraceFormat::RawText,
             pruned: false,
             template_version: None,
+            timeout_reason: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -960,6 +964,7 @@ mod tests {
             trace_format: TraceFormat::RawText,
             pruned: false,
             template_version: None,
+            timeout_reason: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1015,6 +1020,7 @@ mod tests {
             trace_format: TraceFormat::RawText,
             pruned: false,
             template_version: None,
+            timeout_reason: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(

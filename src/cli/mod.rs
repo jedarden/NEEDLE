@@ -17,7 +17,9 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::bead_store::{BeadStore, BfCliBeadStore, BrCliBeadStore, spawn_with_etxtbsy_retry_sync_child};
+use crate::bead_store::{
+    spawn_with_etxtbsy_retry_sync_child, BeadStore, BfCliBeadStore, BrCliBeadStore,
+};
 use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
@@ -1193,8 +1195,8 @@ fn launch_in_tmux(
                 .args(["new-session", "-d", "-s", session_name, &inner_cmd])
                 .spawn()
         },
-        5,   // max_attempts: retry up to 5 times
-        20,  // backoff_ms: wait 20ms between retries
+        5,  // max_attempts: retry up to 5 times
+        20, // backoff_ms: wait 20ms between retries
     )
     .context("failed to launch tmux — is tmux installed?")?;
 

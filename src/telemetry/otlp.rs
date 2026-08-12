@@ -881,9 +881,8 @@ impl OtlpSink {
         // Confirmed live 2026-08-12 (bf-6a617): reqwest::Error { kind: Status(404,
         // None), url: ".../4318/" }, and NEEDLE's own OTLP telemetry has never
         // once reached the dashboard as a result.
-        let http_signal_endpoint = |path: &str| {
-            format!("{}{}", config.endpoint.trim_end_matches('/'), path)
-        };
+        let http_signal_endpoint =
+            |path: &str| format!("{}{}", config.endpoint.trim_end_matches('/'), path);
 
         // Build span exporter, then wrap for resilience
         let base_span_exporter = SpanExporter::builder()

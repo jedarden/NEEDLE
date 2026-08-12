@@ -3694,6 +3694,14 @@ mod config_tests {
         assert_eq!(result, "~/any/path");
     }
 
+    #[test]
+    fn expand_tilde_str_tilde_slash_only() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~/");
+        assert_eq!(result, "/home/testuser");
+        std::env::remove_var("HOME");
+    }
+
     // ── Workspace config tests ──
 
     #[test]
@@ -6268,7 +6276,10 @@ agent:
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/config/needle/file.yaml"));
         std::env::remove_var("HOME");
-        assert_eq!(result, PathBuf::from("/home/testuser/config/needle/file.yaml"));
+        assert_eq!(
+            result,
+            PathBuf::from("/home/testuser/config/needle/file.yaml")
+        );
     }
 
     #[test]
@@ -6338,7 +6349,7 @@ agent:
     fn test_expand_tilde_vec_empty() {
         let input: Vec<PathBuf> = vec![];
         let result = expand_tilde_vec(&input);
-        assert_eq!(result, vec![]);
+        assert_eq!(result, Vec::<PathBuf>::new());
     }
 
     #[test]
@@ -6415,10 +6426,8 @@ agent:
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.strands.explore.workspace_root = PathBuf::from("~/workspaces");
-        config.strands.explore.workspaces = vec![
-            PathBuf::from("~/project1"),
-            PathBuf::from("~/project2"),
-        ];
+        config.strands.explore.workspaces =
+            vec![PathBuf::from("~/project1"), PathBuf::from("~/project2")];
         config.strands.weave.exclude_workspaces = vec![PathBuf::from("~/private")];
         config.strands.splice.report_workspace = Some(PathBuf::from("~/reports"));
 
@@ -6492,7 +6501,10 @@ agent:
             PathBuf::from("/home/testuser/workspace")
         );
         assert_eq!(config.workspace.home, PathBuf::from("/absolute/needle"));
-        assert_eq!(config.agent.adapters_dir, PathBuf::from("relative/adapters"));
+        assert_eq!(
+            config.agent.adapters_dir,
+            PathBuf::from("relative/adapters")
+        );
     }
 
     #[test]
