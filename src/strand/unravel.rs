@@ -744,6 +744,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: dt,
             updated_at: dt,
         }

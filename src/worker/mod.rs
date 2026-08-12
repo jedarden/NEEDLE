@@ -5274,6 +5274,7 @@ mod tests {
             workspace: std::path::PathBuf::from("."),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

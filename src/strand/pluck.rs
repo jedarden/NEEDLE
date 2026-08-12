@@ -924,6 +924,7 @@ mod tests {
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: Utc.from_utc_datetime(&dt),
             updated_at: Utc.from_utc_datetime(&dt),
         }

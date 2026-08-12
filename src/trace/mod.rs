@@ -1074,6 +1074,7 @@ mod tests {
             trace_format: TraceFormat::RawText,
             pruned: true, // Already pruned
             template_version: None,
+            timeout_reason: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1127,6 +1128,7 @@ mod tests {
             trace_format: TraceFormat::RawText,
             pruned: false, // Not yet pruned
             template_version: None,
+            timeout_reason: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1189,6 +1191,7 @@ mod tests {
             trace_format: TraceFormat::RawText,
             pruned: false, // NOT marked as pruned (partial state)
             template_version: None,
+            timeout_reason: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
