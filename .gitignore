@@ -15,3 +15,9 @@ target/criterion/
 
 # Marathon session logs (large, machine-local)
 .marathon/logs/
+
+# bf rotating checkpoint history (machine-local churn, never a shared artifact).
+# Tracking it produced ~20 deletions + ~20 additions of pure noise per rotation
+# cycle and permanently dirtied this shared checkout. The authoritative store is
+# .beads/beads.db; the shared checkpoint is .beads/issues.jsonl.
+.beads/.bf_history/
