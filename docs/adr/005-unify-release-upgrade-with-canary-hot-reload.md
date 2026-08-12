@@ -1,6 +1,6 @@
 # ADR-005: Unify the GitHub-Release Upgrade Path with the Canary-Gated Hot-Reload Channel
 
-**Status:** Proposed — 2026-07-20
+**Status:** Accepted — 2026-08-12 (proposed 2026-07-20; see Addendum for acceptance re-verification)
 **Deciders:** operator (jedarden), via Claude Code (fleet-wide deployed-artifact improvement review)
 **Tracking:** plan.md Phase 9; implementation beads in this repo's workspace, labeled `artifact-improvement`
 
@@ -65,3 +65,57 @@ The fleet runs `worker.max_workers: 10` per host across at least two hosts (ex44
 - `.needle.yaml` (this repo's live, self-hosted config): `self_modification: { enabled: false, auto_promote: false, hot_reload: true, ... }` — confirms the propagation half is armed (`hot_reload: true`) but the trigger half is not.
 - Live version check, 2026-07-20, ex44 host: `needle --version` → `needle 0.2.11`; GitHub API `releases/latest` → `v0.2.12`, `published_at: 2026-07-20T12:49:30Z` (same day).
 - `needle status` / `needle list` / `ps aux | grep needle` at time of audit: zero live NEEDLE-prefixed processes on ex44 (fleet activity elsewhere) — confirms the gap is structural (no path reacts to a new release), not merely "a worker happened to not check yet."
+
+## Addendum (2026-08-12): acceptance re-verification — the drift direction inverted
+
+Re-probed at acceptance, twenty-three days after the decision was drafted. The
+problem this ADR exists to solve is still real, but it now points the other way,
+and that changes one implementation detail materially.
+
+**Then (2026-07-20, ex44):** installed `needle 0.2.11`, latest GitHub release
+`v0.2.12`. The host lagged the release by one.
+
+**Now (2026-08-12, ex44):** installed `needle 0.2.19`, latest GitHub release
+`v0.2.16`. The host is **three releases ahead of anything published.**
+
+So the failure mode is no longer "nobody ran `needle upgrade`" — it is that the
+release pipeline stopped tracking what the fleet actually runs. Both are the same
+underlying gap this ADR names (no automatic reconciliation between the release
+channel and the installed artifact), and neither existing path notices either
+direction.
+
+**Design constraint this imposes, which the Decision as written does not state:**
+`check_for_update()` must compare **strictly greater**, never merely different.
+With today's state a "versions differ, fetch latest" implementation would
+*downgrade* the fleet from 0.2.19 to 0.2.16 on the first poll, and — because the
+Decision routes releases through `:testing` where `check_hot_reload()` will pick
+them up — it would do so automatically, on every host, at the next canary
+promotion. A downgrade is indistinguishable from an upgrade to every mechanism
+downstream of the version comparison, so the comparison is the only place it can
+be prevented. `supervisor.auto_upgrade_check` must also refuse to act when the
+installed version is unknown or unparseable rather than treating that as "older".
+
+**Other state confirmed at acceptance:**
+
+- `supervisor.auto_upgrade_check` and `supervisor.update_check_interval_secs` do
+  not exist in `src/` — this ADR remains entirely unimplemented.
+- `.needle.yaml` still has `self_modification.enabled: false` and
+  `auto_promote: false`, exactly as the Context describes, so the canary gate is
+  still inert.
+- **`hot_reload: true` is set and the channel is live**, which the Context did not
+  state. `~/.needle/bin/needle-stable` exists, so `check_hot_reload()` runs its
+  hash comparison on every worker cycle rather than short-circuiting on a missing
+  `:stable`. It is currently quiescent only because the running binary and
+  `needle-stable` are byte-identical (both `sha256:9ce8450c…`, 0.2.19). The
+  re-exec path is therefore already load-bearing in production, and anything that
+  writes `needle-stable` takes effect fleet-wide without a canary today.
+- Promotion has been happening by hand, which is the strongest evidence for the
+  decision: `~/.needle/bin/` holds `needle-stable.prev`,
+  `needle-stable.pre-0.2.14-backup`, and `needle-stable.pre-assignee-fix.bak` —
+  three hand-named rollback points from three manual interventions.
+
+**Sequencing note.** ADR-013 (accepted the same day) makes Phase 16 authorized
+work, and its staged-rollout item changes the claim path for every backend
+including NEEDLE's own coordination substrate. This ADR is the mechanism that
+makes that rollout survivable — canary-validate the artifact before it becomes
+`:stable` — so the two should land in that order rather than in parallel.
