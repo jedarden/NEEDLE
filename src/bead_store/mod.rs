@@ -14,6 +14,7 @@
 //!
 //! Depends on: `types`.
 
+mod backend;
 mod bead_cli;
 mod bf_cli;
 mod br_cli;
@@ -30,6 +31,10 @@ use async_trait::async_trait;
 use crate::types::{Bead, BeadId, ClaimResult};
 
 // Re-export the implementations so consumers don't need to change their imports
+pub use backend::{
+    builtin_bead_backends, load_bead_backends, BeadBackend, BeadBackendCapabilities,
+    BeadBackendErrorMarkers, BeadBackendQuirk, BeadOperationSpec, ParseShape,
+};
 pub use bead_cli::BeadCliBeadStore;
 pub use bf_cli::BfCliBeadStore;
 pub use br_cli::BrCliBeadStore;
