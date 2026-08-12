@@ -3393,24 +3393,28 @@ fn doctor_check_bead_store(
     if !beads_dir.is_dir() {
         return Ok(CheckResult::pass("Bead store", "skipped (no .beads/)"));
     }
-    // Worker dispatch prefers `bf` (atomic server-selected claiming) but
-    // falls back to `br` for older installs, so check for either — a
-    // machine with only one of the two on PATH should not FAIL here.
-    let store: Box<dyn BeadStore> =
-        match BfCliBeadStore::discover(workspace.to_path_buf(), None, None, None) {
-            Ok(s) => Box::new(s),
-            Err(bf_err) => {
-                match BrCliBeadStore::discover(workspace.to_path_buf(), None, None, None) {
-                    Ok(s) => Box::new(s),
-                    Err(br_err) => {
-                        return Ok(CheckResult::fail(
-                            "Bead store",
-                            format!("no bead store CLI found (bf: {bf_err}; br: {br_err})"),
-                        ))
-                    }
-                }
-            }
-        };
+    // Worker dispatch prefers `bf` (atomic server-selected claiming), falls
+    // back to `br` for older installs, then to bead-rs's `bead` — a machine
+    // with only one of the three on PATH should not FAIL here.
+    let bf_err = match BfCliBeadStore::discover(workspace.to_path_buf(), None, None, None) {
+        Ok(s) => return doctor_run_bead_store_checks(Box::new(s), repair),
+        Err(e) => e,
+    };
+    let br_err = match BrCliBeadStore::discover(workspace.to_path_buf(), None, None, None) {
+        Ok(s) => return doctor_run_bead_store_checks(Box::new(s), repair),
+        Err(e) => e,
+    };
+    let bead_err = match crate::bead_store::BeadCliBeadStore::discover(workspace.to_path_buf()) {
+        Ok(s) => return doctor_run_bead_store_checks(Box::new(s), repair),
+        Err(e) => e,
+    };
+    Ok(CheckResult::fail(
+        "Bead store",
+        format!("no bead store CLI found (bf: {bf_err}; br: {br_err}; bead: {bead_err})"),
+    ))
+}
+
+fn doctor_run_bead_store_checks(store: Box<dyn BeadStore>, repair: bool) -> Result<CheckResult> {
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     if repair {
         match rt.block_on(store.doctor_repair()) {

@@ -24,7 +24,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::bead_store::{BeadStore, BrCliBeadStore};
+use crate::bead_store::{discover_default, BeadStore};
 use crate::config::SpliceConfig;
 use crate::telemetry::Telemetry;
 use crate::types::{BeadId, StrandResult};
@@ -744,7 +744,7 @@ impl SpliceStrand {
         }
 
         // Instantiate bead store for the report workspace.
-        let store = BrCliBeadStore::discover(
+        let store = discover_default(
             report_workspace.clone(),
             None,
             Some("needle".to_string()),
@@ -836,7 +836,7 @@ impl SpliceStrand {
         }
 
         // Instantiate bead store for the report workspace.
-        let store = BrCliBeadStore::discover(
+        let store = discover_default(
             report_workspace.clone(),
             None,
             Some("needle".to_string()),
@@ -996,7 +996,7 @@ impl SpliceStrand {
             let beads_dir = workspace_path.join(".beads");
             if workspace_path.exists() && beads_dir.exists() {
                 // Instantiate bead store for the original workspace
-                if let Ok(original_store) = BrCliBeadStore::discover(
+                if let Ok(original_store) = discover_default(
                     workspace_path.clone(),
                     None,
                     Some("needle".to_string()),

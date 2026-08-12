@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use crate::bead_store::{BeadStore, BrCliBeadStore, Filters};
+use crate::bead_store::{discover_default, BeadStore, Filters};
 use crate::config::ExploreConfig;
 use crate::registry::Registry;
 use crate::telemetry::Telemetry;
@@ -55,25 +55,25 @@ use crate::types::{BeadId, StrandResult};
 
 /// Factory for creating bead stores for workspaces.
 ///
-/// In production, this creates real BrCliBeadStore instances.
+/// In production, this creates real bead store instances via `discover_default`.
 /// In tests, this can be mocked to return controlled test stores.
 #[async_trait::async_trait]
 trait StoreFactory: Send + Sync {
     async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error>;
 }
 
-/// Default factory that creates real BrCliBeadStore instances.
+/// Default factory that creates real bead store instances (bf -> br -> bead).
 struct DefaultStoreFactory;
 
 #[async_trait::async_trait]
 impl StoreFactory for DefaultStoreFactory {
     async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
-        Ok(Arc::new(BrCliBeadStore::discover(
+        discover_default(
             workspace.to_path_buf(),
             None,
             Some("needle".to_string()),
             Some(env!("CARGO_PKG_VERSION").to_string()),
-        )?))
+        )
     }
 }
 
@@ -444,15 +444,15 @@ impl ExploreStrand {
         rotated
     }
 
-    /// Create a BrCliBeadStore for a given workspace path.
+    /// Create a bead store (bf -> br -> bead) for a given workspace path.
     #[allow(dead_code)]
     async fn store_for_workspace(workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
-        Ok(Arc::new(BrCliBeadStore::discover(
+        discover_default(
             workspace.to_path_buf(),
             None,
             Some("needle".to_string()),
             Some(env!("CARGO_PKG_VERSION").to_string()),
-        )?))
+        )
     }
 
     /// Create a BrCliBeadStore for a given workspace path.

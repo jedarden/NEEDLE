@@ -408,13 +408,21 @@ pub enum ClaimOutcome {
 // BrDependency
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// A bead dependency as returned from the `br` JSON output.
+/// A bead dependency as returned from the `br`/`bf` JSON output, or from
+/// bead-rs's `bead` (`{"blocker": "<id>", "kind": "blocks"}` — a lean
+/// edge-only shape with no enriched title/status/priority). The aliases
+/// below accept both without changing how bf/br JSON deserializes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrDependency {
+    #[serde(alias = "blocker")]
     pub id: BeadId,
+    #[serde(default)]
     pub title: String,
+    #[serde(default)]
     pub status: String,
+    #[serde(default)]
     pub priority: Priority,
+    #[serde(rename = "dependency_type", alias = "kind", default)]
     pub dependency_type: String,
 }
 

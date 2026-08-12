@@ -7,21 +7,22 @@
 //!
 //! The trait is `Send + Sync` because it is called from async worker tasks.
 //!
-//! The module provides two implementations:
+//! The module provides three implementations:
 //! - `BrCliBeadStore` - Legacy `br` CLI-backed store (in `br_cli.rs`)
 //! - `BfCliBeadStore` - `bf` CLI-backed store with atomic claiming (in `bf_cli.rs`)
+//! - `BeadCliBeadStore` - `bead` (bead-rs) CLI-backed store (in `bead_cli.rs`)
 //!
 //! Depends on: `types`.
 
+mod bead_cli;
 mod bf_cli;
 mod br_cli;
 mod strategies;
 
 use std::collections::HashSet;
 use std::path::Path;
-
-#[cfg(test)]
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -29,8 +30,41 @@ use async_trait::async_trait;
 use crate::types::{Bead, BeadId, ClaimResult};
 
 // Re-export the implementations so consumers don't need to change their imports
+pub use bead_cli::BeadCliBeadStore;
 pub use bf_cli::BfCliBeadStore;
 pub use br_cli::BrCliBeadStore;
+
+/// Discover the best available bead store backend for `workspace`, trying
+/// `bf` -> `br` -> `bead` in that order — the same precedence documented in
+/// `config::resolve_bead_cli`'s "auto" backend. All three speak a mutually
+/// distinct CLI dialect (see each module's doc comment), so this returns a
+/// type-erased `Arc<dyn BeadStore>` rather than a concrete struct.
+///
+/// This does not change behavior for any host that already has `bf` or `br`
+/// installed (100% of hosts as of 2026-08-12) — it only adds a new fallback
+/// for a workspace that has `bead` and neither of the other two.
+pub fn discover_default(
+    workspace: PathBuf,
+    model: Option<String>,
+    harness: Option<String>,
+    harness_version: Option<String>,
+) -> Result<Arc<dyn BeadStore>> {
+    if let Ok(store) = BfCliBeadStore::discover(
+        workspace.clone(),
+        model.clone(),
+        harness.clone(),
+        harness_version.clone(),
+    ) {
+        return Ok(Arc::new(store));
+    }
+    if let Ok(store) = BrCliBeadStore::discover(workspace.clone(), model, harness, harness_version)
+    {
+        return Ok(Arc::new(store));
+    }
+    let store = BeadCliBeadStore::discover(workspace)
+        .context("no bead store CLI found (tried bf, br, bead)")?;
+    Ok(Arc::new(store))
+}
 
 // Re-export operation strategies for backend descriptors
 pub use strategies::{

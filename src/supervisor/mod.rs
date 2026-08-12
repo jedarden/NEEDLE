@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
-use crate::bead_store::{BeadStore, BrCliBeadStore, Filters};
+use crate::bead_store::{discover_default, BeadStore, Filters};
 use crate::config::{CliOverrides, Config, ConfigLoader};
 use crate::registry::{is_pid_alive, Registry};
 use crate::telemetry::{EventKind, Telemetry};
@@ -210,15 +210,13 @@ impl Supervisor {
         );
 
         // Initialize bead store
-        let store: Arc<dyn BeadStore> = Arc::new(
-            BrCliBeadStore::discover(
-                config.workspace.clone(),
-                None,
-                Some("needle".to_string()),
-                Some(env!("CARGO_PKG_VERSION").to_string()),
-            )
-            .context("failed to initialize bead store for supervisor")?,
-        );
+        let store: Arc<dyn BeadStore> = discover_default(
+            config.workspace.clone(),
+            None,
+            Some("needle".to_string()),
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+        )
+        .context("failed to initialize bead store for supervisor")?;
 
         // Initialize registry
         let registry = Registry::default_location(&needle_config.workspace.home);
