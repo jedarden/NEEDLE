@@ -200,6 +200,7 @@ fn make_test_bead(id: &str) -> Bead {
         workspace: PathBuf::from("/test/workspace"),
         dependencies: Vec::new(),
         dependents: Vec::new(),
+        comments: Vec::new(),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }

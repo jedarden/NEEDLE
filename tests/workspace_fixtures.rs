@@ -103,6 +103,7 @@ impl MockCandidate {
             workspace: self.workspace.clone(),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
