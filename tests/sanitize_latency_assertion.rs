@@ -32,8 +32,10 @@
 use needle::sanitize::Sanitizer;
 use needle::stats::{calculate_median, calculate_p95, calculate_p99};
 
-/// Trace size for the latency assertion test (100KB).
+/// Trace size variants for comprehensive latency testing.
+const SIZE_10KB: usize = 10 * 1024;
 const SIZE_100KB: usize = 100 * 1024;
+const SIZE_1MB: usize = 1024 * 1024;
 
 /// Default number of samples for latency measurement.
 const DEFAULT_SAMPLE_COUNT: usize = 50;
@@ -118,14 +120,14 @@ fn generate_trace_content(target_bytes: usize) -> String {
     result
 }
 
-/// Measures and returns median latency for sanitizing a 100KB trace.
+/// Measures and returns comprehensive metrics for sanitizing traces.
 ///
 /// # Returns
 ///
-/// A tuple of (latencies in microseconds, median latency in microseconds)
-fn measure_median_latency_100kb() -> (Vec<u128>, u128) {
+/// A tuple of (latencies in microseconds, median latency in microseconds, skip stats)
+fn measure_comprehensive_metrics(size: usize) -> (Vec<u128>, u128, needle::sanitize::SkipStats) {
     let sanitizer = Sanitizer::new(&[]).expect("failed to build sanitizer");
-    let content = generate_trace_content(SIZE_100KB);
+    let content = generate_trace_content(size);
     let sample_count = std::env::var("SANITIZER_BENCH_SAMPLE_COUNT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -148,6 +150,19 @@ fn measure_median_latency_100kb() -> (Vec<u128>, u128) {
     latencies.sort();
     let median = calculate_median(&latencies);
 
+    // Measure skip stats once (representative of the workload)
+    let skip_stats = sanitizer.measure_skip_stats(&content);
+
+    (latencies, median, skip_stats)
+}
+
+/// Measures and returns median latency for sanitizing a 100KB trace.
+///
+/// # Returns
+///
+/// A tuple of (latencies in microseconds, median latency in microseconds)
+fn measure_median_latency_100kb() -> (Vec<u128>, u128) {
+    let (latencies, median, _) = measure_comprehensive_metrics(SIZE_100KB);
     (latencies, median)
 }
 
@@ -160,7 +175,7 @@ fn measure_median_latency_100kb() -> (Vec<u128>, u128) {
 /// rules.
 #[test]
 fn sanitize_latency_below_threshold() {
-    let (latencies, median_us) = measure_median_latency_100kb();
+    let (latencies, median_us, skip_stats) = measure_comprehensive_metrics(SIZE_100KB);
     let threshold_ms = {
         let _guard = ENV_VAR_LOCK.lock().unwrap();
         latency_threshold_ms()
@@ -182,16 +197,23 @@ fn sanitize_latency_below_threshold() {
     let min_ms = min_us as f64 / 1000.0;
     let max_ms = max_us as f64 / 1000.0;
 
+    // Calculate throughput
+    let throughput_bytes_per_sec = (SIZE_100KB as f64 / median_ms) * 1000.0;
+    let throughput_mb_per_sec = throughput_bytes_per_sec / (1024.0 * 1024.0);
+
     eprintln!(
         "Sanitizer latency assertion test (100KB trace, {} iterations):",
         latencies.len()
     );
-    eprintln!("  Min:     {:.2} ms", min_ms);
-    eprintln!("  Median:  {:.2} ms", median_ms);
-    eprintln!("  Avg:     {:.2} ms", avg_ms);
-    eprintln!("  P95:     {:.2} ms", p95_ms);
-    eprintln!("  P99:     {:.2} ms", p99_ms);
-    eprintln!("  Max:     {:.2} ms", max_ms);
+    eprintln!("  Latency:");
+    eprintln!("    Min:     {:.2} ms", min_ms);
+    eprintln!("    Median:  {:.2} ms", median_ms);
+    eprintln!("    Avg:     {:.2} ms", avg_ms);
+    eprintln!("    P95:     {:.2} ms", p95_ms);
+    eprintln!("    P99:     {:.2} ms", p99_ms);
+    eprintln!("    Max:     {:.2} ms", max_ms);
+    eprintln!("  Throughput: {:.2} MB/s", throughput_mb_per_sec);
+    eprintln!("  Skip rate: {}", skip_stats.format());
     eprintln!("  Threshold: {} ms", threshold_ms);
 
     assert!(
@@ -205,8 +227,14 @@ fn sanitize_latency_below_threshold() {
 /// Test that the trace generator produces the correct size.
 #[test]
 fn generator_produces_correct_size() {
-    let content = generate_trace_content(SIZE_100KB);
-    assert_eq!(content.len(), SIZE_100KB);
+    let content_10kb = generate_trace_content(SIZE_10KB);
+    assert_eq!(content_10kb.len(), SIZE_10KB);
+
+    let content_100kb = generate_trace_content(SIZE_100KB);
+    assert_eq!(content_100kb.len(), SIZE_100KB);
+
+    let content_1mb = generate_trace_content(SIZE_1MB);
+    assert_eq!(content_1mb.len(), SIZE_1MB);
 }
 
 /// Test that the trace generator is deterministic.
@@ -215,6 +243,135 @@ fn generator_is_deterministic() {
     let content1 = generate_trace_content(SIZE_100KB);
     let content2 = generate_trace_content(SIZE_100KB);
     assert_eq!(content1, content2, "Generator must be deterministic");
+}
+
+/// Comprehensive metrics test for 10KB traces.
+///
+/// Measures latency, throughput, and skip rate for small traces.
+#[test]
+fn sanitize_comprehensive_metrics_10kb() {
+    let (latencies, median_us, skip_stats) = measure_comprehensive_metrics(SIZE_10KB);
+
+    // Calculate statistics
+    let min_us = *latencies.first().unwrap();
+    let max_us = *latencies.last().unwrap();
+    let avg_us = latencies.iter().sum::<u128>() / latencies.len() as u128;
+    let p95_us = calculate_p95(&latencies);
+    let p99_us = calculate_p99(&latencies);
+
+    // Convert to milliseconds for display
+    let median_ms = median_us as f64 / 1000.0;
+    let avg_ms = avg_us as f64 / 1000.0;
+    let p95_ms = p95_us as f64 / 1000.0;
+    let p99_ms = p99_us as f64 / 1000.0;
+    let min_ms = min_us as f64 / 1000.0;
+    let max_ms = max_us as f64 / 1000.0;
+
+    // Calculate throughput
+    let throughput_bytes_per_sec = (SIZE_10KB as f64 / median_ms) * 1000.0;
+    let throughput_mb_per_sec = throughput_bytes_per_sec / (1024.0 * 1024.0);
+
+    eprintln!("Comprehensive metrics test (10KB trace, {} iterations):", latencies.len());
+    eprintln!("  Latency:");
+    eprintln!("    Min:     {:.2} ms", min_ms);
+    eprintln!("    Median:  {:.2} ms", median_ms);
+    eprintln!("    Avg:     {:.2} ms", avg_ms);
+    eprintln!("    P95:     {:.2} ms", p95_ms);
+    eprintln!("    P99:     {:.2} ms", p99_ms);
+    eprintln!("    Max:     {:.2} ms", max_ms);
+    eprintln!("  Throughput: {:.2} MB/s", throughput_mb_per_sec);
+    eprintln!("  Skip rate: {}", skip_stats.format());
+
+    // Validate skip rate is measured
+    assert!(skip_stats.total_checks > 0, "Should have performed rule checks");
+    assert!(skip_stats.skip_rate >= 0.0 && skip_stats.skip_rate <= 1.0,
+        "Skip rate should be between 0.0 and 1.0, got {}", skip_stats.skip_rate);
+}
+
+/// Comprehensive metrics test for 100KB traces.
+///
+/// Measures latency, throughput, and skip rate for medium traces.
+#[test]
+fn sanitize_comprehensive_metrics_100kb() {
+    let (latencies, median_us, skip_stats) = measure_comprehensive_metrics(SIZE_100KB);
+
+    // Calculate statistics
+    let min_us = *latencies.first().unwrap();
+    let max_us = *latencies.last().unwrap();
+    let avg_us = latencies.iter().sum::<u128>() / latencies.len() as u128;
+    let p95_us = calculate_p95(&latencies);
+    let p99_us = calculate_p99(&latencies);
+
+    // Convert to milliseconds for display
+    let median_ms = median_us as f64 / 1000.0;
+    let avg_ms = avg_us as f64 / 1000.0;
+    let p95_ms = p95_us as f64 / 1000.0;
+    let p99_ms = p99_us as f64 / 1000.0;
+    let min_ms = min_us as f64 / 1000.0;
+    let max_ms = max_us as f64 / 1000.0;
+
+    // Calculate throughput
+    let throughput_bytes_per_sec = (SIZE_100KB as f64 / median_ms) * 1000.0;
+    let throughput_mb_per_sec = throughput_bytes_per_sec / (1024.0 * 1024.0);
+
+    eprintln!("Comprehensive metrics test (100KB trace, {} iterations):", latencies.len());
+    eprintln!("  Latency:");
+    eprintln!("    Min:     {:.2} ms", min_ms);
+    eprintln!("    Median:  {:.2} ms", median_ms);
+    eprintln!("    Avg:     {:.2} ms", avg_ms);
+    eprintln!("    P95:     {:.2} ms", p95_ms);
+    eprintln!("    P99:     {:.2} ms", p99_ms);
+    eprintln!("    Max:     {:.2} ms", max_ms);
+    eprintln!("  Throughput: {:.2} MB/s", throughput_mb_per_sec);
+    eprintln!("  Skip rate: {}", skip_stats.format());
+
+    // Validate skip rate is measured
+    assert!(skip_stats.total_checks > 0, "Should have performed rule checks");
+    assert!(skip_stats.skip_rate >= 0.0 && skip_stats.skip_rate <= 1.0,
+        "Skip rate should be between 0.0 and 1.0, got {}", skip_stats.skip_rate);
+}
+
+/// Comprehensive metrics test for 1MB traces.
+///
+/// Measures latency, throughput, and skip rate for large traces.
+#[test]
+fn sanitize_comprehensive_metrics_1mb() {
+    let (latencies, median_us, skip_stats) = measure_comprehensive_metrics(SIZE_1MB);
+
+    // Calculate statistics
+    let min_us = *latencies.first().unwrap();
+    let max_us = *latencies.last().unwrap();
+    let avg_us = latencies.iter().sum::<u128>() / latencies.len() as u128;
+    let p95_us = calculate_p95(&latencies);
+    let p99_us = calculate_p99(&latencies);
+
+    // Convert to milliseconds for display
+    let median_ms = median_us as f64 / 1000.0;
+    let avg_ms = avg_us as f64 / 1000.0;
+    let p95_ms = p95_us as f64 / 1000.0;
+    let p99_ms = p99_us as f64 / 1000.0;
+    let min_ms = min_us as f64 / 1000.0;
+    let max_ms = max_us as f64 / 1000.0;
+
+    // Calculate throughput
+    let throughput_bytes_per_sec = (SIZE_1MB as f64 / median_ms) * 1000.0;
+    let throughput_mb_per_sec = throughput_bytes_per_sec / (1024.0 * 1024.0);
+
+    eprintln!("Comprehensive metrics test (1MB trace, {} iterations):", latencies.len());
+    eprintln!("  Latency:");
+    eprintln!("    Min:     {:.2} ms", min_ms);
+    eprintln!("    Median:  {:.2} ms", median_ms);
+    eprintln!("    Avg:     {:.2} ms", avg_ms);
+    eprintln!("    P95:     {:.2} ms", p95_ms);
+    eprintln!("    P99:     {:.2} ms", p99_ms);
+    eprintln!("    Max:     {:.2} ms", max_ms);
+    eprintln!("  Throughput: {:.2} MB/s", throughput_mb_per_sec);
+    eprintln!("  Skip rate: {}", skip_stats.format());
+
+    // Validate skip rate is measured
+    assert!(skip_stats.total_checks > 0, "Should have performed rule checks");
+    assert!(skip_stats.skip_rate >= 0.0 && skip_stats.skip_rate <= 1.0,
+        "Skip rate should be between 0.0 and 1.0, got {}", skip_stats.skip_rate);
 }
 
 /// Test that the environment variable parsing works correctly.
