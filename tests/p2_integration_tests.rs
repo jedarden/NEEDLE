@@ -240,6 +240,7 @@ fn make_bead(id: &str, priority: u8) -> Bead {
         workspace: PathBuf::from("/tmp/test-workspace"),
         dependencies: vec![],
         dependents: vec![],
+        comments: vec![],
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -1758,6 +1759,7 @@ impl BeadStore for MitosisDedupeStore {
                 workspace: PathBuf::from("/tmp/test"),
                 dependencies: vec![],
                 dependents: vec![],
+                comments: vec![],
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })
@@ -1777,6 +1779,7 @@ impl BeadStore for MitosisDedupeStore {
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
             dependents: vec![],
+            comments: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         })
