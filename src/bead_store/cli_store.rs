@@ -7,9 +7,15 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-use crate::types::Bead;
+use async_trait::async_trait;
 
-use super::{spawn_with_etxtbsy_retry_child, BeadBackend, BeadOperationSpec, ParseShape};
+use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
+
+use super::{
+    execute_create_id_strategy, execute_labels_strategy, spawn_with_etxtbsy_retry_child,
+    validate_strategy_name, BeadBackend, BeadOperationSpec, BeadStore, Filters, NewChild,
+    ParseShape, ParsedStrategy, RepairReport,
+};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
@@ -142,7 +148,12 @@ impl CliBeadStore {
         self.run_argv(name, &args, timeout_secs).await
     }
 
-    async fn run_argv(&self, name: &str, args: &[String], timeout_secs: u64) -> Result<String> {
+    pub(super) async fn run_argv(
+        &self,
+        name: &str,
+        args: &[String],
+        timeout_secs: u64,
+    ) -> Result<String> {
         let binary = self.binary.clone();
         let workspace = self.workspace.clone();
         let owned_args = args.to_vec();
@@ -216,6 +227,311 @@ impl CliBeadStore {
                 self.backend.name, name, shape
             )
         })
+    }
+
+    fn strategy(&self, name: &str) -> Result<ParsedStrategy> {
+        let strategy = self.operation(name)?.strategy.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "backend '{}' operation '{}' has no strategy",
+                self.backend.name,
+                name
+            )
+        })?;
+        validate_strategy_name(Path::new("<resolved-backend>"), name, strategy)
+    }
+
+    async fn mutate(&self, name: &str, values: &[(&str, String)]) -> Result<()> {
+        let values = values.iter().cloned().collect();
+        self.run_operation(name, &values).await?;
+        Ok(())
+    }
+
+    async fn claim_auto_inner(&self, actor: &str) -> Result<ClaimResult> {
+        let values = HashMap::from([("actor", actor.to_string())]);
+        let stdout = self.run_operation("claim_auto", &values).await?;
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .with_context(|| format!("{} claim returned invalid JSON", self.backend.name))?;
+        let bead_id = json
+            .get("bead_id")
+            .or_else(|| json.pointer("/data/bead_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty());
+        match bead_id {
+            Some(id) => Ok(ClaimResult::Claimed(self.show(&BeadId::from(id)).await?)),
+            None => Ok(ClaimResult::NotClaimable {
+                reason: "no beads available".to_string(),
+            }),
+        }
+    }
+}
+
+#[async_trait]
+impl BeadStore for CliBeadStore {
+    async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
+        let values = HashMap::from([("limit", "999999".to_string())]);
+        let stdout = self.run_operation("ready", &values).await?;
+        let mut beads = self.parse_beads("ready", &stdout)?;
+        if let Some(assignee) = &filters.assignee {
+            beads.retain(|bead| bead.assignee.as_ref() == Some(assignee));
+        }
+        beads.retain(|bead| {
+            !filters.exclude_ids.contains(&bead.id)
+                && !bead
+                    .labels
+                    .iter()
+                    .any(|label| filters.exclude_labels.contains(label))
+        });
+        Ok(beads)
+    }
+
+    async fn list_all(&self) -> Result<Vec<Bead>> {
+        let values = HashMap::from([("limit", "999999".to_string())]);
+        let stdout = self.run_operation("list_all", &values).await?;
+        self.parse_beads("list_all", &stdout)
+    }
+
+    async fn show(&self, id: &BeadId) -> Result<Bead> {
+        let values = HashMap::from([("id", id.to_string())]);
+        let stdout = self.run_operation("show", &values).await?;
+        self.parse_beads("show", &stdout)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("{} show {} returned no bead", self.backend.name, id))
+    }
+
+    async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
+        if self.backend.name == "bead-forge" {
+            return Ok(ClaimResult::NotClaimable {
+                reason: "bead-forge cannot atomically claim an explicit bead; use claim_auto"
+                    .to_string(),
+            });
+        }
+        let shown = self.show(id).await?;
+        if shown.status != BeadStatus::Open {
+            return Ok(ClaimResult::NotClaimable {
+                reason: format!("bead is {}, not open", shown.status),
+            });
+        }
+        if let Some(claimed_by) = shown.assignee {
+            return Ok(ClaimResult::RaceLost { claimed_by });
+        }
+
+        // bead-rs exposes its monotonic revision in raw `show` JSON. Read the
+        // state and revision together, then guard the update with that revision.
+        let show_values = HashMap::from([("id", id.to_string())]);
+        let raw = self.run_operation("show", &show_values).await?;
+        let value: serde_json::Value = serde_json::from_str(raw.trim())?;
+        let value = value
+            .as_array()
+            .and_then(|items| items.first())
+            .unwrap_or(&value);
+        if value.get("status").and_then(|v| v.as_str()) != Some("open") {
+            return Ok(ClaimResult::NotClaimable {
+                reason: "bead changed state before claim".to_string(),
+            });
+        }
+        if let Some(claimed_by) = value.get("assignee").and_then(|v| v.as_str()) {
+            if !claimed_by.is_empty() {
+                return Ok(ClaimResult::RaceLost {
+                    claimed_by: claimed_by.to_string(),
+                });
+            }
+        }
+        let revision = value
+            .get("revision")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| anyhow::anyhow!("bead-rs show response omitted revision"))?;
+        let args = vec![
+            "update".to_string(),
+            id.to_string(),
+            "--status".to_string(),
+            "in_progress".to_string(),
+            "--assignee".to_string(),
+            actor.to_string(),
+            "--if-revision".to_string(),
+            revision.to_string(),
+        ];
+        match self.run_argv("claim", &args, DEFAULT_TIMEOUT_SECS).await {
+            Ok(_) => Ok(ClaimResult::Claimed(self.show(id).await?)),
+            Err(error) if error.to_string().contains("code 4") => {
+                let latest = self.show(id).await?;
+                match latest.assignee {
+                    Some(claimed_by) => Ok(ClaimResult::RaceLost { claimed_by }),
+                    None => Ok(ClaimResult::NotClaimable {
+                        reason: "bead changed during claim".to_string(),
+                    }),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
+        self.claim_auto_inner(actor).await
+    }
+
+    async fn release(&self, id: &BeadId) -> Result<()> {
+        self.mutate("release", &[("id", id.to_string())]).await
+    }
+    async fn block(&self, id: &BeadId) -> Result<()> {
+        self.mutate("block", &[("id", id.to_string())]).await
+    }
+    async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+        self.mutate("clear_assignee", &[("id", id.to_string())])
+            .await
+    }
+    async fn flush(&self) -> Result<()> {
+        self.mutate("flush", &[]).await
+    }
+    async fn reopen(&self, id: &BeadId) -> Result<()> {
+        self.mutate("reopen", &[("id", id.to_string())]).await
+    }
+    async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+        Ok(self.show(id).await?.labels)
+    }
+    async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+        self.mutate(
+            "label_add",
+            &[("id", id.to_string()), ("label", label.to_string())],
+        )
+        .await
+    }
+    async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+        self.mutate(
+            "label_remove",
+            &[("id", id.to_string()), ("label", label.to_string())],
+        )
+        .await
+    }
+
+    async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
+        let values = HashMap::from([("title", title.to_string()), ("body", body.to_string())]);
+        let mut args = self.render_operation("create", &values)?;
+        let labels_strategy = match self.strategy("labels")? {
+            ParsedStrategy::Labels(strategy) => strategy,
+            _ => bail!(
+                "backend '{}' has invalid labels strategy",
+                self.backend.name
+            ),
+        };
+        args.extend(execute_labels_strategy(labels_strategy, labels));
+        let stdout = self.run_argv("create", &args, DEFAULT_TIMEOUT_SECS).await?;
+        let id_strategy = match self.strategy("create_id")? {
+            ParsedStrategy::CreateId(strategy) => strategy,
+            _ => bail!(
+                "backend '{}' has invalid create_id strategy",
+                self.backend.name
+            ),
+        };
+        Ok(BeadId::from(execute_create_id_strategy(
+            id_strategy,
+            &stdout,
+        )?))
+    }
+
+    async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+        self.mutate(
+            "dep_add",
+            &[
+                ("blocker", blocker_id.to_string()),
+                ("blocked", blocked_id.to_string()),
+            ],
+        )
+        .await
+    }
+
+    async fn split_bead(
+        &self,
+        parent_id: &BeadId,
+        children: &[NewChild<'_>],
+    ) -> Result<Vec<BeadId>> {
+        // Sequential is the portable implementation. The transactional bf
+        // variant remains on its legacy adapter until the descriptor batch
+        // primitive is wired without weakening atomicity.
+        let mut ids = Vec::with_capacity(children.len());
+        for child in children {
+            let id = self
+                .create_bead(child.title, child.body, child.labels)
+                .await?;
+            self.add_dependency(&id, parent_id).await?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    async fn remove_dependency(&self, blocked_id: &BeadId, blocker_id: &BeadId) -> Result<()> {
+        self.mutate(
+            "dep_remove",
+            &[
+                ("blocked", blocked_id.to_string()),
+                ("blocker", blocker_id.to_string()),
+            ],
+        )
+        .await
+    }
+    async fn doctor_repair(&self) -> Result<RepairReport> {
+        let stdout = self.run_operation("doctor_repair", &HashMap::new()).await?;
+        Ok(super::br_cli::BrCliBeadStore::parse_doctor_output(&stdout))
+    }
+    async fn doctor_check(&self) -> Result<RepairReport> {
+        let stdout = self.run_operation("doctor_check", &HashMap::new()).await?;
+        Ok(super::br_cli::BrCliBeadStore::parse_doctor_output(&stdout))
+    }
+    async fn full_rebuild(&self) -> Result<()> {
+        if self.backend.name != "bead-rs" {
+            bail!(
+                "descriptor-driven full rebuild is not enabled for backend '{}'",
+                self.backend.name
+            );
+        }
+
+        let db_path = self.workspace.join(".beads/beads.db");
+        if db_path.exists() {
+            tokio::fs::remove_file(&db_path)
+                .await
+                .with_context(|| format!("failed to remove {}", db_path.display()))?;
+        }
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = self.workspace.join(format!(".beads/beads.db{suffix}"));
+            if sidecar.exists() {
+                tokio::fs::remove_file(&sidecar)
+                    .await
+                    .with_context(|| format!("failed to remove {}", sidecar.display()))?;
+            }
+        }
+
+        self.run_argv(
+            "full_rebuild.init",
+            &["init".to_string()],
+            DEFAULT_TIMEOUT_SECS,
+        )
+        .await?;
+        let checkpoint = self.workspace.join(".beads/checkpoint");
+        let checkpoint = checkpoint
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("checkpoint path is not valid UTF-8"))?;
+        let args = vec![
+            "sync".to_string(),
+            "import-only".to_string(),
+            "--input".to_string(),
+            checkpoint.to_string(),
+            "--restore-into-empty".to_string(),
+            "--actor".to_string(),
+            "needle".to_string(),
+        ];
+        self.run_argv("full_rebuild.import", &args, DEFAULT_TIMEOUT_SECS)
+            .await?;
+        let report = self.doctor_check().await?;
+        if !report.warnings.is_empty() {
+            bail!(
+                "database still has issues after rebuild: {:?}",
+                report.warnings
+            );
+        }
+        Ok(())
+    }
+    fn has_valid_store(&self) -> bool {
+        self.workspace.join(".beads").is_dir()
     }
 }
 

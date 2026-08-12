@@ -1,4 +1,5 @@
-use needle::bead_store::{builtin_bead_backends, CliBeadStore};
+use needle::bead_store::{builtin_bead_backends, BeadStore, CliBeadStore};
+use needle::types::{BeadId, ClaimResult};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -102,4 +103,31 @@ fn missing_required_runtime_value_fails_before_process_execution() {
         .to_string();
     assert!(error.contains("requires placeholder '{id}'"));
     assert!(!root.path().join("invocations.log").exists());
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn explicit_bead_rs_claim_uses_revision_guard() {
+    let root = tempfile::tempdir().unwrap();
+    let backend = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-rs")
+        .unwrap();
+    let binary = root.path().join("fixture-cli");
+    executable(
+        &binary,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nif [ \"$1\" = show ]; then\n  printf '%s\\n' '[{\"id\":\"fixture-1\",\"title\":\"fixture\",\"description\":null,\"priority\":2,\"status\":\"open\",\"assignee\":null,\"labels\":[],\"source_repo\":\"\",\"dependencies\":[],\"dependents\":[],\"comments\":[],\"created_at\":\"2026-08-12T00:00:00Z\",\"updated_at\":\"2026-08-12T00:00:00Z\",\"revision\":7}]'\nfi\n",
+    );
+    let store =
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
+
+    let result = store
+        .claim(&BeadId::from("fixture-1"), "worker-a")
+        .await
+        .unwrap();
+    assert!(matches!(result, ClaimResult::Claimed(_)));
+    let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
+    assert!(invocations.contains(
+        "update\nfixture-1\n--status\nin_progress\n--assignee\nworker-a\n--if-revision\n7\n"
+    ));
 }

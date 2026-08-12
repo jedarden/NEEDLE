@@ -82,7 +82,20 @@ pub fn open_configured(
             harness,
             harness_version,
         )?)),
-        crate::config::Backend::Bead => Ok(Arc::new(BeadCliBeadStore::new(binary, workspace)?)),
+        crate::config::Backend::Bead => {
+            let descriptor = builtin_bead_backends()
+                .into_iter()
+                .find(|candidate| candidate.name == "bead-rs")
+                .ok_or_else(|| anyhow::anyhow!("built-in bead-rs descriptor is missing"))?;
+            Ok(Arc::new(CliBeadStore::new(
+                descriptor,
+                binary,
+                workspace,
+                model,
+                harness,
+                harness_version,
+            )?))
+        }
     }
 }
 
