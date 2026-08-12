@@ -307,7 +307,7 @@ pub fn validate_strategy_name(
 #[derive(Debug, Clone)]
 pub enum CompareAndSetOutcome {
     /// The conditional mutation succeeded and returned the claimed bead.
-    Claimed(Bead),
+    Claimed(Box<Bead>),
     /// The version changed while the issue was still claimable; reread and retry.
     VersionChanged,
     /// Another actor won the claim race.
@@ -410,7 +410,7 @@ pub async fn execute_claim_strategy(
                     .await?
                 {
                     CompareAndSetOutcome::Claimed(bead) => {
-                        return Ok(ClaimResult::Claimed(bead));
+                        return Ok(ClaimResult::Claimed(*bead));
                     }
                     CompareAndSetOutcome::VersionChanged => continue,
                     CompareAndSetOutcome::RaceLost { claimed_by } => {

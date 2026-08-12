@@ -56,7 +56,7 @@ impl ClaimStrategyOperations for MockOperations {
             .lock()
             .unwrap()
             .pop_front()
-            .unwrap_or_else(|| CompareAndSetOutcome::Claimed(claimed_bead("worker"))))
+            .unwrap_or_else(|| CompareAndSetOutcome::Claimed(Box::new(claimed_bead("worker")))))
     }
 
     async fn batch_claim(&self, _bead_id: &BeadId, _actor: &str) -> anyhow::Result<ClaimResult> {
@@ -134,7 +134,7 @@ async fn compare_and_set_retries_a_version_change() {
     let operations = MockOperations::new(open_bead());
     operations.cas_outcomes.lock().unwrap().extend([
         CompareAndSetOutcome::VersionChanged,
-        CompareAndSetOutcome::Claimed(claimed_bead("this-worker")),
+        CompareAndSetOutcome::Claimed(Box::new(claimed_bead("this-worker"))),
     ]);
 
     let result = execute_claim_strategy(
