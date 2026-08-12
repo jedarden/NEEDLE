@@ -120,7 +120,9 @@ workspace:
 
 **Workspace overrides (`.needle.yaml`):**
 
-Only certain fields can be overridden at the workspace level:
+Only certain fields can be overridden at the workspace level. Every workspace
+with a bead store must explicitly bind its backend; NEEDLE does not infer store
+ownership from whichever executable appears first on `PATH`.
 
 ```yaml
 # .needle.yaml (in workspace root)
@@ -129,10 +131,25 @@ workspace:
     - frontend
     - react
 
+bead_cli:
+  backend: bead-forge       # Existing bead-forge workspace
+# backend: bead-rs          # Native bead-rs workspace after rehydration
+# explicit_path: /opt/bin/bead  # Optional host-specific operator override
+
 # These fields are ignored if set in .needle.yaml:
 # - workspace.default (resolved globally)
 # - workspace.home (resolved globally)
 ```
+
+`bead-forge` resolves the `bf` executable and requires its identity to begin
+with `bf `. `bead-rs` resolves `bead` and requires `bead `. Identity is checked
+before the store is opened. A missing, unknown, or mismatched binding makes the
+workspace ineligible for dispatch. Changing this value does not migrate data:
+initialize and reconcile the destination store first, then change the binding
+during the reviewed cutover.
+
+Explore, Splice, and the supervisor load each target repository's binding
+independently, so bead-forge and bead-rs workspaces can coexist during rollout.
 
 ---
 
@@ -367,6 +384,10 @@ agent:
         adapter: claude-print
     default_adapter: claude-code-glm-4.7
     strict: false
+
+# Put this binding in the repository's .needle.yaml, not only global config.
+bead_cli:
+  backend: bead-forge
 
 workspace:
   default: ~/dev/my-project
