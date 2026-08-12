@@ -3490,6 +3490,10 @@ pub fn expand_tilde_str(path: &str) -> String {
     // Check if path starts with ~/
     if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
+            // Handle the special case of "~/" (empty rest) to match PathBuf behavior
+            if rest.is_empty() {
+                return home;
+            }
             return format!("{}/{}", home, rest);
         }
         // HOME not set, return original
@@ -3699,6 +3703,14 @@ mod config_tests {
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/");
         assert_eq!(result, "/home/testuser");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_path_tilde_slash_only() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(Path::new("~/"));
+        assert_eq!(result, PathBuf::from("/home/testuser"));
         std::env::remove_var("HOME");
     }
 
@@ -6239,6 +6251,14 @@ agent:
         let result = expand_tilde_str("");
         std::env::remove_var("HOME");
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_expand_tilde_str_trailing_slash() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~/");
+        std::env::remove_var("HOME");
+        assert_eq!(result, "/home/testuser");
     }
 
     #[test]
