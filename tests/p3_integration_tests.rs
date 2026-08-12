@@ -194,7 +194,6 @@ fn make_test_bead(id: &str) -> Bead {
         dependencies: vec![],
         dependents: vec![],
         comments: vec![],
-        notes: String::new(),
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
