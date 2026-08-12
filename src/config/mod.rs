@@ -3714,6 +3714,22 @@ mod config_tests {
         std::env::remove_var("HOME");
     }
 
+    #[test]
+    fn expand_tilde_str_tilde_with_parent_directory_reference() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~/../");
+        assert_eq!(result, "/home/testuser/../");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_path_tilde_with_parent_directory_reference() {
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(Path::new("~/../"));
+        assert_eq!(result, PathBuf::from("/home/testuser/../"));
+        std::env::remove_var("HOME");
+    }
+
     // ── Workspace config tests ──
 
     #[test]
