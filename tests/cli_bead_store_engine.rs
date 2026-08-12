@@ -131,3 +131,77 @@ async fn explicit_bead_rs_claim_uses_revision_guard() {
         "update\nfixture-1\n--status\nin_progress\n--assignee\nworker-a\n--if-revision\n7\n"
     ));
 }
+
+#[tokio::test]
+#[cfg(unix)]
+async fn bead_forge_release_uses_atomic_batch_update() {
+    let root = tempfile::tempdir().unwrap();
+    let backend = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-forge")
+        .unwrap();
+    let binary = root.path().join("fixture-cli");
+    executable(
+        &binary,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\n",
+    );
+    let store =
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
+
+    store.release(&BeadId::from("bf-1")).await.unwrap();
+    let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
+    assert!(invocations.starts_with("batch\n--json\n"));
+    assert!(invocations.contains(r#"[{"assignee":"","id":"bf-1","op":"update","status":"open"}]"#));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn bead_forge_split_is_one_transactional_batch() {
+    use needle::bead_store::NewChild;
+
+    let root = tempfile::tempdir().unwrap();
+    let backend = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-forge")
+        .unwrap();
+    let binary = root.path().join("fixture-cli");
+    executable(
+        &binary,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nprintf '%s\\n' '[op 0] ok: bf-child-a' '[op 1] ok: bf-child-b' '[op 2] ok' '[op 3] ok'\n",
+    );
+    let store =
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
+    let labels_a = ["one"];
+    let labels_b = ["two"];
+    let children = [
+        NewChild {
+            title: "A",
+            body: "body A",
+            labels: &labels_a,
+        },
+        NewChild {
+            title: "B",
+            body: "body B",
+            labels: &labels_b,
+        },
+    ];
+
+    let ids = store
+        .split_bead(&BeadId::from("bf-parent"), &children)
+        .await
+        .unwrap();
+    assert_eq!(
+        ids,
+        [BeadId::from("bf-child-a"), BeadId::from("bf-child-b")]
+    );
+    let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
+    assert_eq!(invocations.matches("batch\n").count(), 1);
+    let payload: serde_json::Value =
+        serde_json::from_str(invocations.lines().nth(2).unwrap()).unwrap();
+    assert_eq!(payload[2]["op"], "dep_add_blocker");
+    assert_eq!(payload[2]["id"], "bf-parent");
+    assert_eq!(payload[2]["blocker"], "@0");
+    assert_eq!(payload[3]["op"], "dep_add_blocker");
+    assert_eq!(payload[3]["id"], "bf-parent");
+    assert_eq!(payload[3]["blocker"], "@1");
+}

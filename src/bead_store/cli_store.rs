@@ -301,10 +301,11 @@ impl BeadStore for CliBeadStore {
 
     async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
         if self.backend.name == "bead-forge" {
-            return Ok(ClaimResult::NotClaimable {
-                reason: "bead-forge cannot atomically claim an explicit bead; use claim_auto"
-                    .to_string(),
-            });
+            // bead-forge's public atomic API selects the winning bead inside
+            // its transaction. This preserves the existing backend contract:
+            // the returned bead, rather than the pre-lock candidate, is the
+            // authoritative claim.
+            return self.claim_auto_inner(actor).await;
         }
         let shown = self.show(id).await?;
         if shown.status != BeadStatus::Open {
@@ -371,12 +372,18 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn release(&self, id: &BeadId) -> Result<()> {
+        if self.backend.name == "bead-forge" {
+            return self.run_bf_update_batch(id, Some("open"), Some("")).await;
+        }
         self.mutate("release", &[("id", id.to_string())]).await
     }
     async fn block(&self, id: &BeadId) -> Result<()> {
         self.mutate("block", &[("id", id.to_string())]).await
     }
     async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+        if self.backend.name == "bead-forge" {
+            return self.run_bf_update_batch(id, None, Some("")).await;
+        }
         self.mutate("clear_assignee", &[("id", id.to_string())])
             .await
     }
@@ -445,9 +452,44 @@ impl BeadStore for CliBeadStore {
         parent_id: &BeadId,
         children: &[NewChild<'_>],
     ) -> Result<Vec<BeadId>> {
-        // Sequential is the portable implementation. The transactional bf
-        // variant remains on its legacy adapter until the descriptor batch
-        // primitive is wired without weakening atomicity.
+        if matches!(
+            self.strategy("split")?,
+            ParsedStrategy::Split(super::SplitStrategy::TransactionalBatch)
+        ) {
+            if children.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut operations = Vec::with_capacity(children.len() * 2);
+            for child in children {
+                operations.push(serde_json::json!({
+                    "op": "create",
+                    "title": child.title,
+                    "description": child.body,
+                    "labels": child.labels,
+                }));
+            }
+            for index in 0..children.len() {
+                operations.push(serde_json::json!({
+                    "op": "dep_add_blocker",
+                    "id": parent_id.as_ref(),
+                    "blocker": format!("@{index}"),
+                }));
+            }
+            let payload = serde_json::to_string(&operations)?;
+            let args = vec!["batch".to_string(), "--json".to_string(), payload];
+            let stdout = self.run_argv("split", &args, DEFAULT_TIMEOUT_SECS).await?;
+            let ids = parse_batch_created_ids(&stdout);
+            if ids.len() != children.len() {
+                bail!(
+                    "backend '{}' committed split for {} children but returned {} IDs",
+                    self.backend.name,
+                    children.len(),
+                    ids.len()
+                );
+            }
+            return Ok(ids);
+        }
+
         let mut ids = Vec::with_capacity(children.len());
         for child in children {
             let id = self
@@ -478,7 +520,7 @@ impl BeadStore for CliBeadStore {
         Ok(super::br_cli::BrCliBeadStore::parse_doctor_output(&stdout))
     }
     async fn full_rebuild(&self) -> Result<()> {
-        if self.backend.name != "bead-rs" {
+        if !matches!(self.backend.name.as_str(), "bead-rs" | "bead-forge") {
             bail!(
                 "descriptor-driven full rebuild is not enabled for backend '{}'",
                 self.backend.name
@@ -498,6 +540,23 @@ impl BeadStore for CliBeadStore {
                     .await
                     .with_context(|| format!("failed to remove {}", sidecar.display()))?;
             }
+        }
+
+        if self.backend.name == "bead-forge" {
+            self.run_argv(
+                "full_rebuild.import",
+                &["sync".to_string(), "--import-only".to_string()],
+                DEFAULT_TIMEOUT_SECS,
+            )
+            .await?;
+            let report = self.doctor_check().await?;
+            if !report.warnings.is_empty() {
+                bail!(
+                    "database still has issues after rebuild: {:?}",
+                    report.warnings
+                );
+            }
+            return Ok(());
         }
 
         self.run_argv(
@@ -533,6 +592,45 @@ impl BeadStore for CliBeadStore {
     fn has_valid_store(&self) -> bool {
         self.workspace.join(".beads").is_dir()
     }
+}
+
+impl CliBeadStore {
+    async fn run_bf_update_batch(
+        &self,
+        id: &BeadId,
+        status: Option<&str>,
+        assignee: Option<&str>,
+    ) -> Result<()> {
+        let mut operation = serde_json::Map::new();
+        operation.insert("op".to_string(), serde_json::json!("update"));
+        operation.insert("id".to_string(), serde_json::json!(id.as_ref()));
+        if let Some(status) = status {
+            operation.insert("status".to_string(), serde_json::json!(status));
+        }
+        if let Some(assignee) = assignee {
+            operation.insert("assignee".to_string(), serde_json::json!(assignee));
+        }
+        let payload = serde_json::to_string(&vec![serde_json::Value::Object(operation)])?;
+        self.run_argv(
+            "batch_update",
+            &["batch".to_string(), "--json".to_string(), payload],
+            DEFAULT_TIMEOUT_SECS,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+fn parse_batch_created_ids(output: &str) -> Vec<BeadId> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("[op ")?;
+            let (_, tail) = rest.split_once(']')?;
+            let id = tail.trim().strip_prefix("ok:")?.trim();
+            (!id.is_empty()).then(|| BeadId::from(id))
+        })
+        .collect()
 }
 
 fn is_optional_placeholder(name: &str) -> bool {
