@@ -1,6 +1,6 @@
-//! Integration tests for NEEDLE Phase 2 using real `br` CLI.
+//! Integration tests for NEEDLE Phase 2 using real `bf` CLI.
 //!
-//! These tests use the actual `br` binary to create and manage beads in
+//! These tests use the actual `bf` binary to create and manage beads in
 //! isolated temporary workspaces. Each test:
 //! - Creates its own `.beads/` directory
 //! - Is parallel-safe (unique workspace paths per test)
@@ -38,11 +38,11 @@ use needle::types::{BeadId, ClaimOutcome, StrandResult};
 // Test infrastructure
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Path to the br binary (discovered via PATH or ~/.local/bin/br).
-fn br_path() -> PathBuf {
-    which::which("br").unwrap_or_else(|_| {
+/// Path to the bf binary (discovered via PATH or ~/.local/bin/bf).
+fn bf_path() -> PathBuf {
+    which::which("bf").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(format!("{home}/.local/bin/br"))
+        PathBuf::from(format!("{home}/.local/bin/bf"))
     })
 }
 
@@ -54,7 +54,7 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
         .context("failed to create temp dir")?;
 
     // Initialize .beads/ directory.
-    let br = br_path();
+    let br = bf_path();
     let output = std::process::Command::new(&br)
         .args(["init"])
         .current_dir(dir.path())
@@ -75,7 +75,7 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
 ///
 /// Retries once with `br sync --flush-only` on FrankenSQLite sync conflicts.
 fn create_bead(workspace: &Path, title: &str, priority: u8) -> Result<BeadId> {
-    let br = br_path();
+    let br = bf_path();
     let do_create = || {
         std::process::Command::new(&br)
             .args([
@@ -123,7 +123,7 @@ fn create_bead(workspace: &Path, title: &str, priority: u8) -> Result<BeadId> {
 
 /// Add a label to a bead.
 fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
-    let br = br_path();
+    let br = bf_path();
     let do_add = || {
         std::process::Command::new(&br)
             .args(["label", "add", "--label", label, bead_id.as_ref()])
@@ -160,7 +160,7 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
 ///
 /// Retries once with `br sync --flush-only` on FrankenSQLite sync conflicts.
 fn add_dependency(workspace: &Path, issue_id: &BeadId, dep_id: &BeadId) -> Result<()> {
-    let br = br_path();
+    let br = bf_path();
     let do_add = || {
         std::process::Command::new(&br)
             .args(["dep", "add", issue_id.as_ref(), dep_id.as_ref()])
@@ -195,7 +195,7 @@ fn add_dependency(workspace: &Path, issue_id: &BeadId, dep_id: &BeadId) -> Resul
 
 /// Get bead store for a workspace.
 fn store_for_workspace(workspace: &Path) -> Result<BrCliBeadStore> {
-    BrCliBeadStore::new(br_path(), workspace.to_path_buf(), None, None, None)
+    BrCliBeadStore::new(bf_path(), workspace.to_path_buf(), None, None, None)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -961,7 +961,12 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
         &needle::config::PromptConfig::default(),
     ));
 
+    // Use a barrier to ensure both workers start at approximately the same time
+    // and actually contend for the flock, rather than one completing before
+    // the other even starts.
+    let barrier = Arc::new(std::sync::Barrier::new(2));
     let mut handles = Vec::new();
+
     for i in 0..2u32 {
         let store = store.clone();
         let parent = parent.clone();
@@ -970,6 +975,7 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
         let prompt_builder = prompt_builder.clone();
         let workspace_path = workspace.path().to_path_buf();
         let config_clone = config.clone();
+        let barrier = barrier.clone();
 
         let handle = tokio::spawn(async move {
             let evaluator = MitosisEvaluator::new(
@@ -977,6 +983,10 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
                 Telemetry::new(format!("worker-{i}")),
                 lock_path,
             );
+
+            // Wait at the barrier to ensure both workers are ready before proceeding.
+            // This increases the likelihood that they will actually contend for the flock.
+            barrier.wait();
 
             evaluator
                 .evaluate(
@@ -993,6 +1003,8 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
     }
 
     // Both should complete without error (flock prevents concurrent access).
+    // The test dispatcher has no adapters, so we expect MitosisResult::Skipped
+    // with "adapter not found" reason, which is still a successful evaluation.
     for handle in handles {
         let result = handle.await.unwrap();
         assert!(
@@ -1000,6 +1012,15 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
             "mitosis should complete without error; got {:?}",
             result
         );
+        // Verify the evaluation completed (even if skipped due to no adapter)
+        match result.unwrap() {
+            MitosisResult::Skipped { .. } => {
+                // Expected - test dispatcher has no adapters
+            }
+            other => {
+                panic!("unexpected result in test environment: {:?}", other);
+            }
+        }
     }
 }
 
@@ -1401,7 +1422,7 @@ async fn real_br_database_corruption_auto_recovery() {
         .prefix("needlecorrupttest")
         .tempdir()
         .unwrap();
-    let br = br_path();
+    let br = bf_path();
     let init = std::process::Command::new(&br)
         .args(["init"])
         .current_dir(workspace.path())
@@ -1634,14 +1655,6 @@ fn create_test_dispatcher() -> needle::dispatch::Dispatcher {
     let adapters: HashMap<String, needle::dispatch::AgentAdapter> = HashMap::new();
     let telemetry = Telemetry::new("test".to_string());
     needle::dispatch::Dispatcher::with_adapters(adapters, telemetry, 60)
-}
-
-/// Path to the `bf` binary (discovered via PATH or ~/.local/bin/bf).
-fn bf_path() -> PathBuf {
-    which::which("bf").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(format!("{home}/.local/bin/bf"))
-    })
 }
 
 /// Count the beads currently in a workspace via `bf list --json` (JSONL: one

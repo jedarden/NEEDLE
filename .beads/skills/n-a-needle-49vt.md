@@ -2,7 +2,8 @@
 task_types:
 - other
 labels: []
-success_count: 0
+success_count: 1
+last_used: 2026-08-11
 source_beads:
 - needle-49vt
 ---
