@@ -182,6 +182,7 @@ fn make_test_bead(id: &str) -> Bead {
         workspace: std::path::PathBuf::from("/tmp/test"),
         dependencies: vec![],
         dependents: vec![],
+        comments: vec![],
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
     }
