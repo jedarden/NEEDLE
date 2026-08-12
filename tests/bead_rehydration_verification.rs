@@ -354,6 +354,33 @@ fn public_cli_rehydration_checkpoint_restore_and_rollback() {
     .unwrap();
     let source_records = json_lines(&before).unwrap();
     let mapping = rehydrate(&bead, &destination, &source_records).unwrap();
+    let evidence = root.path().join("evidence");
+    fs::create_dir_all(&evidence).unwrap();
+    fs::write(evidence.join("source.jsonl"), &before).unwrap();
+    fs::write(
+        evidence.join("reconciliation.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "source_repository": "fixture",
+            "source_commit": "fixture",
+            "issues": mapping,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let gitleaks = which::which("gitleaks").expect("gitleaks is required for the release gate");
+    run(
+        &gitleaks,
+        root.path(),
+        &[
+            "detect",
+            "--no-git",
+            "--source",
+            evidence.to_str().unwrap(),
+            "--redact",
+            "--no-banner",
+        ],
+    )
+    .unwrap();
     let destination_records = json_lines(
         &run(
             &bead,
