@@ -2397,6 +2397,21 @@ impl MockProcess {
             Ok(())
         }
     }
+
+    /// Wait for the mock process to exit and return its exit status.
+    ///
+    /// If an inner child process exists, delegates to its `wait()` method.
+    /// Otherwise, returns a successful exit status (0) for testing scenarios.
+    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        if let Some(ref mut child) = self.inner {
+            child.wait()
+        } else {
+            // For testing without a real child process, spawn and wait on a
+            // trivial successful process to get a valid ExitStatus.
+            std::process::Command::new("true")
+                .status()
+        }
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
