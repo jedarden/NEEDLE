@@ -17,7 +17,7 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::bead_store::{BeadStore, BfCliBeadStore, BrCliBeadStore};
+use crate::bead_store::{BeadStore, BfCliBeadStore, BrCliBeadStore, spawn_with_etxtbsy_retry_sync_child};
 use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
@@ -1183,10 +1183,24 @@ fn launch_in_tmux(
         shell_escape(&stderr_log)
     );
 
-    let status = crate::tmux_socket::command()
-        .args(["new-session", "-d", "-s", session_name, &inner_cmd])
-        .status()
-        .context("failed to launch tmux — is tmux installed?")?;
+    // Spawn tmux with ETXTBSY retry to handle race conditions when the binary
+    // has been written to disk immediately before execution (e.g., during upgrade
+    // or hot-reload). The retry wrapper waits for the kernel to finish internal
+    // bookkeeping before attempting to exec the same binary again.
+    let mut child = spawn_with_etxtbsy_retry_sync_child(
+        || {
+            crate::tmux_socket::command()
+                .args(["new-session", "-d", "-s", session_name, &inner_cmd])
+                .spawn()
+        },
+        5,   // max_attempts: retry up to 5 times
+        20,  // backoff_ms: wait 20ms between retries
+    )
+    .context("failed to launch tmux — is tmux installed?")?;
+
+    let status = child
+        .wait()
+        .context("tmux process failed after successful spawn")?;
 
     if !status.success() {
         bail!(
