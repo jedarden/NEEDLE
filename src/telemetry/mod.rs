@@ -3101,42 +3101,45 @@ impl Telemetry {
         let mut otlp_shutdown = None;
         let mut file_sink: Option<Arc<FileSink>> = None;
 
-        // File sink is always created (fallback)
-        // Use configured log_dir if set, otherwise use default
-        let file_sink_result = if let Some(ref log_dir) = config.file_sink.log_dir {
-            FileSink::with_dir(log_dir.clone(), &worker_id, &session_id)
-        } else {
-            FileSink::new(&worker_id, &session_id)
-        };
+        // File sink is created only if enabled in config
+        // When disabled, telemetry falls back to stdout/hook sinks only
+        if config.file_sink.enabled {
+            // Use configured log_dir if set, otherwise use default
+            let file_sink_result = if let Some(ref log_dir) = config.file_sink.log_dir {
+                FileSink::with_dir(log_dir.clone(), &worker_id, &session_id)
+            } else {
+                FileSink::new(&worker_id, &session_id)
+            };
 
-        match file_sink_result {
-            Ok(s) => {
-                // Write boot event directly to file BEFORE spawning writer thread.
-                // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
-                let version = env!("CARGO_PKG_VERSION");
-                if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
-                    // Check if this is a timeout error (filesystem may be hung)
-                    let error_msg = e.to_string();
-                    if error_msg.contains("timed out")
-                        || error_msg.contains("filesystem may be hung")
-                    {
-                        eprintln!(
-                            "NEEDLE WARNING: boot event write timed out after 5s - filesystem may be hung or very slow"
-                        );
-                        eprintln!("  Continuing without boot event in log file. Worker will still function.");
-                        eprintln!(
-                            "  Check: disk space, NFS mounts, filesystem latency, I/O errors"
-                        );
+            match file_sink_result {
+                Ok(s) => {
+                    // Write boot event directly to file BEFORE spawning writer thread.
+                    // Uses a 5-second timeout to prevent indefinite blocking on hung filesystems.
+                    let version = env!("CARGO_PKG_VERSION");
+                    if let Err(e) = s.write_boot_event_direct(&worker_id, &session_id, version) {
+                        // Check if this is a timeout error (filesystem may be hung)
+                        let error_msg = e.to_string();
+                        if error_msg.contains("timed out")
+                            || error_msg.contains("filesystem may be hung")
+                        {
+                            eprintln!(
+                                "NEEDLE WARNING: boot event write timed out after 5s - filesystem may be hung or very slow"
+                            );
+                            eprintln!("  Continuing without boot event in log file. Worker will still function.");
+                            eprintln!(
+                                "  Check: disk space, NFS mounts, filesystem latency, I/O errors"
+                            );
+                        }
+                        tracing::warn!(error = %e, "failed to write boot event directly to file");
                     }
-                    tracing::warn!(error = %e, "failed to write boot event directly to file");
+                    file_sink = Some(Arc::new(s));
+                    // Arc<FileSink> implements Sink via the blanket impl
+                    if let Some(ref fs) = file_sink {
+                        sinks.push(Box::new(Arc::clone(fs)));
+                    }
                 }
-                file_sink = Some(Arc::new(s));
-                // Arc<FileSink> implements Sink via the blanket impl
-                if let Some(ref fs) = file_sink {
-                    sinks.push(Box::new(Arc::clone(fs)));
-                }
+                Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
             }
-            Err(e) => tracing::warn!(error = %e, "failed to create telemetry file sink"),
         }
 
         // OTLP sink (feature-gated)
