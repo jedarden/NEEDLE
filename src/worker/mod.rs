@@ -27,7 +27,7 @@ use tracing::Instrument;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 
-use crate::bead_store::{run_version_handshake, BeadStore};
+use crate::bead_store::BeadStore;
 use crate::canary::CanaryRunner;
 use crate::claim::Claimer;
 use crate::commit_hook;
@@ -724,32 +724,6 @@ impl Worker {
         // Boot: validate config and initialize.
         self.boot()?;
 
-        // Step: Bead-forge version handshake
-        self.telemetry.emit(EventKind::InitStepStarted {
-            step: "version_handshake".to_string(),
-        })?;
-        let step_start = Instant::now();
-        let bf_path = which::which("bf").or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
-            if candidate.exists() {
-                Ok(candidate)
-            } else {
-                Err(anyhow::anyhow!(
-                    "bf not found on PATH or at ~/.local/bin/bf"
-                ))
-            }
-        });
-        if let Ok(path) = bf_path {
-            run_version_handshake(&path).await;
-        } else {
-            tracing::debug!("bf binary not found, skipping version handshake");
-        }
-        self.telemetry.emit(EventKind::InitStepCompleted {
-            step: "version_handshake".to_string(),
-            duration_ms: step_start.elapsed().as_millis() as u64,
-        })?;
-
         // Step: Spawn-path binary metadata recording
         self.telemetry.emit(EventKind::InitStepStarted {
             step: "spawn_path_metadata".to_string(),
@@ -1368,9 +1342,9 @@ impl Worker {
 
     /// Swap the active bead store to a remote workspace.
     ///
-    /// Creates a new bead store (bf -> br -> bead) and rebuilds the Claimer
-    /// to use it. The home store is restored at the start of the next
-    /// select cycle.
+    /// Loads the target workspace's explicit backend binding, creates that
+    /// store, and rebuilds the Claimer to use it. The home store is restored
+    /// at the start of the next select cycle.
     fn switch_store_to(&mut self, workspace: &std::path::Path) -> Result<()> {
         // Resolve this worker's default adapter model so remote-workspace
         // claims carry the same velocity-scoring metadata as home-workspace
@@ -1383,7 +1357,21 @@ impl Worker {
             .adapter(&self.config.agent.default)
             .and_then(|a| a.model.clone());
 
-        let remote_store = crate::bead_store::discover_default(
+        let (remote_config, _) = crate::config::ConfigLoader::load_resolved(
+            workspace,
+            crate::config::CliOverrides {
+                workspace: Some(workspace.to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .with_context(|| {
+            format!(
+                "failed to load bead backend binding for remote workspace {}",
+                workspace.display()
+            )
+        })?;
+        let remote_store = crate::bead_store::open_configured(
+            &remote_config.bead_cli,
             workspace.to_path_buf(),
             model,
             Some("needle".to_string()),

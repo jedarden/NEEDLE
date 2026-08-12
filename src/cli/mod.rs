@@ -10,16 +10,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::bead_store::{
-    spawn_with_etxtbsy_retry_sync_child, BeadStore, BfCliBeadStore, BrCliBeadStore,
-};
+use crate::bead_store::{spawn_with_etxtbsy_retry_sync_child, BeadStore};
 use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
@@ -992,26 +989,18 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
         .context("writer thread failed to start")?;
     eprintln!("NEEDLE worker boot: writer thread started");
 
-    // Phase 1: bead store discovery.
-    // Use BfCliBeadStore for atomic server-selected bead claiming.
-    let store: Arc<dyn crate::bead_store::BeadStore> =
-        Arc::new(init_step("bead_store_discover", &telemetry, || {
-            let bf_store = crate::bead_store::BfCliBeadStore::discover(
-                config.workspace.default.clone(),
-                None,                       // model: do not filter by model — beads are untagged
-                Some("needle".to_string()), // harness
-                Some(env!("CARGO_PKG_VERSION").to_string()), // harness_version
-            )
-            .context("failed to locate bf CLI for bead store")?;
-
-            // Run bead-forge version handshake to detect known-bad versions.
-            let bf_path = &bf_store.bf_path;
-            let rt = tokio::runtime::Runtime::new()
-                .context("failed to create runtime for version check")?;
-            rt.block_on(crate::bead_store::run_version_handshake(bf_path));
-
-            Ok::<_, anyhow::Error>(bf_store)
-        })?);
+    // Phase 1: open only the backend explicitly bound by this workspace.
+    // Binary availability is not evidence of store ownership.
+    let store = init_step("bead_store_discover", &telemetry, || {
+        crate::bead_store::open_configured(
+            &config.bead_cli,
+            config.workspace.default.clone(),
+            None,                       // model: do not filter by model — beads are untagged
+            Some("needle".to_string()), // harness
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+        )
+        .context("failed to open configured bead store")
+    })?;
 
     // Phase 2: resource check before worker construction.
     // Check system resources (CPU and memory) before entering the slow
@@ -3393,28 +3382,27 @@ fn doctor_check_bead_store(
     if !beads_dir.is_dir() {
         return Ok(CheckResult::pass("Bead store", "skipped (no .beads/)"));
     }
-    // Worker dispatch prefers `bf` (atomic server-selected claiming), falls
-    // back to `br` for older installs, then to bead-rs's `bead` — a machine
-    // with only one of the three on PATH should not FAIL here.
-    let bf_err = match BfCliBeadStore::discover(workspace.to_path_buf(), None, None, None) {
-        Ok(s) => return doctor_run_bead_store_checks(Box::new(s), repair),
-        Err(e) => e,
+    let store = match crate::bead_store::discover_default(
+        workspace.to_path_buf(),
+        None,
+        Some("needle-doctor".to_string()),
+        Some(env!("CARGO_PKG_VERSION").to_string()),
+    ) {
+        Ok(store) => store,
+        Err(error) => {
+            return Ok(CheckResult::fail(
+                "Bead store",
+                format!("configured backend unavailable: {error:#}"),
+            ))
+        }
     };
-    let br_err = match BrCliBeadStore::discover(workspace.to_path_buf(), None, None, None) {
-        Ok(s) => return doctor_run_bead_store_checks(Box::new(s), repair),
-        Err(e) => e,
-    };
-    let bead_err = match crate::bead_store::BeadCliBeadStore::discover(workspace.to_path_buf()) {
-        Ok(s) => return doctor_run_bead_store_checks(Box::new(s), repair),
-        Err(e) => e,
-    };
-    Ok(CheckResult::fail(
-        "Bead store",
-        format!("no bead store CLI found (bf: {bf_err}; br: {br_err}; bead: {bead_err})"),
-    ))
+    doctor_run_bead_store_checks(store, repair)
 }
 
-fn doctor_run_bead_store_checks(store: Box<dyn BeadStore>, repair: bool) -> Result<CheckResult> {
+fn doctor_run_bead_store_checks(
+    store: std::sync::Arc<dyn BeadStore>,
+    repair: bool,
+) -> Result<CheckResult> {
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
     if repair {
         match rt.block_on(store.doctor_repair()) {
@@ -3640,26 +3628,25 @@ fn doctor_check_peers(heartbeat_dir: &Path, ttl_secs: u64) -> CheckResult {
 
 fn doctor_check_agent_binary(config: &Config) -> CheckResult {
     let agent = &config.agent.default;
-    // Worker dispatch prefers `bf` (atomic server-selected claiming) but
-    // falls back to `br` for older installs, so accept either being on
-    // PATH rather than hard-requiring `br`.
-    let bead_cli = if which::which("bf").is_ok() {
-        Some("bf")
-    } else if which::which("br").is_ok() {
-        Some("br")
-    } else {
-        None
-    };
+    let bead_cli = crate::config::resolve_bead_cli(&config.bead_cli).ok();
     let agent_ok = which::which(agent).is_ok();
     match (bead_cli, agent_ok) {
-        (Some(cli), true) => CheckResult::pass("Agent binary", format!("{cli} + {agent} on PATH")),
+        (Some((_, path)), true) => {
+            CheckResult::pass("Agent binary", format!("{} + {agent}", path.display()))
+        }
         (None, _) => CheckResult::fail(
             "Agent binary",
-            "no bead store CLI found on PATH (checked bf, br)",
+            format!(
+                "configured bead backend '{}' is unavailable",
+                config.bead_cli.backend
+            ),
         ),
-        (Some(cli), false) => CheckResult::warn(
+        (Some((_, path)), false) => CheckResult::warn(
             "Agent binary",
-            format!("{cli} found but {agent} not found on PATH — workers cannot dispatch"),
+            format!(
+                "{} found but {agent} not found on PATH — workers cannot dispatch",
+                path.display()
+            ),
         ),
     }
 }

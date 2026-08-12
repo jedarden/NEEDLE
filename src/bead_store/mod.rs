@@ -24,7 +24,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 
 use crate::types::{Bead, BeadId, ClaimResult};
@@ -34,36 +34,143 @@ pub use bead_cli::BeadCliBeadStore;
 pub use bf_cli::BfCliBeadStore;
 pub use br_cli::BrCliBeadStore;
 
-/// Discover the best available bead store backend for `workspace`, trying
-/// `bf` -> `br` -> `bead` in that order — the same precedence documented in
-/// `config::resolve_bead_cli`'s "auto" backend. All three speak a mutually
-/// distinct CLI dialect (see each module's doc comment), so this returns a
-/// type-erased `Arc<dyn BeadStore>` rather than a concrete struct.
-///
-/// This does not change behavior for any host that already has `bf` or `br`
-/// installed (100% of hosts as of 2026-08-12) — it only adds a new fallback
-/// for a workspace that has `bead` and neither of the other two.
+/// Open the bead store explicitly bound by the target workspace's resolved
+/// configuration. This is the production entry point: executable discovery
+/// alone is never treated as evidence of store ownership.
+pub fn open_configured(
+    config: &crate::config::BeadCliConfig,
+    workspace: PathBuf,
+    model: Option<String>,
+    harness: Option<String>,
+    harness_version: Option<String>,
+) -> Result<Arc<dyn BeadStore>> {
+    if matches!(config.backend.as_str(), "" | "auto") {
+        bail!(
+            "workspace {} has no authoritative bead backend binding; set bead_cli.backend in {}",
+            workspace.display(),
+            workspace.join(".needle.yaml").display()
+        );
+    }
+
+    let (backend, binary) = crate::config::resolve_bead_cli(config).with_context(|| {
+        format!(
+            "failed to resolve bead_cli.backend for workspace {}",
+            workspace.display()
+        )
+    })?;
+    verify_backend_identity(&backend, &binary, &workspace)?;
+
+    match backend {
+        crate::config::Backend::Bf => Ok(Arc::new(BfCliBeadStore::new(
+            binary,
+            workspace,
+            model,
+            harness,
+            harness_version,
+        )?)),
+        crate::config::Backend::Br => Ok(Arc::new(BrCliBeadStore::new(
+            binary,
+            workspace,
+            model,
+            harness,
+            harness_version,
+        )?)),
+        crate::config::Backend::Bead => Ok(Arc::new(BeadCliBeadStore::new(binary, workspace)?)),
+    }
+}
+
+fn verify_backend_identity(
+    backend: &crate::config::Backend,
+    binary: &Path,
+    workspace: &Path,
+) -> Result<()> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new(binary)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to inspect bead CLI identity at {}",
+                binary.display()
+            )
+        })?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().with_context(|| {
+            format!(
+                "failed waiting for bead CLI identity at {}",
+                binary.display()
+            )
+        })? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "timed out verifying bead backend identity for workspace {} at {}",
+                workspace.display(),
+                binary.display()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    if let Some(mut stream) = child.stdout.take() {
+        stream.read_to_end(&mut stdout)?;
+    }
+    if let Some(mut stream) = child.stderr.take() {
+        stream.read_to_end(&mut stderr)?;
+    }
+    let stdout = String::from_utf8_lossy(&stdout);
+    let stderr = String::from_utf8_lossy(&stderr);
+    let identity = format!("{stdout}{stderr}");
+    let expected_prefix = match backend {
+        crate::config::Backend::Bf => "bf ",
+        crate::config::Backend::Br => "br ",
+        crate::config::Backend::Bead => "bead ",
+    };
+
+    if !status.success() || !identity.trim_start().starts_with(expected_prefix) {
+        bail!(
+            "bead backend identity mismatch for workspace {}: {} must report a version beginning with {:?}, found {:?}",
+            workspace.display(),
+            binary.display(),
+            expected_prefix,
+            identity.trim()
+        );
+    }
+    Ok(())
+}
+
+/// Load a target workspace's configuration and open only its explicitly bound
+/// bead backend. The historical function name is retained while strand call
+/// sites migrate to receiving a pre-resolved backend context.
 pub fn discover_default(
     workspace: PathBuf,
     model: Option<String>,
     harness: Option<String>,
     harness_version: Option<String>,
 ) -> Result<Arc<dyn BeadStore>> {
-    if let Ok(store) = BfCliBeadStore::discover(
-        workspace.clone(),
-        model.clone(),
-        harness.clone(),
-        harness_version.clone(),
-    ) {
-        return Ok(Arc::new(store));
-    }
-    if let Ok(store) = BrCliBeadStore::discover(workspace.clone(), model, harness, harness_version)
-    {
-        return Ok(Arc::new(store));
-    }
-    let store = BeadCliBeadStore::discover(workspace)
-        .context("no bead store CLI found (tried bf, br, bead)")?;
-    Ok(Arc::new(store))
+    let (config, _) = crate::config::ConfigLoader::load_resolved(
+        &workspace,
+        crate::config::CliOverrides {
+            workspace: Some(workspace.clone()),
+            ..Default::default()
+        },
+    )
+    .with_context(|| {
+        format!(
+            "failed to load bead backend binding for workspace {}",
+            workspace.display()
+        )
+    })?;
+    open_configured(&config.bead_cli, workspace, model, harness, harness_version)
 }
 
 // Re-export operation strategies for backend descriptors
@@ -908,6 +1015,57 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use tokio::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    fn version_fixture(directory: &Path, name: &str, version: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = directory.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[test]
+    fn configured_store_rejects_auto_before_opening_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config = crate::config::BeadCliConfig::default();
+        let error = open_configured(&config, workspace.path().to_path_buf(), None, None, None)
+            .err()
+            .expect("auto must not authorize store access");
+        assert!(error
+            .to_string()
+            .contains("no authoritative bead backend binding"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_store_accepts_matching_bead_rs_identity() {
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = version_fixture(workspace.path(), "custom-bead", "bead 0.1.1");
+        let config = crate::config::BeadCliConfig {
+            backend: "bead-rs".to_string(),
+            explicit_path: Some(binary),
+        };
+        assert!(open_configured(&config, workspace.path().to_path_buf(), None, None, None).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_store_rejects_identity_mismatch() {
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = version_fixture(workspace.path(), "not-bead", "bf 0.4.1");
+        let config = crate::config::BeadCliConfig {
+            backend: "bead-rs".to_string(),
+            explicit_path: Some(binary),
+        };
+        let error = open_configured(&config, workspace.path().to_path_buf(), None, None, None)
+            .err()
+            .expect("mismatched identity must fail closed");
+        assert!(error.to_string().contains("identity mismatch"));
+    }
 
     #[test]
     fn filters_default_is_empty() {

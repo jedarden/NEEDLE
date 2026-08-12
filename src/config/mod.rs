@@ -336,15 +336,14 @@ pub struct WorkspaceLabelsOverride {
 
 /// Bead CLI backend configuration.
 ///
-/// Controls which bead store CLI (bf/br/bead) is used and how to resolve it.
+/// Controls which bead store backend is used and how to resolve its CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BeadCliConfig {
-    /// Backend selection: auto (default), bf, br, or bead.
+    /// Backend descriptor name. Production workspaces use `bead-forge` or
+    /// `bead-rs`; `auto` is retained only for discovery diagnostics.
     ///
-    /// - `auto`: Discover bf → ~/.local/bin/bf → br → ~/.local/bin/br → bead → ~/.local/bin/bead → /usr/local/cargo/bin/bead
-    /// - `bf`: Use bead-forge (bf) explicitly
-    /// - `br`: Use deprecated br alias (legacy shim)
-    /// - `bead`: Use original bead CLI
+    /// Legacy short names remain accepted while existing global configuration
+    /// is migrated, but repository bindings should use descriptor names.
     #[serde(default = "BeadCliConfig::default_backend")]
     pub backend: String,
 
@@ -400,11 +399,23 @@ pub enum Backend {
 /// Returns an error if no matching binary is found. The error message lists
 /// all attempted paths.
 pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
-    // If explicit path is set, use it directly (backend detection is skipped)
+    // If an explicit path is set, the configured backend remains authoritative.
+    // Inferring the dialect from an arbitrary filename would make renamed or
+    // wrapper binaries silently select the wrong command grammar.
     if let Some(ref explicit_path) = config.explicit_path {
         if explicit_path.exists() {
-            // Detect backend from the binary name
-            let backend = detect_backend_from_path(explicit_path)?;
+            let backend = match config.backend.as_str() {
+                "bf" | "bead-forge" => Backend::Bf,
+                "br" | "beads-rust" => Backend::Br,
+                "bead" | "bead-rs" => Backend::Bead,
+                "auto" | "" => detect_backend_from_path(explicit_path)?,
+                _ => {
+                    bail!(
+                        "invalid bead CLI backend: {} (must be: bead-forge, bead-rs, beads-rust, or auto for diagnostics)",
+                        config.backend
+                    )
+                }
+            };
             return Ok((backend, explicit_path.clone()));
         } else {
             bail!(
@@ -417,7 +428,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
     let home = std::env::var("HOME").unwrap_or_default();
 
     match config.backend.as_str() {
-        "bf" => {
+        "bf" | "bead-forge" => {
             // bf only: PATH → ~/.local/bin/bf
             let path = find_on_path("bf")
                 .or_else(|_| {
@@ -431,7 +442,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
                 .context("bf CLI not found (checked PATH, ~/.local/bin/bf)")?;
             Ok((Backend::Bf, path))
         }
-        "br" => {
+        "br" | "beads-rust" => {
             // br only: PATH → ~/.local/bin/br
             let path = find_on_path("br")
                 .or_else(|_| {
@@ -445,7 +456,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
                 .context("br CLI not found (checked PATH, ~/.local/bin/br)")?;
             Ok((Backend::Br, path))
         }
-        "bead" => {
+        "bead" | "bead-rs" => {
             // bead only: PATH → ~/.local/bin/bead → /usr/local/cargo/bin/bead
             let path = find_on_path("bead")
                 .or_else(|_| {
@@ -510,7 +521,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
             )
         }
         _ => bail!(
-            "invalid bead CLI backend: {} (must be: auto, bf, br, bead)",
+            "invalid bead CLI backend: {} (must be: bead-forge, bead-rs, beads-rust, or auto for diagnostics)",
             config.backend
         ),
     }
