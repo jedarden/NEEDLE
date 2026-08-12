@@ -3268,6 +3268,26 @@ fn doctor_check_jsonl(beads_dir: &Path) -> CheckResult {
     }
 }
 
+fn doctor_check_checkpoint(
+    beads_dir: &Path,
+    bead_cli: &crate::config::BeadCliConfig,
+) -> CheckResult {
+    if matches!(bead_cli.backend.as_str(), "bead" | "bead-rs") {
+        let pointer = beads_dir.join("checkpoint/current.json");
+        if !pointer.exists() {
+            return CheckResult::fail("Checkpoint", "checkpoint/current.json not found");
+        }
+        return match std::fs::read_to_string(&pointer) {
+            Ok(content) if serde_json::from_str::<serde_json::Value>(&content).is_ok() => {
+                CheckResult::pass("Checkpoint", "native pointer is valid JSON")
+            }
+            Ok(_) => CheckResult::fail("Checkpoint", "current.json is invalid JSON"),
+            Err(error) => CheckResult::fail("Checkpoint", format!("unreadable: {error}")),
+        };
+    }
+    doctor_check_jsonl(beads_dir)
+}
+
 fn doctor_check_sqlite(beads_dir: &Path) -> CheckResult {
     let db = beads_dir.join("beads.db");
     if !db.exists() {
@@ -3769,9 +3789,16 @@ fn doctor_check_telemetry_logs(config: &Config, needle_home: &Path, repair: bool
 
 /// `needle doctor` — check system health and optionally repair.
 fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
-    let config = ConfigLoader::load_global()?;
+    let global = ConfigLoader::load_global()?;
+    let workspace_root = workspace.unwrap_or_else(|| global.workspace.default.clone());
+    let (config, _) = ConfigLoader::load_resolved(
+        &workspace_root,
+        CliOverrides {
+            workspace: Some(workspace_root.clone()),
+            ..Default::default()
+        },
+    )?;
     let needle_home = config.workspace.home.clone();
-    let workspace_root = workspace.unwrap_or_else(|| config.workspace.default.clone());
     let beads_dir = workspace_root.join(".beads");
     let heartbeat_dir = needle_home.join("state").join("heartbeats");
 
@@ -3789,7 +3816,7 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
 
     // JSONL consistency
     if beads_dir.is_dir() {
-        results.push(doctor_check_jsonl(&beads_dir));
+        results.push(doctor_check_checkpoint(&beads_dir, &config.bead_cli));
     }
 
     // SQLite integrity (raw PRAGMA — independent of br)
