@@ -1461,7 +1461,7 @@ mod tests {
         for variant in variants {
             // Each variant should serialize correctly for YAML descriptors
             let serialized = serde_json::to_string(&variant).unwrap();
-            assert!(serialized.contains(r#""""#), "variant should serialize");
+            assert!(serialized.starts_with('"') && serialized.ends_with('"'));
 
             // Each variant should deserialize from snake_case
             let deserialized: Result<ClaimStrategy, _> = serde_json::from_str(&serialized);
@@ -1479,7 +1479,7 @@ mod tests {
 
         for variant in variants {
             let serialized = serde_json::to_string(&variant).unwrap();
-            assert!(serialized.contains(r#""""#));
+            assert!(serialized.starts_with('"') && serialized.ends_with('"'));
 
             let deserialized: Result<ClaimAutoStrategy, _> = serde_json::from_str(&serialized);
             assert!(deserialized.is_ok());
@@ -1493,7 +1493,7 @@ mod tests {
 
         for variant in variants {
             let serialized = serde_json::to_string(&variant).unwrap();
-            assert!(serialized.contains(r#""""#));
+            assert!(serialized.starts_with('"') && serialized.ends_with('"'));
 
             let deserialized: Result<SplitStrategy, _> = serde_json::from_str(&serialized);
             assert!(deserialized.is_ok());
@@ -1507,7 +1507,7 @@ mod tests {
 
         for variant in variants {
             let serialized = serde_json::to_string(&variant).unwrap();
-            assert!(serialized.contains(r#""""#));
+            assert!(serialized.starts_with('"') && serialized.ends_with('"'));
 
             let deserialized: Result<CreateIdStrategy, _> = serde_json::from_str(&serialized);
             assert!(deserialized.is_ok());
@@ -1521,7 +1521,7 @@ mod tests {
 
         for variant in variants {
             let serialized = serde_json::to_string(&variant).unwrap();
-            assert!(serialized.contains(r#""""#));
+            assert!(serialized.starts_with('"') && serialized.ends_with('"'));
 
             let deserialized: Result<LabelsStrategy, _> = serde_json::from_str(&serialized);
             assert!(deserialized.is_ok());
@@ -1535,7 +1535,7 @@ mod tests {
 
         for variant in variants {
             let serialized = serde_json::to_string(&variant).unwrap();
-            assert!(serialized.contains(r#""""#));
+            assert!(serialized.starts_with('"') && serialized.ends_with('"'));
 
             let deserialized: Result<ImportStrategy, _> = serde_json::from_str(&serialized);
             assert!(deserialized.is_ok());
