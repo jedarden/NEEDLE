@@ -11,7 +11,7 @@ output_format = "verbose"
 
 # Configure plotting backend (used by cargo-criterion for report generation)
 # Options: "gnuplot", "plotters", "auto"
-ploting_backend = "auto"
+plotting_backend = "auto"
 
 # Configure measurement settings
 # Default sample size for benchmarks (higher = more accurate but slower)
