@@ -34,6 +34,8 @@ const DEFAULT_PLUCK_TEMPLATE: &str = "\
 
 {bead_body}
 
+{bead_comments}
+
 ## Workspace
 
 {workspace_path}
@@ -358,6 +360,7 @@ const COMMON_VARS: &[&str] = &[
     "{bead_id}",
     "{bead_title}",
     "{bead_body}",
+    "{bead_comments}",
     "{workspace_path}",
     "{context_file_contents}",
     "{workspace_instructions}",
@@ -663,11 +666,15 @@ impl PromptBuilder {
             .unwrap_or("(no workspace instructions)");
         let body = bead.body.as_deref().unwrap_or("(no description)");
 
+        // Build comments section with truncation (max 2000 bytes, newest last).
+        let comments_section = format_comments(&bead.comments);
+
         // Substitute common variables.
         let mut content = template_content
             .replace("{bead_id}", bead.id.as_ref())
             .replace("{bead_title}", &bead.title)
             .replace("{bead_body}", body)
+            .replace("{bead_comments}", &comments_section)
             .replace("{workspace_path}", &workspace.display().to_string())
             .replace("{context_file_contents}", &context_file_contents)
             .replace("{workspace_instructions}", instructions)
@@ -968,6 +975,69 @@ fn hex_sha256(s: &str) -> String {
     })
 }
 
+/// Format bead comments for inclusion in the prompt.
+///
+/// Comments are rendered with newest first (reverse chronological order).
+/// Total output is capped at `MAX_COMMENTS_BYTES`; if exceeded, the oldest
+/// comments are truncated and a note is appended.
+///
+/// The format includes:
+/// - Author and timestamp for each comment
+/// - Clear delimiters between comments
+/// - Explicit instruction that later comments supersede earlier ones
+fn format_comments(comments: &[crate::types::Comment]) -> String {
+    const MAX_COMMENTS_BYTES: usize = 2000;
+
+    if comments.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::from("## Comments (newest first)\n\n");
+    output.push_str(
+        "IMPORTANT: Later comments supersede the description above. \
+        If a comment conflicts with the description, follow the comment.\n\n",
+    );
+
+    // Sort comments by created_at descending (newest first) and accumulate
+    let mut sorted_comments: Vec<_> = comments.iter().collect();
+    sorted_comments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let mut total_bytes = output.len();
+    let mut truncated = false;
+    let mut displayed_count = 0;
+
+    for (idx, comment) in sorted_comments.iter().enumerate() {
+        let comment_text = format!(
+            "### Comment {} (by {}, {})\n{}\n\n",
+            idx + 1,
+            comment.author,
+            comment.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
+            comment.text
+        );
+
+        // Check if adding this comment would exceed the cap
+        if total_bytes + comment_text.len() > MAX_COMMENTS_BYTES {
+            truncated = true;
+            break;
+        }
+
+        output.push_str(&comment_text);
+        total_bytes += comment_text.len();
+        displayed_count += 1;
+    }
+
+    if truncated {
+        let omitted = sorted_comments.len() - displayed_count;
+        let note = format!(
+            "[{} older comment(s) omitted due to length cap - showing only newest comments above]\n\n",
+            omitted
+        );
+        output.push_str(&note);
+    }
+
+    output
+}
+
 /// Extract all `{variable}` references from a template string.
 ///
 /// Skips escaped braces (`{{` and `}}`) which are used for literal JSON.
@@ -1143,6 +1213,7 @@ mod tests {
             "{bead_id}",
             "{bead_title}",
             "{bead_body}",
+            "{bead_comments}",
             "{workspace_path}",
             "{context_file_contents}",
             "{workspace_instructions}",
@@ -1524,5 +1595,102 @@ mod tests {
 
         assert!(result.content.contains("MY_DOCS"));
         assert!(result.content.contains("MY_BEADS"));
+    }
+
+    #[test]
+    fn prompt_contains_comments_section_when_present() {
+        use crate::types::Comment;
+        use chrono::Utc;
+
+        let config = PromptConfig::default();
+        let builder = PromptBuilder::new(&config);
+        let mut bead = test_bead();
+
+        // Add a comment to the bead
+        bead.comments = vec![Comment {
+            id: 1,
+            bead_id: "needle-abc".to_string(),
+            text: "DO NOT do the fix described in the description. Do Y instead.".to_string(),
+            author: "human".to_string(),
+            created_at: Utc::now(),
+        }];
+
+        let result = builder
+            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .unwrap();
+
+        // Comments section should be present
+        assert!(result.content.contains("## Comments (newest first)"));
+        assert!(result
+            .content
+            .contains("DO NOT do the fix described in the description"));
+        assert!(result
+            .content
+            .contains("Later comments supersede the description above"));
+    }
+
+    #[test]
+    fn prompt_without_bead_comments_has_no_comments_section() {
+        let config = PromptConfig::default();
+        let builder = PromptBuilder::new(&config);
+        let bead = test_bead(); // No comments by default
+
+        let result = builder
+            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .unwrap();
+
+        // No comments section when there are no comments
+        assert!(!result.content.contains("## Comments"));
+    }
+
+    #[test]
+    fn comments_are_ordered_newest_first() {
+        use crate::types::Comment;
+        use chrono::Duration;
+        use chrono::Utc;
+
+        let config = PromptConfig::default();
+        let builder = PromptBuilder::new(&config);
+        let mut bead = test_bead();
+
+        let now = Utc::now();
+        bead.comments = vec![
+            Comment {
+                id: 1,
+                bead_id: "needle-abc".to_string(),
+                text: "First comment (oldest)".to_string(),
+                author: "user1".to_string(),
+                created_at: now - Duration::hours(2),
+            },
+            Comment {
+                id: 2,
+                bead_id: "needle-abc".to_string(),
+                text: "Second comment (middle)".to_string(),
+                author: "user2".to_string(),
+                created_at: now - Duration::hours(1),
+            },
+            Comment {
+                id: 3,
+                bead_id: "needle-abc".to_string(),
+                text: "Third comment (newest)".to_string(),
+                author: "user3".to_string(),
+                created_at: now,
+            },
+        ];
+
+        let result = builder
+            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .unwrap();
+
+        // Comments should appear in reverse chronological order
+        let third_pos = result.content.find("Third comment (newest)").unwrap();
+        let second_pos = result.content.find("Second comment (middle)").unwrap();
+        let first_pos = result.content.find("First comment (oldest)").unwrap();
+
+        assert!(third_pos < second_pos, "newest comment should appear first");
+        assert!(
+            second_pos < first_pos,
+            "middle comment should appear before oldest"
+        );
     }
 }

@@ -431,6 +431,22 @@ where
     Ok(s.filter(|s| !s.is_empty()))
 }
 
+/// A comment on a bead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Comment {
+    /// Comment ID (internal database ID).
+    pub id: i64,
+    /// The bead this comment is on.
+    #[serde(rename = "issue_id")]
+    pub bead_id: String,
+    /// The comment text.
+    pub text: String,
+    /// Author who created the comment.
+    pub author: String,
+    /// When the comment was created.
+    pub created_at: DateTime<Utc>,
+}
+
 /// A bead as returned from the bead store.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bead {
@@ -454,6 +470,10 @@ pub struct Bead {
     pub dependencies: Vec<BrDependency>,
     #[serde(default)]
     pub dependents: Vec<BrDependency>,
+    /// Comments on this bead, returned by `bf show --json`.
+    /// Empty array if no comments or backend doesn't support comments.
+    #[serde(default)]
+    pub comments: Vec<Comment>,
     pub created_at: DateTime<Utc>,
     // br ready --json omits updated_at; default to now so explore can deserialize it
     #[serde(default = "chrono::Utc::now")]
