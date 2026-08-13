@@ -1091,6 +1091,34 @@ impl Worker {
         // Check boot timeout before each step
         self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
 
+        // Step: Adapter preflight
+        self.telemetry.emit(EventKind::InitStepStarted {
+            step: "adapter_preflight".to_string(),
+        })?;
+        let step_start = Instant::now();
+        // Validate that the configured adapter exists before entering the main claim loop.
+        // This ensures adapter configuration errors are caught early during startup rather
+        // than after a bead has been claimed, preventing orphaned in_progress beads.
+        if let Err(e) = self.resolve_adapter() {
+            // Provide clear context that this is a startup preflight failure
+            bail!(
+                "startup adapter preflight failed: {e}\n\n\
+                 The configured agent adapter could not be resolved. This check runs during \
+                 worker initialization to ensure adapter configuration is valid before \
+                 processing any beads. Common causes:\n\
+                 - Adapter YAML file missing from ~/.needle/agents/ or ~/.local/bin/claude-config/agents/\n\
+                 - Incorrect adapter name in agent.default config\n\
+                 - Adapter defined but missing required fields (provider, model, etc.)",
+            );
+        }
+        self.telemetry.emit(EventKind::InitStepCompleted {
+            step: "adapter_preflight".to_string(),
+            duration_ms: step_start.elapsed().as_millis() as u64,
+        })?;
+
+        // Check boot timeout before each step
+        self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
+
         // Step: Heartbeat emitter start
         self.telemetry.emit(EventKind::InitStepStarted {
             step: "heartbeat_emitter".to_string(),
