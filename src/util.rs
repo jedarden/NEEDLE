@@ -374,7 +374,6 @@ pub(crate) mod test_env {
     /// Hold the returned tuple for the whole test body; dropping it releases
     /// the lock and restores the environment. The lock is intentionally
     /// poison-tolerant: a panicking test must not wedge every later test.
-    #[must_use]
     pub(crate) fn isolate_env() -> (MutexGuard<'static, ()>, EnvGuard) {
         let lock = ENV_LOCK
             .lock()
