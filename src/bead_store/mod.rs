@@ -888,6 +888,14 @@ pub trait BeadStore: Send + Sync {
     /// Fetch a single bead by ID.
     async fn show(&self, id: &BeadId) -> Result<Bead>;
 
+    /// Fetch operator/agent notes when the backend exposes them.
+    ///
+    /// Backends without a notes projection return `None`; this keeps notes a
+    /// capability rather than forcing it into NEEDLE's common bead model.
+    async fn notes(&self, _id: &BeadId) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Attempt to atomically claim a bead (set status=in_progress, assignee=actor).
     ///
     /// Returns a `ClaimResult` describing the outcome:

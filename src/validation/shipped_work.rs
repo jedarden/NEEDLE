@@ -39,6 +39,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
+use crate::bead_store::BeadStore;
 use crate::types::Bead;
 use crate::validation::predispatch::{self, hash_notes};
 use crate::validation::GateResult;
@@ -59,11 +60,15 @@ const TRIVIAL_PATH_PREFIXES: &[&str] = &["notes/", ".beads/", ".needle-predispat
 /// bead's workspace directory (`bead.workspace` / `source_repo`). The
 /// pre-dispatch baseline comes from the `predispatch` snapshot recorded by the
 /// worker before the agent ran.
-pub async fn verify_shipped_work(post: &Bead, workspace: &Path) -> Result<GateResult> {
+pub async fn verify_shipped_work(
+    post: &Bead,
+    workspace: &Path,
+    store: &dyn BeadStore,
+) -> Result<GateResult> {
     let snapshot = predispatch::load(workspace, &post.id).await;
     // `Bead` does not carry `notes`, so read the current value the same way the
     // snapshot did.
-    let post_notes = predispatch::current_notes(workspace, &post.id)
+    let post_notes = predispatch::current_notes(store, &post.id)
         .await
         .unwrap_or_default();
 

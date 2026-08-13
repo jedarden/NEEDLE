@@ -299,6 +299,20 @@ impl BeadStore for CliBeadStore {
             .ok_or_else(|| anyhow::anyhow!("{} show {} returned no bead", self.backend.name, id))
     }
 
+    async fn notes(&self, id: &BeadId) -> Result<Option<String>> {
+        let values = HashMap::from([("id", id.to_string())]);
+        let stdout = self.run_operation("show", &values).await?;
+        let value: serde_json::Value = serde_json::from_str(stdout.trim())?;
+        let object = value
+            .as_array()
+            .and_then(|items| items.first())
+            .unwrap_or(&value);
+        Ok(object
+            .get("notes")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string))
+    }
+
     async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
         if self.backend.name == "bead-forge" {
             // bead-forge's public atomic API selects the winning bead inside

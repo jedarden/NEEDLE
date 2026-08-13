@@ -441,7 +441,7 @@ impl OutcomeHandler {
         match self.timeout_op(|| store.show(&bead.id), "show").await {
             Ok(Some(current)) if current.status.is_done() => {
                 if self.config.worker.enforce_shipped_work {
-                    match verify_shipped_work(&current, &bead.workspace).await {
+                    match verify_shipped_work(&current, &bead.workspace, store).await {
                         Ok(crate::validation::GateResult::Fail(reason)) => {
                             tracing::warn!(
                                 bead_id = %bead.id,

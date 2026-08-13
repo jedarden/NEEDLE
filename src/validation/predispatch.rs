@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::bead_store::spawn_with_etxtbsy_retry;
+use crate::bead_store::{spawn_with_etxtbsy_retry, BeadStore};
 use crate::types::BeadId;
 
 /// Workspace + bead state captured immediately before an agent is dispatched.
@@ -77,10 +77,10 @@ fn snapshot_path(workspace: &Path, bead_id: &BeadId) -> PathBuf {
 ///
 /// Never fails the dispatch: a snapshot that cannot be written just means the
 /// gate falls back to its conservative path later.
-pub async fn record(workspace: &Path, bead_id: &BeadId) -> Result<()> {
+pub async fn record(workspace: &Path, bead_id: &BeadId, store: &dyn BeadStore) -> Result<()> {
     let snapshot = PreDispatch {
         head_sha: git_head(workspace).await,
-        notes_hash: read_notes(workspace, bead_id).await.map(|n| hash_notes(&n)),
+        notes_hash: read_notes(store, bead_id).await.map(|n| hash_notes(&n)),
     };
 
     let path = snapshot_path(workspace, bead_id);
@@ -116,22 +116,13 @@ async fn git_head(workspace: &Path) -> Option<String> {
 ///
 /// `Bead` does not carry `notes`, so the gate reads it the same way the
 /// snapshot did.
-pub async fn current_notes(workspace: &Path, bead_id: &BeadId) -> Option<String> {
-    read_notes(workspace, bead_id).await
+pub async fn current_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<String> {
+    read_notes(store, bead_id).await
 }
 
-/// Read the bead's `notes` field via `bf show --json`.
-///
-/// `bf show` emits a single-element array; tolerate both that and a bare object
-/// so the gate does not silently lose its fallback if the shape changes.
-async fn read_notes(workspace: &Path, bead_id: &BeadId) -> Option<String> {
-    let raw = run(workspace, "bf", &["show", bead_id.as_ref(), "--json"]).await?;
-    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let obj = match &value {
-        serde_json::Value::Array(items) => items.first()?,
-        other => other,
-    };
-    Some(obj.get("notes")?.as_str().unwrap_or_default().to_string())
+/// Read notes through the already-resolved workspace backend.
+async fn read_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<String> {
+    store.notes(bead_id).await.ok().flatten()
 }
 
 async fn run(workspace: &Path, bin: &str, args: &[&str]) -> Option<String> {

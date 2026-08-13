@@ -2157,7 +2157,12 @@ impl Worker {
                 // runs, so the shipped-work gate has a baseline to judge the
                 // closure against. Best-effort: a missing snapshot degrades the
                 // gate to its conservative path, it never blocks dispatch.
-                if let Err(e) = crate::validation::predispatch::record(dispatch_ws, &bead.id).await
+                if let Err(e) = crate::validation::predispatch::record(
+                    dispatch_ws,
+                    &bead.id,
+                    self.store.as_ref(),
+                )
+                .await
                 {
                     tracing::warn!(
                         bead_id = %bead.id,

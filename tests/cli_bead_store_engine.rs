@@ -22,7 +22,7 @@ fn store(root: &Path, backend_name: &str) -> CliBeadStore {
     let binary = root.join("fixture-cli");
     executable(
         &binary,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nprintf '%s\\n' '[{\"id\":\"fixture-1\",\"title\":\"fixture\",\"description\":null,\"priority\":2,\"status\":\"open\",\"assignee\":null,\"labels\":[],\"source_repo\":\"\",\"dependencies\":[],\"dependents\":[],\"comments\":[],\"created_at\":\"2026-08-12T00:00:00Z\",\"updated_at\":\"2026-08-12T00:00:00Z\"}]'\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nprintf '%s\\n' '[{\"id\":\"fixture-1\",\"title\":\"fixture\",\"description\":null,\"notes\":\"backend note\",\"priority\":2,\"status\":\"open\",\"assignee\":null,\"labels\":[],\"source_repo\":\"\",\"dependencies\":[],\"dependents\":[],\"comments\":[],\"created_at\":\"2026-08-12T00:00:00Z\",\"updated_at\":\"2026-08-12T00:00:00Z\"}]'\n",
     );
     CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap()
 }
@@ -86,6 +86,21 @@ async fn operation_execution_uses_bound_binary_and_workspace() {
 
     assert_eq!(beads.len(), 1);
     assert_eq!(beads[0].id.as_ref(), "fixture-1");
+    assert_eq!(
+        fs::read_to_string(root.path().join("invocations.log")).unwrap(),
+        "show\nfixture-1\n--json\n"
+    );
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn notes_use_the_bound_backend_show_operation() {
+    let root = tempfile::tempdir().unwrap();
+    let store = store(root.path(), "bead-rs");
+    assert_eq!(
+        store.notes(&BeadId::from("fixture-1")).await.unwrap(),
+        Some("backend note".to_string())
+    );
     assert_eq!(
         fs::read_to_string(root.path().join("invocations.log")).unwrap(),
         "show\nfixture-1\n--json\n"
