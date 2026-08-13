@@ -123,7 +123,7 @@ fn integration_non_tmux_worker_discoverable() {
     // This simulates the path that might be invisible to status/list
     let needle_binary = std::env::var("NEEDLE_BINARY").unwrap_or_else(|_| "needle".to_string());
 
-    let mut worker = Command::new(&needle_binary)
+    let child = Command::new(&needle_binary)
         .env("NEEDLE_INNER", "1")
         .args([
             "run",
@@ -139,8 +139,52 @@ fn integration_non_tmux_worker_discoverable() {
         .spawn()
         .expect("failed to start needle worker");
 
-    let worker_pid = worker.id();
+    let worker_pid = child.id();
     println!("Started worker PID: {}", worker_pid);
+
+    // ProcessGuard ensures cleanup if test panics
+    struct ProcessGuard {
+        inner: Option<std::process::Child>,
+    }
+
+    impl ProcessGuard {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            if let Some(ref mut child) = self.inner {
+                child.try_wait()
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            if let Some(ref mut child) = self.inner {
+                child.kill()
+            } else {
+                Ok(())
+            }
+        }
+
+        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            if let Some(ref mut child) = self.inner {
+                child.wait()
+            } else {
+                Err(std::io::Error::other("No child process to wait for"))
+            }
+        }
+    }
+
+    impl Drop for ProcessGuard {
+        fn drop(&mut self) {
+            let _ = self.kill();
+            let _ = self.wait();
+            // Prevent double-wait by consuming the child after our methods handle it
+            let _ = self.inner.take();
+        }
+    }
+
+    let mut worker_guard = ProcessGuard {
+        inner: Some(child),
+    };
 
     // Wait for worker to boot and register
     thread::sleep(Duration::from_secs(5));
@@ -260,7 +304,7 @@ fn integration_non_tmux_worker_discoverable() {
     let _ = Command::new(&needle_binary)
         .args(["stop", "--all"])
         .status();
-    let _ = worker.wait();
+    let _ = worker_guard.wait();
 
     // Wait for graceful shutdown
     thread::sleep(Duration::from_secs(2));
