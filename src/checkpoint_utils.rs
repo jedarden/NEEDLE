@@ -1490,7 +1490,10 @@ mod tests {
         // and the error handling logic exists in the implementation
         let result = flush_checkpoint_to_temp(workspace_path).await;
         // Under normal circumstances this should succeed
-        assert!(result.is_ok(), "flush should succeed under normal conditions");
+        assert!(
+            result.is_ok(),
+            "flush should succeed under normal conditions"
+        );
     }
 
     #[tokio::test]
@@ -1506,15 +1509,14 @@ mod tests {
 
         let result = copy_dir_recursive(source_path, &dest_path);
         assert!(result.is_ok(), "copying empty directory should succeed");
-        assert!(dest_path.exists(), "destination directory should be created");
+        assert!(
+            dest_path.exists(),
+            "destination directory should be created"
+        );
 
         // Verify destination is empty
         let entries = fs::read_dir(&dest_path).expect("failed to read destination");
-        assert_eq!(
-            entries.count(),
-            0,
-            "copied directory should be empty"
-        );
+        assert_eq!(entries.count(), 0, "copied directory should be empty");
     }
 
     #[tokio::test]
@@ -1523,16 +1525,17 @@ mod tests {
         let source = TempDir::new().expect("failed to create source temp dir");
         let source_path = source.path();
 
-        fs::write(source_path.join("single.txt"), b"content")
-            .expect("failed to write file");
+        fs::write(source_path.join("single.txt"), b"content").expect("failed to write file");
 
         let destination = TempDir::new().expect("failed to create destination temp dir");
         let dest_path = destination.path().join("single_copy");
 
-        copy_dir_recursive(source_path, &dest_path)
-            .expect("copy failed");
+        copy_dir_recursive(source_path, &dest_path).expect("copy failed");
 
-        assert!(dest_path.join("single.txt").exists(), "file should be copied");
+        assert!(
+            dest_path.join("single.txt").exists(),
+            "file should be copied"
+        );
         assert_eq!(
             fs::read_to_string(dest_path.join("single.txt")).expect("failed to read"),
             "content",
@@ -1631,8 +1634,7 @@ mod tests {
         fs::create_dir_all(&beads_dir).expect("failed to create .beads");
 
         // Create a minimal beads.db file
-        fs::write(beads_dir.join("beads.db"), b"test database")
-            .expect("failed to write db");
+        fs::write(beads_dir.join("beads.db"), b"test database").expect("failed to write db");
 
         // Flush checkpoint
         let (temp_dir, checkpoint_path) = flush_checkpoint_to_temp(workspace_path)
