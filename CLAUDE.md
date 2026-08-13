@@ -53,6 +53,8 @@ Leaf modules (no internal deps): `types`, `config`, `telemetry`, `bead_store`, `
 
 The Explore strand (enabled by default via `ExploreConfig::default_enabled()`) scans `workspace_root` (defaulting to `$HOME`) for bead workspaces. Without isolation, a test's spawned binary will leak into the real user environment and scan real repos, contaminating both the test and production bead stores.
 
+**📖 Comprehensive isolation patterns documentation:** See `docs/testing-isolation-patterns.md` for detailed coverage of all 4 isolation patterns, decision trees, anti-patterns, and code examples. This policy is the summary; the full documentation includes when to use each pattern and common mistakes.
+
 **Required isolation for subprocess tests:**
 
 ```rust
