@@ -286,6 +286,17 @@ fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
 }
 
 /// Returns `(Worker, TempDir)` — the TempDir must be kept alive for the test duration.
+///
+/// ISOLATION REQUIRED: In-process Worker tests must pin Explore strand's scan root.
+///
+/// This helper builds a Worker in-process via `test_config()`, which isolates the
+/// Explore strand. Tests that use this helper must keep the returned TempDir alive
+/// for the entire test duration — the Worker reads from that directory and dropping
+/// the TempDir while the Worker is active is undefined behavior.
+///
+/// See `test_config()` for full isolation documentation, including the 2026-08-05
+/// contamination incident where lack of Explore isolation caused 2302 real beads
+/// to be mutated under the fixture worker identity.
 fn make_worker_with_adapter(
     store: Arc<dyn BeadStore>,
     adapter_name: &str,
@@ -803,9 +814,20 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
     config.workspace.home = _home_dir.path().to_path_buf();
     config.self_modification.hot_reload = false;
     config.workspace.default = std::path::PathBuf::from("/tmp");
-    // Confine Explore strand to test's tempdir to prevent scanning real user directories.
-    // REQUIRED — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
-    // Without this, in-process Workers scan $HOME and claim real beads (2026-08-05 incident).
+    // ISOLATION REQUIRED: In-process Worker tests must pin Explore strand's scan root.
+    //
+    // This test builds a Worker in-process with custom config. The Explore strand
+    // MUST be isolated to prevent scanning real user directories.
+    //
+    // Without explicit pinning, ExploreConfig::default() resolves workspace_root to the real
+    // home directory via default_workspace_root() → dirs_or_home(""), causing tests to scan
+    // and mutate production bead stores.
+    //
+    // 2026-08-05 incident: test_config() isolated workspace.default/home but not strands.explore,
+    // letting an orphaned integration_tests binary mutate 2302 beads to in_progress under
+    // assignee echo-test-test-worker and truncate .beads/issues.jsonl to 0 bytes (recovered from git).
+    //
+    // See CLAUDE.md Test Isolation Policy for full details.
     config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
     config.strands.explore.workspaces = Vec::new();
 
@@ -2367,8 +2389,20 @@ async fn debug_worker_hang() {
     config.agent.routing = None;
     config.workspace.home = _home_dir.path().to_path_buf();
     config.workspace.default = PathBuf::from("/tmp/test-workspace");
-    // Isolate Explore strand to prevent scanning real home directory
-    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    // ISOLATION REQUIRED: In-process Worker tests must pin Explore strand's scan root.
+    //
+    // This test builds a Worker in-process with custom config for debugging. The Explore
+    // strand MUST be isolated to prevent scanning real user directories.
+    //
+    // Without explicit pinning, ExploreConfig::default() resolves workspace_root to the real
+    // home directory via default_workspace_root() → dirs_or_home(""), causing tests to scan
+    // and mutate production bead stores.
+    //
+    // 2026-08-05 incident: test_config() isolated workspace.default/home but not strands.explore,
+    // letting an orphaned integration_tests binary mutate 2302 beads to in_progress under
+    // assignee echo-test-test-worker and truncate .beads/issues.jsonl to 0 bytes (recovered from git).
+    //
+    // See CLAUDE.md Test Isolation Policy for full details.
     config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
     config.strands.explore.workspaces = Vec::new();
 
