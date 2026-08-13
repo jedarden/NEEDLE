@@ -10,6 +10,10 @@
 //! `CliBeadStore` binds one backend descriptor to one executable, preventing
 //! command grammar and binary identity from being mixed accidentally.
 //!
+//! IMPORTANT: authors of the `bead-rs`/beads_rust descriptor must probe the
+//! actual beads_rust binary (including its help and output), not infer its
+//! dialect from this module, `CliBeadStore`, or the bead-forge descriptor.
+//!
 //! Depends on: `types`.
 
 mod backend;
