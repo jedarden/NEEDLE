@@ -10,7 +10,7 @@ NEEDLE must drive **three** independently-evolving bead CLIs, not one canonical 
 
 | Priority | Backend | Binary | Upstream | Installed here |
 |---|---|---|---|---|
-| **primary** | **bead-rs** | `bead` | `git.ardenone.com/jedarden/bead-rs` | agent-sandbox `needle-pod`, v0.1.1 |
+| **primary** | **bead-rs** | `bead` | `git.ardenone.com/jedarden/bead-rs` | v0.1.3 (`85f36ac`) |
 | **secondary** | **bead-forge** | `bf` | `git.ardenone.com/jedarden/bead-forge` | `~/.local/bin/bf`, v0.4.1 |
 | **tertiary** | **beads_rust** | `br` | `github.com/dicklesworthstone/beads_rust` | `~/.cargo/bin/br`, v0.1.28 |
 | *(open world)* | any other | — | third-party, future, forks | not installed |

@@ -84,7 +84,7 @@ fn needle_claims_closes_and_restores_a_bead_rs_workspace() {
     assert!(!Path::new("/bin/br").exists());
     assert_eq!(
         stdout(bead_command(&bead, &workspace).arg("--version")),
-        "bead 0.1.1"
+        "bead 0.1.3"
     );
 
     run(bead_command(&bead, &workspace).args(["init", "--prefix", "e2e"]));

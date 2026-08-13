@@ -55,7 +55,7 @@ Complete the task described above. When finished:
   work, work that turned out to be already done, and work you found blocked are all
   legitimate outcomes with nothing to commit. Record the finding on the bead instead:
 
-`bf update {bead_id} --notes \"what you checked and what you found\"`
+`{bead_cli} update {bead_id} --notes \"what you checked and what you found\"`
 
   Never create `notes/{bead_id}.md`, a summary, a report, or a status file to satisfy a
   commit requirement. Status belongs on the bead, not in git history. A commit whose only
@@ -63,7 +63,7 @@ Complete the task described above. When finished:
   rejected.
 - Close the bead:
 
-`bf close {bead_id} --reason \"...\"`
+`{bead_cli} close {bead_id} --reason \"...\"`
 
 If you cannot complete the task:
 - Do NOT close the bead
@@ -293,9 +293,9 @@ chain of focused, independently achievable tasks.
 
 ### Requirements
 
-1. **Create 3-5 child beads** using the `bf create` command:
+1. **Create 3-5 child beads** using the active bead CLI:
    ```bash
-   bf create --title \"Child Title\" \\
+   {bead_cli} create --title \"Child Title\" \\
      --description \"Child description and acceptance criteria\" \\
      --label split-child
    ```
@@ -318,14 +318,14 @@ chain of focused, independently achievable tasks.
 
 5. **Verify the setup:**
    ```bash
-   bf show {bead_id}  # Should show umbrella label and dependency on last child
-   bf show <last-child-id>  # Should show this parent as a dependent
+   {bead_cli} show {bead_id}  # Should show umbrella label and dependency on last child
+   {bead_cli} show <last-child-id>  # Should show this parent as a dependent
    ```
 
    Chain and label with:
    ```bash
-   bf dep add <blocker-id> --blocks <blocked-id>
-   bf label add <bead-id> --label split-child
+   {dep_add_command}
+   {bead_cli} label add <bead-id> --label split-child
    ```
 
 ### Example
@@ -365,6 +365,8 @@ const COMMON_VARS: &[&str] = &[
     "{context_file_contents}",
     "{workspace_instructions}",
     "{worker_id}",
+    "{bead_cli}",
+    "{dep_add_command}",
 ];
 
 /// Returns the extra (strand-specific) variables allowed for a given template name.
@@ -385,6 +387,27 @@ fn extra_vars_for_template(name: &str) -> Option<&'static [&'static str]> {
         "unravel" => Some(&["{human_bead_context}"]),
         "pulse" => Some(&["{scan_results}", "{existing_beads}"]),
         _ => None,
+    }
+}
+
+fn bead_commands_for_workspace(workspace: &Path) -> (&'static str, &'static str) {
+    let backend = std::fs::read_to_string(workspace.join(".needle.yaml"))
+        .ok()
+        .and_then(|text| serde_yaml::from_str::<serde_yaml::Value>(&text).ok())
+        .and_then(|value| {
+            value
+                .get("bead_cli")?
+                .get("backend")?
+                .as_str()
+                .map(str::to_string)
+        });
+    if matches!(backend.as_deref(), Some("bead" | "bead-rs")) {
+        (
+            "bead",
+            "bead dep add <blocked-id> <blocker-id> --kind blocks",
+        )
+    } else {
+        ("bf", "bf dep add <blocker-id> --blocks <blocked-id>")
     }
 }
 
@@ -670,6 +693,7 @@ impl PromptBuilder {
         let comments_section = format_comments(&bead.comments);
 
         // Substitute common variables.
+        let (bead_cli, dep_add_command) = bead_commands_for_workspace(workspace);
         let mut content = template_content
             .replace("{bead_id}", bead.id.as_ref())
             .replace("{bead_title}", &bead.title)
@@ -678,7 +702,9 @@ impl PromptBuilder {
             .replace("{workspace_path}", &workspace.display().to_string())
             .replace("{context_file_contents}", &context_file_contents)
             .replace("{workspace_instructions}", instructions)
-            .replace("{worker_id}", worker_id);
+            .replace("{worker_id}", worker_id)
+            .replace("{bead_cli}", bead_cli)
+            .replace("{dep_add_command}", dep_add_command);
 
         // Substitute strand-specific variables.
         for (var, value) in extra_vars {
@@ -1141,6 +1167,32 @@ mod tests {
             result.content.contains("notes/needle-abc.md"),
             "prompt must contain notes file fallback instruction"
         );
+    }
+
+    #[test]
+    fn bead_rs_binding_renders_bead_commands_and_blocked_first_dependencies() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "bead_cli:\n  backend: bead-rs\n",
+        )
+        .unwrap();
+        let builder = PromptBuilder::new(&PromptConfig::default());
+        let bead = test_bead();
+
+        let pluck = builder
+            .build_pluck(&bead, workspace.path(), "worker-01")
+            .unwrap();
+        assert!(pluck.content.contains("bead close needle-abc"));
+        assert!(!pluck.content.contains("bf close needle-abc"));
+
+        let split = builder
+            .build_split(&bead, workspace.path(), "worker-01", 3)
+            .unwrap();
+        assert!(split
+            .content
+            .contains("bead dep add <blocked-id> <blocker-id> --kind blocks"));
+        assert!(!split.content.contains("bf dep add"));
     }
 
     #[test]

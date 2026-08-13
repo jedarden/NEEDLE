@@ -464,8 +464,8 @@ fn builtin_bead_rs() -> BeadBackend {
         ],
         identity_pattern: r"^bead\s".to_string(),
         version_command: default_version_command(),
-        verified_against: "bead 0.1.1 (commit 3122b85)".to_string(),
-        verified_on: "2026-08-12".to_string(),
+        verified_against: "bead 0.1.3 (commit 85f36ac)".to_string(),
+        verified_on: "2026-08-13".to_string(),
         operations,
         capabilities: BeadBackendCapabilities {
             atomic_claim: true,

@@ -1,7 +1,7 @@
 # Bead-forge to bead-rs agent-guided rehydration
 
-Status: proven on isolated fixtures; fleet cutover blocked on `bf-57wtd` and the
-NEEDLE staged-rollout gate.
+Status: proven on isolated fixtures against bead-rs v0.1.3; fleet cutover is
+blocked only on the NEEDLE staged-rollout gate.
 
 This procedure follows bead-rs ADR-002. It is rehydration, not schema import:
 the source is read through public `bf` commands, every destination mutation is
@@ -23,8 +23,7 @@ Do not cut over a fleet repository until all of these are true:
 1. The exact bead-rs build has the independently authored and approved
    ADR-002 field guide and supports
    `bead schema explain urn:bead-rs:schema:issue:native-v1`. Installed bead
-   0.1.1 and source commit `3122b85` did not satisfy this on 2026-08-12;
-   `bf-57wtd` tracks the prerequisite. Help prose is not a substitute.
+   v0.1.3 (`85f36ac`) satisfies this gate. Help prose is not a substitute.
 2. NEEDLE's descriptor-driven store, mixed-backend isolation, and real
    bead-rs lifecycle gates pass on the release candidate.
 3. No source mutation or NEEDLE worker is active during the final capture and
@@ -69,7 +68,7 @@ Each source item has exactly one disposition:
   "source_repository": "ssh://git.ardenone.com/jedarden/example.git",
   "source_commit": "<40-hex commit>",
   "source_cli": "bf 0.4.1",
-  "destination_cli": "bead 0.1.1+<approved commit>",
+  "destination_cli": "bead 0.1.3+85f36ac",
   "captured_at": "<UTC timestamp>",
   "issues": [
     {
