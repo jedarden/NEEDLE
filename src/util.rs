@@ -196,6 +196,32 @@ pub fn build_cargo_test_command(timeout_minutes: Option<u64>) -> std::process::C
     cmd
 }
 
+/// Capture the current system time in UTC.
+///
+/// Returns the current UTC timestamp as a `chrono::DateTime<chrono::Utc>`.
+/// This is a minimal timestamp capture function with no formatting logic.
+///
+/// # Returns
+///
+/// * `chrono::DateTime<chrono::Utc>` - Current UTC timestamp
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::util::capture_timestamp;
+///
+/// let now = capture_timestamp();
+/// println!("Current UTC time: {}", now);
+/// ```
+///
+/// # Performance
+///
+/// This function performs a system call to get the current time and should
+/// be called only when a timestamp is actually needed.
+pub fn capture_timestamp() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -586,5 +612,44 @@ mod tests {
 
         // Verify total argument count
         assert_eq!(args.len(), 6);
+    }
+
+    #[test]
+    fn test_capture_timestamp_returns_utc_datetime() {
+        let timestamp = capture_timestamp();
+
+        // Verify it returns a DateTime<Utc> type
+        // This will compile only if the type matches
+        let _: chrono::DateTime<chrono::Utc> = timestamp;
+    }
+
+    #[test]
+    fn test_capture_timestamp_is_current() {
+        let before = chrono::Utc::now();
+        let timestamp = capture_timestamp();
+        let after = chrono::Utc::now();
+
+        // Verify the captured timestamp is between before and after
+        assert!(timestamp >= before, "captured timestamp should be >= before");
+        assert!(timestamp <= after, "captured timestamp should be <= after");
+    }
+
+    #[test]
+    fn test_capture_timestamp_is_utc() {
+        let timestamp = capture_timestamp();
+
+        // Verify the timestamp is in UTC
+        assert_eq!(timestamp.timezone(), chrono::Utc);
+    }
+
+    #[test]
+    fn test_capture_timestamp_consistency() {
+        // Call the function multiple times and verify we get different timestamps
+        let timestamp1 = capture_timestamp();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let timestamp2 = capture_timestamp();
+
+        // timestamp2 should be later than timestamp1
+        assert!(timestamp2 > timestamp1, "later timestamp should be greater");
     }
 }
