@@ -189,6 +189,68 @@ async fn bead_forge_release_uses_atomic_batch_update() {
 
 #[tokio::test]
 #[cfg(unix)]
+async fn bead_forge_explicit_claim_uses_atomic_batch_update() {
+    let root = tempfile::tempdir().unwrap();
+    let backend = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-forge")
+        .unwrap();
+    let binary = root.path().join("fixture-cli");
+    executable(
+        &binary,
+        r#"#!/bin/sh
+printf '%s\n' "$@" >> invocations.log
+if [ "$1" = show ]; then
+  if [ -f claimed ]; then
+    printf '%s\n' '[{"id":"bf-1","title":"fixture","description":null,"priority":2,"status":"in_progress","assignee":"worker-a","labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
+  else
+    printf '%s\n' '[{"id":"bf-1","title":"fixture","description":null,"priority":2,"status":"open","assignee":null,"labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
+  fi
+elif [ "$1" = batch ]; then
+  touch claimed
+fi
+"#,
+    );
+    let store =
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
+
+    let result = store
+        .claim(&BeadId::from("bf-1"), "worker-a")
+        .await
+        .unwrap();
+    assert!(matches!(result, ClaimResult::Claimed(_)));
+    let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
+    assert!(invocations.contains("batch\n--json\n"));
+    assert!(invocations
+        .contains(r#"[{"assignee":"worker-a","id":"bf-1","op":"update","status":"in_progress"}]"#));
+    assert!(!invocations.contains("update\nbf-1\n--assignee\n"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
+async fn bead_forge_clear_assignee_uses_atomic_batch_update() {
+    let root = tempfile::tempdir().unwrap();
+    let backend = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-forge")
+        .unwrap();
+    let binary = root.path().join("fixture-cli");
+    executable(
+        &binary,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\n",
+    );
+    let store =
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
+
+    store.clear_assignee(&BeadId::from("bf-1")).await.unwrap();
+    let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
+    assert!(invocations.starts_with("batch\n--json\n"));
+    assert!(invocations.contains(r#"[{"assignee":"","id":"bf-1","op":"update"}]"#));
+    assert!(!invocations.contains("update\nbf-1\n--assignee\n"));
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn bead_forge_split_is_one_transactional_batch() {
     use needle::bead_store::NewChild;
 

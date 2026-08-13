@@ -13,8 +13,8 @@ use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
 use super::{
     execute_create_id_strategy, execute_labels_strategy, spawn_with_etxtbsy_retry_child,
-    validate_strategy_name, BeadBackend, BeadOperationSpec, BeadStore, Filters, NewChild,
-    ParseShape, ParsedStrategy, RepairReport,
+    validate_strategy_name, BeadBackend, BeadOperationSpec, BeadStore, ClaimStrategy, Filters,
+    NewChild, ParseShape, ParsedStrategy, RepairReport,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -314,12 +314,11 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
-        if self.backend.name == "bead-forge" {
-            // bead-forge's public atomic API selects the winning bead inside
-            // its transaction. This preserves the existing backend contract:
-            // the returned bead, rather than the pre-lock candidate, is the
-            // authoritative claim.
-            return self.claim_auto_inner(actor).await;
+        if matches!(
+            self.strategy("claim")?,
+            ParsedStrategy::Claim(ClaimStrategy::BatchOp)
+        ) {
+            return self.claim_via_batch(id, actor).await;
         }
         let shown = self.show(id).await?;
         if shown.status != BeadStatus::Open {
@@ -609,6 +608,33 @@ impl BeadStore for CliBeadStore {
 }
 
 impl CliBeadStore {
+    async fn claim_via_batch(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
+        let shown = self.show(id).await?;
+        if shown.status != BeadStatus::Open {
+            return Ok(ClaimResult::NotClaimable {
+                reason: format!("bead is {}, not open", shown.status),
+            });
+        }
+        if let Some(claimed_by) = shown.assignee {
+            return Ok(ClaimResult::RaceLost { claimed_by });
+        }
+
+        // bf 0.4.1 removed --assignee from `update`, but its transactional
+        // batch update operation still accepts status and assignee together.
+        self.run_bf_update_batch(id, Some("in_progress"), Some(actor))
+            .await
+            .with_context(|| format!("bf batch update {id} (claim) failed"))?;
+
+        let claimed = self.show(id).await?;
+        if claimed.assignee.as_deref() == Some(actor) {
+            Ok(ClaimResult::Claimed(claimed))
+        } else {
+            Ok(ClaimResult::RaceLost {
+                claimed_by: claimed.assignee.unwrap_or_else(|| "(unknown)".to_string()),
+            })
+        }
+    }
+
     async fn run_bf_update_batch(
         &self,
         id: &BeadId,
