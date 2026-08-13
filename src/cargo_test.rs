@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use crate::test_output::TestOutput;
 use crate::trace::TraceCapture;
 use crate::types::BeadId;
+use crate::util::capture_timestamp;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -160,6 +161,8 @@ pub struct TestOutcome {
     pub compilation_failed: bool,
     /// Parsed compilation error messages (if compilation_failed is true).
     pub compilation_errors: Vec<CompilationError>,
+    /// Timestamp when cargo test command was launched (ISO 8601 UTC).
+    pub launch_timestamp: String,
 }
 
 /// Classification of compilation error variants.
@@ -673,11 +676,22 @@ impl CargoTest {
     /// - The process cannot be spawned
     pub fn run(&self) -> Result<TestOutcome> {
         let start = Instant::now();
+
+        // Capture timestamp BEFORE building/spawning the command
+        // This ensures the timestamp is captured even if command construction fails
+        let launch_timestamp = capture_timestamp();
+
+        tracing::debug!(
+            launch_timestamp = %launch_timestamp,
+            "captured cargo test launch timestamp"
+        );
+
         let args = self.args.build_args();
 
         tracing::info!(
             workspace = %self.workspace.display(),
             args = ?args,
+            launch_timestamp = %launch_timestamp,
             "running cargo test"
         );
 
@@ -705,6 +719,7 @@ impl CargoTest {
                     timed_out: true,
                     compilation_failed: false,
                     compilation_errors: Vec::new(),
+                    launch_timestamp,
                 });
             }
 
@@ -749,6 +764,7 @@ impl CargoTest {
             timed_out: false,
             compilation_failed,
             compilation_errors,
+            launch_timestamp,
         })
     }
 
@@ -1108,6 +1124,7 @@ mod tests {
             timed_out: false,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
         assert!(outcome.success());
     }
@@ -1122,6 +1139,7 @@ mod tests {
             timed_out: false,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
         assert!(!outcome.success());
     }
@@ -1136,6 +1154,7 @@ mod tests {
             timed_out: true,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
         assert!(!outcome.success());
     }
@@ -1150,6 +1169,7 @@ mod tests {
             timed_out: false,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
         assert!(outcome.summary().contains("Passed"));
         assert!(outcome.summary().contains("5s"));
@@ -1165,6 +1185,7 @@ mod tests {
             timed_out: false,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
         assert!(outcome.summary().contains("Failed"));
         assert!(outcome.summary().contains("exit code"));
@@ -1181,6 +1202,7 @@ mod tests {
             timed_out: true,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
         assert!(outcome.summary().contains("Timed out"));
         assert!(outcome.summary().contains("100s"));
@@ -1202,6 +1224,7 @@ mod tests {
                 None,
                 None,
             )],
+            launch_timestamp: String::new(),
         };
         assert!(outcome.summary().contains("Compilation failed"));
         assert!(outcome.summary().contains("1 error"));
@@ -1216,6 +1239,7 @@ mod tests {
             duration: Duration::from_secs(1),
             timed_out: false,
             compilation_failed: true,
+            launch_timestamp: String::new(),
             compilation_errors: vec![CompilationError::new(
                 Some("E0308".to_string()),
                 "mismatched types".to_string(),
@@ -1238,6 +1262,7 @@ mod tests {
             timed_out: false,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
         assert!(!outcome.is_compilation_failure());
         assert!(outcome.is_test_failure());
@@ -1528,6 +1553,7 @@ mod tests {
             timed_out: false,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
 
         let metrics = outcome.to_metrics("my_test".to_string());
@@ -1551,6 +1577,7 @@ mod tests {
             timed_out: false,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
 
         let metrics = outcome.to_metrics("failing_test".to_string());
@@ -1572,6 +1599,7 @@ mod tests {
             timed_out: true,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
 
         let metrics = outcome.to_metrics("timeout_test".to_string());
@@ -2348,6 +2376,7 @@ mod tests {
             timed_out: false,
             compilation_failed: false,
             compilation_errors: Vec::new(),
+            launch_timestamp: String::new(),
         };
 
         let metrics = outcome.to_metrics("precision_test".to_string());

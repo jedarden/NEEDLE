@@ -302,6 +302,7 @@ pub fn capture_timestamp_result() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Datelike, Timelike};
     use std::env;
     use std::path::PathBuf;
 
@@ -858,5 +859,374 @@ mod tests {
             "timestamp should be >= epoch, got {}",
             parsed.timestamp()
         );
+    }
+
+    #[test]
+    fn test_capture_timestamp_exact_iso8601_format() {
+        // This test verifies the exact ISO 8601/RFC 3339 format specification
+        let timestamp = capture_timestamp();
+
+        // Parse the timestamp to validate its format
+        let parsed = timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("timestamp should be valid ISO 8601 format");
+
+        // Re-format with the exact same specification and verify it matches
+        let reformatted = parsed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert_eq!(
+            timestamp, reformatted,
+            "timestamp should match exact RFC 3339 format with seconds precision and UTC suffix"
+        );
+    }
+
+    #[test]
+    fn test_capture_timestamp_utc_timezone_designation() {
+        // This test verifies that timestamps are explicitly in UTC (ending with 'Z')
+        let timestamp = capture_timestamp();
+
+        // Must end with 'Z' to indicate UTC timezone
+        assert!(
+            timestamp.ends_with('Z'),
+            "UTC timestamp must end with 'Z' timezone indicator, got: {}",
+            timestamp
+        );
+
+        // Parse and verify it's interpreted as UTC
+        let parsed = timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("should parse as UTC datetime");
+        assert_eq!(
+            parsed.timezone(),
+            chrono::Utc,
+            "parsed timestamp should be in UTC timezone"
+        );
+    }
+
+    #[test]
+    fn test_capture_timestamp_no_fractional_seconds() {
+        // This test verifies that fractional seconds are NOT included
+        // Format should be "2026-08-13T14:30:00Z", not "2026-08-13T14:30:00.123Z"
+        let timestamp = capture_timestamp();
+
+        // The timestamp should not contain a decimal point (which would indicate fractional seconds)
+        assert!(
+            !timestamp.contains('.'),
+            "timestamp should not contain fractional seconds (no decimal point), got: {}",
+            timestamp
+        );
+
+        // Verify format is exactly "YYYY-MM-DDTHH:MM:SSZ" (20 characters)
+        assert_eq!(
+            timestamp.len(),
+            20,
+            "timestamp should be exactly 20 characters (YYYY-MM-DDTHH:MM:SSZ), got: {} with length {}",
+            timestamp,
+            timestamp.len()
+        );
+    }
+
+    #[test]
+    fn test_capture_timestamp_string_roundtrip() {
+        // This test verifies that a timestamp can be converted to a string and back
+        let timestamp = capture_timestamp();
+
+        // Parse the string back to a DateTime
+        let parsed = timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("timestamp should be valid ISO 8601 format");
+
+        // Convert back to string with the same format
+        let converted = parsed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        // The roundtrip should preserve the exact string
+        assert_eq!(
+            timestamp, converted,
+            "timestamp roundtrip should preserve exact string representation"
+        );
+    }
+
+    #[test]
+    fn test_capture_timestamp_result_and_capture_timestamp_consistency() {
+        // This test verifies that both functions return the same format and behavior
+        let timestamp1 = capture_timestamp();
+        let result = capture_timestamp_result();
+
+        assert!(
+            result.is_ok(),
+            "capture_timestamp_result should return Ok in normal operation"
+        );
+
+        let timestamp2 = result.unwrap();
+
+        // Both should be valid ISO 8601 strings
+        let parsed1 = timestamp1
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("capture_timestamp result should parse");
+        let parsed2 = timestamp2
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("capture_timestamp_result should parse");
+
+        // Both should use the same format specification
+        let formatted1 = parsed1.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let formatted2 = parsed2.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        assert_eq!(
+            timestamp1, formatted1,
+            "capture_timestamp should use correct format"
+        );
+        assert_eq!(
+            timestamp2, formatted2,
+            "capture_timestamp_result should use correct format"
+        );
+    }
+
+    #[test]
+    fn test_capture_timestamp_rapid_calls_return_monotonic_values() {
+        // This test verifies that rapid calls return monotonically increasing timestamps
+        let timestamps: Vec<String> = (0..10)
+            .map(|_| {
+                let ts = capture_timestamp();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                ts
+            })
+            .collect();
+
+        // Parse all timestamps
+        let parsed: Vec<chrono::DateTime<chrono::Utc>> = timestamps
+            .iter()
+            .map(|ts| {
+                ts.parse::<chrono::DateTime<chrono::Utc>>()
+                    .expect("should parse timestamp")
+            })
+            .collect();
+
+        // Verify monotonicity (each timestamp should be >= the previous)
+        for i in 1..parsed.len() {
+            assert!(
+                parsed[i] >= parsed[i - 1],
+                "timestamp {} should be >= timestamp {}, got {} < {}",
+                i,
+                i - 1,
+                parsed[i].to_rfc3339(),
+                parsed[i - 1].to_rfc3339()
+            );
+        }
+    }
+
+    #[test]
+    fn test_capture_timestamp_epoch_fallback_value() {
+        // This test documents the exact fallback value used when timestamp capture fails
+        let fallback = "1970-01-01T00:00:00Z";
+
+        // Verify it's valid ISO 8601
+        let parsed = fallback
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("fallback should be valid ISO 8601");
+
+        // Verify it's exactly the Unix epoch (timestamp 0)
+        assert_eq!(parsed.timestamp(), 0, "fallback should be Unix epoch");
+
+        // Verify it uses the correct format
+        let reformatted = parsed.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert_eq!(
+            fallback, reformatted,
+            "fallback should use correct RFC 3339 format"
+        );
+    }
+
+    #[test]
+    fn test_capture_timestamp_components() {
+        // This test verifies that timestamp components are in the expected ranges
+        let timestamp = capture_timestamp();
+        let parsed = timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("should parse timestamp");
+
+        // Verify year is reasonable (2020-2030)
+        assert!(
+            parsed.year() >= 2020 && parsed.year() <= 2030,
+            "year should be between 2020 and 2030, got {}",
+            parsed.year()
+        );
+
+        // Verify month is valid (1-12)
+        assert!(
+            parsed.month() >= 1 && parsed.month() <= 12,
+            "month should be 1-12, got {}",
+            parsed.month()
+        );
+
+        // Verify day is valid (1-31)
+        assert!(
+            parsed.day() >= 1 && parsed.day() <= 31,
+            "day should be 1-31, got {}",
+            parsed.day()
+        );
+
+        // Verify hour is valid (0-23)
+        assert!(
+            parsed.hour() <= 23,
+            "hour should be 0-23, got {}",
+            parsed.hour()
+        );
+
+        // Verify minute is valid (0-59)
+        assert!(
+            parsed.minute() <= 59,
+            "minute should be 0-59, got {}",
+            parsed.minute()
+        );
+
+        // Verify second is valid (0-59)
+        assert!(
+            parsed.second() <= 59,
+            "second should be 0-59, got {}",
+            parsed.second()
+        );
+
+        // Verify nanoseconds are 0 (we use SecondsFormat::Secs)
+        assert_eq!(
+            parsed.nanosecond(),
+            0,
+            "nanoseconds should be 0 when using SecondsFormat::Secs, got {}",
+            parsed.nanosecond()
+        );
+    }
+
+    #[test]
+    fn test_capture_timestamp_result_returns_result_type() {
+        // This test verifies that capture_timestamp_result returns the correct Result type
+        let result: Result<String, anyhow::Error> = capture_timestamp_result();
+
+        // Should return Ok in normal operation
+        assert!(result.is_ok(), "should return Ok(String)");
+
+        let timestamp = result.unwrap();
+        // The value should be a valid timestamp
+        let _ = timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("should be valid ISO 8601");
+    }
+
+    #[test]
+    fn test_capture_timestamp_handles_panic_gracefully() {
+        // This test documents that the function uses catch_unwind to handle chrono panics
+        // In normal operation with a valid system clock, this should never panic
+        // If chrono does panic (e.g., due to extreme system clock values), catch_unwind
+        // converts the panic into an Err, and capture_timestamp returns the epoch fallback
+
+        // Call the function - it should never panic
+        let timestamp = capture_timestamp();
+
+        // Should always return a valid string
+        assert!(!timestamp.is_empty());
+        let _ = timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("should be valid ISO 8601 even if fallback was used");
+    }
+
+    #[test]
+    fn test_capture_timestamp_multiple_calls_consistency() {
+        // This test verifies that multiple calls to capture_timestamp all return
+        // strings in the correct format, regardless of timing variations
+
+        for i in 0..20 {
+            let timestamp = capture_timestamp();
+
+            // Each timestamp should be valid ISO 8601
+            let _parsed = timestamp
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .unwrap_or_else(|e| panic!("iteration {}: should parse, got error: {}", i, e));
+
+            // Each should end with 'Z'
+            assert!(
+                timestamp.ends_with('Z'),
+                "iteration {}: should end with 'Z', got: {}",
+                i,
+                timestamp
+            );
+
+            // Each should be exactly 20 characters
+            assert_eq!(
+                timestamp.len(),
+                20,
+                "iteration {}: should be 20 characters, got: {} with length {}",
+                i,
+                timestamp,
+                timestamp.len()
+            );
+
+            // Each should have no fractional seconds
+            assert!(
+                !timestamp.contains('.'),
+                "iteration {}: should not contain fractional seconds, got: {}",
+                i,
+                timestamp
+            );
+
+            // Small delay to advance time
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn test_capture_timestamp_format_specification_compliance() {
+        // This test verifies compliance with the documented format specification:
+        // "The format is `2026-08-13T14:30:00Z` (UTC timezone indicated by `Z`)"
+
+        let timestamp = capture_timestamp();
+
+        // Test the exact format with a regex-like pattern check
+        // Format: YYYY-MM-DDTHH:MM:SSZ
+        assert_eq!(
+            timestamp.chars().nth(4),
+            Some('-'),
+            "should have '-' after year"
+        );
+        assert_eq!(
+            timestamp.chars().nth(7),
+            Some('-'),
+            "should have '-' after month"
+        );
+        assert_eq!(
+            timestamp.chars().nth(10),
+            Some('T'),
+            "should have 'T' between date and time"
+        );
+        assert_eq!(
+            timestamp.chars().nth(13),
+            Some(':'),
+            "should have ':' after hour"
+        );
+        assert_eq!(
+            timestamp.chars().nth(16),
+            Some(':'),
+            "should have ':' after minute"
+        );
+        assert_eq!(
+            timestamp.chars().nth(19),
+            Some('Z'),
+            "should have 'Z' at the end (UTC indicator)"
+        );
+    }
+
+    #[test]
+    fn test_capture_timestamp_result_error_path_documentation() {
+        // This test documents the error path behavior for capture_timestamp_result
+        // In normal operation, this function returns Ok, but it can return Err if:
+        // 1. The system time cannot be retrieved (e.g., in restricted environments)
+        // 2. Chrono formatting fails (e.g., due to extreme system clock values)
+        //
+        // When Err is returned, capture_timestamp() handles it by:
+        // 1. Returning the epoch fallback: "1970-01-01T00:00:00Z"
+        // 2. Logging an error message to stderr
+
+        // In normal test environment, should always return Ok
+        let result = capture_timestamp_result();
+        assert!(result.is_ok(), "normal operation should return Ok");
+
+        // If it were to return Err, capture_timestamp() would handle it:
+        // let timestamp = capture_timestamp(); // would return epoch fallback
+        // assert_eq!(timestamp, "1970-01-01T00:00:00Z");
     }
 }

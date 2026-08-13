@@ -3870,7 +3870,7 @@ output_transform: "needle-transform-custom"
         // 8 iterations * 0.18s ≈ 1.44s, plus overhead
         assert!(result.elapsed >= Duration::from_millis(1300));
         assert!(result.stdout.contains("outoutoutoutoutoutoutout"));
-        assert!(result.stderr.contains("errerrererrererrerrerre"));
+        assert!(result.stderr.contains("errerrerrerrerrerrerrerr"));
     }
 
     #[tokio::test]
@@ -3882,6 +3882,7 @@ output_transform: "needle-transform-custom"
             // Sleep for 5 seconds without any output
             "sleep 5",
         );
+        adapter.timeout_secs = 0; // Use new timeout mode, not legacy
         adapter.idle_timeout_secs = 1; // Should fire after 1s of silence
 
         let mut adapters = HashMap::new();
