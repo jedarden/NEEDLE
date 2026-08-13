@@ -42,17 +42,17 @@ pub fn get_home_or_default<S: Into<String>>(default: S) -> String {
 /// Expand a tilde-slash path prefix to the HOME directory.
 ///
 /// For paths starting with "~/", replaces the prefix with the HOME directory.
-/// If HOME is not set, returns the path unchanged. Non-tilde paths are returned
-/// unchanged.
+/// Also expands bare "~" to the HOME directory. If HOME is not set, returns
+/// the path unchanged. Non-tilde paths are returned unchanged.
 ///
 /// # Arguments
 ///
-/// * `path` - A path string that may start with "~/"
+/// * `path` - A path string that may start with "~/" or be exactly "~"
 ///
 /// # Returns
 ///
 /// * `String` - The expanded path, or the original path if HOME is missing or
-///   the path doesn't start with "~/"
+///   the path doesn't start with "~"
 ///
 /// # Examples
 ///
@@ -60,6 +60,7 @@ pub fn get_home_or_default<S: Into<String>>(default: S) -> String {
 /// use needle::util::expand_tilde;
 ///
 /// // Assuming HOME=/home/coding
+/// assert_eq!(expand_tilde("~"), "/home/coding");
 /// assert_eq!(expand_tilde("~/foo"), "/home/coding/foo");
 /// assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
 /// assert_eq!(expand_tilde("relative/path"), "relative/path");
@@ -67,11 +68,20 @@ pub fn get_home_or_default<S: Into<String>>(default: S) -> String {
 ///
 /// # Edge Cases
 ///
-/// * "~" alone (without slash) is returned unchanged
+/// * "~" alone expands to HOME directory (when HOME is set)
+/// * "~" alone returns "~" unchanged (when HOME is not set)
 /// * If HOME is not set, "~/foo" returns "~/foo" unchanged
 /// * No double slashes: "~//foo" expands to "$HOME//foo" (preserves user input)
 pub fn expand_tilde(path: &str) -> String {
-    // Only expand paths starting with "~/", not "~" alone
+    // Check if path is exactly ~ (bare tilde)
+    if path == "~" {
+        match get_home() {
+            Some(home) => return home,
+            None => return path.to_string(),
+        }
+    }
+
+    // Check if path starts with ~/ (not just ~)
     if !path.starts_with("~/") {
         return path.to_string();
     }
@@ -131,6 +141,61 @@ pub fn resolve_worker_binary_path(worker_binary_path: Option<&PathBuf>) -> Resul
     }
 }
 
+/// Build a cargo test command with configurable timeout.
+///
+/// This function constructs a `std::process::Command` that runs `cargo test`
+/// with a timeout wrapper. The timeout command will terminate the test if it
+/// exceeds the specified duration.
+///
+/// The command is structured as: `timeout <seconds> cargo test --all-targets -- --nocapture`
+///
+/// # Arguments
+///
+/// * `timeout_minutes` - Optional timeout in minutes. If `None`, defaults to 30 minutes.
+///
+/// # Returns
+///
+/// * `std::process::Command` - Configured command ready for execution via `spawn()` or `status()`.
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::util::build_cargo_test_command;
+/// use std::process::Command;
+///
+/// // With default 30-minute timeout
+/// let cmd = build_cargo_test_command(None);
+///
+/// // With custom 45-minute timeout
+/// let cmd = build_cargo_test_command(Some(45));
+///
+/// // Execute the command
+/// let status = cmd.status().expect("failed to execute cargo test");
+/// ```
+///
+/// # Timeout Behavior
+///
+/// - The `timeout` command will send `SIGTERM` to the cargo process when the timeout is reached.
+/// - If the process does not exit within 1 second after `SIGTERM`, `SIGKILL` is sent.
+/// - Exit code 124 indicates the timeout was triggered (see `timeout(1)` man page).
+///
+/// # Default Value
+///
+/// When `timeout_minutes` is `None`, the default is **30 minutes**.
+pub fn build_cargo_test_command(timeout_minutes: Option<u64>) -> std::process::Command {
+    let timeout_seconds = timeout_minutes.unwrap_or(30) * 60;
+
+    let mut cmd = std::process::Command::new("timeout");
+    cmd.arg(format!("{}", timeout_seconds))
+        .arg("cargo")
+        .arg("test")
+        .arg("--all-targets")
+        .arg("--")
+        .arg("--nocapture");
+
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,7 +212,7 @@ mod tests {
             expand_tilde("~/Documents/file.txt"),
             "/home/testuser/Documents/file.txt"
         );
-        assert_eq!(expand_tilde("~"), "~"); // "~" alone is not expanded
+        assert_eq!(expand_tilde("~"), "/home/testuser"); // "~" alone expands to HOME
         assert_eq!(expand_tilde(""), ""); // Empty string
         assert_eq!(expand_tilde("/absolute/path"), "/absolute/path"); // Absolute paths unchanged
         assert_eq!(expand_tilde("relative/path"), "relative/path"); // Relative paths unchanged
@@ -159,7 +224,7 @@ mod tests {
         env::remove_var("HOME");
 
         assert_eq!(expand_tilde("~/foo"), "~/foo"); // Returns unchanged when HOME is missing
-        assert_eq!(expand_tilde("~"), "~");
+        assert_eq!(expand_tilde("~"), "~"); // "~" returns unchanged when HOME is missing
         assert_eq!(expand_tilde("/absolute/path"), "/absolute/path");
     }
 
@@ -253,8 +318,8 @@ mod tests {
         assert_eq!(expand_tilde("~username"), "~username");
         assert_eq!(expand_tilde("~backup"), "~backup");
 
-        // "~" alone should not be expanded
-        assert_eq!(expand_tilde("~"), "~");
+        // "~" alone should expand to HOME
+        assert_eq!(expand_tilde("~"), "/home/testuser");
 
         // "~." should not be expanded
         assert_eq!(expand_tilde("~."), "~.");
@@ -296,11 +361,26 @@ mod tests {
         env::remove_var("HOME");
 
         // Without HOME, all tilde variants are returned unchanged
-        assert_eq!(expand_tilde("~"), "~");
+        assert_eq!(expand_tilde("~"), "~"); // Bare tilde returns unchanged when HOME missing
         assert_eq!(expand_tilde("~/"), "~/");
         assert_eq!(expand_tilde("~/foo"), "~/foo");
         assert_eq!(expand_tilde("~foo"), "~foo");
         assert_eq!(expand_tilde("~/~/path"), "~/~/path");
+    }
+
+    /// Test bare tilde expansion behavior.
+    ///
+    /// This verifies that "~" alone expands to HOME when set, and returns unchanged
+    /// when HOME is not set. This is the core fix for the bare tilde expansion issue.
+    #[test]
+    fn test_bare_tilde_expansion() {
+        // With HOME set, bare tilde should expand to HOME
+        env::set_var("HOME", "/home/testuser");
+        assert_eq!(expand_tilde("~"), "/home/testuser");
+
+        // With HOME unset, bare tilde should return unchanged
+        env::remove_var("HOME");
+        assert_eq!(expand_tilde("~"), "~");
     }
 
     /// Test that absolute paths without tilde prefix pass through unchanged.
@@ -410,5 +490,101 @@ mod tests {
         let resolved = resolve_worker_binary_path(override_path.as_ref())
             .expect("failed to resolve binary path with relative override");
         assert_eq!(resolved, PathBuf::from("./target/debug/needle"));
+    }
+
+    #[test]
+    fn test_build_cargo_test_command_default_timeout() {
+        let cmd = build_cargo_test_command(None);
+
+        // Verify the program is 'timeout'
+        assert_eq!(cmd.get_program(), "timeout");
+
+        // Verify the arguments: ["1800", "cargo", "test", "--all-targets", "--", "--nocapture"]
+        let args: Vec<&str> = cmd.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            vec!["1800", "cargo", "test", "--all-targets", "--", "--nocapture"]
+        );
+    }
+
+    #[test]
+    fn test_build_cargo_test_command_custom_timeout() {
+        let cmd = build_cargo_test_command(Some(45));
+
+        // Verify the program is 'timeout'
+        assert_eq!(cmd.get_program(), "timeout");
+
+        // 45 minutes = 2700 seconds
+        let args: Vec<&str> = cmd.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            vec!["2700", "cargo", "test", "--all-targets", "--", "--nocapture"]
+        );
+    }
+
+    #[test]
+    fn test_build_cargo_test_command_one_minute() {
+        let cmd = build_cargo_test_command(Some(1));
+
+        // Verify the program is 'timeout'
+        assert_eq!(cmd.get_program(), "timeout");
+
+        // 1 minute = 60 seconds
+        let args: Vec<&str> = cmd.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            vec!["60", "cargo", "test", "--all-targets", "--", "--nocapture"]
+        );
+    }
+
+    #[test]
+    fn test_build_cargo_test_command_zero_minutes() {
+        let cmd = build_cargo_test_command(Some(0));
+
+        // Verify the program is 'timeout'
+        assert_eq!(cmd.get_program(), "timeout");
+
+        // 0 minutes = 0 seconds (edge case, but valid)
+        let args: Vec<&str> = cmd.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            vec!["0", "cargo", "test", "--all-targets", "--", "--nocapture"]
+        );
+    }
+
+    #[test]
+    fn test_build_cargo_test_command_large_timeout() {
+        let cmd = build_cargo_test_command(Some(120));
+
+        // Verify the program is 'timeout'
+        assert_eq!(cmd.get_program(), "timeout");
+
+        // 120 minutes = 7200 seconds (2 hours)
+        let args: Vec<&str> = cmd.get_args().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(
+            args,
+            vec!["7200", "cargo", "test", "--all-targets", "--", "--nocapture"]
+        );
+    }
+
+    #[test]
+    fn test_build_cargo_test_command_structure() {
+        let cmd = build_cargo_test_command(Some(15));
+
+        // Verify the program is 'timeout'
+        assert_eq!(cmd.get_program(), "timeout");
+
+        let args: Vec<&str> = cmd.get_args().map(|s| s.to_str().unwrap()).collect();
+
+        // Verify the structure in detail
+        assert_eq!(args[0], "900"); // 15 minutes = 900 seconds
+        assert_eq!(args[1], "cargo");
+        assert_eq!(args[2], "test");
+        assert_eq!(args[3], "--all-targets");
+        assert_eq!(args[4], "--");
+        assert_eq!(args[5], "--nocapture");
+
+        // Verify total argument count
+        assert_eq!(args.len(), 6);
     }
 }
