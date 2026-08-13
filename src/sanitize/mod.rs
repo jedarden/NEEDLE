@@ -989,6 +989,6 @@ mod tests {
 
         // Verify values are reasonable
         assert!(skip_stats.total_checks > 0, "Should perform rule checks");
-        assert!(latency_ms >= 0, "Latency should be non-negative");
+        assert!(latency_ms < 1_000, "Latency should remain below one second");
     }
 }

@@ -870,9 +870,7 @@ mod tests {
         assert_eq!(pointer["type"], "test_checkpoint");
         assert!(pointer.get("timestamp").is_some());
         assert_eq!(
-            pointer["source_workspace"]
-                .as_str()
-                .map(|p| PathBuf::from(p)),
+            pointer["source_workspace"].as_str().map(PathBuf::from),
             Some(workspace_path.to_path_buf())
         );
     }

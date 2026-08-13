@@ -4093,7 +4093,6 @@ output_transform: "needle-transform-custom"
         assert!(result.elapsed < Duration::from_secs(10));
     }
 
-
     #[tokio::test]
     async fn activity_detection_during_transforms() {
         // Test that activity detection works when output_transform is configured
@@ -4124,7 +4123,10 @@ output_transform: "needle-transform-custom"
     #[tokio::test]
     async fn activity_detection_on_multiline_output() {
         // Test that activity detection works for multiline output
-        let adapter = test_adapter("multiline-test", "for i in 1 2 3 4 5; do echo \"line $i\"; sleep 0.1; done");
+        let adapter = test_adapter(
+            "multiline-test",
+            "for i in 1 2 3 4 5; do echo \"line $i\"; sleep 0.1; done",
+        );
         let mut adapters = HashMap::new();
         adapters.insert("multiline-test".to_string(), adapter);
         let dispatcher = test_dispatcher(adapters);
@@ -4180,7 +4182,6 @@ output_transform: "needle-transform-custom"
         assert!(result.elapsed < Duration::from_secs(10));
     }
 
-
     #[tokio::test]
     async fn activity_detection_timestamps_before_parsing() {
         // Test that activity timestamps are recorded before newline parsing
@@ -4214,7 +4215,10 @@ output_transform: "needle-transform-custom"
     #[tokio::test]
     async fn activity_detection_on_rapid_output() {
         // Test that activity detection handles rapid output without missing bytes
-        let adapter = test_adapter("rapid-test", "for i in $(seq 1 100); do echo \"rapid $i\"; done");
+        let adapter = test_adapter(
+            "rapid-test",
+            "for i in $(seq 1 100); do echo \"rapid $i\"; done",
+        );
         let mut adapters = HashMap::new();
         adapters.insert("rapid-test".to_string(), adapter);
         let dispatcher = test_dispatcher(adapters);
@@ -4237,6 +4241,10 @@ output_transform: "needle-transform-custom"
         assert!(result.stdout.contains("rapid 100"));
         // Count the lines to verify none were missed
         let line_count = result.stdout.lines().count();
-        assert!(line_count >= 100, "Expected at least 100 lines, got {}", line_count);
+        assert!(
+            line_count >= 100,
+            "Expected at least 100 lines, got {}",
+            line_count
+        );
     }
 }

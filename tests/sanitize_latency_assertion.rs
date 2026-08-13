@@ -161,6 +161,7 @@ fn measure_comprehensive_metrics(size: usize) -> (Vec<u128>, u128, needle::sanit
 /// # Returns
 ///
 /// A tuple of (latencies in microseconds, median latency in microseconds)
+#[allow(dead_code)]
 fn measure_median_latency_100kb() -> (Vec<u128>, u128) {
     let (latencies, median, _) = measure_comprehensive_metrics(SIZE_100KB);
     (latencies, median)

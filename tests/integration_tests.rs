@@ -2827,11 +2827,13 @@ fn heartbeat_cleanup_on_signal_integration() {
 
     // Register cleanup handler IMMEDIATELY after spawning to ensure cleanup
     // even if early operations fail. This prevents zombie processes.
+    #[allow(dead_code)]
     struct ProcessGuard {
         inner: Option<std::process::Child>,
         pid: u32,
     }
 
+    #[allow(dead_code)]
     impl ProcessGuard {
         fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
             if let Some(ref mut child) = self.inner {
@@ -3518,11 +3520,13 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
     println!("Worker PID: {}", worker_pid);
 
     // ProcessGuard ensures cleanup if test panics
+    #[allow(dead_code)]
     struct ProcessGuard {
         inner: Option<std::process::Child>,
         pid: u32,
     }
 
+    #[allow(dead_code)]
     impl ProcessGuard {
         fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
             if let Some(ref mut child) = self.inner {

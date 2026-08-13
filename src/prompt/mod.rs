@@ -1026,7 +1026,7 @@ fn format_comments(comments: &[crate::types::Comment]) -> String {
 
     // Sort comments by created_at descending (newest first) and accumulate
     let mut sorted_comments: Vec<_> = comments.iter().collect();
-    sorted_comments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    sorted_comments.sort_by_key(|comment| std::cmp::Reverse(comment.created_at));
 
     let mut total_bytes = output.len();
     let mut truncated = false;

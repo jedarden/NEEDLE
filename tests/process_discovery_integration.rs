@@ -148,14 +148,6 @@ fn integration_non_tmux_worker_discoverable() {
     }
 
     impl ProcessGuard {
-        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-            if let Some(ref mut child) = self.inner {
-                child.try_wait()
-            } else {
-                Ok(None)
-            }
-        }
-
         fn kill(&mut self) -> std::io::Result<()> {
             if let Some(ref mut child) = self.inner {
                 child.kill()
@@ -182,9 +174,7 @@ fn integration_non_tmux_worker_discoverable() {
         }
     }
 
-    let mut worker_guard = ProcessGuard {
-        inner: Some(child),
-    };
+    let mut worker_guard = ProcessGuard { inner: Some(child) };
 
     // Wait for worker to boot and register
     thread::sleep(Duration::from_secs(5));

@@ -268,11 +268,11 @@ fn populate_workspace(workspace: &Path) -> Result<Vec<String>> {
 #[tokio::test]
 async fn checkpoint_roundtrip_preserves_all_bead_state() {
     // Step 1: Create source workspace and populate with beads
-    let source_workspace = create_test_workspace("source")
-        .expect("failed to create source workspace");
+    let source_workspace =
+        create_test_workspace("source").expect("failed to create source workspace");
 
-    let bead_ids = populate_workspace(source_workspace.path())
-        .expect("failed to populate source workspace");
+    let bead_ids =
+        populate_workspace(source_workspace.path()).expect("failed to populate source workspace");
 
     // Verify we created the expected number of beads
     assert_eq!(
@@ -306,16 +306,12 @@ async fn checkpoint_roundtrip_preserves_all_bead_state() {
     );
 
     // Step 3: Restore checkpoint to fresh workspace
-    let (_restored_temp, restored_path) =
-        restore_checkpoint_to_fresh_workspace(&checkpoint_path)
-            .await
-            .expect("failed to restore checkpoint to fresh workspace");
+    let (_restored_temp, restored_path) = restore_checkpoint_to_fresh_workspace(&checkpoint_path)
+        .await
+        .expect("failed to restore checkpoint to fresh workspace");
 
     // Verify restored workspace structure
-    assert!(
-        restored_path.exists(),
-        "Restored workspace should exist"
-    );
+    assert!(restored_path.exists(), "Restored workspace should exist");
     assert!(
         restored_path.join(".beads").exists(),
         "Restored .beads directory should exist"
@@ -337,8 +333,8 @@ async fn checkpoint_roundtrip_preserves_all_bead_state() {
 #[tokio::test]
 async fn checkpoint_roundtrip_handles_empty_workspace() {
     // Create an empty workspace (just bf init, no beads)
-    let source_workspace = create_test_workspace("empty")
-        .expect("failed to create empty workspace");
+    let source_workspace =
+        create_test_workspace("empty").expect("failed to create empty workspace");
 
     // Flush empty workspace to checkpoint
     let (_checkpoint_temp, checkpoint_path) = flush_checkpoint_to_temp(source_workspace.path())
@@ -346,10 +342,9 @@ async fn checkpoint_roundtrip_handles_empty_workspace() {
         .expect("failed to flush empty workspace to checkpoint");
 
     // Restore to fresh workspace
-    let (_restored_temp, restored_path) =
-        restore_checkpoint_to_fresh_workspace(&checkpoint_path)
-            .await
-            .expect("failed to restore empty checkpoint");
+    let (_restored_temp, restored_path) = restore_checkpoint_to_fresh_workspace(&checkpoint_path)
+        .await
+        .expect("failed to restore empty checkpoint");
 
     // Verify equality (both should have 0 beads)
     let config = WorkspaceEqualityConfig::default();
@@ -362,14 +357,13 @@ async fn checkpoint_roundtrip_handles_empty_workspace() {
 /// verifying that single-bead workspaces round-trip correctly.
 #[tokio::test]
 async fn checkpoint_roundtrip_handles_single_bead() {
-    let source_workspace = create_test_workspace("single")
-        .expect("failed to create source workspace");
+    let source_workspace =
+        create_test_workspace("single").expect("failed to create source workspace");
 
     // Create a single bead
-    let bead_id = create_bead(source_workspace.path(), "Single Task")
-        .expect("failed to create single bead");
-    add_label(source_workspace.path(), &bead_id, "solo")
-        .expect("failed to add label");
+    let bead_id =
+        create_bead(source_workspace.path(), "Single Task").expect("failed to create single bead");
+    add_label(source_workspace.path(), &bead_id, "solo").expect("failed to add label");
 
     // Flush to checkpoint
     let (_checkpoint_temp, checkpoint_path) = flush_checkpoint_to_temp(source_workspace.path())
@@ -377,10 +371,9 @@ async fn checkpoint_roundtrip_handles_single_bead() {
         .expect("failed to flush single-bead workspace");
 
     // Restore to fresh workspace
-    let (_restored_temp, restored_path) =
-        restore_checkpoint_to_fresh_workspace(&checkpoint_path)
-            .await
-            .expect("failed to restore single-bead checkpoint");
+    let (_restored_temp, restored_path) = restore_checkpoint_to_fresh_workspace(&checkpoint_path)
+        .await
+        .expect("failed to restore single-bead checkpoint");
 
     // Verify equality
     let config = WorkspaceEqualityConfig::default();
@@ -393,12 +386,11 @@ async fn checkpoint_roundtrip_handles_single_bead() {
 /// with required fields (timestamp, source_workspace, type).
 #[tokio::test]
 async fn checkpoint_pointer_file_contains_valid_metadata() {
-    let source_workspace = create_test_workspace("pointer")
-        .expect("failed to create source workspace");
+    let source_workspace =
+        create_test_workspace("pointer").expect("failed to create source workspace");
 
     // Create a bead
-    create_bead(source_workspace.path(), "Test Bead")
-        .expect("failed to create bead");
+    create_bead(source_workspace.path(), "Test Bead").expect("failed to create bead");
 
     // Flush to checkpoint
     let (_checkpoint_temp, checkpoint_path) = flush_checkpoint_to_temp(source_workspace.path())
@@ -431,8 +423,7 @@ async fn checkpoint_pointer_file_contains_valid_metadata() {
     let timestamp = pointer["timestamp"]
         .as_str()
         .expect("timestamp should be a string");
-    chrono::DateTime::parse_from_rfc3339(timestamp)
-        .expect("timestamp should be valid ISO 8601");
+    chrono::DateTime::parse_from_rfc3339(timestamp).expect("timestamp should be valid ISO 8601");
 }
 
 /// Integration test: Multiple sequential round-trips.
@@ -442,18 +433,17 @@ async fn checkpoint_pointer_file_contains_valid_metadata() {
 #[tokio::test]
 async fn checkpoint_roundtrip_preserves_state_across_multiple_cycles() {
     // Create initial workspace
-    let source_workspace = create_test_workspace("multi-cycle")
-        .expect("failed to create source workspace");
+    let source_workspace =
+        create_test_workspace("multi-cycle").expect("failed to create source workspace");
 
     // Populate with beads
-    let bead_ids = populate_workspace(source_workspace.path())
-        .expect("failed to populate workspace");
+    let _bead_ids =
+        populate_workspace(source_workspace.path()).expect("failed to populate workspace");
 
     // First round-trip
-    let (_checkpoint1_temp, checkpoint1_path) =
-        flush_checkpoint_to_temp(source_workspace.path())
-            .await
-            .expect("failed to flush first checkpoint");
+    let (_checkpoint1_temp, checkpoint1_path) = flush_checkpoint_to_temp(source_workspace.path())
+        .await
+        .expect("failed to flush first checkpoint");
 
     let (_restored1_temp, restored1_path) =
         restore_checkpoint_to_fresh_workspace(&checkpoint1_path)
@@ -465,10 +455,9 @@ async fn checkpoint_roundtrip_preserves_state_across_multiple_cycles() {
     assert_workspace_eq(source_workspace.path(), &restored1_path, &config);
 
     // Second round-trip (from restored workspace)
-    let (_checkpoint2_temp, checkpoint2_path) =
-        flush_checkpoint_to_temp(&restored1_path)
-            .await
-            .expect("failed to flush second checkpoint");
+    let (_checkpoint2_temp, checkpoint2_path) = flush_checkpoint_to_temp(&restored1_path)
+        .await
+        .expect("failed to flush second checkpoint");
 
     let (_restored2_temp, restored2_path) =
         restore_checkpoint_to_fresh_workspace(&checkpoint2_path)

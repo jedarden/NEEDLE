@@ -1187,7 +1187,10 @@ mod tests {
         let error = open_configured(&config, workspace.path().to_path_buf(), None, None, None)
             .err()
             .expect("capability drift must fail closed");
-        assert!(error.to_string().contains("capability mismatch"));
+        assert!(
+            error.to_string().contains("capability mismatch"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]
