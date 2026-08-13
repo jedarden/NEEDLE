@@ -243,6 +243,34 @@ pub enum CliCommand {
         name: String,
     },
 
+    /// Resolve and verify a bead backend descriptor against a workspace.
+    #[command(name = "bead-backend")]
+    BeadBackend {
+        /// Builtin backend name (`bead-rs` or `bead-forge`).
+        name: String,
+        /// Workspace used for the capability probe.
+        #[arg(short = 'w', long, default_value = ".")]
+        workspace: PathBuf,
+    },
+
+    /// Audit repository bead-backend bindings without changing them.
+    #[command(name = "bead-backend-audit")]
+    BeadBackendAudit {
+        /// Directory whose immediate child repositories are audited.
+        #[arg(default_value = ".")]
+        root: PathBuf,
+    },
+
+    /// Explicitly bind one repository to a bead backend descriptor.
+    #[command(name = "bead-backend-bind")]
+    BeadBackendBind {
+        /// Builtin backend name (`bead-rs` or `bead-forge`).
+        backend: String,
+        /// Repository to update.
+        #[arg(default_value = ".")]
+        workspace: PathBuf,
+    },
+
     /// Run canary tests against a :testing binary.
     Canary {
         /// Show channel status instead of running tests.
@@ -411,6 +439,11 @@ pub fn run() -> Result<()> {
             Ok(())
         }
         CliCommand::TestAgent { name } => cmd_test_agent(&name),
+        CliCommand::BeadBackend { name, workspace } => cmd_bead_backend(&name, &workspace),
+        CliCommand::BeadBackendAudit { root } => cmd_bead_backend_audit(&root),
+        CliCommand::BeadBackendBind { backend, workspace } => {
+            cmd_bead_backend_bind(&backend, &workspace)
+        }
         CliCommand::Canary { status } => cmd_canary(status),
         CliCommand::Upgrade { check } => cmd_upgrade(check),
         CliCommand::Rollback => cmd_rollback(),
@@ -2367,6 +2400,131 @@ fn cmd_test_agent(name: &str) -> Result<()> {
         bail!("agent adapter '{}' is not ready", name);
     }
 
+    Ok(())
+}
+
+fn cmd_bead_backend(name: &str, workspace: &Path) -> Result<()> {
+    if !matches!(name, "bead-rs" | "bead-forge") {
+        bail!("unknown builtin bead backend '{name}'");
+    }
+    let workspace = workspace
+        .canonicalize()
+        .with_context(|| format!("workspace does not exist: {}", workspace.display()))?;
+    let config = crate::config::BeadCliConfig {
+        backend: name.to_string(),
+        explicit_path: None,
+    };
+    let (_, binary) = crate::config::resolve_bead_cli(&config)?;
+    crate::bead_store::open_configured(&config, workspace.clone(), None, None, None)?;
+    let descriptor = crate::bead_store::builtin_bead_backends()
+        .into_iter()
+        .find(|descriptor| descriptor.name == name)
+        .ok_or_else(|| anyhow::anyhow!("builtin descriptor '{name}' is missing"))?;
+    println!("backend: {}", descriptor.name);
+    println!("binary: {}", binary.display());
+    println!("verified_against: {}", descriptor.verified_against);
+    println!("atomic_claim: {}", descriptor.capabilities.atomic_claim);
+    println!(
+        "transactional_batch: {}",
+        descriptor.capabilities.transactional_batch
+    );
+    Ok(())
+}
+
+fn workspace_backend_binding(workspace: &Path) -> Result<Option<String>> {
+    let path = workspace.join(".needle.yaml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let value: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?,
+    )
+    .with_context(|| format!("invalid YAML in {}", path.display()))?;
+    Ok(value
+        .get("bead_cli")
+        .and_then(|value| value.get("backend"))
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::to_string))
+}
+
+fn cmd_bead_backend_audit(root: &Path) -> Result<()> {
+    let root = root
+        .canonicalize()
+        .with_context(|| format!("audit root does not exist: {}", root.display()))?;
+    let mut workspaces = Vec::new();
+    if root.join(".beads").is_dir() {
+        workspaces.push(root.clone());
+    }
+    for entry in std::fs::read_dir(&root)
+        .with_context(|| format!("failed to read audit root {}", root.display()))?
+    {
+        let path = entry?.path();
+        if path.is_dir() && path.join(".beads").is_dir() {
+            workspaces.push(path);
+        }
+    }
+    workspaces.sort();
+    let mut unbound = 0usize;
+    for workspace in &workspaces {
+        match workspace_backend_binding(workspace)? {
+            Some(binding) => println!("BOUND\t{}\t{}", binding, workspace.display()),
+            None => {
+                unbound += 1;
+                println!("UNBOUND\t-\t{}", workspace.display());
+            }
+        }
+    }
+    println!(
+        "summary: {} workspaces, {} bound, {} unbound",
+        workspaces.len(),
+        workspaces.len().saturating_sub(unbound),
+        unbound
+    );
+    if unbound > 0 {
+        bail!("{unbound} bead workspaces have no explicit backend binding");
+    }
+    Ok(())
+}
+
+fn cmd_bead_backend_bind(backend: &str, workspace: &Path) -> Result<()> {
+    if !matches!(backend, "bead-rs" | "bead-forge") {
+        bail!("unknown builtin bead backend '{backend}'");
+    }
+    let workspace = workspace
+        .canonicalize()
+        .with_context(|| format!("workspace does not exist: {}", workspace.display()))?;
+    if !workspace.join(".beads").is_dir() {
+        bail!("{} is not a bead workspace", workspace.display());
+    }
+    let path = workspace.join(".needle.yaml");
+    let mut root = if path.exists() {
+        serde_yaml::from_str::<serde_yaml::Value>(&std::fs::read_to_string(&path)?)
+            .with_context(|| format!("invalid YAML in {}", path.display()))?
+    } else {
+        serde_yaml::Value::Mapping(Default::default())
+    };
+    let root_map = root
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("{} must contain a YAML mapping", path.display()))?;
+    let bead_cli_key = serde_yaml::Value::String("bead_cli".to_string());
+    let bead_cli = root_map
+        .entry(bead_cli_key)
+        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+    let bead_cli_map = bead_cli
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("bead_cli in {} must be a mapping", path.display()))?;
+    bead_cli_map.insert(
+        serde_yaml::Value::String("backend".to_string()),
+        serde_yaml::Value::String(backend.to_string()),
+    );
+    std::fs::write(&path, serde_yaml::to_string(&root)?)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    println!(
+        "bound {} to {} (routing only; no bead data was migrated)",
+        workspace.display(),
+        backend
+    );
     Ok(())
 }
 
