@@ -365,7 +365,7 @@ async fn git_head(workspace: &Path) -> Option<String> {
 
 /// Get a list of dirty (modified) paths in the workspace.
 async fn git_dirty_paths(workspace: &Path) -> BTreeSet<String> {
-    let output = match run_git(workspace, &["status", "--porcelain"]).await {
+    let output = match run_git_raw(workspace, &["status", "--porcelain"]).await {
         Some(out) => out,
         None => return BTreeSet::new(),
     };
@@ -379,7 +379,7 @@ async fn git_dirty_paths(workspace: &Path) -> BTreeSet<String> {
             // agent touched is reported, including staged-only changes
             // (Y == ' '), which still represent work the agent performed.
             let chars: Vec<char> = line.chars().collect();
-            if chars.len() < 2 {
+            if chars.len() < 4 {
                 return None;
             }
 
@@ -398,6 +398,17 @@ async fn git_dirty_paths(workspace: &Path) -> BTreeSet<String> {
 
 /// Run a git command and return stdout if successful.
 async fn run_git(workspace: &Path, args: &[&str]) -> Option<String> {
+    Some(run_git_raw(workspace, args).await?.trim().to_string())
+}
+
+/// Run a git command and return stdout exactly as produced.
+///
+/// Callers that parse a column-oriented format must use this rather than
+/// [`run_git`]: `git status --porcelain` encodes the staged/worktree state in
+/// the first two columns, so trimming the combined stdout silently deletes the
+/// leading space of the *first* line whenever the file has no staged change —
+/// which shifts that line's path by one character.
+async fn run_git_raw(workspace: &Path, args: &[&str]) -> Option<String> {
     let git_dir = workspace.join(".git");
     let output = tokio::process::Command::new("git")
         .args(args)
@@ -413,7 +424,7 @@ async fn run_git(workspace: &Path, args: &[&str]) -> Option<String> {
         return None;
     }
 
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Compute summary of committed work between two Git SHAs.

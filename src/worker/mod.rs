@@ -4371,19 +4371,13 @@ mod tests {
         let store = Arc::new(MockStore::empty());
         let worker = make_worker(store);
         let result = worker.resolve_adapter();
-        // Default config uses "claude" which won't be in the dispatcher's adapter map,
-        // so this should fail with a clear error message instead of silently falling back.
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("configured agent adapter"),
-            "error should mention missing adapter"
-        );
-        assert!(
-            msg.contains("'claude'"),
-            "error should mention the requested adapter name"
-        );
+        // `valid_test_config` selects the `claude-sonnet` built-in and disables
+        // routing, so resolution must succeed without consulting any adapter
+        // the operator happens to have installed. This previously asserted an
+        // error, which only held because the default routing rules rewrote the
+        // request to `claude-print` — an adapter that is not built in.
+        let adapter = result.expect("built-in adapter should resolve");
+        assert_eq!(adapter.name, "claude-sonnet");
     }
 
     #[tokio::test]
@@ -4405,7 +4399,7 @@ mod tests {
     #[tokio::test]
     async fn do_select_with_no_beads_transitions_to_exhausted() {
         let store = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
         // Disable Explore strand so it doesn't find beads from the filesystem
         config.strands.explore.enabled = false;
@@ -4776,7 +4770,13 @@ mod tests {
 
                 for cycle in 0..CLAIM_CYCLES {
                     // Reset the in-memory bead to a claimable state for the next
-                    // independent cycle.
+                    // independent cycle. Each cycle uses a distinct bead id: the
+                    // claim path circuit-breaks a single bead after
+                    // MAX_CLAIM_EVENTS_PER_BEAD (100) claim events, so reusing one
+                    // id would quarantine it halfway through and make this a test
+                    // of the breaker rather than of span depth.
+                    let mut bead = make_test_bead(&format!("needle-span-depth-{cycle}"));
+                    bead.workspace = home.path().to_path_buf();
                     *store.beads.lock().unwrap() = vec![bead.clone()];
                     worker.current_bead = Some(bead.clone());
                     worker.current_strand = Some("pluck".to_string());
