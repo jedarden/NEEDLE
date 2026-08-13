@@ -561,6 +561,27 @@ async fn exhaustion_empty_workspace() {
     assert_eq!(worker.beads_processed(), 0, "no beads should be processed");
 }
 
+/// Test exhaustion with idle_action=Exit.
+///
+/// This test builds a Worker in-process with custom config. The Explore strand
+/// MUST be isolated to prevent scanning real user directories.
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+///
+/// Why isolation is required for in-process Worker tests:
+/// - Workers built in-process never go through a child process, so setting
+///   `HOME` in a Command::new() call has no effect (no child process exists)
+/// - Without explicit config, Explore uses `ExploreConfig::default()`: `workspaces: []`
+///   (= auto-discover) with `workspace_root` defaulting to the real home directory
+///   (`ExploreConfig::default_workspace_root()` -> `dirs_or_home("")`)
+/// - Left unchecked, Explore scans every directory under $HOME containing a
+///   `.beads/` and claims REAL beads from REAL repos under the fixture
+///   adapter/worker identity
+///
+/// 2026-08-05 contamination incident: An in-process Worker test without
+/// isolation let an orphaned `integration_tests` binary roam into bead-forge's
+/// live store, mutate 2302 beads to `in_progress` under assignee
+/// `echo-test-test-worker`, and truncate `.beads/issues.jsonl` to 0 bytes.
 #[tokio::test]
 async fn exhaustion_with_idle_action_exit() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
@@ -572,8 +593,7 @@ async fn exhaustion_with_idle_action_exit() {
     config.self_modification.hot_reload = false;
     config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
     config.workspace.home = _home_dir.path().to_path_buf();
-    // Isolate Explore strand to prevent scanning real home directory
-    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    // Confine Explore strand to test's tempdir to prevent scanning real user directories
     config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
     config.strands.explore.workspaces = Vec::new();
 
@@ -783,8 +803,9 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
     config.workspace.home = _home_dir.path().to_path_buf();
     config.self_modification.hot_reload = false;
     config.workspace.default = std::path::PathBuf::from("/tmp");
-    // Isolate Explore strand to prevent scanning real home directory
-    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    // Confine Explore strand to test's tempdir to prevent scanning real user directories.
+    // REQUIRED — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+    // Without this, in-process Workers scan $HOME and claim real beads (2026-08-05 incident).
     config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
     config.strands.explore.workspaces = Vec::new();
 
@@ -1047,6 +1068,27 @@ fn outcome_classify_covers_all_exit_code_ranges() {
 // Test 7: Worker config validation at boot
 // ═════════════════════════════════════════════════════════════════════════════
 
+/// Test that worker rejects invalid config at boot.
+///
+/// This test builds a Worker in-process with intentionally invalid config.
+/// The Explore strand MUST be isolated to prevent scanning real user directories.
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+///
+/// Why isolation is required for in-process Worker tests:
+/// - Workers built in-process never go through a child process, so setting
+///   `HOME` in a Command::new() call has no effect (no child process exists)
+/// - Without explicit config, Explore uses `ExploreConfig::default()`: `workspaces: []`
+///   (= auto-discover) with `workspace_root` defaulting to the real home directory
+///   (`ExploreConfig::default_workspace_root()` -> `dirs_or_home("")`)
+/// - Left unchecked, Explore scans every directory under $HOME containing a
+///   `.beads/` and claims REAL beads from REAL repos under the fixture
+///   adapter/worker identity
+///
+/// 2026-08-05 contamination incident: An in-process Worker test without
+/// isolation let an orphaned `integration_tests` binary roam into bead-forge's
+/// live store, mutate 2302 beads to `in_progress` under assignee
+/// `echo-test-test-worker`, and truncate `.beads/issues.jsonl` to 0 bytes.
 #[tokio::test]
 async fn worker_boot_rejects_invalid_config() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
@@ -1054,8 +1096,7 @@ async fn worker_boot_rejects_invalid_config() {
     let mut config = Config::default();
     config.agent.default = String::new(); // Invalid: empty agent name
     config.workspace.home = _home_dir.path().to_path_buf();
-    // Isolate Explore strand to prevent scanning real home directory
-    // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+    // Confine Explore strand to test's tempdir to prevent scanning real user directories
     config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
     config.strands.explore.workspaces = Vec::new();
 
@@ -3524,6 +3565,49 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    // ProcessGuard ensures cleanup if test panics
+    struct ProcessGuard {
+        inner: Option<std::process::Child>,
+    }
+
+    impl ProcessGuard {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            if let Some(ref mut child) = self.inner {
+                child.try_wait()
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            if let Some(ref mut child) = self.inner {
+                child.kill()
+            } else {
+                Ok(())
+            }
+        }
+
+        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            if let Some(ref mut child) = self.inner {
+                child.wait()
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "No child process to wait for",
+                ))
+            }
+        }
+    }
+
+    impl Drop for ProcessGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.inner.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
     let needle_binary = std::env::current_exe()
         .ok()
         .and_then(|p| {
@@ -3595,13 +3679,15 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
         .arg("1")
         .env("HOME", temp_dir1.path());
 
-    let mut child1 = match cmd1.spawn() {
+    let child1 = match cmd1.spawn() {
         Ok(c) => c,
         Err(e) => {
             println!("Skipping scenario 1: failed to spawn worker: {}", e);
             return;
         }
     };
+
+    let mut child1_guard = ProcessGuard { inner: Some(child1) };
 
     // Wait for heartbeat creation
     let heartbeat_dir1 = workspace1.join("state").join("heartbeats");
@@ -3616,8 +3702,8 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
     }
 
     if !heartbeat_file1.exists() {
-        let _ = child1.kill();
-        let _ = child1.wait();
+        let _ = child1_guard.kill();
+        let _ = child1_guard.wait();
         panic!("Scenario 1: Heartbeat file not created");
     }
 
@@ -3626,7 +3712,7 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
     // Wait for normal exit
     let exit_start = Instant::now();
     while exit_start.elapsed() < Duration::from_secs(20) {
-        if let Ok(Some(_)) = child1.try_wait() {
+        if let Ok(Some(_)) = child1_guard.try_wait() {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -3670,13 +3756,15 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
         .arg("1")
         .env("HOME", temp_dir2.path());
 
-    let mut child2 = match cmd2.spawn() {
+    let child2 = match cmd2.spawn() {
         Ok(c) => c,
         Err(e) => {
             println!("Skipping scenario 2: failed to spawn worker: {}", e);
             return;
         }
     };
+
+    let mut child2_guard = ProcessGuard { inner: Some(child2) };
 
     // Wait for heartbeat creation
     let heartbeat_dir2 = workspace2.join("state").join("heartbeats");
@@ -3691,8 +3779,8 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
     }
 
     if !heartbeat_file2.exists() {
-        let _ = child2.kill();
-        let _ = child2.wait();
+        let _ = child2_guard.kill();
+        let _ = child2_guard.wait();
         panic!("Scenario 2: Heartbeat file not created");
     }
 
@@ -3701,7 +3789,7 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
     // Worker should exit quickly due to empty queue
     let exit_start2 = Instant::now();
     while exit_start2.elapsed() < Duration::from_secs(20) {
-        if let Ok(Some(_)) = child2.try_wait() {
+        if let Ok(Some(_)) = child2_guard.try_wait() {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));
