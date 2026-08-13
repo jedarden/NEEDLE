@@ -29,6 +29,14 @@ const FLOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Number of consecutive claim errors before marking a bead suspect.
 const CLAIM_ERROR_THRESHOLD: u32 = 3;
 
+/// Maximum claim-related history entries allowed before a bead is quarantined.
+///
+/// A single claim can append more than one history entry (for example,
+/// `claimed` plus `assignee_changed`), so this is intentionally a hard safety
+/// budget rather than a claim-attempt count.  The backend is checked before
+/// each mutation whenever it exposes event history.
+const MAX_CLAIM_EVENTS_PER_BEAD: u32 = 100;
+
 /// Atomic bead claimer with workspace-level flock serialization.
 pub struct Claimer {
     store: Arc<dyn BeadStore>,
@@ -38,6 +46,8 @@ pub struct Claimer {
     telemetry: Telemetry,
     /// Track consecutive claim errors per bead ID.
     claim_errors: Arc<std::sync::Mutex<HashMap<BeadId, u32>>>,
+    /// Track total claim events emitted per bead ID for circuit-breaking.
+    claim_events: Arc<std::sync::Mutex<HashMap<BeadId, u32>>>,
 }
 
 impl Claimer {
@@ -62,6 +72,7 @@ impl Claimer {
             retry_backoff_ms,
             telemetry,
             claim_errors: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            claim_events: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -91,6 +102,43 @@ impl Claimer {
     fn clear_claim_errors(&self, bead_id: &BeadId) {
         let mut errors = self.claim_errors.lock().unwrap();
         errors.remove(bead_id);
+    }
+
+    /// Check the in-memory fallback budget for backends that do not expose
+    /// claim history in their `show` projection.
+    ///
+    /// Returns `Some(total_events)` after the budget is exhausted.
+    fn check_event_limit(&self, bead_id: &BeadId) -> Option<u32> {
+        let mut events = self.claim_events.lock().unwrap();
+        let count = events.entry(bead_id.clone()).or_insert(0);
+        *count += 1;
+        let total = *count;
+
+        if total > MAX_CLAIM_EVENTS_PER_BEAD {
+            Some(total)
+        } else {
+            None
+        }
+    }
+
+    async fn trip_event_limit(&self, bead_id: &BeadId, event_count: u32) -> Result<String> {
+        let reason = format!(
+            "claim history for bead {bead_id} reached {event_count} claim events (limit {MAX_CLAIM_EVENTS_PER_BEAD}); quarantining to prevent event-log runaway"
+        );
+        if let Err(error) = self.store.block(bead_id).await {
+            let failure = format!("{reason}; quarantine failed: {error}");
+            tracing::error!(%bead_id, %error, "failed to quarantine bead after claim history limit");
+            self.telemetry.emit(EventKind::ClaimFailed {
+                bead_id: bead_id.clone(),
+                reason: failure.clone(),
+            })?;
+            return Err(anyhow!(failure));
+        }
+        self.telemetry.emit(EventKind::ClaimFailed {
+            bead_id: bead_id.clone(),
+            reason: reason.clone(),
+        })?;
+        Ok(reason)
     }
 
     /// Attempt to claim the next available bead from the candidate list.
@@ -172,21 +220,22 @@ impl Claimer {
             };
 
             // Verify bead is still claimable (status=open, no assignee)
-            let current = match self.store.show(bead_id).await {
-                Ok(b) => b,
-                Err(e) => {
-                    drop(lock_file);
-                    self.telemetry.emit(EventKind::ClaimFailed {
-                        bead_id: bead_id.clone(),
-                        reason: format!("verify failed: {e}"),
-                    })?;
-                    // Set Error status on the bead.claim span
-                    tracing::Span::current().record("otel.status_code", 2u64);
-                    tracing::Span::current()
-                        .record("otel.status_description", format!("verify failed: {e}"));
-                    return Ok(ClaimOutcome::StoreError(e));
-                }
-            };
+            let (current, claim_event_count) =
+                match self.store.show_with_claim_history(bead_id).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        drop(lock_file);
+                        self.telemetry.emit(EventKind::ClaimFailed {
+                            bead_id: bead_id.clone(),
+                            reason: format!("verify failed: {e}"),
+                        })?;
+                        // Set Error status on the bead.claim span
+                        tracing::Span::current().record("otel.status_code", 2u64);
+                        tracing::Span::current()
+                            .record("otel.status_description", format!("verify failed: {e}"));
+                        return Ok(ClaimOutcome::StoreError(e));
+                    }
+                };
 
             if current.status != BeadStatus::Open || current.assignee.is_some() {
                 drop(lock_file);
@@ -210,6 +259,23 @@ impl Claimer {
                     .await;
                 }
                 continue;
+            }
+
+            let in_memory_limit = if claim_event_count.is_none() {
+                self.check_event_limit(bead_id)
+            } else {
+                None
+            };
+            if let Some(event_count) = claim_event_count.or(in_memory_limit) {
+                if event_count >= MAX_CLAIM_EVENTS_PER_BEAD {
+                    drop(lock_file);
+                    let reason = self.trip_event_limit(bead_id, event_count).await?;
+                    return Ok(ClaimOutcome::Suspect {
+                        bead_id: bead_id.clone(),
+                        consecutive_errors: event_count,
+                        last_error: reason,
+                    });
+                }
             }
 
             // Attempt claim via store
@@ -417,6 +483,27 @@ impl Claimer {
 
         match self.store.claim_auto(actor).await {
             Ok(ClaimResult::Claimed(bead)) => {
+                let claim_event_count = match self.store.show_with_claim_history(&bead.id).await {
+                    Ok((_, count)) => count,
+                    Err(error) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            %error,
+                            "unable to inspect claim history after atomic claim"
+                        );
+                        None
+                    }
+                };
+                let in_memory_count = if claim_event_count.is_none() {
+                    Some(self.check_event_limit(&bead.id).unwrap_or(0))
+                } else {
+                    None
+                };
+                let event_count = claim_event_count.or(in_memory_count).unwrap_or(0);
+                if event_count >= MAX_CLAIM_EVENTS_PER_BEAD {
+                    let reason = self.trip_event_limit(&bead.id, event_count).await?;
+                    return Ok(ClaimResult::NotClaimable { reason });
+                }
                 tracing::Span::current().record("needle.bead.id", bead.id.as_ref());
                 tracing::Span::current().record("needle.claim.result", "succeeded");
                 self.telemetry.emit(EventKind::ClaimSuccess {
@@ -533,6 +620,9 @@ mod tests {
         beads: Mutex<Vec<Bead>>,
         /// Claim results consumed in FIFO order; when empty, claims succeed.
         claim_results: Mutex<Vec<ClaimResult>>,
+        claim_auto_result: Mutex<Option<ClaimResult>>,
+        claim_event_count: Mutex<Option<u32>>,
+        blocked_beads: Mutex<Vec<BeadId>>,
     }
 
     impl MockBeadStore {
@@ -540,11 +630,24 @@ mod tests {
             MockBeadStore {
                 beads: Mutex::new(beads),
                 claim_results: Mutex::new(vec![]),
+                claim_auto_result: Mutex::new(None),
+                claim_event_count: Mutex::new(None),
+                blocked_beads: Mutex::new(Vec::new()),
             }
         }
 
         fn with_claim_results(self, results: Vec<ClaimResult>) -> Self {
             *self.claim_results.lock().unwrap() = results;
+            self
+        }
+
+        fn with_claim_event_count(self, count: u32) -> Self {
+            *self.claim_event_count.lock().unwrap() = Some(count);
+            self
+        }
+
+        fn with_claim_auto_result(self, result: ClaimResult) -> Self {
+            *self.claim_auto_result.lock().unwrap() = Some(result);
             self
         }
     }
@@ -566,6 +669,11 @@ mod tests {
                 .find(|b| b.id == *id)
                 .cloned()
                 .ok_or_else(|| anyhow!("bead not found: {id}"))
+        }
+
+        async fn show_with_claim_history(&self, id: &BeadId) -> Result<(Bead, Option<u32>)> {
+            let bead = self.show(id).await?;
+            Ok((bead, *self.claim_event_count.lock().unwrap()))
         }
 
         async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
@@ -590,6 +698,9 @@ mod tests {
         }
 
         async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            if let Some(result) = self.claim_auto_result.lock().unwrap().take() {
+                return Ok(result);
+            }
             // Return NotClaimable for tests unless overridden
             Ok(ClaimResult::NotClaimable {
                 reason: "no beads available".to_string(),
@@ -600,7 +711,8 @@ mod tests {
             Ok(())
         }
 
-        async fn block(&self, _id: &BeadId) -> Result<()> {
+        async fn block(&self, id: &BeadId) -> Result<()> {
+            self.blocked_beads.lock().unwrap().push(id.clone());
             Ok(())
         }
 
@@ -677,6 +789,60 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(result, ClaimOutcome::NoCandidates));
+    }
+
+    #[tokio::test]
+    async fn claim_history_limit_quarantines_before_claim_mutation() {
+        let bead = make_bead("needle-bloated", "/tmp/ws");
+        let store = Arc::new(
+            MockBeadStore::new(vec![bead.clone()])
+                .with_claim_event_count(MAX_CLAIM_EVENTS_PER_BEAD),
+        );
+        let claimer = make_claimer(store.clone());
+
+        let result = claimer
+            .claim_next(
+                std::slice::from_ref(&bead),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
+
+        match result {
+            ClaimOutcome::Suspect {
+                bead_id,
+                last_error,
+                ..
+            } => {
+                assert_eq!(bead_id, bead.id);
+                assert!(last_error.contains("event-log runaway"));
+            }
+            other => panic!("expected event-limit suspect outcome, got {other:?}"),
+        }
+        assert_eq!(store.blocked_beads.lock().unwrap().as_slice(), &[bead.id]);
+    }
+
+    #[tokio::test]
+    async fn claim_auto_history_limit_quarantines_after_atomic_claim() {
+        let bead = make_bead("needle-bloated-auto", "/tmp/ws");
+        let store = Arc::new(
+            MockBeadStore::new(vec![bead.clone()])
+                .with_claim_auto_result(ClaimResult::Claimed(bead.clone()))
+                .with_claim_event_count(MAX_CLAIM_EVENTS_PER_BEAD),
+        );
+        let claimer = make_claimer(store.clone());
+
+        let result = claimer.claim_auto("worker-1", "test-strand").await.unwrap();
+
+        match result {
+            ClaimResult::NotClaimable { reason } => {
+                assert!(reason.contains("event-log runaway"));
+            }
+            other => panic!("expected event-limit not-claimable outcome, got {other:?}"),
+        }
+        assert_eq!(store.blocked_beads.lock().unwrap().as_slice(), &[bead.id]);
     }
 
     #[tokio::test]

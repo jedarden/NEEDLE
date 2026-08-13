@@ -961,6 +961,17 @@ pub trait BeadStore: Send + Sync {
     /// Fetch a single bead by ID.
     async fn show(&self, id: &BeadId) -> Result<Bead>;
 
+    /// Fetch a bead together with the number of claim-related history entries
+    /// the backend exposed for it.
+    ///
+    /// Most backends do not include event history in their normal bead
+    /// projection, so the default implementation reports no count.  A
+    /// backend that does expose history can override this to let NEEDLE stop
+    /// retrying a bead before another claim mutation grows its JSON record.
+    async fn show_with_claim_history(&self, id: &BeadId) -> Result<(Bead, Option<u32>)> {
+        Ok((self.show(id).await?, None))
+    }
+
     /// Fetch operator/agent notes when the backend exposes them.
     ///
     /// Backends without a notes projection return `None`; this keeps notes a
