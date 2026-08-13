@@ -1246,6 +1246,224 @@ async fn worker_boot_rejects_invalid_config() {
     );
 }
 
+/// Test that worker rejects a nonexistent adapter at boot.
+///
+/// This test builds a Worker in-process with a nonexistent adapter name.
+/// The Explore strand MUST be isolated to prevent scanning real user directories.
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+///
+/// Why isolation is required for in-process Worker tests:
+/// - Workers built in-process never go through a child process, so setting
+///   `HOME` in a Command::new() call has no effect (no child process exists)
+/// - Without explicit config, Explore uses `ExploreConfig::default()`: `workspaces: []`
+///   (= auto-discover) with `workspace_root` defaulting to the real home directory
+///   (`ExploreConfig::default_workspace_root()` -> `dirs_or_home("")`)
+/// - Left unchecked, Explore scans every directory under $HOME containing a
+///   `.beads/` and claims REAL beads from REAL repos under the fixture
+///   adapter/worker identity
+///
+/// 2026-08-05 contamination incident: An in-process Worker test without
+/// isolation let an orphaned `integration_tests` binary roam into bead-forge's
+/// live store, mutate 2302 beads to `in_progress` under assignee
+/// `echo-test-test-worker`, and truncate `.beads/issues.jsonl` to 0 bytes.
+#[tokio::test]
+async fn worker_boot_rejects_nonexistent_adapter() {
+    let nonexistent_adapter = "nonexistent-test-adapter-xyz-999";
+    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+    let _home_dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.agent.default = nonexistent_adapter.to_string();
+    config.workspace.home = _home_dir.path().to_path_buf();
+    // Confine Explore strand to test's tempdir to prevent scanning real user directories
+    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
+
+    let mut worker = Worker::new(config, "test-worker".to_string(), store);
+    let result = worker.run().await;
+
+    // Worker should fail immediately with nonzero exit
+    assert!(
+        result.is_err(),
+        "worker should fail to boot with nonexistent adapter"
+    );
+
+    let error_msg = result.unwrap_err().to_string();
+
+    // Error message must include the adapter name
+    assert!(
+        error_msg.contains(nonexistent_adapter),
+        "error should mention the nonexistent adapter name: {error_msg}"
+    );
+
+    // Error message must mention it's an adapter error
+    assert!(
+        error_msg.contains("adapter") && error_msg.contains("not found"),
+        "error should indicate adapter not found: {error_msg}"
+    );
+
+    // Error message must include configuration directory guidance
+    assert!(
+        error_msg.contains("~/.needle/agents/")
+            || error_msg.contains(".needle/agents/")
+            || error_msg.contains("claude-config/agents/")
+            || error_msg.contains(".config/needle/adapters/"),
+        "error should include configuration directory guidance: {error_msg}"
+    );
+
+    // Worker should not have claimed any work
+    assert_eq!(
+        worker.beads_processed(),
+        0,
+        "worker should not process any beads when adapter is invalid"
+    );
+}
+
+/// Test that worker rejects a nonexistent adapter even when beads are available.
+///
+/// Regression test for the scenario where:
+/// 1. A bead exists and is ready to be claimed
+/// 2. The configured adapter does not exist
+/// 3. Worker should fail at boot BEFORE claiming the bead
+///
+/// This prevents orphaned in_progress beads from misconfiguration.
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+#[tokio::test]
+async fn worker_boot_rejects_nonexistent_adapter_before_claiming_work() {
+    let nonexistent_adapter = "another-missing-adapter-456";
+    let bead = make_bead("needle-adapter-check", 1);
+    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
+    let _home_dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.agent.default = nonexistent_adapter.to_string();
+    config.workspace.home = _home_dir.path().to_path_buf();
+    // Confine Explore strand to test's tempdir to prevent scanning real user directories
+    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
+
+    let mut worker = Worker::new(config, "test-worker".to_string(), store);
+    let result = worker.run().await;
+
+    // Worker should fail at boot, not claim the bead
+    assert!(
+        result.is_err(),
+        "worker should fail to boot with nonexistent adapter"
+    );
+
+    let error_msg = result.unwrap_err().to_string();
+    assert!(
+        error_msg.contains(nonexistent_adapter),
+        "error should mention the nonexistent adapter name"
+    );
+
+    // Verify no work was done
+    assert_eq!(
+        worker.beads_processed(),
+        0,
+        "worker should not claim or process any beads when adapter is invalid"
+    );
+
+    // Verify no claim was attempted on the store
+    let actions = store.actions();
+    assert!(
+        !actions.iter().any(|a| a.starts_with("claim:")),
+        "worker should not attempt to claim beads when adapter is invalid; actions: {:?}",
+        actions
+    );
+}
+
+/// Test that worker boots successfully with a valid adapter.
+///
+/// This is the positive test case demonstrating that:
+/// 1. When a valid adapter is configured, worker boots successfully
+/// 2. Worker can claim and process beads
+/// 3. No adapter validation errors occur
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+#[tokio::test]
+async fn worker_boot_succeeds_with_valid_adapter() {
+    let bead = make_bead("needle-valid-adapter", 1);
+    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
+
+    // Use make_worker_with_adapter which sets up a valid adapter
+    let (mut worker, _home_dir) =
+        make_worker_with_adapter(store.clone(), "valid-test-adapter", "exit 0", 10);
+
+    let result = worker.run().await;
+
+    // Worker should succeed
+    assert!(
+        result.is_ok(),
+        "worker should boot successfully with valid adapter: {:?}",
+        result
+    );
+
+    let final_state = result.unwrap();
+    assert!(
+        final_state == WorkerState::Stopped || final_state == WorkerState::Exhausted,
+        "worker should reach terminal state, got: {:?}",
+        final_state
+    );
+
+    // Worker should have processed the bead
+    assert!(
+        worker.beads_processed() >= 1,
+        "worker should process at least one bead with valid adapter"
+    );
+}
+
+/// Test that adapter validation happens BEFORE the main worker loop.
+///
+/// This is a timing/regression test ensuring that:
+/// 1. Adapter validation is early in the boot sequence
+/// 2. No beads are claimed before validation
+/// 3. The error is immediate, not delayed by idle timeouts or retries
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+#[tokio::test]
+async fn adapter_validation_happens_before_main_worker_loop() {
+    let nonexistent_adapter = "timing-test-adapter-missing";
+    let bead = make_bead("needle-timing-check", 1);
+    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
+    let _home_dir = tempfile::tempdir().unwrap();
+    let mut config = Config::default();
+    config.agent.default = nonexistent_adapter.to_string();
+    config.worker.idle_action = IdleAction::Wait;
+    config.worker.idle_timeout = 10; // 10 second idle timeout
+    config.workspace.home = _home_dir.path().to_path_buf();
+    // Confine Explore strand to test's tempdir to prevent scanning real user directories
+    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
+
+    let start = std::time::Instant::now();
+    let mut worker = Worker::new(config, "test-worker".to_string(), store);
+    let result = worker.run().await;
+    let elapsed = start.elapsed();
+
+    // Should fail immediately, not wait for idle timeout
+    assert!(
+        result.is_err(),
+        "worker should fail with nonexistent adapter"
+    );
+
+    let error_msg = result.unwrap_err().to_string();
+    assert!(
+        error_msg.contains(nonexistent_adapter),
+        "error should mention the nonexistent adapter"
+    );
+
+    // Verify failure was fast (< 2 seconds), not delayed by idle timeout
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "adapter validation should fail immediately, not after idle timeout; took {:?}",
+        elapsed
+    );
+
+    // Verify no beads were claimed
+    assert_eq!(worker.beads_processed(), 0);
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Test 8: Full pipeline telemetry sequence
 // ═════════════════════════════════════════════════════════════════════════════

@@ -1100,16 +1100,25 @@ impl Worker {
         // This ensures adapter configuration errors are caught early during startup rather
         // than after a bead has been claimed, preventing orphaned in_progress beads.
         if let Err(e) = self.resolve_adapter() {
-            // Provide clear context that this is a startup preflight failure
-            bail!(
-                "startup adapter preflight failed: {e}\n\n\
-                 The configured agent adapter could not be resolved. This check runs during \
-                 worker initialization to ensure adapter configuration is valid before \
-                 processing any beads. Common causes:\n\
-                 - Adapter YAML file missing from ~/.needle/agents/ or ~/.local/bin/claude-config/agents/\n\
-                 - Incorrect adapter name in agent.default config\n\
-                 - Adapter defined but missing required fields (provider, model, etc.)",
+            // Provide clear, actionable error message for missing adapter
+            let adapter_name = &self.config.agent.default;
+            eprintln!("ERROR: Configured agent adapter '{adapter_name}' was not found.");
+            eprintln!("Startup is aborting to prevent claiming beads with an invalid adapter configuration.");
+            eprintln!();
+            eprintln!("To fix this, check one of these locations for your adapter configuration:");
+            eprintln!("  - ~/.needle/agents/{adapter_name}.yaml");
+            eprintln!("  - ~/.local/bin/claude-config/agents/{adapter_name}/config.json");
+            eprintln!("  - ~/.config/needle/adapters/{adapter_name}.yaml");
+            eprintln!();
+            eprintln!("Common causes:");
+            eprintln!("  - Adapter file does not exist or is in a different location");
+            eprintln!("  - Incorrect adapter name specified in agent.default config");
+            eprintln!(
+                "  - Adapter file exists but is missing required fields (provider, model, etc.)"
             );
+            eprintln!();
+            eprintln!("Underlying error: {e}");
+            bail!("adapter '{adapter_name}' not found — startup aborted");
         }
         self.telemetry.emit(EventKind::InitStepCompleted {
             step: "adapter_preflight".to_string(),
@@ -3793,12 +3802,16 @@ impl Worker {
         let default_adapter_name = &self.config.agent.default;
 
         // Resolve the default adapter to get its model (if any).
-        let default_adapter = self.dispatcher.adapter(default_adapter_name)
+        let default_adapter = self
+            .dispatcher
+            .adapter(default_adapter_name)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!(
-                "configured agent adapter '{}' not found — check ~/.needle/agents/{}.yaml or ~/.local/bin/claude-config/agents/{}/config.json exists",
-                default_adapter_name, default_adapter_name, default_adapter_name
-            ))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "adapter '{}' not found in any of the expected configuration directories",
+                    default_adapter_name
+                )
+            })?;
 
         // Apply routing rules if configured.
         let (chosen_adapter_name, matched_rule) = self.apply_routing_rules(&default_adapter)?;
@@ -3821,11 +3834,10 @@ impl Worker {
         let adapter = self.dispatcher.adapter(&chosen_adapter_name)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(
-                "routed agent adapter '{}' not found — routing matched model '{}' with rule '{}', but the adapter is missing from ~/.config/needle/adapters/{}.yaml",
+                "routed adapter '{}' not found — routing matched model '{}' with rule '{}', but the adapter does not exist",
                 chosen_adapter_name,
                 default_adapter.model.as_deref().unwrap_or("unknown"),
-                matched_rule,
-                chosen_adapter_name
+                matched_rule
             ))?;
 
         Ok(adapter)
@@ -4254,7 +4266,7 @@ mod tests {
     }
 
     fn make_worker(store: Arc<dyn BeadStore>) -> Worker {
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         // Disable hot-reload in tests — it would re-exec into a different binary.
         config.self_modification.hot_reload = false;
         // Disable Explore: it defaults to scanning the real $HOME for any
@@ -4274,6 +4286,15 @@ mod tests {
         config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
         config.strands.explore.workspaces = Vec::new();
         Worker::new(config, "test-worker".to_string(), store)
+    }
+
+    /// Return a configuration whose selected adapter is one of NEEDLE's
+    /// built-ins. `Config::default()` intentionally names the legacy
+    /// operator-provided `claude` adapter, which is absent in isolated CI.
+    fn valid_test_config() -> Config {
+        let mut config = Config::default();
+        config.agent.default = "claude-sonnet".to_string();
+        config
     }
 
     #[tokio::test]
@@ -4309,7 +4330,7 @@ mod tests {
     #[tokio::test]
     async fn run_with_empty_store_returns_exhausted_or_stopped() {
         let store = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Exit;
         config.self_modification.hot_reload = false;
         config.strands.explore.enabled = false;
@@ -4386,7 +4407,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_flag_causes_stop() {
         let store = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Exit;
         config.self_modification.hot_reload = false;
         // Disable Explore strand so it doesn't scan the real filesystem —
@@ -4724,7 +4745,7 @@ mod tests {
                 let mut bead = make_test_bead("needle-span-depth");
                 bead.workspace = home.path().to_path_buf();
                 let store = Arc::new(MockStore::new(vec![bead.clone()]));
-                let mut config = Config::default();
+                let mut config = valid_test_config();
                 config.workspace.home = home.path().to_path_buf();
                 config.workspace.default = home.path().to_path_buf();
                 config.self_modification.hot_reload = false;
@@ -5080,7 +5101,7 @@ mod tests {
         std::fs::write(log_dir.join("worker.jsonl"), &log_content).unwrap();
 
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
         config.workspace.home = dir.path().to_path_buf();
         config.telemetry.file_sink.log_dir = Some(log_dir);
@@ -5111,7 +5132,7 @@ mod tests {
         std::fs::write(log_dir.join("worker.jsonl"), &log_content).unwrap();
 
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
         config.workspace.home = dir.path().to_path_buf();
         config.telemetry.file_sink.log_dir = Some(log_dir);
@@ -5240,7 +5261,7 @@ mod tests {
     fn set_state_uses_bead_workspace_for_cross_workspace_bead() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.workspace.home = dir.path().join("home");
         config.workspace.default = dir.path().join("home");
         let mut worker = Worker::new(config, "test-cross-ws".to_string(), store);
@@ -5276,7 +5297,7 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let dir = tempfile::tempdir().unwrap();
         let home_ws = dir.path().join("home");
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.workspace.home = home_ws.clone();
         config.workspace.default = home_ws.clone();
         let mut worker = Worker::new(config, "test-unset-ws".to_string(), store);
@@ -5311,7 +5332,7 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let dir = tempfile::tempdir().unwrap();
         let home_ws = dir.path().join("home");
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.workspace.home = home_ws.clone();
         config.workspace.default = home_ws.clone();
         let mut worker = Worker::new(config, "test-no-bead".to_string(), store);
@@ -5333,7 +5354,7 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         // Isolate workspace home to avoid registry pollution from other tests.
         let dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
         config.workspace.home = dir.path().to_path_buf();
         let mut worker = Worker::new(config, "test-log-inc".to_string(), store);
@@ -5385,7 +5406,7 @@ mod tests {
     #[tokio::test]
     async fn handle_exhausted_with_exit_returns_stopped() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Exit;
         config.self_modification.hot_reload = false;
         let mut worker = Worker::new(config, "test-exhaust-exit".to_string(), store);
@@ -5399,7 +5420,7 @@ mod tests {
     #[tokio::test]
     async fn handle_exhausted_with_wait_returns_selecting() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Wait;
         // Use a very short timeout so the test doesn't block.
         config.worker.idle_timeout = 0;
@@ -5457,7 +5478,7 @@ mod tests {
     #[tokio::test]
     async fn do_select_clears_race_lost_this_cycle_and_retry_count() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
         // Disable Explore strand so it doesn't find beads from the filesystem
         config.strands.explore.enabled = false;
@@ -5551,7 +5572,7 @@ mod tests {
         // Create bin/ so the path exists but needle-testing is absent.
         std::fs::create_dir_all(dir.path().join("bin")).unwrap();
         let store = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.self_modification.enabled = false;
         config.self_modification.auto_promote = true;
         config.self_modification.hot_reload = false;
@@ -5567,7 +5588,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("bin")).unwrap();
         let store = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.self_modification.enabled = true;
         config.self_modification.auto_promote = false;
         config.self_modification.hot_reload = false;
@@ -5583,7 +5604,7 @@ mod tests {
         // bin/ exists but needle-testing does not.
         std::fs::create_dir_all(dir.path().join("bin")).unwrap();
         let store = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = valid_test_config();
         config.self_modification.enabled = true;
         config.self_modification.auto_promote = true;
         config.self_modification.hot_reload = false;
