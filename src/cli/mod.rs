@@ -3577,6 +3577,40 @@ fn doctor_check_bead_store(
     doctor_run_bead_store_checks(store, repair)
 }
 
+fn doctor_check_bead_backend(config: &Config) -> CheckResult {
+    let (backend, path) = match crate::config::resolve_bead_cli(&config.bead_cli) {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            return CheckResult::fail(
+                "Bead backend",
+                format!("{}: {error:#}", config.bead_cli.backend),
+            )
+        }
+    };
+    let name = match backend {
+        crate::config::Backend::Bead => "bead-rs",
+        crate::config::Backend::Bf => "bead-forge",
+    };
+    let Some(descriptor) = crate::bead_store::builtin_bead_backends()
+        .into_iter()
+        .find(|descriptor| descriptor.name == name)
+    else {
+        return CheckResult::fail("Bead backend", format!("descriptor {name} is missing"));
+    };
+    let mut detail = vec![format!("verified against: {}", descriptor.verified_against)];
+    if !descriptor.capabilities.transactional_batch {
+        detail.push("capability gap: split/mitosis is sequential, not atomic".to_string());
+    }
+    if !descriptor.capabilities.velocity_metadata {
+        detail.push("capability gap: claim omits model/harness velocity metadata".to_string());
+    }
+    CheckResult::pass(
+        "Bead backend",
+        format!("{} at {}", descriptor.name, path.display()),
+    )
+    .with_detail(detail)
+}
+
 fn doctor_run_bead_store_checks(
     store: std::sync::Arc<dyn BeadStore>,
     repair: bool,
@@ -3991,7 +4025,10 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
         ));
     }
 
-    // Bead store connectivity (br doctor)
+    // Resolved descriptor, binary, and declared safety gaps.
+    results.push(doctor_check_bead_backend(&config));
+
+    // Bead store connectivity.
     results.push(doctor_check_bead_store(
         &workspace_root,
         &beads_dir,
