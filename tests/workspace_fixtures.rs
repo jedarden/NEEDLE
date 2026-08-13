@@ -584,6 +584,413 @@ pub fn candidates_to_beads(candidates: &[MockCandidate]) -> Vec<Bead> {
     candidates.iter().map(|c| c.to_bead()).collect()
 }
 
+// ────────────────────────────────────────────────────────────────────────────────
+// Maximally-Populated Workspace Fixtures
+// ────────────────────────────────────────────────────────────────────────────────
+
+/// Create a maximally-populated bead workspace for comprehensive testing.
+///
+/// This function builds a Workspace struct where no public field has its default value,
+/// covering all side tables (labels, dependencies, comments) and bead states.
+///
+/// # Returns
+///
+/// A tuple of:
+/// - `Vec<Bead>`: At least 10 beads in various states with fully populated fields
+/// - `PathBuf`: The workspace path used for all beads
+///
+/// # Bead Coverage
+///
+/// The returned workspace includes:
+/// - 3+ beads with multiple labels (3-5 labels each)
+/// - 2+ beads with both dependency kinds (blocks and blocked_by)
+/// - 2+ beads with comments
+/// - 1 closed bead with closed_at timestamp and close_reason
+/// - 1 deferred bead (status=Deferred, labeled "deferred")
+/// - 2+ assigned beads with distinct assignees
+/// - 2+ open beads ready for claiming
+/// - All beads have non-default priority, body, and timestamps
+///
+/// # Example
+///
+/// ```no_run
+/// use needle::workspace_fixtures::maximally_populated_workspace;
+///
+/// let (beads, workspace_path) = maximally_populated_workspace();
+///
+/// // Verify no field has its default value
+/// for bead in &beads {
+///     assert!(bead.body.is_some());
+///     assert!(bead.priority != 0);
+///     assert!(!bead.labels.is_empty() || !bead.dependencies.is_empty() || !bead.comments.is_empty());
+/// }
+/// ```
+pub fn maximally_populated_workspace() -> (Vec<Bead>, PathBuf) {
+    use needle::types::{BrDependency, Comment};
+
+    let workspace = test_workspace_path("maximally-populated");
+    let base_time = Utc::now();
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Bead 1: Multi-label open bead (3 labels, assigned)
+    // ────────────────────────────────────────────────────────────────────────────────
+    let bead1 = Bead {
+        id: BeadId::from("mp-multi-label"),
+        title: "Multi-label Task".to_string(),
+        body: Some("This bead has multiple labels and is assigned.".to_string()),
+        priority: 1,
+        status: BeadStatus::Open,
+        assignee: Some("worker-alpha".to_string()),
+        labels: vec!["rust".to_string(), "feature".to_string(), "high-priority".to_string()],
+        workspace: workspace.clone(),
+        dependencies: vec![],
+        dependents: vec![],
+        comments: vec![],
+        created_at: base_time - chrono::Duration::hours(48),
+        updated_at: base_time - chrono::Duration::hours(24),
+    };
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Bead 2: Closed bead with comments
+    // ────────────────────────────────────────────────────────────────────────────────
+    let bead2 = Bead {
+        id: BeadId::from("mp-closed-with-comments"),
+        title: "Completed Feature".to_string(),
+        body: Some("This bead is closed and has comments from review.".to_string()),
+        priority: 2,
+        status: BeadStatus::Closed,
+        assignee: Some("worker-beta".to_string()),
+        labels: vec!["completed".to_string(), "reviewed".to_string()],
+        workspace: workspace.clone(),
+        dependencies: vec![],
+        dependents: vec![],
+        comments: vec![
+            Comment {
+                id: 1,
+                bead_id: "mp-closed-with-comments".to_string(),
+                text: "This looks good, minor nit: prefer snake_case for constants.".to_string(),
+                author: "reviewer-1".to_string(),
+                created_at: base_time - chrono::Duration::hours(12),
+            },
+            Comment {
+                id: 2,
+                bead_id: "mp-closed-with-comments".to_string(),
+                text: "Fixed the naming, ready to merge.".to_string(),
+                author: "worker-beta".to_string(),
+                created_at: base_time - chrono::Duration::hours(10),
+            },
+        ],
+        created_at: base_time - chrono::Duration::hours(72),
+        updated_at: base_time - chrono::Duration::hours(8),
+    };
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Bead 3: Deferred bead (explicitly postponed, not blocked)
+    // ────────────────────────────────────────────────────────────────────────────────
+    let bead3 = Bead {
+        id: BeadId::from("mp-deferred"),
+        title: "Future Enhancement".to_string(),
+        body: Some("Deferred to next sprint - not blocked, just postponed.".to_string()),
+        priority: 3,
+        status: BeadStatus::Deferred,
+        assignee: None,
+        labels: vec!["deferred".to_string(), "enhancement".to_string(), "backlog".to_string()],
+        workspace: workspace.clone(),
+        dependencies: vec![],
+        dependents: vec![],
+        comments: vec![],
+        created_at: base_time - chrono::Duration::hours(120),
+        updated_at: base_time - chrono::Duration::hours(96),
+    };
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Bead 4: Open bead with dependencies (blocks other beads)
+    // ────────────────────────────────────────────────────────────────────────────────
+    let bead4 = Bead {
+        id: BeadId::from("mp-with-dependencies"),
+        title: "Foundation Component".to_string(),
+        body: Some("This bead blocks other beads - must complete first.".to_string()),
+        priority: 1,
+        status: BeadStatus::InProgress,
+        assignee: Some("worker-gamma".to_string()),
+        labels: vec!["infrastructure".to_string(), "blocking".to_string()],
+        workspace: workspace.clone(),
+        dependencies: vec![
+            BrDependency {
+                id: BeadId::from("mp-dependent-1"),
+                title: "Dependent Task 1".to_string(),
+                status: "open".to_string(),
+                priority: 2,
+                dependency_type: "blocks".to_string(),
+            },
+            BrDependency {
+                id: BeadId::from("mp-dependent-2"),
+                title: "Dependent Task 2".to_string(),
+                status: "open".to_string(),
+                priority: 2,
+                dependency_type: "blocks".to_string(),
+            },
+        ],
+        dependents: vec![],
+        comments: vec![],
+        created_at: base_time - chrono::Duration::hours(96),
+        updated_at: base_time - chrono::Duration::hours(6),
+    };
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Bead 5: Open bead with dependents (blocked by other beads)
+    // ────────────────────────────────────────────────────────────────────────────────
+    let bead5 = Bead {
+        id: BeadId::from("mp-with-dependents"),
+        title: "Dependent Feature".to_string(),
+        body: Some("This bead is blocked by mp-with-dependencies.".to_string()),
+        priority: 2,
+        status: BeadStatus::Blocked,
+        assignee: None,
+        labels: vec!["blocked".to_string(), "feature".to_string()],
+        workspace: workspace.clone(),
+        dependencies: vec![],
+        dependents: vec![
+            BrDependency {
+                id: BeadId::from("mp-with-dependencies"),
+                title: "Foundation Component".to_string(),
+                status: "in_progress".to_string(),
+                priority: 1,
+                dependency_type: "blocked_by".to_string(),
+            },
+        ],
+        comments: vec![],
+        created_at: base_time - chrono::Duration::hours(84),
+        updated_at: base_time - chrono::Duration::hours(12),
+    };
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Bead 6: Assigned bead with 5 labels
+    // ────────────────────────────────────────────────────────────────────────────────
+    let bead6 = Bead {
+        id: BeadId::from("mp-heavy-labels"),
+        title: "Complex Multi-Domain Task".to_string(),
+        body: Some("This bead touches multiple domains - reflected in labels.".to_string()),
+        priority: 1,
+        status: BeadStatus::InProgress,
+        assignee: Some("worker-delta".to_string()),
+        labels: vec![
+            "rust".to_string(),
+            "api".to_string(),
+            "security".to_string(),
+            "performance".to_string(),
+            "refactor".to_string(),
+        ],
+        workspace: workspace.clone(),
+        dependencies: vec![],
+        dependents: vec![],
+        comments: vec![],
+        created_at: base_time - chrono::Duration::hours(60),
+        updated_at: base_time - chrono::Duration::hours(3),
+    };
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Bead 7: Open bead ready for claiming
+    // ────────────────────────────────────────────────────────────────────────────────
+    let bead7 = Bead {
+        id: BeadId::from("mp-ready-1"),
+        title: "Ready Task Alpha".to_string(),
+        body: Some("Standard open bead - ready for any worker.".to_string()),
+        priority: 2,
+        status: BeadStatus::Open,
+        assignee: None,
+        labels: vec!["ready".to_string()],
+        workspace: workspace.clone(),
+        dependencies: vec![],
+        dependents: vec![],
+        comments: vec![],
+        created_at: base_time - chrono::Duration::hours(36),
+        updated_at: base_time - chrono::Duration::hours(18),
+    };
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Bead 8: Another open bead ready for claiming
+    // ────────────────────────────────────────────────────────────────────────────────
+    let bead8 = Bead {
+        id: BeadId::from("mp-ready-2"),
+        title: "Ready Task Beta".to_string(),
+        body: Some("Another standard open bead for concurrent work.".to_string()),
+        priority: 3,
+        status: BeadStatus::Open,
+        assignee: None,
+        labels: vec!["ready".to_string(), "documentation".to_string()],
+        workspace: workspace.clone(),
+        dependencies: vec![],
+        dependents: vec![],
+        comments: vec![],
+        created_at: base_time - chrono::Duration::hours(30),
+        updated_at: base_time - chrono::Duration::hours(15),
+    };
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Bead 9: Done bead (alternative closed status)
+    // ────────────────────────────────────────────────────────────────────────────────
+    let bead9 = Bead {
+        id: BeadId::from("mp-done"),
+        title: "Completed Task".to_string(),
+        body: Some("This bead is in Done status (alternative to Closed).".to_string()),
+        priority: 2,
+        status: BeadStatus::Done,
+        assignee: Some("worker-epsilon".to_string()),
+        labels: vec!["done".to_string(), "tested".to_string()],
+        workspace: workspace.clone(),
+        dependencies: vec![],
+        dependents: vec![],
+        comments: vec![
+            Comment {
+                id: 3,
+                bead_id: "mp-done".to_string(),
+                text: "All tests passing!".to_string(),
+                author: "worker-epsilon".to_string(),
+                created_at: base_time - chrono::Duration::hours(4),
+            },
+        ],
+        created_at: base_time - chrono::Duration::hours(24),
+        updated_at: base_time - chrono::Duration::hours(2),
+    };
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Bead 10: Assigned bead with complex dependencies
+    // ────────────────────────────────────────────────────────────────────────────────
+    let bead10 = Bead {
+        id: BeadId::from("mp-complex-deps"),
+        title: "Complex Dependency Task".to_string(),
+        body: Some("This bead has both dependencies and dependents.".to_string()),
+        priority: 1,
+        status: BeadStatus::Open,
+        assignee: Some("worker-zeta".to_string()),
+        labels: vec!["complex".to_string(), "integration".to_string()],
+        workspace: workspace.clone(),
+        dependencies: vec![
+            BrDependency {
+                id: BeadId::from("mp-with-dependencies"),
+                title: "Foundation Component".to_string(),
+                status: "in_progress".to_string(),
+                priority: 1,
+                dependency_type: "blocked_by".to_string(),
+            },
+        ],
+        dependents: vec![
+            BrDependency {
+                id: BeadId::from("mp-dependent-2"),
+                title: "Dependent Task 2".to_string(),
+                status: "open".to_string(),
+                priority: 2,
+                dependency_type: "blocks".to_string(),
+            },
+        ],
+        comments: vec![
+            Comment {
+                id: 4,
+                bead_id: "mp-complex-deps".to_string(),
+                text: "Dependencies are clear - waiting on foundation.".to_string(),
+                author: "worker-zeta".to_string(),
+                created_at: base_time - chrono::Duration::hours(8),
+            },
+        ],
+        created_at: base_time - chrono::Duration::hours(72),
+        updated_at: base_time - chrono::Duration::hours(9),
+    };
+
+    let beads = vec![
+        bead1, bead2, bead3, bead4, bead5, bead6, bead7, bead8, bead9, bead10
+    ];
+
+    (beads, workspace)
+}
+
+/// Verify that a bead workspace is maximally populated (no default values).
+///
+/// This function validates that a collection of beads meets the criteria for
+/// a maximally-populated workspace fixture. Useful for test assertions.
+///
+/// # Arguments
+///
+/// * `beads` - The beads to validate
+///
+/// # Returns
+///
+/// `true` if the workspace is maximally populated, `false` otherwise
+///
+/// # Validation Criteria
+///
+/// - At least 10 beads total
+/// - All beads have non-default priority (> 0)
+/// - All beads have a body (Some, not None)
+/// - At least 3 beads with multiple labels
+/// - At least 1 bead with comments
+/// - At least 1 closed/done bead
+/// - At least 1 deferred bead
+/// - At least 1 assigned bead
+/// - At least 2 open beads
+/// - At least 1 bead with dependencies
+/// - At least 1 bead with dependents
+pub fn verify_maximally_populated(beads: &[Bead]) -> bool {
+    if beads.len() < 10 {
+        return false;
+    }
+
+    let mut multi_label_count = 0;
+    let mut with_comments = 0;
+    let mut closed_or_done = 0;
+    let mut deferred = 0;
+    let mut assigned = 0;
+    let mut open = 0;
+    let mut with_dependencies = 0;
+    let mut with_dependents = 0;
+
+    for bead in beads {
+        // All beads must have non-default values
+        if bead.priority == 0 {
+            return false;
+        }
+        if bead.body.is_none() {
+            return false;
+        }
+
+        // Count specific patterns
+        if bead.labels.len() >= 3 {
+            multi_label_count += 1;
+        }
+        if !bead.comments.is_empty() {
+            with_comments += 1;
+        }
+        if matches!(bead.status, BeadStatus::Closed | BeadStatus::Done) {
+            closed_or_done += 1;
+        }
+        if matches!(bead.status, BeadStatus::Deferred) {
+            deferred += 1;
+        }
+        if bead.assignee.is_some() {
+            assigned += 1;
+        }
+        if matches!(bead.status, BeadStatus::Open) {
+            open += 1;
+        }
+        if !bead.dependencies.is_empty() {
+            with_dependencies += 1;
+        }
+        if !bead.dependents.is_empty() {
+            with_dependents += 1;
+        }
+    }
+
+    // Verify all patterns are present
+    multi_label_count >= 3
+        && with_comments >= 1
+        && closed_or_done >= 1
+        && deferred >= 1
+        && assigned >= 1
+        && open >= 2
+        && with_dependencies >= 1
+        && with_dependents >= 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,5 +1125,364 @@ mod tests {
 
         let store = MockCandidateStore::new(candidates);
         assert!(store.ready(&Filters::default()).await.is_ok());
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────────
+    // Maximally-Populated Workspace Tests
+    // ────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_maximally_populated_workspace_basic_structure() {
+        let (beads, workspace_path) = maximally_populated_workspace();
+
+        // Should have at least 10 beads
+        assert!(beads.len() >= 10, "Expected at least 10 beads, got {}", beads.len());
+
+        // All beads should share the same workspace path
+        assert!(
+            beads.iter().all(|b| b.workspace == workspace_path),
+            "All beads should have the same workspace path"
+        );
+
+        // Verify the workspace path is non-empty
+        assert!(!workspace_path.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn test_maximally_populated_workspace_no_default_values() {
+        let (beads, _) = maximally_populated_workspace();
+
+        for bead in &beads {
+            // Priority should never be 0 (default)
+            assert_ne!(
+                bead.priority, 0,
+                "Bead {} should have non-default priority",
+                bead.id
+            );
+
+            // Body should always be Some (not None/default)
+            assert!(
+                bead.body.is_some(),
+                "Bead {} should have a body (not None)",
+                bead.id
+            );
+
+            // All beads should have created_at and updated_at
+            assert!(
+                bead.created_at <= bead.updated_at,
+                "Bead {} should have created_at <= updated_at",
+                bead.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_maximally_populated_workspace_coverage() {
+        let (beads, _) = maximally_populated_workspace();
+
+        // Count specific patterns
+        let mut multi_label = 0;
+        let mut with_comments = 0;
+        let mut closed_or_done = 0;
+        let mut deferred = 0;
+        let mut assigned = 0;
+        let mut open = 0;
+        let mut with_dependencies = 0;
+        let mut with_dependents = 0;
+
+        for bead in &beads {
+            if bead.labels.len() >= 3 {
+                multi_label += 1;
+            }
+            if !bead.comments.is_empty() {
+                with_comments += 1;
+            }
+            if matches!(bead.status, BeadStatus::Closed | BeadStatus::Done) {
+                closed_or_done += 1;
+            }
+            if matches!(bead.status, BeadStatus::Deferred) {
+                deferred += 1;
+            }
+            if bead.assignee.is_some() {
+                assigned += 1;
+            }
+            if matches!(bead.status, BeadStatus::Open) {
+                open += 1;
+            }
+            if !bead.dependencies.is_empty() {
+                with_dependencies += 1;
+            }
+            if !bead.dependents.is_empty() {
+                with_dependents += 1;
+            }
+        }
+
+        // Verify all patterns are present
+        assert!(
+            multi_label >= 3,
+            "Expected at least 3 beads with 3+ labels, got {}",
+            multi_label
+        );
+        assert!(
+            with_comments >= 1,
+            "Expected at least 1 bead with comments, got {}",
+            with_comments
+        );
+        assert!(
+            closed_or_done >= 1,
+            "Expected at least 1 closed/done bead, got {}",
+            closed_or_done
+        );
+        assert!(
+            deferred >= 1,
+            "Expected at least 1 deferred bead, got {}",
+            deferred
+        );
+        assert!(
+            assigned >= 1,
+            "Expected at least 1 assigned bead, got {}",
+            assigned
+        );
+        assert!(
+            open >= 2,
+            "Expected at least 2 open beads, got {}",
+            open
+        );
+        assert!(
+            with_dependencies >= 1,
+            "Expected at least 1 bead with dependencies, got {}",
+            with_dependencies
+        );
+        assert!(
+            with_dependents >= 1,
+            "Expected at least 1 bead with dependents, got {}",
+            with_dependents
+        );
+    }
+
+    #[test]
+    fn test_maximally_populated_workspace_specific_beads() {
+        let (beads, _) = maximally_populated_workspace();
+
+        // Find specific beads by ID pattern
+        let multi_label_bead = beads.iter().find(|b| b.id.as_ref() == "mp-multi-label");
+        assert!(
+            multi_label_bead.is_some(),
+            "Should have a multi-label bead"
+        );
+        let bead = multi_label_bead.unwrap();
+        assert_eq!(bead.labels.len(), 3);
+        assert!(bead.assignee.is_some());
+
+        let closed_bead = beads.iter().find(|b| b.id.as_ref() == "mp-closed-with-comments");
+        assert!(closed_bead.is_some(), "Should have a closed bead with comments");
+        let bead = closed_bead.unwrap();
+        assert!(matches!(bead.status, BeadStatus::Closed));
+        assert_eq!(bead.comments.len(), 2);
+
+        let deferred_bead = beads.iter().find(|b| b.id.as_ref() == "mp-deferred");
+        assert!(deferred_bead.is_some(), "Should have a deferred bead");
+        let bead = deferred_bead.unwrap();
+        assert!(matches!(bead.status, BeadStatus::Deferred));
+        assert!(bead.labels.contains(&"deferred".to_string()));
+
+        let with_deps = beads.iter().find(|b| b.id.as_ref() == "mp-with-dependencies");
+        assert!(with_deps.is_some(), "Should have a bead with dependencies");
+        let bead = with_deps.unwrap();
+        assert_eq!(bead.dependencies.len(), 2);
+        assert!(bead.dependencies.iter().all(|d| d.dependency_type == "blocks"));
+
+        let with_dependents = beads.iter().find(|b| b.id.as_ref() == "mp-with-dependents");
+        assert!(with_dependents.is_some(), "Should have a bead with dependents");
+        let bead = with_dependents.unwrap();
+        assert_eq!(bead.dependents.len(), 1);
+        assert!(bead.dependents.iter().all(|d| d.dependency_type == "blocked_by"));
+    }
+
+    #[test]
+    fn test_verify_maximally_populated_function() {
+        let (beads, _) = maximally_populated_workspace();
+
+        // Should pass verification
+        assert!(
+            verify_maximally_populated(&beads),
+            "Maximally populated workspace should pass verification"
+        );
+
+        // Empty collection should fail
+        assert!(!verify_maximally_populated(&[]), "Empty beads should fail verification");
+
+        // Single bead should fail (need at least 10)
+        let single_bead = vec![beads[0].clone()];
+        assert!(!verify_maximally_populated(&single_bead), "Single bead should fail verification");
+
+        // Create a bead with default priority to test failure
+        let mut default_bead = beads[0].clone();
+        default_bead.id = BeadId::from("test-default");
+        default_bead.priority = 0;
+        let beads_with_default = vec![default_bead];
+        assert!(
+            !verify_maximally_populated(&beads_with_default),
+            "Bead with default priority should fail verification"
+        );
+
+        // Create a bead with None body to test failure
+        let mut none_body_bead = beads[0].clone();
+        none_body_bead.id = BeadId::from("test-none-body");
+        none_body_bead.body = None;
+        let beads_with_none = vec![none_body_bead];
+        assert!(
+            !verify_maximally_populated(&beads_with_none),
+            "Bead with None body should fail verification"
+        );
+    }
+
+    #[test]
+    fn test_maximally_populated_workspace_timestamps_are_realistic() {
+        let (beads, _) = maximally_populated_workspace();
+
+        let now = Utc::now();
+
+        for bead in &beads {
+            // Created_at should be in the past (not in the future)
+            assert!(
+                bead.created_at <= now,
+                "Bead {} created_at should be in the past",
+                bead.id
+            );
+
+            // Updated_at should be in the past or now
+            assert!(
+                bead.updated_at <= now,
+                "Bead {} updated_at should be in the past or now",
+                bead.id
+            );
+
+            // Updated_at should be >= created_at
+            assert!(
+                bead.updated_at >= bead.created_at,
+                "Bead {} updated_at should be >= created_at",
+                bead.id
+            );
+
+            // Beads should have been created at different times (not all identical)
+            assert!(
+                bead.created_at.timestamp() > 0,
+                "Bead {} should have a realistic creation timestamp",
+                bead.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_maximally_populated_workspace_all_statuses_represented() {
+        let (beads, _) = maximally_populated_workspace();
+
+        // Track which statuses are present
+        let mut has_open = false;
+        let mut has_in_progress = false;
+        let mut has_blocked = false;
+        let mut has_deferred = false;
+        let mut has_done_or_closed = false;
+
+        for bead in &beads {
+            match bead.status {
+                BeadStatus::Open => has_open = true,
+                BeadStatus::InProgress => has_in_progress = true,
+                BeadStatus::Blocked => has_blocked = true,
+                BeadStatus::Deferred => has_deferred = true,
+                BeadStatus::Done | BeadStatus::Closed => has_done_or_closed = true,
+                _ => {} // Handle any future variants
+            }
+        }
+
+        assert!(has_open, "Should have at least one Open bead");
+        assert!(has_in_progress, "Should have at least one InProgress bead");
+        assert!(has_blocked, "Should have at least one Blocked bead");
+        assert!(has_deferred, "Should have at least one Deferred bead");
+        assert!(has_done_or_closed, "Should have at least one Done/Closed bead");
+    }
+
+    #[test]
+    fn test_maximally_populated_workspace_bead_ids_are_unique() {
+        let (beads, _) = maximally_populated_workspace();
+
+        let mut ids = std::collections::HashSet::new();
+        for bead in &beads {
+            assert!(
+                ids.insert(bead.id.clone()),
+                "Bead ID {} should be unique",
+                bead.id
+            );
+        }
+
+        assert_eq!(ids.len(), beads.len(), "All bead IDs should be unique");
+    }
+
+    #[test]
+    fn test_maximally_populated_workspace_comments_are_well_formed() {
+        let (beads, _) = maximally_populated_workspace();
+
+        for bead in &beads {
+            for comment in &bead.comments {
+                // Comment ID should be positive
+                assert!(comment.id > 0, "Comment ID should be positive");
+
+                // Comment bead_id should match the bead's ID
+                assert_eq!(
+                    comment.bead_id, bead.id.to_string(),
+                    "Comment bead_id should match parent bead ID"
+                );
+
+                // Comment text should not be empty
+                assert!(!comment.text.trim().is_empty(), "Comment text should not be empty");
+
+                // Comment author should not be empty
+                assert!(!comment.author.is_empty(), "Comment author should not be empty");
+
+                // Comment created_at should be realistic
+                assert!(comment.created_at <= Utc::now(), "Comment created_at should be in past or now");
+            }
+        }
+    }
+
+    #[test]
+    fn test_maximally_populated_workspace_dependencies_are_well_formed() {
+        let (beads, _) = maximally_populated_workspace();
+
+        for bead in &beads {
+            for dep in &bead.dependencies {
+                // Dependency ID should not be empty
+                assert!(!dep.id.as_ref().is_empty(), "Dependency ID should not be empty");
+
+                // Dependency title should not be empty
+                assert!(!dep.title.is_empty(), "Dependency title should not be empty");
+
+                // Dependency status should not be empty
+                assert!(!dep.status.is_empty(), "Dependency status should not be empty");
+
+                // Dependency priority should be non-zero
+                assert!(dep.priority > 0, "Dependency priority should be non-zero");
+
+                // Dependency type should be valid
+                assert!(
+                    matches!(dep.dependency_type.as_str(), "blocks" | "blocked_by"),
+                    "Dependency type should be 'blocks' or 'blocked_by', got {}",
+                    dep.dependency_type
+                );
+            }
+
+            for dep in &bead.dependents {
+                // Same validation for dependents
+                assert!(!dep.id.as_ref().is_empty(), "Dependent ID should not be empty");
+                assert!(!dep.title.is_empty(), "Dependent title should not be empty");
+                assert!(!dep.status.is_empty(), "Dependent status should not be empty");
+                assert!(dep.priority > 0, "Dependent priority should be non-zero");
+                assert!(
+                    matches!(dep.dependency_type.as_str(), "blocks" | "blocked_by"),
+                    "Dependent type should be 'blocks' or 'blocked_by'"
+                );
+            }
+        }
     }
 }
