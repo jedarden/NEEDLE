@@ -268,24 +268,17 @@ impl MitosisEvaluator {
                     ),
                 });
             }
-        } else {
-            // Check if we should fire based on first_failure_only or repeat_interval.
-            let should_fire = if self.config.repeat_interval > 0 {
-                // repeat_interval mode: fire at 1, 1+N, 1+2N, ...
-                // But skip beads that are already mitosis children (have mitosis-depth label).
-                let has_mitosis_depth_label =
-                    bead.labels.iter().any(|l| l.starts_with("mitosis-depth:"));
-                let is_repeat_tick =
-                    failure_count > 1 && (failure_count - 1) % self.config.repeat_interval == 0;
+        } else if self.config.first_failure_only && failure_count != 1 {
+            // Allow periodic retries after the first failure when configured,
+            // but never re-split a bead that is already a mitosis child.
+            let has_mitosis_depth_label =
+                bead.labels.iter().any(|l| l.starts_with("mitosis-depth:"));
+            let is_repeat_tick = failure_count > 1
+                && self.config.repeat_interval > 0
+                && (failure_count - 1) % self.config.repeat_interval == 0
+                && !has_mitosis_depth_label;
 
-                // Fire at first failure OR at repeat interval ticks (if not a mitosis child)
-                failure_count == 1 || (is_repeat_tick && !has_mitosis_depth_label)
-            } else {
-                // first_failure_only mode: only fire at failure_count == 1
-                !self.config.first_failure_only || failure_count == 1
-            };
-
-            if !should_fire {
+            if !is_repeat_tick {
                 tracing::debug!(
                     bead_id = %bead.id,
                     failure_count,
@@ -2261,7 +2254,7 @@ End of response."#;
         // repeat_interval = 50 should fire at 1, 51, 101, 151, ...
         let config = MitosisConfig {
             enabled: true,
-            first_failure_only: false,
+            first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 50,
             max_depth: 0,
@@ -2353,7 +2346,7 @@ End of response."#;
         // Beads with mitosis-depth:1 label should be skipped even at repeat ticks
         let config = MitosisConfig {
             enabled: true,
-            first_failure_only: false,
+            first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 50,
             max_depth: 0,
@@ -2450,7 +2443,7 @@ End of response."#;
         // Verify depth-limited beads don't trigger repeat mitosis.
         let config = MitosisConfig {
             enabled: true,
-            first_failure_only: false,
+            first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 50,
             max_depth: 0,
