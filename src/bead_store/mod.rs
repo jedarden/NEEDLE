@@ -58,6 +58,9 @@ pub fn open_configured(
         )
     })?;
     verify_backend_identity(&backend, &binary, &workspace)?;
+    if backend == crate::config::Backend::Bead {
+        verify_bead_rs_capabilities(&binary, &workspace)?;
+    }
 
     match backend {
         crate::config::Backend::Bf => {
@@ -155,6 +158,72 @@ fn verify_backend_identity(
             expected_prefix,
             identity.trim()
         );
+    }
+    Ok(())
+}
+
+fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<()> {
+    let output = std::process::Command::new(binary)
+        .args(["capabilities", "--profile", "native-v1"])
+        .current_dir(workspace)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to probe bead-rs capabilities at {}",
+                binary.display()
+            )
+        })?;
+    if !output.status.success() {
+        bail!(
+            "bead-rs capability probe failed for workspace {} at {}: {}",
+            workspace.display(),
+            binary.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let capabilities: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("invalid bead-rs capability JSON from {}", binary.display()))?;
+    if capabilities
+        .get("implementation")
+        .and_then(|value| value.as_str())
+        != Some("bead-rs")
+        || capabilities
+            .get("atomic_claim")
+            .and_then(|value| value.as_bool())
+            != Some(true)
+    {
+        bail!(
+            "bead-rs capability mismatch for workspace {}: expected implementation=bead-rs and atomic_claim=true",
+            workspace.display()
+        );
+    }
+    for status in ["open", "in_progress", "deferred", "closed"] {
+        let present = capabilities["statuses"]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| value == status));
+        if !present {
+            bail!(
+                "bead-rs capability mismatch for workspace {}: missing status {status}",
+                workspace.display()
+            );
+        }
+    }
+    for schema_ref in [
+        "urn:bead-rs:schema:issue:native-v1",
+        "urn:bead-rs:schema:event:native-v1",
+        "urn:bead-rs:schema:field-guide:native-v1",
+    ] {
+        let present = capabilities["schemas"].as_array().is_some_and(|schemas| {
+            schemas
+                .iter()
+                .any(|schema| schema["schema_ref"] == schema_ref)
+        });
+        if !present {
+            bail!(
+                "bead-rs capability mismatch for workspace {}: missing schema {schema_ref}",
+                workspace.display()
+            );
+        }
     }
     Ok(())
 }
@@ -1044,7 +1113,13 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let path = directory.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\necho '{version}'\n")).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = capabilities ]; then\n  printf '%s\\n' '{{\"implementation\":\"bead-rs\",\"atomic_claim\":true,\"statuses\":[\"open\",\"in_progress\",\"deferred\",\"closed\"],\"schemas\":[{{\"schema_ref\":\"urn:bead-rs:schema:issue:native-v1\"}},{{\"schema_ref\":\"urn:bead-rs:schema:event:native-v1\"}},{{\"schema_ref\":\"urn:bead-rs:schema:field-guide:native-v1\"}}]}}'\nelse\n  echo '{version}'\nfi\n"
+            ),
+        )
+        .unwrap();
         let mut permissions = std::fs::metadata(&path).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&path, permissions).unwrap();
@@ -1088,6 +1163,31 @@ mod tests {
             .err()
             .expect("mismatched identity must fail closed");
         assert!(error.to_string().contains("identity mismatch"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_store_rejects_bead_rs_capability_drift() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("custom-bead");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nif [ \"$1\" = capabilities ]; then echo '{\"implementation\":\"bead-rs\",\"atomic_claim\":false}'; else echo 'bead 0.1.3'; fi\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+        let config = crate::config::BeadCliConfig {
+            backend: "bead-rs".to_string(),
+            explicit_path: Some(binary),
+        };
+        let error = open_configured(&config, workspace.path().to_path_buf(), None, None, None)
+            .err()
+            .expect("capability drift must fail closed");
+        assert!(error.to_string().contains("capability mismatch"));
     }
 
     #[test]
