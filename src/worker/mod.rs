@@ -4294,6 +4294,24 @@ mod tests {
     fn valid_test_config() -> Config {
         let mut config = Config::default();
         config.agent.default = "claude-sonnet".to_string();
+        // Isolate operator state. `workspace.home` defaults to the real
+        // `~/.needle`, whose `state/workers.json` is the live fleet's worker
+        // registry — booting a test worker registered into it and raced both
+        // the fleet and the other tests sharing this worker id. `adapters_dir`
+        // is pinned alongside it so adapter resolution sees only built-ins and
+        // never depends on what the operator happens to have installed.
+        let home = crate::util::test_env::isolated_home();
+        config.agent.adapters_dir = home.join("adapters");
+        config.workspace.home = home;
+        // Drop the default routing rules. They rewrite any sonnet/opus/fable/
+        // haiku model to `claude-print` and otherwise fall back to
+        // `claude-code-glm-4.7` — both operator-provided adapters that exist
+        // only in the real `~/.config/needle/adapters`. Leaving them on makes
+        // these tests pass or fail based on what the machine happens to have
+        // installed, and the boot error blames `agent.default` rather than the
+        // adapter routing actually selected. Tests that exercise routing build
+        // their own `RoutingConfig`.
+        config.agent.routing = None;
         config
     }
 

@@ -299,6 +299,94 @@ pub fn capture_timestamp_result() -> Result<String> {
     }
 }
 
+/// Crate-wide test-only environment isolation.
+///
+/// `HOME` is process-global, but Rust runs unit tests as threads inside a
+/// single process. Any test that calls `set_var("HOME", ..)` or
+/// `remove_var("HOME")` therefore mutates state that every concurrently
+/// running test observes. Before this module existed, several modules each
+/// had their own private `Mutex` (or none at all), which provides no mutual
+/// exclusion against the others — tests that merely *read* `HOME`
+/// (`worker::tests`, `telemetry::tests`, tilde expansion) failed
+/// nondeterministically depending on interleaving.
+///
+/// Every test that reads or writes `HOME`/`PATH` must go through
+/// [`isolate_env`] or [`isolate_env_with_home`] so that exactly one such test
+/// runs at a time and the previous values are always restored.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// The single process-wide lock guarding `HOME`/`PATH` in tests.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Restores `HOME` and `PATH` to their captured values when dropped.
+    pub(crate) struct EnvGuard {
+        home: Option<OsString>,
+        path: Option<OsString>,
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            restore("HOME", self.home.take());
+            restore("PATH", self.path.take());
+        }
+    }
+
+    fn restore(key: &str, value: Option<OsString>) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    /// A private, per-caller NEEDLE home for tests.
+    ///
+    /// `WorkspaceConfig::default_home()` resolves to the operator's real
+    /// `~/.needle`, whose `state/workers.json` is the *live fleet's* worker
+    /// registry. Unit tests that construct a `Worker` therefore registered
+    /// themselves into it and raced each other (and the running fleet) on a
+    /// single read-modify-write file. Every test config must point somewhere
+    /// private instead.
+    ///
+    /// Each call returns a fresh subdirectory, so concurrently running tests
+    /// that share a worker id never touch the same registry file. The backing
+    /// root is held in a `OnceLock` for the lifetime of the test process.
+    pub(crate) fn isolated_home() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock;
+
+        static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+        let root =
+            ROOT.get_or_init(|| tempfile::tempdir().expect("failed to create test home root"));
+        let dir = root
+            .path()
+            .join(format!("home-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir_all(dir.join("state")).expect("failed to create test home state dir");
+        dir
+    }
+
+    /// Acquire the environment lock and capture `HOME`/`PATH` for restoration.
+    ///
+    /// Hold the returned tuple for the whole test body; dropping it releases
+    /// the lock and restores the environment. The lock is intentionally
+    /// poison-tolerant: a panicking test must not wedge every later test.
+    #[must_use]
+    pub(crate) fn isolate_env() -> (MutexGuard<'static, ()>, EnvGuard) {
+        let lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = EnvGuard {
+            home: std::env::var_os("HOME"),
+            path: std::env::var_os("PATH"),
+        };
+        (lock, guard)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +396,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_with_home() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // Set a known HOME value for testing
         env::set_var("HOME", "/home/testuser");
 
@@ -324,6 +413,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_without_home() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // Remove HOME for this test
         env::remove_var("HOME");
 
@@ -334,6 +424,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_trailing_slash_in_home() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // Test that trailing slashes in HOME are handled correctly
         env::set_var("HOME", "/home/testuser/");
 
@@ -343,6 +434,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_preserves_double_slash() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // If the user types "~//foo", we preserve the double slash (it's their input)
@@ -351,6 +443,7 @@ mod tests {
 
     #[test]
     fn test_get_home_or_default() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/test");
         assert_eq!(get_home_or_default("fallback"), "/home/test");
 
@@ -360,6 +453,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_multi_level_paths() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Test single level
@@ -392,6 +486,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_normal_cases() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Basic tilde expansion
@@ -415,6 +510,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_edge_case_tilde_without_slash() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // "~foo" should not be expanded (not a home path pattern)
@@ -432,6 +528,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_edge_case_multiple_tildes() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Any path starting with "~/" is expanded, regardless of tildes elsewhere
@@ -450,6 +547,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_edge_case_empty_and_whitespace() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Empty string
@@ -462,6 +560,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_edge_case_no_home_with_tilde_variants() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         env::remove_var("HOME");
 
         // Without HOME, all tilde variants are returned unchanged
@@ -478,6 +577,7 @@ mod tests {
     /// when HOME is not set. This is the core fix for the bare tilde expansion issue.
     #[test]
     fn test_bare_tilde_expansion() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // With HOME set, bare tilde should expand to HOME
         env::set_var("HOME", "/home/testuser");
         assert_eq!(expand_tilde("~"), "/home/testuser");
@@ -492,6 +592,7 @@ mod tests {
     /// This is one of the acceptance criteria: verify "/abs/path" returns unchanged.
     #[test]
     fn test_absolute_paths_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Absolute paths should pass through unchanged
@@ -508,6 +609,7 @@ mod tests {
     /// remain unchanged.
     #[test]
     fn test_relative_paths_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Relative paths should pass through unchanged
@@ -527,6 +629,7 @@ mod tests {
     /// where tilde paths return unchanged.
     #[test]
     fn test_missing_home_fallback() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // Explicitly remove HOME to test fallback behavior
         env::remove_var("HOME");
 
@@ -546,6 +649,7 @@ mod tests {
     /// manipulation. Each test should set up its own HOME state.
     #[test]
     fn test_home_isolation() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // Set HOME to a specific value
         env::set_var("HOME", "/home/testuser");
         assert_eq!(expand_tilde("~/test"), "/home/testuser/test");

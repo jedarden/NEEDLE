@@ -375,7 +375,9 @@ async fn git_dirty_paths(workspace: &Path) -> BTreeSet<String> {
         .filter_map(|line| {
             // git status --porcelain format: XY PATH
             // X = staged, Y = worktree
-            // We only care about worktree changes (Y != ' ' && Y != '?')
+            // Untracked entries (Y == '?') are excluded; everything else the
+            // agent touched is reported, including staged-only changes
+            // (Y == ' '), which still represent work the agent performed.
             let chars: Vec<char> = line.chars().collect();
             if chars.len() < 2 {
                 return None;
@@ -686,6 +688,26 @@ mod tests {
             .output()
             .await
             .expect("git add failed");
+
+        // Commit it. A staged-but-uncommitted add is still a reported change,
+        // so the "worktree clean" premise only holds once it is committed.
+        tokio::process::Command::new("git")
+            .args([
+                "-c",
+                "user.email=github@jedarden.com",
+                "-c",
+                "user.name=jedarden",
+                "commit",
+                "-m",
+                "seed",
+            ])
+            .current_dir(workspace)
+            .env("GIT_DIR", &git_dir)
+            .env("GIT_WORK_TREE", workspace)
+            .kill_on_drop(true)
+            .output()
+            .await
+            .expect("git commit failed");
 
         // Create a file and don't stage it (untracked)
         let untracked_path = workspace.join("untracked.txt");

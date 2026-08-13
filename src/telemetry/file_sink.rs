@@ -118,9 +118,17 @@ impl FileSink {
     ///
     /// If the file exists, appends to it. If not, creates a new file.
     fn open_file_with_size(path: &Path) -> Result<(std::fs::File, u64)> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        // Telemetry lines can carry sanitized transcript content, so restrict
+        // newly created log files to the owner. This applies at creation only;
+        // an existing file keeps its current mode.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
             .open(path)
             .with_context(|| format!("failed to open log file: {}", path.display()))?;
 
@@ -555,7 +563,7 @@ mod tests {
         // This tests the rotation logic without waiting for actual midnight
         {
             let mut current_date = sink.current_date.lock().unwrap();
-            *current_date = "2099-01-01".to_string();
+            *current_date = "2000-01-01".to_string();
         }
 
         // Write another event - this should trigger rotation
@@ -564,7 +572,8 @@ mod tests {
         // Verify path changed (rotation occurred)
         let new_path = sink.path();
         assert_ne!(new_path, initial_path);
-        assert!(new_path.to_string_lossy().contains("2099-01-01"));
+        // Rotation names the new file for the current date, not the stale one.
+        assert!(new_path.to_string_lossy().contains(&initial_date));
     }
 
     #[test]
@@ -695,9 +704,14 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let log_dir = temp_dir.path();
 
-        // Create initial file with some content
-        let filename = "test-worker-sess002-2024-01-01-001.jsonl";
-        let path = log_dir.join(filename);
+        // Create initial file with some content. Per the module docs the first
+        // file of a day is `{worker}-{session}-{date}.jsonl`; the `-001`
+        // suffix is only used for subsequent rotations within the same day.
+        let filename = format!(
+            "test-worker-sess002-{}.jsonl",
+            Utc::now().format("%Y-%m-%d")
+        );
+        let path = log_dir.join(&filename);
 
         fs::create_dir_all(log_dir).unwrap();
         fs::write(&path, "{\"old\":\"data\"}\n").unwrap();

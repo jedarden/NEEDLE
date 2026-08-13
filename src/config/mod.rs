@@ -545,41 +545,14 @@ fn detect_backend_from_path(path: &Path) -> Result<Backend> {
 mod tests {
     use super::*;
 
-    static BEAD_CLI_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct BeadCliEnvGuard {
-        home: Option<std::ffi::OsString>,
-        path: Option<std::ffi::OsString>,
-    }
-
-    impl BeadCliEnvGuard {
-        fn capture() -> Self {
-            Self {
-                home: std::env::var_os("HOME"),
-                path: std::env::var_os("PATH"),
-            }
-        }
-    }
-
-    impl Drop for BeadCliEnvGuard {
-        fn drop(&mut self) {
-            match self.home.take() {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match self.path.take() {
-                Some(value) => std::env::set_var("PATH", value),
-                None => std::env::remove_var("PATH"),
-            }
-        }
-    }
-
-    fn isolate_bead_cli_env() -> (std::sync::MutexGuard<'static, ()>, BeadCliEnvGuard) {
-        let lock = BEAD_CLI_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let env = BeadCliEnvGuard::capture();
-        (lock, env)
+    /// Delegates to the single crate-wide env lock so that `HOME`/`PATH`
+    /// mutation here excludes — and is excluded by — every other test that
+    /// touches the process environment.
+    fn isolate_bead_cli_env() -> (
+        std::sync::MutexGuard<'static, ()>,
+        crate::util::test_env::EnvGuard,
+    ) {
+        crate::util::test_env::isolate_env()
     }
 
     #[test]
@@ -3569,12 +3542,14 @@ fn expand_tilde_option(path: &Option<PathBuf>) -> Option<PathBuf> {
 mod config_tests {
     use super::*;
 
-    static SUPERVISOR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn lock_supervisor_env() -> std::sync::MutexGuard<'static, ()> {
-        SUPERVISOR_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// Delegates to the single crate-wide env lock. A module-private lock
+    /// would not exclude the `HOME` mutations performed by other modules'
+    /// tests, which is what made these tests order-dependent.
+    fn lock_supervisor_env() -> (
+        std::sync::MutexGuard<'static, ()>,
+        crate::util::test_env::EnvGuard,
+    ) {
+        crate::util::test_env::isolate_env()
     }
 
     #[test]
@@ -3653,6 +3628,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_with_tilde_slash() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/docs");
         assert_eq!(result, "/home/testuser/docs");
@@ -3661,6 +3637,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_bare_tilde() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~");
         assert_eq!(result, "/home/testuser");
@@ -3669,6 +3646,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_absolute_path_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("/tmp/file.txt");
         assert_eq!(result, "/tmp/file.txt");
@@ -3677,6 +3655,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_relative_path_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("relative/path");
         assert_eq!(result, "relative/path");
@@ -3685,6 +3664,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_empty_string() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("");
         assert_eq!(result, "");
@@ -3693,6 +3673,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_missing_home_returns_original() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = expand_tilde_str("~/docs");
         assert_eq!(result, "~/docs");
@@ -3700,6 +3681,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_missing_home_bare_tilde() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = expand_tilde_str("~");
         assert_eq!(result, "~");
@@ -3707,6 +3689,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_nested_path() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/docs/notes/file.md");
         assert_eq!(result, "/home/testuser/docs/notes/file.md");
@@ -3715,6 +3698,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_with_spaces() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/test user");
         let result = expand_tilde_str("~/my docs");
         assert_eq!(result, "/home/test user/my docs");
@@ -3723,6 +3707,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_tilde_in_middle_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("/path/~user/docs");
         assert_eq!(result, "/path/~user/docs");
@@ -3731,6 +3716,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_tilde_user_prefix_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~otheruser/docs");
         assert_eq!(result, "~otheruser/docs");
@@ -3739,6 +3725,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_no_panic_on_missing_home() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         // This should not panic
         let result = expand_tilde_str("~/any/path");
@@ -3747,6 +3734,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_tilde_slash_only() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/");
         assert_eq!(result, "/home/testuser");
@@ -3755,6 +3743,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_path_tilde_slash_only() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/"));
         assert_eq!(result, PathBuf::from("/home/testuser"));
@@ -3763,6 +3752,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_tilde_with_parent_directory_reference() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/../");
         assert_eq!(result, "/home/testuser/../");
@@ -3771,6 +3761,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_path_tilde_with_parent_directory_reference() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/../"));
         assert_eq!(result, PathBuf::from("/home/testuser/../"));
@@ -4289,6 +4280,7 @@ mod config_tests {
 
     #[test]
     fn load_invalid_yaml_returns_error() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "invalid: [yaml: broken: {{{").unwrap();
@@ -4918,7 +4910,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_defaults() {
-        let _guard = lock_supervisor_env();
+        let (_env_lock, _env_guard) = lock_supervisor_env();
         // Ensure no env vars are set
         std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
         std::env::remove_var("SUPERVISOR_SOCKET_PATH");
@@ -4930,7 +4922,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_heartbeat_only() {
-        let _guard = lock_supervisor_env();
+        let (_env_lock, _env_guard) = lock_supervisor_env();
         std::env::remove_var("SUPERVISOR_SOCKET_PATH");
         std::env::set_var("SUPERVISOR_HEARTBEAT_PATH", "/custom/heartbeat.json");
 
@@ -4946,7 +4938,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_socket_only() {
-        let _guard = lock_supervisor_env();
+        let (_env_lock, _env_guard) = lock_supervisor_env();
         std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
         std::env::set_var("SUPERVISOR_SOCKET_PATH", "/tmp/supervisor.sock");
 
@@ -4962,7 +4954,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_both_paths() {
-        let _guard = lock_supervisor_env();
+        let (_env_lock, _env_guard) = lock_supervisor_env();
         std::env::set_var(
             "SUPERVISOR_HEARTBEAT_PATH",
             "/var/lib/needle/heartbeat.json",
@@ -4985,7 +4977,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_expands_tilde() {
-        let _guard = lock_supervisor_env();
+        let (_env_lock, _env_guard) = lock_supervisor_env();
         std::env::set_var("SUPERVISOR_HEARTBEAT_PATH", "~/heartbeat.json");
         std::env::set_var("SUPERVISOR_SOCKET_PATH", "~/supervisor.sock");
 
@@ -5890,6 +5882,8 @@ agent:
 
     #[test]
     fn worker_binary_path_tilde_is_expanded() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
         let mut config = Config {
             worker: WorkerConfig {
                 worker_binary_path: Some(PathBuf::from("~/bin/needle")),
@@ -5909,6 +5903,8 @@ agent:
 
     #[test]
     fn bead_cli_explicit_path_tilde_is_expanded() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
         let mut config = Config {
             bead_cli: BeadCliConfig {
                 explicit_path: Some(PathBuf::from("~/local/bin/bf")),
@@ -5952,6 +5948,7 @@ agent:
 
     #[test]
     fn get_home_env_returns_some_when_set() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // Save the original HOME value
         let original_home = std::env::var("HOME").ok();
 
@@ -5971,6 +5968,7 @@ agent:
 
     #[test]
     fn get_home_env_returns_none_when_not_set() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // Save the original HOME value
         let original_home = std::env::var("HOME").ok();
 
@@ -5988,6 +5986,7 @@ agent:
 
     #[test]
     fn get_home_env_never_panics() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // This test verifies that get_home_env() handles all cases gracefully
         // without panicking, even with unusual HOME values.
 
@@ -6292,6 +6291,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_with_slash() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/docs");
         std::env::remove_var("HOME");
@@ -6300,6 +6300,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_bare_tilde() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~");
         std::env::remove_var("HOME");
@@ -6308,6 +6309,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_nested_path() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/config/needle/file.yaml");
         std::env::remove_var("HOME");
@@ -6316,6 +6318,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_without_tilde_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("/absolute/path");
         std::env::remove_var("HOME");
@@ -6324,6 +6327,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_relative_path_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("relative/path");
         std::env::remove_var("HOME");
@@ -6332,6 +6336,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_other_user_tilde_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~otheruser/path");
         std::env::remove_var("HOME");
@@ -6340,6 +6345,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_empty_string() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("");
         std::env::remove_var("HOME");
@@ -6348,6 +6354,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_trailing_slash() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/");
         std::env::remove_var("HOME");
@@ -6356,6 +6363,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_missing_home() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = expand_tilde_str("~/docs");
         assert_eq!(result, "~/docs"); // No HOME, return unchanged
@@ -6363,6 +6371,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_missing_home_bare_tilde() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = expand_tilde_str("~");
         assert_eq!(result, "~"); // No HOME, return unchanged
@@ -6370,6 +6379,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_with_slash() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/docs"));
         std::env::remove_var("HOME");
@@ -6378,6 +6388,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_bare_tilde() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~"));
         std::env::remove_var("HOME");
@@ -6386,6 +6397,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_nested_path() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/config/needle/file.yaml"));
         std::env::remove_var("HOME");
@@ -6397,6 +6409,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_absolute_path_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("/absolute/path"));
         std::env::remove_var("HOME");
@@ -6405,6 +6418,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_relative_path_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("relative/path"));
         std::env::remove_var("HOME");
@@ -6413,6 +6427,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_missing_home() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = expand_tilde(Path::new("~/docs"));
         assert_eq!(result, PathBuf::from("~/docs")); // No HOME, return unchanged
@@ -6420,6 +6435,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_empty_string() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new(""));
         std::env::remove_var("HOME");
@@ -6428,6 +6444,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_trailing_slash() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/"));
         std::env::remove_var("HOME");
@@ -6436,6 +6453,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_parent_path() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/../"));
         std::env::remove_var("HOME");
@@ -6444,6 +6462,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_option_some() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let input = Some(PathBuf::from("~/docs"));
         let result = expand_tilde_option(&input);
@@ -6467,6 +6486,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_vec_single() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let input = vec![PathBuf::from("~/docs")];
         let result = expand_tilde_vec(&input);
@@ -6476,6 +6496,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_vec_multiple() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let input = vec![
             PathBuf::from("~/docs"),
@@ -6496,6 +6517,7 @@ agent:
 
     #[test]
     fn test_dirs_or_home_with_home() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = dirs_or_home(".config/needle");
         std::env::remove_var("HOME");
@@ -6504,6 +6526,7 @@ agent:
 
     #[test]
     fn test_dirs_or_home_without_home_fallback() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = dirs_or_home(".config/needle");
         assert_eq!(result, PathBuf::from("/tmp/.config/needle"));
@@ -6511,6 +6534,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_global_config() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.workspace.default = PathBuf::from("~/workspace");
@@ -6536,6 +6560,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_workspace_config() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.strands.explore.workspace_root = PathBuf::from("~/workspaces");
@@ -6570,6 +6595,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_env_var_paths() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.strands.learning.global_learnings_file = PathBuf::from("~/global-learnings.md");
@@ -6600,6 +6626,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_mixed_paths() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.workspace.default = PathBuf::from("~/workspace");
@@ -6622,6 +6649,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_missing_home() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let mut config = Config::default();
         config.workspace.default = PathBuf::from("~/workspace");

@@ -4802,7 +4802,10 @@ mod tests {
         sink.flush(std::time::Duration::from_secs(5))
             .expect("flush should succeed");
 
-        let path = dir.join("test-worker-deadbeef.jsonl");
+        let path = dir.join(format!(
+            "test-worker-deadbeef-{}.jsonl",
+            Utc::now().format("%Y-%m-%d")
+        ));
         let contents = std::fs::read_to_string(&path).expect("should read file");
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 1, "expected 1 line");
@@ -6163,7 +6166,10 @@ mod tests {
 
         let worker_id = "test-boot-worker";
         let session_id = "cafe1234";
-        let file_path = dir.join(format!("{worker_id}-{session_id}.jsonl"));
+        let file_path = dir.join(format!(
+            "{worker_id}-{session_id}-{}.jsonl",
+            Utc::now().format("%Y-%m-%d")
+        ));
 
         // Create a FileSink (this creates the file and writes the boot event)
         let file_sink = FileSink::with_dir(dir.to_path_buf(), worker_id, session_id)
