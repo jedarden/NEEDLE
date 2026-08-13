@@ -4702,6 +4702,7 @@ strands:
         assert!(config.enabled);
         assert!(config.first_failure_only);
         assert_eq!(config.force_failure_threshold, 0);
+        assert_eq!(config.repeat_interval, 0);
     }
 
     #[test]
