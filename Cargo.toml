@@ -104,6 +104,9 @@ libc = "0.2"
 # Random jitter (backoff desynchronization)
 rand = "0.8"
 
+# Temporary directories (checkpoint test utilities)
+tempfile = "3"
+
 # OpenTelemetry / OTLP (gated behind `otlp` feature)
 opentelemetry = { version = "0.31", optional = true }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"], optional = true }
@@ -121,7 +124,6 @@ testcontainers = { version = "0.23", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3"
 proptest = "1"
 filetime = "0.2"
 criterion = "0.5"
