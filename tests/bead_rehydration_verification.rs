@@ -137,7 +137,11 @@ fn verify_reconciliation(
 fn create_native(bead: &Path, workspace: &Path, source: &Value) -> Result<String> {
     let title = source["title"].as_str().context("title missing")?;
     let description = source["description"].as_str().unwrap_or_default();
-    let priority = source["priority"].as_u64().unwrap_or(2).min(4).to_string();
+    let priority = source["priority"].as_u64().unwrap_or(2);
+    if priority > 4 {
+        bail!("source priority {priority} is outside bead-rs range 0-4");
+    }
+    let priority = priority.to_string();
     let issue_type = source["issue_type"].as_str().unwrap_or("task");
     let mut args = vec![
         "create".to_string(),
@@ -257,6 +261,21 @@ fn verifier_rejects_omission_and_edge_inversion() {
         serde_json::json!({"id":"bead-b","dependencies":[]}),
     ];
     assert!(verify_reconciliation(&source, &inverted, &mapping).is_err());
+}
+
+#[test]
+fn creation_rejects_out_of_range_priority_before_writing() {
+    let workspace = tempfile::tempdir().unwrap();
+    let source = serde_json::json!({
+        "title": "invalid priority",
+        "description": "must not be silently clamped",
+        "priority": 5,
+        "issue_type": "task",
+        "labels": []
+    });
+    let error = create_native(Path::new("bead"), workspace.path(), &source)
+        .expect_err("priority 5 must require an explicit reconciliation decision");
+    assert!(error.to_string().contains("outside bead-rs range 0-4"));
 }
 
 #[test]

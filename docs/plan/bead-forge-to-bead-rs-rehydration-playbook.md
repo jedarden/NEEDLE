@@ -151,9 +151,18 @@ belong under `/home/coding/scratch`.
    ```
 
    Repeat the complete issue, field, graph, and ready-frontier verification.
-10. Scan source public records, the reconciliation report, and intended Git
-    artifacts with the repository's configured secret scanner. Do not print
-    detected secret values. Resolve findings before approval.
+10. Place source public records, the reconciliation report, and intended Git
+    artifacts in a dedicated scan directory, then run the repository's
+    configured secret scanner in redacted mode. With the fleet-standard
+    `gitleaks` binary this gate is:
+
+    ```text
+    gitleaks detect --no-git --redact --source ABSOLUTE_SCAN_DIRECTORY
+    ```
+
+    A missing scanner or nonzero result blocks approval. Keep scanner output
+    out of the repository, never print detected secret values, and resolve all
+    findings before continuing.
 
 Run the repository proof with:
 
