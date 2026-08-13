@@ -1333,7 +1333,7 @@ async fn worker_boot_rejects_nonexistent_adapter() {
 async fn worker_boot_rejects_nonexistent_adapter_before_claiming_work() {
     let nonexistent_adapter = "another-missing-adapter-456";
     let bead = make_bead("needle-adapter-check", 1);
-    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
+    let store = Arc::new(IntegrationMockStore::new(vec![bead]));
     let _home_dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.agent.default = nonexistent_adapter.to_string();
@@ -1342,7 +1342,7 @@ async fn worker_boot_rejects_nonexistent_adapter_before_claiming_work() {
     config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
     config.strands.explore.workspaces = Vec::new();
 
-    let mut worker = Worker::new(config, "test-worker".to_string(), store);
+    let mut worker = Worker::new(config, "test-worker".to_string(), store.clone());
     let result = worker.run().await;
 
     // Worker should fail at boot, not claim the bead
