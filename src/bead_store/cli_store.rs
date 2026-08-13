@@ -8,6 +8,9 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 use async_trait::async_trait;
+use serde::de::{self, SeqAccess, Visitor};
+use serde::Deserialize;
+use std::fmt;
 
 use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
@@ -229,6 +232,26 @@ impl CliBeadStore {
         })
     }
 
+    fn parse_beads_with_claim_history(
+        &self,
+        name: &str,
+        output: &str,
+    ) -> Result<Vec<(Bead, Option<u32>)>> {
+        let shape = self.operation(name)?.parse.ok_or_else(|| {
+            anyhow::anyhow!(
+                "backend '{}' operation '{}' has no declared parse shape",
+                self.backend.name,
+                name
+            )
+        })?;
+        parse_beads_with_claim_history(shape, output).with_context(|| {
+            format!(
+                "failed to parse backend '{}' operation '{}' with claim history as {:?}",
+                self.backend.name, name, shape
+            )
+        })
+    }
+
     fn strategy(&self, name: &str) -> Result<ParsedStrategy> {
         let strategy = self.operation(name)?.strategy.as_deref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -297,6 +320,17 @@ impl BeadStore for CliBeadStore {
             .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("{} show {} returned no bead", self.backend.name, id))
+    }
+
+    async fn show_with_claim_history(&self, id: &BeadId) -> Result<(Bead, Option<u32>)> {
+        let values = HashMap::from([("id", id.to_string())]);
+        let stdout = self.run_operation("show", &values).await?;
+        let (bead, claim_events) = self
+            .parse_beads_with_claim_history("show", &stdout)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("{} show {} returned no bead", self.backend.name, id))?;
+        Ok((bead, claim_events))
     }
 
     async fn notes(&self, id: &BeadId) -> Result<Option<String>> {
@@ -750,5 +784,143 @@ fn parse_beads(shape: ParseShape, output: &str) -> Result<Vec<Bead>> {
         ParseShape::BareId | ParseShape::None => {
             bail!("parse shape {shape:?} cannot produce bead records")
         }
+    }
+}
+
+#[derive(Deserialize)]
+struct BeadWithClaimHistory {
+    #[serde(flatten)]
+    bead: Bead,
+    #[serde(default, deserialize_with = "count_claim_events")]
+    events: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct EventTypeOnly {
+    #[serde(rename = "type", alias = "event_type", default)]
+    event_type: Option<String>,
+}
+
+fn count_claim_events<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ClaimEventVisitor;
+
+    impl<'de> Visitor<'de> for ClaimEventVisitor {
+        type Value = Option<u32>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an array of bead events")
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut count = 0u32;
+            while let Some(event) = sequence.next_element::<EventTypeOnly>()? {
+                if matches!(
+                    event.event_type.as_deref(),
+                    Some("claimed") | Some("assignee_changed") | Some("claim")
+                ) {
+                    count = count.saturating_add(1);
+                }
+            }
+            Ok(Some(count))
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(0))
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(Some(0))
+        }
+    }
+
+    deserializer.deserialize_any(ClaimEventVisitor)
+}
+
+fn parse_beads_with_claim_history(
+    shape: ParseShape,
+    output: &str,
+) -> Result<Vec<(Bead, Option<u32>)>> {
+    if output.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let records = match shape {
+        ParseShape::JsonArray => serde_json::from_str::<Vec<BeadWithClaimHistory>>(output)?,
+        ParseShape::JsonObject => {
+            if let Ok(record) = serde_json::from_str::<BeadWithClaimHistory>(output) {
+                vec![record]
+            } else {
+                serde_json::from_str::<Vec<BeadWithClaimHistory>>(output)?
+            }
+        }
+        ParseShape::JsonLines => output
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(serde_json::from_str::<BeadWithClaimHistory>)
+            .collect::<std::result::Result<Vec<_>, _>>()?,
+        ParseShape::BareId | ParseShape::None => {
+            bail!("parse shape {shape:?} cannot produce bead records")
+        }
+    };
+
+    Ok(records
+        .into_iter()
+        .map(|record| (record.bead, record.events))
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_beads_with_claim_history, ParseShape};
+
+    #[test]
+    fn claim_history_parser_counts_only_claim_mutations() {
+        let json = r#"[
+            {
+                "id": "bf-test",
+                "title": "history",
+                "priority": 1,
+                "status": "open",
+                "created_at": "2026-08-13T00:00:00Z",
+                "events": [
+                    {"type": "created"},
+                    {"type": "claimed"},
+                    {"type": "assignee_changed"},
+                    {"type": "commented"},
+                    {"type": "claim"}
+                ]
+            }
+        ]"#;
+
+        let parsed = parse_beads_with_claim_history(ParseShape::JsonArray, json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0.id.as_ref(), "bf-test");
+        assert_eq!(parsed[0].1, Some(3));
+    }
+
+    #[test]
+    fn claim_history_parser_defaults_when_events_are_omitted() {
+        let json = r#"{
+            "id": "bf-test",
+            "title": "history",
+            "priority": 1,
+            "status": "open",
+            "created_at": "2026-08-13T00:00:00Z"
+        }"#;
+
+        let parsed = parse_beads_with_claim_history(ParseShape::JsonObject, json).unwrap();
+        assert_eq!(parsed[0].1, None);
     }
 }
