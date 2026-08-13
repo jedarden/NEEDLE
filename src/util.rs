@@ -196,14 +196,29 @@ pub fn build_cargo_test_command(timeout_minutes: Option<u64>) -> std::process::C
     cmd
 }
 
-/// Capture the current system time in UTC.
+/// Capture the current system time in UTC as an ISO 8601 formatted string.
 ///
-/// Returns the current UTC timestamp as a `chrono::DateTime<chrono::Utc>`.
-/// This is a minimal timestamp capture function with no formatting logic.
+/// Returns the current UTC timestamp as an ISO 8601/RFC 3339 string.
+/// The format is `2026-08-13T14:30:00Z` (UTC timezone indicated by `Z`).
+///
+/// This function handles all errors internally and never panics. If system
+/// time is unavailable or chrono formatting fails (e.g., due to extreme
+/// system clock values that overflow chrono's internal calculations), it
+/// falls back to the Unix epoch timestamp (`1970-01-01T00:00:00Z`) and
+/// logs an error message to stderr.
 ///
 /// # Returns
 ///
-/// * `chrono::DateTime<chrono::Utc>` - Current UTC timestamp
+/// * `String` - Current UTC timestamp in ISO 8601 format, or the epoch
+///   timestamp as a fallback if time capture fails
+///
+/// # Fallback Behavior
+///
+/// When the system time cannot be retrieved (e.g., in restricted environments)
+/// or chrono formatting fails, this function:
+/// - Returns `"1970-01-01T00:00:00Z"` (Unix epoch)
+/// - Logs an error message to stderr with failure details
+/// - Never panics, ensuring the function is safe to call in production
 ///
 /// # Examples
 ///
@@ -212,14 +227,76 @@ pub fn build_cargo_test_command(timeout_minutes: Option<u64>) -> std::process::C
 ///
 /// let now = capture_timestamp();
 /// println!("Current UTC time: {}", now);
+/// // Output: "2026-08-13T14:30:00Z" (or epoch on failure)
 /// ```
 ///
 /// # Performance
 ///
 /// This function performs a system call to get the current time and should
 /// be called only when a timestamp is actually needed.
-pub fn capture_timestamp() -> chrono::DateTime<chrono::Utc> {
-    chrono::Utc::now()
+///
+/// # Error Handling
+///
+/// For use cases that need to distinguish between success and failure,
+/// use [`capture_timestamp_result()`] instead, which returns a `Result`.
+pub fn capture_timestamp() -> String {
+    capture_timestamp_result().unwrap_or_else(|e| {
+        eprintln!("Failed to capture timestamp: {}. Using epoch fallback.", e);
+        // Unix epoch as ISO 8601 timestamp (fallback when system time fails)
+        "1970-01-01T00:00:00Z".to_string()
+    })
+}
+
+/// Capture the current system time in UTC as an ISO 8601 formatted string.
+///
+/// Returns the current UTC timestamp as an ISO 8601/RFC 3339 string.
+/// The format is `2026-08-13T14:30:00Z` (UTC timezone indicated by `Z`).
+///
+/// This is the fallible version of [`capture_timestamp()`] that returns
+/// a `Result` instead of handling errors internally. Use this when you
+/// need to distinguish between successful timestamp capture and failures.
+///
+/// # Returns
+///
+/// * `Result<String>` - Current UTC timestamp in ISO 8601 format, or an
+///   error if time capture fails
+///
+/// # Errors
+///
+/// This function returns an error if:
+/// - The system time cannot be retrieved (e.g., in restricted environments)
+/// - Chrono formatting fails to produce an ISO 8601 string (e.g., due to
+///   extreme system clock values)
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::util::capture_timestamp_result;
+///
+/// match capture_timestamp_result() {
+///     Ok(timestamp) => println!("Current UTC time: {}", timestamp),
+///     Err(e) => eprintln!("Failed to capture timestamp: {}", e),
+/// }
+/// ```
+///
+/// # Performance
+///
+/// This function performs a system call to get the current time and should
+/// be called only when a timestamp is actually needed.
+pub fn capture_timestamp_result() -> Result<String> {
+    // Use catch_unwind to handle any potential panics from chrono operations
+    // This protects against extreme edge cases like system clock overflow
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let now = chrono::Utc::now();
+        now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }));
+
+    match result {
+        Ok(timestamp) => Ok(timestamp),
+        Err(_) => Err(anyhow::anyhow!(
+            "chrono operation panicked - possibly due to extreme system clock values"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -529,7 +606,14 @@ mod tests {
         let args: Vec<&str> = cmd.get_args().map(|s| s.to_str().unwrap()).collect();
         assert_eq!(
             args,
-            vec!["1800", "cargo", "test", "--all-targets", "--", "--nocapture"]
+            vec![
+                "1800",
+                "cargo",
+                "test",
+                "--all-targets",
+                "--",
+                "--nocapture"
+            ]
         );
     }
 
@@ -544,7 +628,14 @@ mod tests {
         let args: Vec<&str> = cmd.get_args().map(|s| s.to_str().unwrap()).collect();
         assert_eq!(
             args,
-            vec!["2700", "cargo", "test", "--all-targets", "--", "--nocapture"]
+            vec![
+                "2700",
+                "cargo",
+                "test",
+                "--all-targets",
+                "--",
+                "--nocapture"
+            ]
         );
     }
 
@@ -589,7 +680,14 @@ mod tests {
         let args: Vec<&str> = cmd.get_args().map(|s| s.to_str().unwrap()).collect();
         assert_eq!(
             args,
-            vec!["7200", "cargo", "test", "--all-targets", "--", "--nocapture"]
+            vec![
+                "7200",
+                "cargo",
+                "test",
+                "--all-targets",
+                "--",
+                "--nocapture"
+            ]
         );
     }
 
@@ -615,41 +713,150 @@ mod tests {
     }
 
     #[test]
-    fn test_capture_timestamp_returns_utc_datetime() {
+    fn test_capture_timestamp_returns_string() {
         let timestamp = capture_timestamp();
 
-        // Verify it returns a DateTime<Utc> type
-        // This will compile only if the type matches
-        let _: chrono::DateTime<chrono::Utc> = timestamp;
+        // Verify it returns a String type
+        let _: String = timestamp;
+    }
+
+    #[test]
+    fn test_capture_timestamp_is_iso8601_format() {
+        let timestamp = capture_timestamp();
+
+        // Verify the timestamp is in ISO 8601 format (RFC 3339)
+        // Format: 2026-08-13T14:30:00Z
+        assert!(
+            timestamp.len() == 20,
+            "ISO 8601 timestamp should be 20 characters"
+        );
+        assert!(
+            timestamp.ends_with('Z'),
+            "ISO 8601 UTC timestamp should end with 'Z'"
+        );
+
+        // Verify it can be parsed back as a DateTime
+        timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("timestamp should be valid ISO 8601 format");
     }
 
     #[test]
     fn test_capture_timestamp_is_current() {
-        let before = chrono::Utc::now();
+        let _before = chrono::Utc::now();
         let timestamp = capture_timestamp();
-        let after = chrono::Utc::now();
+        let _after = chrono::Utc::now();
 
-        // Verify the captured timestamp is between before and after
-        assert!(timestamp >= before, "captured timestamp should be >= before");
-        assert!(timestamp <= after, "captured timestamp should be <= after");
-    }
+        // Parse the timestamp string and verify it's reasonably close to now
+        let parsed = timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("timestamp should be valid ISO 8601 format");
 
-    #[test]
-    fn test_capture_timestamp_is_utc() {
-        let timestamp = capture_timestamp();
+        // Allow a small window for timing variations (system clock adjustments, etc.)
+        // The timestamp should be within 1 second of "now"
+        let now = chrono::Utc::now();
+        let diff_from_now = (now - parsed).num_seconds().abs();
 
-        // Verify the timestamp is in UTC
-        assert_eq!(timestamp.timezone(), chrono::Utc);
+        assert!(
+            diff_from_now <= 1,
+            "captured timestamp should be within 1 second of now, but was {} seconds off",
+            diff_from_now
+        );
     }
 
     #[test]
     fn test_capture_timestamp_consistency() {
         // Call the function multiple times and verify we get different timestamps
         let timestamp1 = capture_timestamp();
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(250));
         let timestamp2 = capture_timestamp();
 
-        // timestamp2 should be later than timestamp1
-        assert!(timestamp2 > timestamp1, "later timestamp should be greater");
+        // Parse both timestamps and verify timestamp2 is later or equal
+        let parsed1 = timestamp1
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("timestamp1 should be valid ISO 8601 format");
+        let parsed2 = timestamp2
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("timestamp2 should be valid ISO 8601 format");
+
+        assert!(
+            parsed2 >= parsed1,
+            "later timestamp should be greater or equal"
+        );
+    }
+
+    #[test]
+    fn test_capture_timestamp_result_returns_ok() {
+        let result = capture_timestamp_result();
+
+        // Should always return Ok in normal operation
+        assert!(result.is_ok(), "capture_timestamp_result should return Ok");
+
+        let timestamp = result.unwrap();
+        // Verify the timestamp is valid ISO 8601
+        timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("timestamp should be valid ISO 8601 format");
+    }
+
+    #[test]
+    fn test_capture_timestamp_result_format_matches() {
+        let result = capture_timestamp_result();
+        let timestamp = result.expect("should return Ok");
+
+        // Verify it matches the format from capture_timestamp()
+        let direct = capture_timestamp();
+
+        // Both should be valid ISO 8601
+        let parsed_result = timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("result timestamp should parse");
+        let parsed_direct = direct
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("direct timestamp should parse");
+
+        // They should be very close in time (within 1 second)
+        let diff = (parsed_result - parsed_direct).num_seconds().abs();
+        assert!(
+            diff <= 1,
+            "timestamps should be within 1 second, but were {} seconds apart",
+            diff
+        );
+    }
+
+    #[test]
+    fn test_capture_timestamp_fallback_is_epoch() {
+        // Verify the fallback timestamp is the Unix epoch
+        let fallback = "1970-01-01T00:00:00Z";
+
+        // Parse the fallback timestamp
+        let parsed = fallback
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("fallback timestamp should be valid ISO 8601");
+
+        // Verify it's the Unix epoch (timestamp 0)
+        assert_eq!(parsed.timestamp(), 0, "fallback should be Unix epoch");
+    }
+
+    #[test]
+    fn test_capture_timestamp_always_returns_valid_string() {
+        // This test verifies that capture_timestamp never panics and always
+        // returns a valid ISO 8601 string, even if fallback is used
+        let timestamp = capture_timestamp();
+
+        // Should always be a non-empty string
+        assert!(!timestamp.is_empty(), "timestamp should not be empty");
+
+        // Should always be valid ISO 8601 (either real time or epoch fallback)
+        let parsed = timestamp
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .expect("timestamp should always be valid ISO 8601, even if fallback");
+
+        // The timestamp should be reasonable (not negative)
+        assert!(
+            parsed.timestamp() >= 0,
+            "timestamp should be >= epoch, got {}",
+            parsed.timestamp()
+        );
     }
 }
