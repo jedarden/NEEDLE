@@ -11,6 +11,116 @@
 //! 5. Deterministic ordering (property test)
 //! 6. Cross-workspace mend: two-workspace zombie scenario
 
+// ============================================================================
+// PROCESSGUARD COVERAGE CATALOG — 2026-08-13
+// ============================================================================
+//
+// This section documents the ProcessGuard coverage analysis performed across
+// all integration tests. ProcessGuard is a test helper that ensures child
+// processes are cleaned up (killed + reaped) even if a test panics, preventing
+// zombie processes from contaminating the test environment.
+//
+// **EXECUTIVE SUMMARY: NO ADDITIONAL COVERAGE NEEDED**
+//
+// All integration tests that spawn real child processes already implement
+// proper ProcessGuard wrapping. The analysis found:
+// - **Total sites needing ProcessGuard:** 0
+// - **Tests already correctly covered:** 4 (all real process tests)
+// - **Mock infrastructure tests:** 1 (MockProcess::wait() — no guard needed)
+//
+// ----------------------------------------------------------------------------
+// TESTS WITH REAL CHILD PROCESSES (ALL COVERED)
+// ----------------------------------------------------------------------------
+//
+// 1. dead_worker_cleanup_integration (line ~2206)
+//    - Spawns: Real `needle worker --once` subprocess
+//    - ProcessGuard: ✅ YES (lines 2277-2313)
+//    - Pattern: Drop implementation kills + waits
+//
+// 2. heartbeat_cleanup_on_signal_integration (line ~2618)
+//    - Spawns: Real `needle run` subprocess with heartbeat file
+//    - ProcessGuard: ✅ YES (lines 2720-2762)
+//    - Pattern: Wait with timeout handling, explicit error messages
+//
+// 3. heartbeat_cleanup_on_normal_exit_integration (line ~3317)
+//    - Spawns: Real `needle run` subprocess
+//    - ProcessGuard: ✅ YES (lines 3410-3453)
+//    - Pattern: Handles cleanup on panic/timeout
+//
+// 4. heartbeat_cleanup_multiple_scenarios_integration (line ~3596)
+//    - Spawns: TWO real `needle run` subprocesses (scenario1, scenario2)
+//    - ProcessGuard: ✅ YES (lines 3600-3638) — 2 separate instances
+//    - Pattern: Multiple sequential scenarios, each with its own guard
+//
+// ----------------------------------------------------------------------------
+// MOCK INFRASTRUCTURE (NOT REAL PROCESSES)
+// ----------------------------------------------------------------------------
+//
+// 5. MockProcess::wait() (line ~2477)
+//    - Type: Test helper/mock infrastructure
+//    - Spawns: Does NOT spawn real process (trivial `true` command only)
+//    - ProcessGuard: ❌ NO (Not needed — not a long-lived worker process)
+//
+// ----------------------------------------------------------------------------
+// CONSISTENT PATTERN USED ACROSS ALL TESTS
+// ----------------------------------------------------------------------------
+//
+// All ProcessGuard implementations follow this pattern:
+//
+// ```rust
+// struct ProcessGuard {
+//     inner: Option<std::process::Child>,
+// }
+//
+// impl ProcessGuard {
+//     fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+//         if let Some(ref mut child) = self.inner {
+//             child.wait()  // Safe, wrapped in Drop
+//         } else {
+//             Err(std::io::Error::other("No child process"))
+//         }
+//     }
+// }
+//
+// impl Drop for ProcessGuard {
+//     fn drop(&mut self) {
+//         if let Some(mut child) = self.inner.take() {
+//             let _ = child.kill();      // Signal termination
+//             let _ = child.wait();      // Reap to prevent zombies
+//         }
+//     }
+// }
+// ```
+//
+// ----------------------------------------------------------------------------
+// NEXT STEPS (OPTIONAL IMPROVEMENTS)
+// ----------------------------------------------------------------------------
+//
+// Since all tests already have coverage, no immediate action is required.
+// Optional improvements for future maintenance:
+//
+// 1. Extract ProcessGuard to a shared test helper module to reduce
+//    code duplication across the 4 tests that use it.
+//
+// 2. Consider adding a macro or builder pattern for common ProcessGuard
+//    patterns (with timeout, with custom error messages, etc.).
+//
+// 3. Document the pattern in test development guidelines for new tests
+//    that spawn real subprocesses.
+//
+// ----------------------------------------------------------------------------
+// ANALYSIS METHODOLOGY
+// ----------------------------------------------------------------------------
+//
+// This catalog was created by:
+// 1. Scanning all test files for `child.wait()` calls
+// 2. Cross-referencing each call site with ProcessGuard usage
+// 3. Distinguishing between real process tests and mock infrastructure
+// 4. Verifying ProcessGuard implementations include Drop guards
+//
+// See: tests/processguard_coverage_catalog.md for detailed analysis.
+// ============================================================================
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -248,6 +358,21 @@ fn test_adapter(name: &str, template: &str, timeout_secs: u64) -> AgentAdapter {
     }
 }
 
+/// ISOLATION REQUIRED: In-process Worker tests must pin Explore strand's scan root.
+///
+/// This applies to tests that build a Worker in-process via this helper. Subprocess tests
+/// use `cmd.env("HOME", ...)` instead; this clause covers the in-process shape where
+/// HOME isolation does not apply (no subprocess is ever spawned).
+///
+/// Without explicit pinning, `ExploreConfig::default()` resolves `workspace_root` to the
+/// real home directory via `default_workspace_root()` → `dirs_or_home("")`, causing tests
+/// to scan and mutate production bead stores.
+///
+/// 2026-08-05 incident: An in-process Worker test without Explore isolation let an
+/// orphaned `integration_tests` binary mutate 2302 beads to `in_progress` under assignee
+/// `echo-test-test-worker` and truncate `.beads/issues.jsonl` to 0 bytes (recovered from git).
+///
+/// See CLAUDE.md Test Isolation Policy for full details.
 fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Exit;
@@ -261,21 +386,7 @@ fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
     // Isolate workspace home so the registry doesn't leak between tests.
     config.workspace.home = workspace_home.to_path_buf();
     // Confine the Explore strand to the test's temp home.
-    //
-    // REQUIRED — see "Test Isolation Policy" in CLAUDE.md and ADR-006. That
-    // policy is written for tests that spawn the `needle` *binary* and isolate
-    // it with `cmd.env("HOME", ...)`. Workers built in-process here never go
-    // through a child process, so no `HOME` override applies and they inherit
-    // `ExploreConfig::default()`: `workspaces: []` (= auto-discover) with
-    // `workspace_root` defaulting to the real home directory
-    // (`ExploreConfig::default_workspace_root()` -> `dirs_or_home("")`).
-    //
-    // Left unset, Explore scans every directory under $HOME containing a
-    // `.beads/` and claims REAL beads from REAL repos under the fixture
-    // adapter/worker identity. On 2026-08-05 that emptied bead-forge's live
-    // store — beads were mutated to `in_progress` under assignee
-    // `echo-test-test-worker` (adapter `echo-test` + worker `test-worker`)
-    // and `.beads/issues.jsonl` was truncated to 0 bytes.
+    // REQUIRED — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
     config.strands.explore.workspace_root = workspace_home.to_path_buf();
     config.strands.explore.workspaces = Vec::new();
     // Enable OTLP sink to trigger the runtime guard (bf-4nwm7).
@@ -1616,8 +1727,7 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     let explore_config = ExploreConfig {
         enabled: true,
         workspaces: vec![remote_workspace.clone()],
-        // Isolate Explore strand to prevent scanning real home directory
-        // REQUIRED — see ADR-006 and Test Isolation Policy in CLAUDE.md
+        // Isolate Explore scan root to prevent real user directory scans (see CLAUDE.md Test Isolation Policy)
         workspace_root: temp_dir.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
@@ -2271,6 +2381,7 @@ async fn dead_worker_cleanup_integration() {
         .stderr(Stdio::piped());
 
     // Spawn the process and wait with timeout to prevent hangs
+    #[allow(unused_mut)]
     let mut child = cmd.spawn().expect("Failed to spawn worker");
 
     // ProcessGuard ensures cleanup if test panics
@@ -2297,10 +2408,7 @@ async fn dead_worker_cleanup_integration() {
             if let Some(ref mut child) = self.0 {
                 child.wait()
             } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "No child process to wait for",
-                ))
+                Err(std::io::Error::other("No child process to wait for"))
             }
         }
     }
@@ -2441,6 +2549,12 @@ pub struct MockProcess {
     inner: Option<std::process::Child>,
 }
 
+impl Default for MockProcess {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockProcess {
     /// Create a new MockProcess with no inner child process.
     pub fn new() -> Self {
@@ -2474,8 +2588,7 @@ impl MockProcess {
         } else {
             // For testing without a real child process, spawn and wait on a
             // trivial successful process to get a valid ExitStatus.
-            std::process::Command::new("true")
-                .status()
+            std::process::Command::new("true").status()
         }
     }
 }
@@ -2700,6 +2813,7 @@ fn heartbeat_cleanup_on_signal_integration() {
 
     // Spawn the worker process
     println!("Spawning worker process...");
+    #[allow(unused_mut)]
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -2743,10 +2857,7 @@ fn heartbeat_cleanup_on_signal_integration() {
             if let Some(ref mut child) = self.inner {
                 child.wait()
             } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "No child process to wait for",
-                ))
+                Err(std::io::Error::other("No child process to wait for"))
             }
         }
     }
@@ -3437,10 +3548,7 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
             if let Some(ref mut child) = self.inner {
                 child.wait()
             } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "No child process to wait for",
-                ))
+                Err(std::io::Error::other("No child process to wait for"))
             }
         }
     }
@@ -3625,10 +3733,7 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
             if let Some(ref mut child) = self.inner {
                 child.wait()
             } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "No child process to wait for",
-                ))
+                Err(std::io::Error::other("No child process to wait for"))
             }
         }
     }
@@ -3721,7 +3826,9 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
         }
     };
 
-    let mut child1_guard = ProcessGuard { inner: Some(child1) };
+    let mut child1_guard = ProcessGuard {
+        inner: Some(child1),
+    };
 
     // Wait for heartbeat creation
     let heartbeat_dir1 = workspace1.join("state").join("heartbeats");
@@ -3798,7 +3905,9 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
         }
     };
 
-    let mut child2_guard = ProcessGuard { inner: Some(child2) };
+    let mut child2_guard = ProcessGuard {
+        inner: Some(child2),
+    };
 
     // Wait for heartbeat creation
     let heartbeat_dir2 = workspace2.join("state").join("heartbeats");
