@@ -1464,6 +1464,212 @@ async fn adapter_validation_happens_before_main_worker_loop() {
     assert_eq!(worker.beads_processed(), 0);
 }
 
+/// Subprocess test: needle binary produces actionable error message for nonexistent adapter.
+///
+/// This test spawns the actual needle binary as a subprocess to verify that the
+/// error message shown to users is:
+/// 1. Captured from stderr
+/// 2. Contains the specific adapter name that failed
+/// 3. Contains configuration directory guidance
+/// 4. Is actionable (user knows how to fix the problem)
+///
+/// ISOLATION REQUIRED: This test spawns a real needle binary subprocess.
+/// The test must isolate HOME to prevent the Explore strand from scanning
+/// the real user workspace. Without this, the spawned needle binary would leak
+/// into the real $HOME and scan real repos, contaminating the test environment.
+///
+/// See CLAUDE.md Test Isolation Policy and ADR-006 for full details.
+#[tokio::test]
+async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
+    // Create a temporary workspace for the test
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("test-workspace");
+    std::fs::create_dir(&workspace).unwrap();
+
+    // Initialize br workspace
+    let init_output = std::process::Command::new("/home/coding/.local/bin/br")
+        .arg("init")
+        .current_dir(&workspace)
+        .output()
+        .expect("br init command failed to execute");
+    assert!(
+        init_output.status.success(),
+        "br init failed: {}",
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+
+    // Create .needle.yaml configuration to enable bead store discovery
+    std::fs::write(
+        workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-forge\n",
+    )
+    .expect("failed to create .needle.yaml configuration");
+
+    // Get the needle binary path
+    let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
+
+    // Use a clearly fake adapter name that will never exist
+    let nonexistent_adapter = "totally-fake-adapter-xyz-999";
+
+    // Spawn the needle binary with the nonexistent adapter
+    let output = std::process::Command::new(&bin_path)
+        .arg("run")
+        .arg("--agent")
+        .arg(nonexistent_adapter)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--identifier")
+        .arg("test-worker") // Use explicit identifier for deterministic behavior
+        .env("HOME", temp_dir.path()) // ISOLATION: Prevent scanning real user directories
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("needle run command failed to execute");
+
+    // Capture stderr for analysis
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // The worker should fail (nonzero exit code)
+    assert!(
+        !output.status.success(),
+        "needle run should fail with nonexistent adapter, but it succeeded. \
+         stderr: {}",
+         stderr_output
+    );
+
+    // ASSERTION 1: Error message must contain the nonexistent adapter name
+    assert!(
+        stderr_output.contains(nonexistent_adapter),
+        "error message should mention the nonexistent adapter name '{}'. \
+         Got stderr:\n{}",
+        nonexistent_adapter,
+        stderr_output
+    );
+
+    // ASSERTION 2: Error message must indicate this is an adapter error
+    assert!(
+        stderr_output.contains("adapter") &&
+        (stderr_output.contains("not found") || stderr_output.contains("unknown") || stderr_output.contains("no such")),
+        "error message should indicate adapter not found. \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 3: Error message must include specific configuration directory paths
+    // The error should provide exact file paths where users should configure adapters
+    assert!(
+        stderr_output.contains("~/.needle/agents/") ||
+        stderr_output.contains(".needle/agents/") ||
+        stderr_output.contains("claude-config/agents/") ||
+        stderr_output.contains(".config/needle/adapters/"),
+        "error message should include specific configuration directory paths. \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 4: Error message must contain the adapter name in file path examples
+    // This ensures users see exactly where their adapter file should be located
+    assert!(
+        (stderr_output.contains(&format!("{nonexistent_adapter}.yaml")) ||
+         stderr_output.contains(&format!("{nonexistent_adapter}/config.json")) ||
+         stderr_output.contains(&format!("agents/{nonexistent_adapter}"))),
+        "error message should show the adapter name in file path examples. \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 5: Error message must include remediation language
+    // Phrases like "To fix this" indicate actionable guidance
+    assert!(
+        stderr_output.contains("To fix this") ||
+        stderr_output.contains("To resolve this") ||
+        stderr_output.contains("To correct this") ||
+        stderr_output.contains("fix this") ||
+        stderr_output.contains("resolve this"),
+        "error message should include remediation language (e.g., 'To fix this'). \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 6: Error message must include a "Common causes" or similar section
+    // This helps users diagnose why the error occurred
+    assert!(
+        stderr_output.contains("Common causes") ||
+        stderr_output.contains("common causes") ||
+        stderr_output.contains("Possible causes") ||
+        stderr_output.contains("possible causes") ||
+        stderr_output.contains("Reasons") ||
+        stderr_output.contains("reasons"),
+        "error message should include a 'Common causes' section to help diagnose the issue. \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 7: Error message must be structured with bullet points or numbered lists
+    // Multi-step guidance is easier to follow when formatted as a list
+    assert!(
+        stderr_output.contains("  -") ||  // Markdown-style bullets
+        stderr_output.contains("•") ||   // Unicode bullets
+        stderr_output.contains("*") ||   // Asterisk bullets
+        stderr_output.contains("1.") ||  // Numbered lists
+        stderr_output.contains("\n\n"),  // At minimum, multi-paragraph structure
+        "error message should be structured with bullets or multiple paragraphs for readability. \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 8: Error message must indicate the problem occurred at startup
+    // This prevents users from thinking it's a runtime issue
+    assert!(
+        stderr_output.contains("startup") ||
+        stderr_output.contains("Startup") ||
+        stderr_output.contains("boot") ||
+        stderr_output.contains("initialization") ||
+        stderr_output.contains("aborting"),
+        "error message should indicate the problem occurred at startup/boot time. \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 9: Error message must prevent bead claiming with invalid config
+    // This is critical - the error should explain WHY startup is aborting
+    assert!(
+        stderr_output.contains("claiming") ||
+        stderr_output.contains("prevent") ||
+        stderr_output.contains("invalid adapter") ||
+        stderr_output.contains("invalid configuration") ||
+        stderr_output.contains("aborting to prevent"),
+        "error message should explain why startup is aborting (to prevent claiming beads with bad config). \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 10: Verify the error message is substantial and multi-line
+    // A good error message should be detailed, not a single line
+    let line_count = stderr_output.lines().count();
+    assert!(
+        line_count >= 5,
+        "error message should be substantial (at least 5 lines), but got {} lines. \
+         Got stderr:\n{}",
+        line_count,
+        stderr_output
+    );
+
+    // ASSERTION 11: Verify the error message ends with a clear error statement
+    // The final line should summarize the problem
+    let final_line = stderr_output.lines().last().unwrap_or("");
+    assert!(
+        final_line.contains("Error:") ||
+        final_line.contains("error:") ||
+        final_line.contains("startup aborted") ||
+        final_line.contains("not found"),
+        "error message should end with a clear error summary. Final line: '{}'. \
+         Got stderr:\n{}",
+        final_line,
+        stderr_output
+    );
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Test 8: Full pipeline telemetry sequence
 // ═════════════════════════════════════════════════════════════════════════════
@@ -3539,6 +3745,106 @@ worker:
     println!("  Expanded path: {}", custom_binary.display());
 }
 
+/// Test tilde expansion with trailing slash edge cases.
+///
+/// This test validates that tilde expansion correctly handles paths with trailing
+/// slashes, including bare tilde with slash, paths with trailing slashes, and
+/// multiple trailing slashes.
+#[tokio::test]
+async fn worker_binary_path_tilde_expansion_trailing_slashes() {
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create test directories in the isolated home
+    let bin_dir = isolated_home.join("bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
+
+    let nested_dir = isolated_home.join("some").join("nested").join("path");
+    fs::create_dir_all(&nested_dir).expect("failed to create nested dirs");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Bare tilde with trailing slash (~/)
+    // Current behavior: ~/ expands to HOME/ (trailing slash preserved)
+    let tilde_with_slash = "~/";
+    let expanded = expand_tilde(tilde_with_slash);
+    let expected_home_with_slash = format!("{}/", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_home_with_slash,
+        "~/ should expand to home directory with trailing slash preserved"
+    );
+
+    // Test 2: Tilde with path and trailing slash (~/bin/)
+    // Current behavior: ~/bin/ expands to HOME/bin/ (trailing slash preserved)
+    let tilde_path_with_slash = "~/bin/";
+    let expanded = expand_tilde(tilde_path_with_slash);
+    let expected_bin_with_slash = format!("{}/", bin_dir.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_bin_with_slash,
+        "~/bin/ should expand to home/bin with trailing slash preserved"
+    );
+
+    // Test 3: Tilde with nested path and trailing slash
+    // Current behavior: trailing slash is preserved
+    let tilde_nested_with_slash = "~/some/nested/path/";
+    let expanded = expand_tilde(tilde_nested_with_slash);
+    let expected_nested_with_slash = format!("{}/", nested_dir.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_nested_with_slash,
+        "~/some/nested/path/ should expand with trailing slash preserved"
+    );
+
+    // Test 4: Multiple trailing slashes are preserved as-is
+    // Current behavior: ~/bin/// expands to HOME/bin///
+    let tilde_multiple_slashes = "~/bin///";
+    let expanded = expand_tilde(tilde_multiple_slashes);
+    let expected = format!("{}/bin///", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected,
+        "~/bin/// should preserve all trailing slashes"
+    );
+
+    // Test 5: Bare tilde (no slash) should work correctly
+    let bare_tilde = "~";
+    let expanded = expand_tilde(bare_tilde);
+    assert_eq!(
+        expanded,
+        isolated_home.to_str().unwrap(),
+        "~ should expand to home directory"
+    );
+
+    // Test 6: Path without trailing slash (baseline comparison)
+    let tilde_path_no_slash = "~/bin";
+    let expanded = expand_tilde(tilde_path_no_slash);
+    assert_eq!(
+        expanded,
+        bin_dir.to_str().unwrap(),
+        "~/bin should expand same as ~/bin/"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Tilde expansion trailing slash edge cases test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Bare tilde ~ -> {}", isolated_home.display());
+    println!("  ~/ -> {}", isolated_home.display());
+    println!("  ~/bin/ -> {}", bin_dir.display());
+    println!("  ~/bin/// -> {}", bin_dir.display());
+}
+
 /// Test absolute and relative paths in worker_binary_path configuration.
 ///
 /// This test validates that absolute paths are preserved and relative paths
@@ -4218,4 +4524,183 @@ async fn init_tracing_subscriber_with_otlp_enabled_does_not_panic() {
     let _ = needle::cli::init_tracing_subscriber("test-worker".to_string(), session_id, &config);
 
     // Test passes if we get here without panicking - no explicit assert needed
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 14: Subprocess adapter validation failure
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Test that needle binary exits with nonzero code when configured with a nonexistent adapter.
+///
+/// This is a subprocess test (as opposed to the in-process adapter validation tests above)
+/// that verifies the actual needle binary fails at boot when given a config with a nonexistent
+/// adapter. This catches issues in the CLI layer that in-process Worker construction tests miss.
+///
+/// Test requirements:
+/// - Uses isolated HOME environment (temporary directory)
+/// - Uses isolated scan/workspace root
+/// - Configures worker with a known nonexistent adapter name
+/// - Asserts worker exits with nonzero exit code
+/// - Uses Command::new(CARGO_BIN_EXE_needle) pattern
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+#[tokio::test]
+async fn subprocess_adapter_failure_exits_nonzero() {
+    use std::io::Write;
+
+    // Create isolated temp directory for HOME and workspace
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let workspace = temp_dir.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("failed to create workspace");
+
+    let config_dir = temp_dir.path().join(".needle");
+    std::fs::create_dir_all(&config_dir).expect("failed to create config dir");
+
+    // Create a minimal config with a nonexistent adapter
+    let config_path = config_dir.join("config.toml");
+    let config_content = format!(
+        r#"[worker]
+idle_action = "exit"
+idle_timeout = 10
+
+[agent]
+default = "nonexistent-test-adapter-xyz-999"
+timeout = 10
+
+[workspace]
+default = "{}"
+home = "{}"
+
+[strands.explore]
+enabled = true
+workspaces = []
+workspace_root = "{}"
+"#,
+        workspace.display(),
+        temp_dir.path().display(),
+        temp_dir.path().display()  // Isolate Explore scan root to test tempdir
+    );
+
+    let mut config_file = std::fs::File::create(&config_path)
+        .expect("failed to create config file");
+    config_file
+        .write_all(config_content.as_bytes())
+        .expect("failed to write config");
+
+    // Spawn the needle binary with our test config
+    let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
+    let mut cmd = Command::new(&bin_path);
+    cmd.arg("worker")
+        .arg("--once")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--workspace")
+        .arg(&workspace)
+        .env("HOME", temp_dir.path()) // Isolate HOME to prevent Explore strand from scanning real user workspace
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // ProcessGuard ensures cleanup if test panics
+    struct ProcessGuard(Option<std::process::Child>);
+
+    impl ProcessGuard {
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            if let Some(ref mut child) = self.0 {
+                child.try_wait()
+            } else {
+                Ok(None)
+            }
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            if let Some(ref mut child) = self.0 {
+                child.kill()
+            } else {
+                Ok(())
+            }
+        }
+
+        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+            if let Some(ref mut child) = self.0 {
+                child.wait()
+            } else {
+                Err(std::io::Error::other("No child process to wait for"))
+            }
+        }
+    }
+
+    impl Drop for ProcessGuard {
+        fn drop(&mut self) {
+            let _ = self.kill();
+            let _ = self.wait();
+            let _ = self.0.take();
+        }
+    }
+
+    let mut guard = ProcessGuard(Some(cmd.spawn().expect("Failed to spawn needle process")));
+
+    // Wait with timeout - should fail quickly, not hang
+    let timeout_duration = Duration::from_secs(10);
+    let start_time = Instant::now();
+
+    let exit_status = loop {
+        if start_time.elapsed() > timeout_duration {
+            panic!(
+                "needle process did not complete within {:?} - possible hang",
+                timeout_duration
+            );
+        }
+
+        match guard.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => panic!("Failed to wait for needle process: {}", e),
+        }
+    };
+
+    // Capture stdout and stderr from the completed process
+    let child = guard.0.take().expect("child process should exist");
+    let output = child.wait_with_output().expect("failed to capture process output");
+
+    // Store captured stderr for later assertion
+    let stderr_output = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout_output = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Verify the process exited with nonzero code
+    assert!(
+        !output.status.success(),
+        "needle process should fail with nonzero exit code when adapter does not exist, \
+         but it succeeded with status: {:?}",
+        output.status
+    );
+
+    // Verify exit code is specifically nonzero (not just !success())
+    let exit_code = output.status.code().unwrap_or(1);
+    assert_ne!(
+        exit_code, 0,
+        "exit code should be nonzero, got: {}",
+        exit_code
+    );
+
+    // The failure should be fast (< 5 seconds), not delayed by idle timeouts
+    assert!(
+        start_time.elapsed() < Duration::from_secs(5),
+        "adapter validation should fail immediately, not after idle timeout; took {:?}",
+        start_time.elapsed()
+    );
+
+    // Verify stderr contains error information about the nonexistent adapter
+    assert!(
+        !stderr_output.is_empty(),
+        "stderr should not be empty when adapter does not exist"
+    );
+
+    // Verify stderr mentions the adapter name or "adapter" generally
+    assert!(
+        stderr_output.contains("nonexistent-test-adapter-xyz-999") ||
+        stderr_output.contains("adapter") ||
+        stderr_output.contains("not found"),
+        "stderr should mention the nonexistent adapter; got: {}",
+        stderr_output
+    );
 }
