@@ -10,7 +10,7 @@ agent:
     default_adapter: claude-code-glm-4.7
     strict: false
 bead_cli:
-  backend: bead-forge
+  backend: bead-rs
 worker:
   max_workers: 10
   launch_stagger_seconds: 2
