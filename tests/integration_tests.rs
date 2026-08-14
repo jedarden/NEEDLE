@@ -4659,7 +4659,8 @@ workspace_root = "{}"
     let timeout_duration = Duration::from_secs(10);
     let start_time = Instant::now();
 
-    let exit_status = loop {
+    // Hang guard only; the authoritative status comes from `wait_with_output()`.
+    let _exit_status = loop {
         if start_time.elapsed() > timeout_duration {
             panic!(
                 "needle process did not complete within {:?} - possible hang",
@@ -4682,7 +4683,7 @@ workspace_root = "{}"
 
     // Store captured stderr for later assertion
     let stderr_output = String::from_utf8_lossy(&output.stderr).to_string();
-    let stdout_output = String::from_utf8_lossy(&output.stdout).to_string();
+    let _stdout_output = String::from_utf8_lossy(&output.stdout).to_string();
 
     // Verify the process exited with nonzero code
     assert!(
