@@ -4,6 +4,39 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.20] - 2026-08-13
+
+Pluggable bead-backend release. NEEDLE can operate bead-rs and bead-forge
+workspaces concurrently while preserving repository-local ownership.
+
+### Added
+
+- Descriptor-driven bead CLI backends for bead-rs v0.1.3 and bead-forge
+  v0.4.1, including backend-specific claim, lifecycle, dependency, checkpoint,
+  and split strategies.
+- Explicit per-workspace `bead_cli.backend` binding with executable identity
+  verification. Missing, unknown, and mismatched bindings fail before store
+  access.
+- Mixed-backend isolation, real bead-rs lifecycle, and bead-forge-to-bead-rs
+  rehydration gates.
+- `needle bead-backend`, backend audit/bind commands, and backend reporting in
+  doctor/config output.
+
+### Changed
+
+- Explore and other cross-workspace paths resolve each target repository's
+  backend independently; installing another bead CLI cannot switch ownership.
+- Agent prompts and validation paths use the resolved backend dialect instead
+  of hard-coded bead-forge commands.
+
+### Fixed
+
+- Startup validates the selected agent adapter before claiming work.
+- Claim-history circuit breaking quarantines runaway work before event records
+  grow without bound.
+- Environment-sensitive unit tests now isolate process-global HOME/PATH state
+  and worker registry paths, restoring deterministic release verification.
+
 ## [0.2.19] - 2026-08-07
 
 Canary release. `needle upgrade` was simultaneously unsafe and unusable: it
