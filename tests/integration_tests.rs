@@ -1668,6 +1668,20 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
         final_line,
         stderr_output
     );
+
+    // ASSERTION 12: Error message must include actionable configuration directory guidance
+    // This is distinct from path checking - it validates the presence of remediation language
+    // that explicitly directs users to check their configuration directory
+    assert!(
+        stderr_output.contains("check your configuration directory") ||
+        stderr_output.contains("check your config") ||
+        stderr_output.contains("check the config") ||
+        stderr_output.contains("configuration directory") ||
+        (stderr_output.contains("check") && stderr_output.contains("config")),
+        "error message should include actionable guidance about checking the configuration directory. \
+         Got stderr:\n{}",
+        stderr_output
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
