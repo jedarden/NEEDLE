@@ -4,6 +4,41 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-14
+
+Version-correction release. No new functionality relative to 0.2.20; this
+exists because 0.2.20 shipped a **breaking change under a patch version**.
+
+### Changed
+
+- **BREAKING (originally shipped in 0.2.20):** every bead workspace must now
+  carry an explicit `bead_cli.backend` binding in `.needle.yaml`. Workspaces
+  without one previously worked by auto-detection and now fail closed before
+  store access:
+
+  ```
+  0.2.19:  [PASS]  Bead store   ok
+  0.2.20:  [FAIL]  Bead store   no authoritative bead backend binding;
+                                set bead_cli.backend in .../.needle.yaml
+  ```
+
+  Failing closed is deliberate — it prevents a worker from guessing a backend
+  and opening another implementation's store. But it breaks existing configs,
+  so it warranted a minor bump under the 0.x rule ("anything MAY change", with
+  breaking changes signalled by the minor), not a patch. Audit a fleet with
+  `needle bead-backend-audit <root>` and bind anything reported unbound before
+  upgrading.
+
+### Notes
+
+- This release does not claim a stable public API. 1.0.0 is deliberately
+  deferred: the bead-rs backend is pinned to a pre-1.0 dependency (bead 0.1.3)
+  whose CLI contract is still moving, Phase 16 remains open, and worker
+  hot-reload is currently inert (`check_hot_reload` is never called).
+- 0.2.19 does **not** fail closed against a bead-rs workspace: it reports the
+  config valid and opens the bead-rs SQLite database before `bf` fails. Hosts
+  sharing repositories with a migrated workspace should be upgraded together.
+
 ## [0.2.20] - 2026-08-13
 
 Pluggable bead-backend release. NEEDLE can operate bead-rs and bead-forge
