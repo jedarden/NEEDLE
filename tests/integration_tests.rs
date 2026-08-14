@@ -1534,7 +1534,7 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
         !output.status.success(),
         "needle run should fail with nonexistent adapter, but it succeeded. \
          stderr: {}",
-         stderr_output
+        stderr_output
     );
 
     // ASSERTION 1: Error message must contain the nonexistent adapter name
@@ -1548,8 +1548,10 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
 
     // ASSERTION 2: Error message must indicate this is an adapter error
     assert!(
-        stderr_output.contains("adapter") &&
-        (stderr_output.contains("not found") || stderr_output.contains("unknown") || stderr_output.contains("no such")),
+        stderr_output.contains("adapter")
+            && (stderr_output.contains("not found")
+                || stderr_output.contains("unknown")
+                || stderr_output.contains("no such")),
         "error message should indicate adapter not found. \
          Got stderr:\n{}",
         stderr_output
@@ -1558,10 +1560,10 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
     // ASSERTION 3: Error message must include specific configuration directory paths
     // The error should provide exact file paths where users should configure adapters
     assert!(
-        stderr_output.contains("~/.needle/agents/") ||
-        stderr_output.contains(".needle/agents/") ||
-        stderr_output.contains("claude-config/agents/") ||
-        stderr_output.contains(".config/needle/adapters/"),
+        stderr_output.contains("~/.needle/agents/")
+            || stderr_output.contains(".needle/agents/")
+            || stderr_output.contains("claude-config/agents/")
+            || stderr_output.contains(".config/needle/adapters/"),
         "error message should include specific configuration directory paths. \
          Got stderr:\n{}",
         stderr_output
@@ -1570,9 +1572,9 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
     // ASSERTION 4: Error message must contain the adapter name in file path examples
     // This ensures users see exactly where their adapter file should be located
     assert!(
-        (stderr_output.contains(&format!("{nonexistent_adapter}.yaml")) ||
-         stderr_output.contains(&format!("{nonexistent_adapter}/config.json")) ||
-         stderr_output.contains(&format!("agents/{nonexistent_adapter}"))),
+        (stderr_output.contains(&format!("{nonexistent_adapter}.yaml"))
+            || stderr_output.contains(&format!("{nonexistent_adapter}/config.json"))
+            || stderr_output.contains(&format!("agents/{nonexistent_adapter}"))),
         "error message should show the adapter name in file path examples. \
          Got stderr:\n{}",
         stderr_output
@@ -1581,11 +1583,11 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
     // ASSERTION 5: Error message must include remediation language
     // Phrases like "To fix this" indicate actionable guidance
     assert!(
-        stderr_output.contains("To fix this") ||
-        stderr_output.contains("To resolve this") ||
-        stderr_output.contains("To correct this") ||
-        stderr_output.contains("fix this") ||
-        stderr_output.contains("resolve this"),
+        stderr_output.contains("To fix this")
+            || stderr_output.contains("To resolve this")
+            || stderr_output.contains("To correct this")
+            || stderr_output.contains("fix this")
+            || stderr_output.contains("resolve this"),
         "error message should include remediation language (e.g., 'To fix this'). \
          Got stderr:\n{}",
         stderr_output
@@ -1594,12 +1596,12 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
     // ASSERTION 6: Error message must include a "Common causes" or similar section
     // This helps users diagnose why the error occurred
     assert!(
-        stderr_output.contains("Common causes") ||
-        stderr_output.contains("common causes") ||
-        stderr_output.contains("Possible causes") ||
-        stderr_output.contains("possible causes") ||
-        stderr_output.contains("Reasons") ||
-        stderr_output.contains("reasons"),
+        stderr_output.contains("Common causes")
+            || stderr_output.contains("common causes")
+            || stderr_output.contains("Possible causes")
+            || stderr_output.contains("possible causes")
+            || stderr_output.contains("Reasons")
+            || stderr_output.contains("reasons"),
         "error message should include a 'Common causes' section to help diagnose the issue. \
          Got stderr:\n{}",
         stderr_output
@@ -1612,7 +1614,7 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
         stderr_output.contains("•") ||   // Unicode bullets
         stderr_output.contains("*") ||   // Asterisk bullets
         stderr_output.contains("1.") ||  // Numbered lists
-        stderr_output.contains("\n\n"),  // At minimum, multi-paragraph structure
+        stderr_output.contains("\n\n"), // At minimum, multi-paragraph structure
         "error message should be structured with bullets or multiple paragraphs for readability. \
          Got stderr:\n{}",
         stderr_output
@@ -1621,11 +1623,11 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
     // ASSERTION 8: Error message must indicate the problem occurred at startup
     // This prevents users from thinking it's a runtime issue
     assert!(
-        stderr_output.contains("startup") ||
-        stderr_output.contains("Startup") ||
-        stderr_output.contains("boot") ||
-        stderr_output.contains("initialization") ||
-        stderr_output.contains("aborting"),
+        stderr_output.contains("startup")
+            || stderr_output.contains("Startup")
+            || stderr_output.contains("boot")
+            || stderr_output.contains("initialization")
+            || stderr_output.contains("aborting"),
         "error message should indicate the problem occurred at startup/boot time. \
          Got stderr:\n{}",
         stderr_output
@@ -1659,10 +1661,10 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
     // The final line should summarize the problem
     let final_line = stderr_output.lines().last().unwrap_or("");
     assert!(
-        final_line.contains("Error:") ||
-        final_line.contains("error:") ||
-        final_line.contains("startup aborted") ||
-        final_line.contains("not found"),
+        final_line.contains("Error:")
+            || final_line.contains("error:")
+            || final_line.contains("startup aborted")
+            || final_line.contains("not found"),
         "error message should end with a clear error summary. Final line: '{}'. \
          Got stderr:\n{}",
         final_line,
@@ -4592,11 +4594,11 @@ workspace_root = "{}"
 "#,
         workspace.display(),
         temp_dir.path().display(),
-        temp_dir.path().display()  // Isolate Explore scan root to test tempdir
+        temp_dir.path().display() // Isolate Explore scan root to test tempdir
     );
 
-    let mut config_file = std::fs::File::create(&config_path)
-        .expect("failed to create config file");
+    let mut config_file =
+        std::fs::File::create(&config_path).expect("failed to create config file");
     config_file
         .write_all(config_content.as_bytes())
         .expect("failed to write config");
@@ -4674,7 +4676,9 @@ workspace_root = "{}"
 
     // Capture stdout and stderr from the completed process
     let child = guard.0.take().expect("child process should exist");
-    let output = child.wait_with_output().expect("failed to capture process output");
+    let output = child
+        .wait_with_output()
+        .expect("failed to capture process output");
 
     // Store captured stderr for later assertion
     let stderr_output = String::from_utf8_lossy(&output.stderr).to_string();
@@ -4711,9 +4715,9 @@ workspace_root = "{}"
 
     // Verify stderr mentions the adapter name or "adapter" generally
     assert!(
-        stderr_output.contains("nonexistent-test-adapter-xyz-999") ||
-        stderr_output.contains("adapter") ||
-        stderr_output.contains("not found"),
+        stderr_output.contains("nonexistent-test-adapter-xyz-999")
+            || stderr_output.contains("adapter")
+            || stderr_output.contains("not found"),
         "stderr should mention the nonexistent adapter; got: {}",
         stderr_output
     );
