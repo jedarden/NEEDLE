@@ -91,7 +91,13 @@ pub enum CliCommand {
 
     /// Stop running worker(s).
     Stop {
-        /// Stop all needle workers.
+        /// Kill the tmux session of every registered worker.
+        ///
+        /// This does NOT reliably terminate the worker supervisors: a
+        /// `needle run` process whose session is killed is commonly reparented
+        /// to init and keeps running, and may ignore SIGINT. After this
+        /// command, verify with `pgrep -af needle-stable run` and signal any
+        /// survivors directly. See `needle cleanup` for session hygiene.
         #[arg(long)]
         all: bool,
 
@@ -347,7 +353,10 @@ pub enum CliCommand {
 
     /// Run the fleet supervisor daemon (auto-scale workers based on queue depth).
     Supervise {
-        /// Workspace to monitor (defaults to config workspace).
+        /// Workspace to monitor exclusively. The supervisor spawns workers
+        /// only for this workspace's ready queue; it does not auto-discover
+        /// or scale workers for other workspaces. Defaults to the global
+        /// config workspace if not specified.
         #[arg(short = 'w', long)]
         workspace: Option<PathBuf>,
     },
@@ -3435,7 +3444,10 @@ fn doctor_check_checkpoint(
     beads_dir: &Path,
     bead_cli: &crate::config::BeadCliConfig,
 ) -> CheckResult {
-    if matches!(bead_cli.backend, crate::config::BeadBackend::Bead | crate::config::BeadBackend::Br) {
+    if matches!(
+        bead_cli.backend,
+        crate::config::BeadBackend::Bead | crate::config::BeadBackend::Br
+    ) {
         let pointer = beads_dir.join("checkpoint/current.json");
         if !pointer.exists() {
             return CheckResult::fail("Checkpoint", "checkpoint/current.json not found");
