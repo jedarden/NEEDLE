@@ -8,13 +8,16 @@ examples or planning documents.
 ## Project Overview
 
 NEEDLE (Navigates Every Enqueued Deliverable, Logs Effort) is a Rust worker
-binary. It selects and claims work from a bead-forge store, dispatches a coding
-agent, records telemetry, and routes every outcome through an explicit state
-machine.
+binary. It selects and claims work through the repository's configured bead
+backend, dispatches a coding agent, records telemetry, and routes every outcome
+through an explicit state machine.
 
-The canonical bead CLI is `bf` (bead-forge). `br` is a deprecated compatibility
-shim on some hosts. Do not add new source, prompts, scripts, tests, or
-documentation that invoke `br`.
+The primary backend is bead-rs (`bead`); bead-forge (`bf`) remains supported
+for explicitly bound legacy workspaces. Check `.needle.yaml` and the `.beads/`
+layout before running either CLI. Do not infer the backend from which binaries
+happen to be installed, and never use one backend's repair or import command on
+the other backend's database. `br` is retired and must not be introduced in
+source, prompts, scripts, tests, or documentation.
 
 ## Working Safely
 
@@ -28,9 +31,10 @@ documentation that invoke `br`.
   actual failure mode, which happens at the bead level: the same bead getting
   claimed and worked twice (confirmed 2026-08-09, commitgraph `cg-l0v0kc` —
   two byte-identical commits at the same second from two concurrent workers).
-  `bf claim` is atomic, so avoid this by decomposing and dependency-ordering
-  beads so the same unit of work is never independently claimable twice — see
-  the target repo's own `AGENTS.md` for repo-specific guidance.
+  The supported backends provide atomic claim operations, so avoid this by
+  decomposing and dependency-ordering beads so the same unit of work is never
+  independently claimable twice — see the target repo's own `AGENTS.md` for
+  repo-specific guidance.
 - Do not use destructive Git operations (`reset --hard`, forced checkout,
   forced push) to resolve unrelated changes.
 - Forgejo (`git.ardenone.com`) is the authoritative remote. GitHub is a mirror.
@@ -106,32 +110,30 @@ test worker at `/home/coding` or another directory containing real projects.
 Each bead supplies its own deliverables and acceptance criteria. Complete and
 verify the requested repository work before closing it.
 
-Use:
+This repository is bead-rs-backed. Use:
 
 ```bash
-bf close BEAD_ID --reason "Summary of what was done"
+bead close BEAD_ID --reason "Summary of what was done"
 ```
 
 The close flag is `--reason`, not `--body`. When no code change is appropriate,
-record the reason with `bf update --notes` or a bead comment rather than
-creating an empty commit.
+record the reason with a bead comment or another supported public `bead`
+operation rather than creating an empty commit.
 
-SQLite (`.beads/beads.db`) is the live store. `issues.jsonl` is a checkpoint
-written by `bf sync --flush-only`; mutations do not necessarily flush it
-automatically.
+SQLite (`.beads/beads.db`) is the live store. `.beads/checkpoint/` is the
+git-tracked durable checkpoint, and mutations do not flush it implicitly.
 
-Before repairing a healthy-enough store, protect live database state first:
+Flush explicitly before committing bead state:
 
 ```bash
-bf sync --flush-only
-sqlite3 .beads/beads.db "PRAGMA integrity_check;"
-bf doctor --repair
+bead sync flush-only
 ```
 
-Only run the repair step when diagnostics show it is needed. If the database is
-already corrupt and a flush may poison the checkpoint, inspect checkpoint
-freshness and recovery options before acting. Never delete or rebuild a bead
-database without explicitly accounting for unflushed work.
+`bead doctor` is read-only by default. If a database is missing, wrong-schema,
+or corrupt, confirm the backend first and restore an empty native store from
+the committed forensic checkpoint with the documented `bead init` plus `bead
+sync import-only --restore-into-empty` procedure. Never delete or rebuild a
+bead database without explicitly accounting for unflushed work.
 
 ## Commits
 
