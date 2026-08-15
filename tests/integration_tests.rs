@@ -157,6 +157,86 @@ fn configured_forge_store(workspace: PathBuf) -> needle::bead_store::CliBeadStor
         .expect("configured bead-forge test store")
 }
 
+/// ProcessGuard ensures proper cleanup of child processes in tests.
+///
+/// This struct wraps a child process and guarantees cleanup via Drop:
+/// - Kills the process on drop (if still running)
+/// - Reaps the process to prevent zombies
+///
+/// Usage:
+/// ```rust
+/// let child = Command::new("...").spawn().unwrap();
+/// let pid = child.id();
+/// let guard = ProcessGuard::new(child, Some(pid));
+/// // Use guard.try_wait(), guard.kill(), guard.wait()
+/// // Cleanup happens automatically when guard is dropped
+/// ```
+struct ProcessGuard {
+    inner: Option<std::process::Child>,
+    pid: Option<u32>,
+}
+
+impl ProcessGuard {
+    /// Create a new ProcessGuard from a spawned child process.
+    ///
+    /// # Arguments
+    /// * `child` - The spawned child process
+    /// * `pid` - Optional PID for logging/debugging (can be obtained via `child.id()`)
+    fn new(child: std::process::Child, pid: Option<u32>) -> Self {
+        Self {
+            inner: Some(child),
+            pid,
+        }
+    }
+
+    /// Try to wait for the process to exit without blocking.
+    ///
+    /// Returns `Ok(Some(status))` if the process has exited,
+    /// `Ok(None)` if the process is still running,
+    /// or `Err` if an error occurs.
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        if let Some(ref mut child) = self.inner {
+            child.try_wait()
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get the PID of the child process, if available.
+    fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    /// Send a kill signal to the child process.
+    fn kill(&mut self) -> std::io::Result<()> {
+        if let Some(ref mut child) = self.inner {
+            child.kill()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Wait for the child process to exit (blocking).
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        if let Some(ref mut child) = self.inner {
+            child.wait()
+        } else {
+            Err(std::io::Error::other("No child process to wait for"))
+        }
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.inner.take() {
+            // Kill the process (safe even if already exited)
+            let _ = child.kill();
+            // Reap the process to prevent zombies
+            let _ = child.wait();
+        }
+    }
+}
+
 /// Mock BeadStore that tracks all operations and returns configurable beads.
 ///
 /// Key behaviors:
@@ -2821,48 +2901,11 @@ async fn dead_worker_cleanup_integration() {
         .stderr(Stdio::piped());
 
     // Spawn the process and wait with timeout to prevent hangs
-    #[allow(unused_mut)]
     let mut child = cmd.spawn().expect("Failed to spawn worker");
+    let pid = child.id();
 
     // ProcessGuard ensures cleanup if test panics
-    struct ProcessGuard(Option<std::process::Child>);
-
-    impl ProcessGuard {
-        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-            if let Some(ref mut child) = self.0 {
-                child.try_wait()
-            } else {
-                Ok(None)
-            }
-        }
-
-        fn kill(&mut self) -> std::io::Result<()> {
-            if let Some(ref mut child) = self.0 {
-                child.kill()
-            } else {
-                Ok(())
-            }
-        }
-
-        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-            if let Some(ref mut child) = self.0 {
-                child.wait()
-            } else {
-                Err(std::io::Error::other("No child process to wait for"))
-            }
-        }
-    }
-
-    impl Drop for ProcessGuard {
-        fn drop(&mut self) {
-            let _ = self.kill();
-            let _ = self.wait();
-            // Prevent double-wait by consuming the child after our methods handle it
-            let _ = self.0.take();
-        }
-    }
-
-    let mut guard = ProcessGuard(Some(child));
+    let mut guard = ProcessGuard::new(child, Some(pid));
 
     // Wait with timeout
     let timeout_duration = Duration::from_secs(60);
@@ -3267,56 +3310,7 @@ fn heartbeat_cleanup_on_signal_integration() {
 
     // Register cleanup handler IMMEDIATELY after spawning to ensure cleanup
     // even if early operations fail. This prevents zombie processes.
-    #[allow(dead_code)]
-    struct ProcessGuard {
-        inner: Option<std::process::Child>,
-        pid: u32,
-    }
-
-    #[allow(dead_code)]
-    impl ProcessGuard {
-        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-            if let Some(ref mut child) = self.inner {
-                child.try_wait()
-            } else {
-                Ok(None)
-            }
-        }
-
-        fn pid(&self) -> u32 {
-            self.pid
-        }
-
-        fn kill(&mut self) -> std::io::Result<()> {
-            if let Some(ref mut child) = self.inner {
-                child.kill()
-            } else {
-                Ok(())
-            }
-        }
-
-        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-            if let Some(ref mut child) = self.inner {
-                child.wait()
-            } else {
-                Err(std::io::Error::other("No child process to wait for"))
-            }
-        }
-    }
-
-    impl Drop for ProcessGuard {
-        fn drop(&mut self) {
-            if let Some(mut child) = self.inner.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
-
-    let mut child_guard = ProcessGuard {
-        inner: Some(child),
-        pid: worker_pid,
-    };
+    let mut child_guard = ProcessGuard::new(child, Some(worker_pid));
 
     // Give the worker time to start up and create its heartbeat file
     let heartbeat_dir = workspace.join("state").join("heartbeats");
@@ -3861,6 +3855,121 @@ async fn worker_binary_path_tilde_expansion_trailing_slashes() {
     println!("  ~/bin/// -> {}", bin_dir.display());
 }
 
+/// Test tilde expansion with parent directory edge cases.
+///
+/// This test validates that tilde expansion correctly handles paths that reference
+/// parent directories, including ~/.., ~/../, ~/path/.., and combinations with
+/// trailing slashes.
+#[tokio::test]
+async fn worker_binary_path_tilde_expansion_parent_directories() {
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create test directories in the isolated home
+    let bin_dir = isolated_home.join("bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create bin dir");
+
+    let nested_dir = isolated_home.join("some").join("nested").join("path");
+    fs::create_dir_all(&nested_dir).expect("failed to create nested dirs");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Direct parent directory reference (~/..)
+    // Current behavior: ~/.. expands to HOME/.. (parent of home directory)
+    let tilde_parent = "~/..";
+    let expanded = expand_tilde(tilde_parent);
+    let expected_parent = format!("{}/..", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_parent,
+        "~/.. should expand to home directory followed by parent reference"
+    );
+
+    // Test 2: Parent directory with trailing slash (~/../)
+    let tilde_parent_slash = "~/../";
+    let expanded = expand_tilde(tilde_parent_slash);
+    let expected_parent_slash = format!("{}/../", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_parent_slash,
+        "~/../ should expand to home directory with parent reference and trailing slash"
+    );
+
+    // Test 3: Path with parent directory at the end (~/bin/..)
+    let tilde_bin_parent = "~/bin/..";
+    let expanded = expand_tilde(tilde_bin_parent);
+    let expected_bin_parent = format!("{}/bin/..", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_bin_parent,
+        "~/bin/.. should expand to home/bin followed by parent reference"
+    );
+
+    // Test 4: Path with parent directory at the end and trailing slash (~/bin/../)
+    let tilde_bin_parent_slash = "~/bin/../";
+    let expanded = expand_tilde(tilde_bin_parent_slash);
+    let expected_bin_parent_slash = format!("{}/bin/../", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_bin_parent_slash,
+        "~/bin/../ should expand with trailing slash preserved"
+    );
+
+    // Test 5: Multiple parent directory references (~/../..)
+    let tilde_multi_parent = "~/../..";
+    let expanded = expand_tilde(tilde_multi_parent);
+    let expected_multi_parent = format!("{}/../..", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_multi_parent,
+        "~/../.. should expand to home followed by two parent references"
+    );
+
+    // Test 6: Nested path with parent directory reference (~/some/nested/path/..)
+    let tilde_nested_parent = "~/some/nested/path/..";
+    let expanded = expand_tilde(tilde_nested_parent);
+    let expected_nested_parent = format!("{}/some/nested/path/..", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_nested_parent,
+        "~/some/nested/path/.. should expand to nested path followed by parent reference"
+    );
+
+    // Test 7: Parent directory in middle of path (~/../bin)
+    let tilde_parent_then_path = "~/../bin";
+    let expanded = expand_tilde(tilde_parent_then_path);
+    let expected_parent_then_path = format!("{}/../bin", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_parent_then_path,
+        "~/../bin should expand to home parent followed by bin"
+    );
+
+    // Test 8: Parent directory in middle of path with trailing slash (~/../bin/)
+    let tilde_parent_then_path_slash = "~/../bin/";
+    let expanded = expand_tilde(tilde_parent_then_path_slash);
+    let expected_parent_then_path_slash = format!("{}/../bin/", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_parent_then_path_slash,
+        "~/../bin/ should expand with trailing slash preserved"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Tilde expansion parent directory edge cases test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  ~/.. -> {}", isolated_home.join("..").display());
+    println!("  ~/../ -> {}", isolated_home.join("..").join("").display());
+    println!("  ~/bin/.. -> {}", isolated_home.join("bin").join("..").display());
+    println!("  ~/../.. -> {}", isolated_home.join("..").join("..").display());
+}
+
 /// Test absolute and relative paths in worker_binary_path configuration.
 ///
 /// This test validates that absolute paths are preserved and relative paths
@@ -4060,56 +4169,7 @@ fn heartbeat_cleanup_on_normal_exit_integration() {
     println!("Worker PID: {}", worker_pid);
 
     // ProcessGuard ensures cleanup if test panics
-    #[allow(dead_code)]
-    struct ProcessGuard {
-        inner: Option<std::process::Child>,
-        pid: u32,
-    }
-
-    #[allow(dead_code)]
-    impl ProcessGuard {
-        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-            if let Some(ref mut child) = self.inner {
-                child.try_wait()
-            } else {
-                Ok(None)
-            }
-        }
-
-        fn pid(&self) -> u32 {
-            self.pid
-        }
-
-        fn kill(&mut self) -> std::io::Result<()> {
-            if let Some(ref mut child) = self.inner {
-                child.kill()
-            } else {
-                Ok(())
-            }
-        }
-
-        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-            if let Some(ref mut child) = self.inner {
-                child.wait()
-            } else {
-                Err(std::io::Error::other("No child process to wait for"))
-            }
-        }
-    }
-
-    impl Drop for ProcessGuard {
-        fn drop(&mut self) {
-            if let Some(mut child) = self.inner.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
-
-    let mut child_guard = ProcessGuard {
-        inner: Some(child),
-        pid: worker_pid,
-    };
+    let mut child_guard = ProcessGuard::new(child, Some(worker_pid));
 
     // Give the worker time to start up and create its heartbeat file
     let heartbeat_dir = workspace.join("state").join("heartbeats");
@@ -4251,46 +4311,6 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    // ProcessGuard ensures cleanup if test panics
-    struct ProcessGuard {
-        inner: Option<std::process::Child>,
-    }
-
-    impl ProcessGuard {
-        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-            if let Some(ref mut child) = self.inner {
-                child.try_wait()
-            } else {
-                Ok(None)
-            }
-        }
-
-        fn kill(&mut self) -> std::io::Result<()> {
-            if let Some(ref mut child) = self.inner {
-                child.kill()
-            } else {
-                Ok(())
-            }
-        }
-
-        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-            if let Some(ref mut child) = self.inner {
-                child.wait()
-            } else {
-                Err(std::io::Error::other("No child process to wait for"))
-            }
-        }
-    }
-
-    impl Drop for ProcessGuard {
-        fn drop(&mut self) {
-            if let Some(mut child) = self.inner.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
-
     let needle_binary = std::env::current_exe()
         .ok()
         .and_then(|p| {
@@ -4370,9 +4390,7 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
         }
     };
 
-    let mut child1_guard = ProcessGuard {
-        inner: Some(child1),
-    };
+    let mut child1_guard = ProcessGuard::new(child1, None);
 
     // Wait for heartbeat creation
     let heartbeat_dir1 = workspace1.join("state").join("heartbeats");
@@ -4449,9 +4467,7 @@ fn heartbeat_cleanup_multiple_scenarios_integration() {
         }
     };
 
-    let mut child2_guard = ProcessGuard {
-        inner: Some(child2),
-    };
+    let mut child2_guard = ProcessGuard::new(child2, None);
 
     // Wait for heartbeat creation
     let heartbeat_dir2 = workspace2.join("state").join("heartbeats");
