@@ -1246,6 +1246,25 @@ mod tests {
         assert!(backoff.should_scan());
     }
 
+    #[test]
+    fn adaptive_scan_backoff_honors_configured_base_interval() {
+        let mut backoff = ExploreScanBackoff::new(3, 10);
+
+        assert!(backoff.should_scan());
+        backoff.record_scan(false);
+        assert_eq!(backoff.effective_interval_cycles(), 6);
+        for _ in 1..6 {
+            assert!(!backoff.should_scan());
+        }
+        assert!(backoff.should_scan());
+
+        backoff.record_scan(true);
+        assert_eq!(backoff.effective_interval_cycles(), 3);
+        assert!(!backoff.should_scan());
+        assert!(!backoff.should_scan());
+        assert!(backoff.should_scan());
+    }
+
     /// Pin CPU-relevant behavior by counting actual remote-store queries. The
     /// test never waits on wall-clock time: skipped selection cycles must not
     /// create stores or call `ready()`.
