@@ -65,10 +65,20 @@ strands:
     cooldown_hours: 168
     prompt_template: null
   pulse:
-    enabled: false
-    scanners: []
-    max_beads_per_run: 5
-    cooldown_hours: 48
+    enabled: true
+    scanners:
+      # File-based health checks (work even when code doesn't compile)
+      - name: todo-comments
+        command: grep -rn "TODO\|FIXME\|XXX\|HACK" src/ --include="*.rs" || true
+        severity_threshold: 4
+      - name: unwrap-usage
+        command: grep -rn "\.unwrap()" src/ --include="*.rs" | grep -v "test\|test_modules" || true
+        severity_threshold: 3
+      - name: large-files
+        command: find src/ -name "*.rs" -size +50k -exec ls -lh {} \; || true
+        severity_threshold: 4
+    max_beads_per_run: 3
+    cooldown_hours: 24
     severity_threshold: 3
     prompt_template: null
   reflect:
@@ -117,7 +127,7 @@ telemetry:
     color: auto
   hooks: []
   otlp_sink:
-    enabled: false
+    enabled: true
     endpoint: http://localhost:4317
     protocol: grpc
     timeout_secs: 10
