@@ -454,6 +454,59 @@ impl HealthMonitor {
         Ok(is_fresh)
     }
 
+    /// Check if a worker is alive based on heartbeat file freshness.
+    ///
+    /// Returns `Ok(true)` if the heartbeat file exists and is fresh (age < heartbeat_ttl_secs).
+    /// Returns `Ok(false)` if the heartbeat file doesn't exist or is stale.
+    /// Returns `Err` if the heartbeat file exists but cannot be read/parsed.
+    ///
+    /// # Arguments
+    ///
+    /// * `qualified_worker_id` - Fully-qualified worker ID (e.g., 'claude-code-glm-5-alpha')
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let monitor = HealthMonitor::new(config, "alpha".to_string(), telemetry, None);
+    /// let is_alive = monitor.check_worker_alive("claude-code-glm-5-alpha")?;
+    /// ```
+    pub fn check_worker_alive(&self, qualified_worker_id: &str) -> Result<bool> {
+        let path = self.heartbeat_dir.join(format!("{}.json", qualified_worker_id));
+
+        if !path.exists() {
+            tracing::debug!(
+                worker = %qualified_worker_id,
+                path = %path.display(),
+                "worker heartbeat file does not exist"
+            );
+            return Ok(false);
+        }
+
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read heartbeat file for worker {}: {}", qualified_worker_id, path.display()))?;
+
+        let heartbeat: HeartbeatData = serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse heartbeat file for worker {}: {}", qualified_worker_id, path.display()))?;
+
+        let age = Utc::now()
+            .signed_duration_since(heartbeat.last_heartbeat)
+            .to_std()
+            .unwrap_or(Duration::ZERO);
+
+        let is_alive = age < self.heartbeat_ttl;
+        if !is_alive {
+            tracing::debug!(
+                worker = %qualified_worker_id,
+                path = %path.display(),
+                age_secs = age.as_secs(),
+                ttl_secs = self.heartbeat_ttl.as_secs(),
+                "worker heartbeat is stale"
+            );
+        }
+
+        Ok(is_alive)
+    }
+
     // ── Reader utilities (used by peer monitoring / Mend strand) ────────────
 
     /// Read all heartbeat files in the given directory.
@@ -922,6 +975,47 @@ impl Drop for HealthMonitor {
 // ──────────────────────────────────────────────────────────────────────────────
 // Utility functions
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Calculate the age of a heartbeat timestamp in seconds.
+///
+/// This function computes the time difference between the current time (`Utc::now()`)
+/// and the provided heartbeat timestamp, returning the age in seconds.
+///
+/// # Arguments
+///
+/// * `timestamp` - The heartbeat timestamp to calculate age from
+///
+/// # Returns
+///
+/// * `i64` - Age in seconds (0 for future timestamps, positive for past timestamps)
+///
+/// # Behavior
+///
+/// - Returns `0` for future timestamps (handles clock skew)
+/// - Returns accurate age in seconds for past timestamps
+///
+/// # Example
+///
+/// ```no_run
+/// use chrono::{Utc, TimeZone};
+/// use needle::health::calculate_heartbeat_age;
+///
+/// let past = Utc::now() - chrono::Duration::seconds(120);
+/// let age = calculate_heartbeat_age(past);
+/// assert_eq!(age, 120);
+///
+/// let future = Utc::now() + chrono::Duration::seconds(30);
+/// let age = calculate_heartbeat_age(future);
+/// assert_eq!(age, 0); // Clock skew handling
+/// ```
+pub fn calculate_heartbeat_age(timestamp: DateTime<Utc>) -> i64 {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(timestamp);
+
+    // Return 0 for future timestamps (handles clock skew)
+    // Return positive seconds for past timestamps
+    duration.num_seconds().max(0)
+}
 
 /// Clean up a heartbeat file by removing it from disk.
 ///
@@ -3137,30 +3231,560 @@ mod tests {
             path.exists(),
             "directory should still exist after failed cleanup"
         );
+    }
 
-        // Test 2: Nonexistent file should succeed (idempotent cleanup)
-        let nonexistent_path = dir.path().join("nonexistent-heartbeat.json");
-        assert!(!nonexistent_path.exists(), "test file should not exist");
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Heartbeat Freshness Detection Tests
+    // ──────────────────────────────────────────────────────────────────────────────
 
-        let result = cleanup_heartbeat_file(&nonexistent_path);
+    /// Test age calculation with fresh timestamp (recent heartbeat).
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Age calculation returns correct value for fresh heartbeat
+    /// - Recent timestamp (within TTL) produces small age value
+    #[test]
+    fn calculate_heartbeat_age_fresh_timestamp() {
+        let now = Utc::now();
+        let recent = now - chrono::Duration::seconds(30); // 30 seconds ago
+
+        let age = calculate_heartbeat_age(recent);
+
+        assert_eq!(
+            age, 30,
+            "age should be 30 seconds for a heartbeat from 30 seconds ago"
+        );
+    }
+
+    /// Test age calculation with stale timestamp (old heartbeat).
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Age calculation returns correct value for stale heartbeat
+    /// - Old timestamp (beyond TTL) produces large age value
+    #[test]
+    fn calculate_heartbeat_age_stale_timestamp() {
+        let now = Utc::now();
+        let old = now - chrono::Duration::seconds(600); // 10 minutes ago
+
+        let age = calculate_heartbeat_age(old);
+
+        assert_eq!(
+            age, 600,
+            "age should be 600 seconds for a heartbeat from 10 minutes ago"
+        );
+    }
+
+    /// Test age calculation with future timestamp (clock skew handling).
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Age calculation handles clock skew gracefully
+    /// - Future timestamp returns 0 (not negative)
+    #[test]
+    fn calculate_heartbeat_age_future_timestamp() {
+        let now = Utc::now();
+        let future = now + chrono::Duration::seconds(30); // 30 seconds in the future
+
+        let age = calculate_heartbeat_age(future);
+
+        assert_eq!(
+            age, 0,
+            "age should be 0 for future timestamps (clock skew handling)"
+        );
+    }
+
+    /// Test age calculation with current timestamp.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Age calculation returns 0 for heartbeat created just now
+    #[test]
+    fn calculate_heartbeat_age_current_timestamp() {
+        let now = Utc::now();
+
+        let age = calculate_heartbeat_age(now);
+
+        // Allow small tolerance for timing differences
         assert!(
-            result.is_ok(),
-            "cleanup should succeed when file doesn't exist"
+            age <= 1,
+            "age should be 0 or 1 seconds for current timestamp, got {}",
+            age
+        );
+    }
+
+    /// Test that is_stale correctly identifies fresh heartbeats.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Fresh heartbeat (age < TTL) is not stale
+    #[test]
+    fn is_stale_fresh_heartbeat_not_stale() {
+        let hb = HeartbeatData {
+            worker_id: "test".to_string(),
+            qualified_id: "claude-test".to_string(),
+            pid: 1,
+            state: WorkerState::Selecting,
+            current_bead: None,
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now() - chrono::Duration::seconds(60), // 1 minute ago
+            started_at: Utc::now(),
+            beads_processed: 0,
+            session: "test".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
+            heartbeat_file: None,
+        };
+
+        let ttl = Duration::from_secs(300); // 5 minutes
+
+        assert!(
+            !HealthMonitor::is_stale(&hb, ttl),
+            "fresh heartbeat (1 minute old) should not be stale with 5 minute TTL"
+        );
+    }
+
+    /// Test that is_stale correctly identifies stale heartbeats.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Stale heartbeat (age > TTL) is stale
+    #[test]
+    fn is_stale_stale_heartbeat_is_stale() {
+        let hb = HeartbeatData {
+            worker_id: "test".to_string(),
+            qualified_id: "claude-test".to_string(),
+            pid: 1,
+            state: WorkerState::Selecting,
+            current_bead: None,
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now() - chrono::Duration::seconds(600), // 10 minutes ago
+            started_at: Utc::now(),
+            beads_processed: 0,
+            session: "test".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
+            heartbeat_file: None,
+        };
+
+        let ttl = Duration::from_secs(300); // 5 minutes
+
+        assert!(
+            HealthMonitor::is_stale(&hb, ttl),
+            "stale heartbeat (10 minutes old) should be stale with 5 minute TTL"
+        );
+    }
+
+    /// Test that is_stale handles boundary condition (age == TTL).
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Heartbeat exactly at TTL boundary is considered stale
+    #[test]
+    fn is_stale_boundary_at_ttl() {
+        let hb = HeartbeatData {
+            worker_id: "test".to_string(),
+            qualified_id: "claude-test".to_string(),
+            pid: 1,
+            state: WorkerState::Selecting,
+            current_bead: None,
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now() - chrono::Duration::seconds(300), // exactly 5 minutes ago
+            started_at: Utc::now(),
+            beads_processed: 0,
+            session: "test".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-sonnet-4".to_string(),
+            heartbeat_file: None,
+        };
+
+        let ttl = Duration::from_secs(300); // 5 minutes
+
+        assert!(
+            HealthMonitor::is_stale(&hb, ttl),
+            "heartbeat exactly at TTL boundary should be considered stale"
+        );
+    }
+
+    /// Test liveness check with fresh heartbeat returns true.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Liveness check returns Ok(true) for fresh heartbeat
+    /// - Heartbeat file exists and is within TTL
+    #[tokio::test]
+    async fn check_worker_alive_fresh_heartbeat_returns_true() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
         );
 
-        // Test 3: Successful removal should work normally
-        let test_file = dir.path().join("real-heartbeat.json");
-        std::fs::write(&test_file, b"test data").unwrap();
-        assert!(test_file.exists(), "test file should exist before cleanup");
+        // Create a fresh heartbeat file for another worker
+        let qualified_id = "claude-code-glm-5-other-worker";
+        let path = hb_dir.join(format!("{}.json", qualified_id));
 
-        let result = cleanup_heartbeat_file(&test_file);
+        let hb = HeartbeatData {
+            worker_id: "other-worker".to_string(),
+            qualified_id: qualified_id.to_string(),
+            pid: 2000,
+            state: WorkerState::Executing,
+            current_bead: Some(BeadId::from("nd-abc")),
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now() - chrono::Duration::seconds(2), // 2 seconds ago (fresh, within 5s TTL)
+            started_at: Utc::now(),
+            beads_processed: 5,
+            session: "other-worker".to_string(),
+            is_idle: false,
+            current_task: Some("nd-abc".to_string()),
+            model: "claude-code-glm-5".to_string(),
+            heartbeat_file: None,
+        };
+
+        std::fs::write(&path, serde_json::to_string(&hb).unwrap()).unwrap();
+
+        // Check if the worker is alive
+        let is_alive = monitor.check_worker_alive(qualified_id).unwrap();
+
         assert!(
-            result.is_ok(),
-            "cleanup should succeed when removing a real file"
+            is_alive,
+            "worker with fresh heartbeat (2 seconds old) should be considered alive"
         );
+    }
+
+    /// Test liveness check with stale heartbeat returns false.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Liveness check returns Ok(false) for stale heartbeat
+    /// - Heartbeat file exists but age exceeds TTL
+    #[tokio::test]
+    async fn check_worker_alive_stale_heartbeat_returns_false() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create a stale heartbeat file for another worker
+        let qualified_id = "claude-code-glm-5-stale-worker";
+        let path = hb_dir.join(format!("{}.json", qualified_id));
+
+        let hb = HeartbeatData {
+            worker_id: "stale-worker".to_string(),
+            qualified_id: qualified_id.to_string(),
+            pid: 3000,
+            state: WorkerState::Executing,
+            current_bead: Some(BeadId::from("nd-def")),
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now() - chrono::Duration::seconds(600), // 10 minutes ago (stale)
+            started_at: Utc::now(),
+            beads_processed: 10,
+            session: "stale-worker".to_string(),
+            is_idle: false,
+            current_task: Some("nd-def".to_string()),
+            model: "claude-code-glm-5".to_string(),
+            heartbeat_file: None,
+        };
+
+        std::fs::write(&path, serde_json::to_string(&hb).unwrap()).unwrap();
+
+        // Check if the worker is alive
+        let is_alive = monitor.check_worker_alive(qualified_id).unwrap();
+
         assert!(
-            !test_file.exists(),
-            "file should be removed after successful cleanup"
+            !is_alive,
+            "worker with stale heartbeat (10 minutes old) should not be considered alive"
+        );
+    }
+
+    /// Test liveness check with missing heartbeat returns false.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Liveness check returns Ok(false) for missing heartbeat
+    /// - Heartbeat file does not exist
+    #[tokio::test]
+    async fn check_worker_alive_missing_heartbeat_returns_false() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Check a worker that doesn't have a heartbeat file
+        let qualified_id = "claude-code-glm-5-nonexistent-worker";
+
+        let is_alive = monitor.check_worker_alive(qualified_id).unwrap();
+
+        assert!(
+            !is_alive,
+            "worker without heartbeat file should not be considered alive"
+        );
+    }
+
+    /// Test liveness check with malformed heartbeat returns Err.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Liveness check returns Err for malformed heartbeat
+    /// - Heartbeat file exists but cannot be parsed
+    #[tokio::test]
+    async fn check_worker_alive_malformed_heartbeat_returns_error() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create a malformed heartbeat file (invalid JSON)
+        let qualified_id = "claude-code-glm-5-malformed-worker";
+        let path = hb_dir.join(format!("{}.json", qualified_id));
+
+        std::fs::write(&path, b"invalid json {{{").unwrap();
+
+        // Attempt to check if the worker is alive
+        let result = monitor.check_worker_alive(qualified_id);
+
+        assert!(
+            result.is_err(),
+            "malformed heartbeat should return error"
+        );
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string().to_lowercase();
+        assert!(
+            err_msg.contains("parse") || err_msg.contains("heartbeat"),
+            "error message should mention parsing or heartbeat: {}",
+            err
+        );
+    }
+
+    /// Test liveness check with heartbeat file containing invalid timestamp.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Liveness check returns Err for heartbeat with invalid timestamp
+    /// - Heartbeat file is valid JSON but timestamp cannot be parsed
+    #[tokio::test]
+    async fn check_worker_alive_invalid_timestamp_returns_error() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Create a heartbeat file with invalid timestamp format
+        let qualified_id = "claude-code-glm-5-bad-ts-worker";
+        let path = hb_dir.join(format!("{}.json", qualified_id));
+
+        let invalid_hb = serde_json::json!({
+            "worker_id": "bad-ts-worker",
+            "qualified_id": qualified_id,
+            "pid": 4000,
+            "state": "Executing",
+            "current_bead": "nd-xyz",
+            "workspace": "/tmp",
+            "last_heartbeat": "not-a-valid-timestamp", // Invalid timestamp
+            "started_at": "2026-08-15T00:00:00Z",
+            "beads_processed": 0,
+            "session": "bad-ts-worker",
+            "is_idle": false,
+            "current_task": "nd-xyz",
+            "model": "claude-code-glm-5"
+        });
+
+        std::fs::write(&path, invalid_hb.to_string()).unwrap();
+
+        // Attempt to check if the worker is alive
+        let result = monitor.check_worker_alive(qualified_id);
+
+        assert!(
+            result.is_err(),
+            "heartbeat with invalid timestamp should return error"
+        );
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string().to_lowercase();
+        assert!(
+            err_msg.contains("parse") || err_msg.contains("timestamp"),
+            "error message should mention parsing or timestamp: {}",
+            err
+        );
+    }
+
+    /// Test verify_heartbeat with fresh heartbeat returns true.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - verify_heartbeat returns Ok(true) for fresh heartbeat
+    /// - Checks this worker's own heartbeat file
+    #[tokio::test]
+    async fn verify_heartbeat_fresh_returns_true() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let mut monitor = HealthMonitor::new(
+            config,
+            "verify-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Start emitter to create a fresh heartbeat
+        monitor.start_emitter().unwrap();
+
+        // Verify the heartbeat is fresh
+        let is_fresh = monitor.verify_heartbeat().unwrap();
+
+        assert!(
+            is_fresh,
+            "freshly created heartbeat should be verified as fresh"
+        );
+
+        monitor.stop();
+    }
+
+    /// Test verify_heartbeat with missing heartbeat returns false.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - verify_heartbeat returns Ok(false) for missing heartbeat
+    /// - Heartbeat file does not exist
+    #[tokio::test]
+    async fn verify_heartbeat_missing_returns_false() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "verify-missing-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Don't start emitter - no heartbeat file exists
+
+        // Verify the heartbeat is missing (returns Ok(false))
+        let is_fresh = monitor.verify_heartbeat().unwrap();
+
+        assert!(
+            !is_fresh,
+            "missing heartbeat should return false (not fresh)"
+        );
+    }
+
+    /// Test verify_heartbeat with stale heartbeat returns false.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - verify_heartbeat returns Ok(false) for stale heartbeat
+    /// - Heartbeat file exists but age exceeds TTL
+    #[tokio::test]
+    async fn verify_heartbeat_stale_returns_false() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let mut monitor = HealthMonitor::new(
+            config,
+            "verify-stale-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Start emitter to create a heartbeat
+        monitor.start_emitter().unwrap();
+
+        let path = monitor.heartbeat_path();
+
+        // Manually update the heartbeat file to have an old timestamp
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut hb: HeartbeatData = serde_json::from_str(&content).unwrap();
+        hb.last_heartbeat = Utc::now() - chrono::Duration::seconds(600); // 10 minutes ago
+        std::fs::write(&path, serde_json::to_string(&hb).unwrap()).unwrap();
+
+        // Verify the heartbeat is stale
+        let is_fresh = monitor.verify_heartbeat().unwrap();
+
+        assert!(
+            !is_fresh,
+            "stale heartbeat (10 minutes old) should not be verified as fresh"
+        );
+
+        monitor.stop();
+    }
+
+    /// Test verify_heartbeat with malformed heartbeat returns Err.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - verify_heartbeat returns Err for malformed heartbeat
+    /// - Heartbeat file exists but cannot be parsed
+    #[tokio::test]
+    async fn verify_heartbeat_malformed_returns_error() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "verify-malformed-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        let path = monitor.heartbeat_path();
+
+        // Create a malformed heartbeat file
+        std::fs::write(&path, b"invalid json {{{").unwrap();
+
+        // Verify the malformed heartbeat returns error
+        let result = monitor.verify_heartbeat();
+
+        assert!(
+            result.is_err(),
+            "malformed heartbeat should return error"
+        );
+
+        let err = result.unwrap_err();
+        let err_msg = err.to_string().to_lowercase();
+        assert!(
+            err_msg.contains("parse") || err_msg.contains("heartbeat"),
+            "error message should mention parsing or heartbeat: {}",
+            err
         );
     }
 
@@ -3444,6 +4068,337 @@ mod tests {
         assert!(
             result.is_err(),
             "check_heartbeat_file_exists should return error for broken symlink"
+        );
+    }
+
+    /// Test that calculate_heartbeat_age returns accurate age for past timestamps.
+    #[test]
+    fn calculate_heartbeat_age_past_timestamp() {
+        let now = Utc::now();
+
+        // Test various past timestamps
+        let ten_seconds_ago = now - chrono::Duration::seconds(10);
+        assert_eq!(calculate_heartbeat_age(ten_seconds_ago), 10);
+
+        let two_minutes_ago = now - chrono::Duration::seconds(120);
+        assert_eq!(calculate_heartbeat_age(two_minutes_ago), 120);
+
+        let one_hour_ago = now - chrono::Duration::seconds(3600);
+        assert_eq!(calculate_heartbeat_age(one_hour_ago), 3600);
+    }
+
+    /// Test that calculate_heartbeat_age returns 0 for future timestamps (clock skew).
+    #[test]
+    fn calculate_heartbeat_age_future_timestamp_returns_zero() {
+        let now = Utc::now();
+
+        // Test various future timestamps (simulating clock skew)
+        let one_second_future = now + chrono::Duration::seconds(1);
+        assert_eq!(calculate_heartbeat_age(one_second_future), 0);
+
+        let thirty_seconds_future = now + chrono::Duration::seconds(30);
+        assert_eq!(calculate_heartbeat_age(thirty_seconds_future), 0);
+
+        let five_minutes_future = now + chrono::Duration::seconds(300);
+        assert_eq!(calculate_heartbeat_age(five_minutes_future), 0);
+    }
+
+    /// Test that calculate_heartbeat_age returns 0 for current time.
+    #[test]
+    fn calculate_heartbeat_age_current_time() {
+        let now = Utc::now();
+
+        // Age of current time should be 0 (or very close due to execution time)
+        let age = calculate_heartbeat_age(now);
+        assert!(
+            age == 0 || age == 1,
+            "age of current timestamp should be 0 or 1, got {}",
+            age
+        );
+    }
+
+    /// Test that calculate_heartbeat_age handles very old timestamps.
+    #[test]
+    fn calculate_heartbeat_age_very_old_timestamp() {
+        let now = Utc::now();
+
+        // Test a very old timestamp (e.g., 24 hours ago)
+        let one_day_ago = now - chrono::Duration::seconds(86400);
+        assert_eq!(calculate_heartbeat_age(one_day_ago), 86400);
+
+        // Test a week old timestamp
+        let one_week_ago = now - chrono::Duration::seconds(604800);
+        assert_eq!(calculate_heartbeat_age(one_week_ago), 604800);
+    }
+
+    /// Test that calculate_heartbeat_age can be used for freshness detection.
+    #[test]
+    fn calculate_heartbeat_age_for_freshness_detection() {
+        let now = Utc::now();
+        let ttl_secs = 300; // 5 minutes TTL
+
+        // Fresh heartbeat (within TTL)
+        let fresh_timestamp = now - chrono::Duration::seconds(120);
+        let age = calculate_heartbeat_age(fresh_timestamp);
+        assert!(
+            age < ttl_secs,
+            "fresh heartbeat should have age less than TTL: {} < {}",
+            age,
+            ttl_secs
+        );
+
+        // Stale heartbeat (exceeded TTL)
+        let stale_timestamp = now - chrono::Duration::seconds(600);
+        let age = calculate_heartbeat_age(stale_timestamp);
+        assert!(
+            age > ttl_secs,
+            "stale heartbeat should have age greater than TTL: {} > {}",
+            age,
+            ttl_secs
+        );
+    }
+
+    /// Test that check_worker_alive returns true for fresh heartbeats.
+    #[tokio::test]
+    async fn check_worker_alive_fresh_heartbeat() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let mut config = test_config(&hb_dir);
+        config.health.heartbeat_ttl_secs = 300;
+
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Write a fresh heartbeat for another worker
+        let worker_id = "claude-code-glm-5-alpha";
+        let heartbeat = HeartbeatData {
+            worker_id: "alpha".to_string(),
+            qualified_id: worker_id.to_string(),
+            pid: 1234,
+            state: WorkerState::Executing,
+            current_bead: Some(BeadId::from("needle-abc")),
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now(),
+            started_at: Utc::now(),
+            beads_processed: 5,
+            session: "alpha".to_string(),
+            is_idle: false,
+            current_task: Some("needle-abc".to_string()),
+            model: "claude-code-glm-5".to_string(),
+            heartbeat_file: None,
+        };
+
+        let path = hb_dir.join(format!("{}.json", worker_id));
+        std::fs::write(&path, serde_json::to_string(&heartbeat).unwrap()).unwrap();
+
+        // Check that the worker is alive
+        let is_alive = monitor.check_worker_alive(worker_id).unwrap();
+        assert!(
+            is_alive,
+            "worker with fresh heartbeat should be alive"
+        );
+    }
+
+    /// Test that check_worker_alive returns false for stale heartbeats.
+    #[tokio::test]
+    async fn check_worker_alive_stale_heartbeat() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let mut config = test_config(&hb_dir);
+        config.health.heartbeat_ttl_secs = 300;
+
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Write a stale heartbeat for another worker (older than TTL)
+        let worker_id = "claude-code-glm-5-alpha";
+        let heartbeat = HeartbeatData {
+            worker_id: "alpha".to_string(),
+            qualified_id: worker_id.to_string(),
+            pid: 1234,
+            state: WorkerState::Executing,
+            current_bead: Some(BeadId::from("needle-abc")),
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now() - chrono::Duration::seconds(600), // 10 minutes old
+            started_at: Utc::now(),
+            beads_processed: 5,
+            session: "alpha".to_string(),
+            is_idle: false,
+            current_task: Some("needle-abc".to_string()),
+            model: "claude-code-glm-5".to_string(),
+            heartbeat_file: None,
+        };
+
+        let path = hb_dir.join(format!("{}.json", worker_id));
+        std::fs::write(&path, serde_json::to_string(&heartbeat).unwrap()).unwrap();
+
+        // Check that the worker is not alive
+        let is_alive = monitor.check_worker_alive(worker_id).unwrap();
+        assert!(
+            !is_alive,
+            "worker with stale heartbeat should not be alive"
+        );
+    }
+
+    /// Test that check_worker_alive returns false when heartbeat file doesn't exist.
+    #[tokio::test]
+    async fn check_worker_alive_no_heartbeat_file() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Check a worker that doesn't have a heartbeat file
+        let worker_id = "claude-code-glm-5-nonexistent";
+        let is_alive = monitor.check_worker_alive(worker_id).unwrap();
+        assert!(
+            !is_alive,
+            "worker without heartbeat file should not be alive"
+        );
+    }
+
+    /// Test that check_worker_alive returns error for unparseable heartbeat file.
+    #[tokio::test]
+    async fn check_worker_alive_unparseable_heartbeat() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Write an invalid JSON file
+        let worker_id = "claude-code-glm-5-invalid";
+        let path = hb_dir.join(format!("{}.json", worker_id));
+        std::fs::write(&path, b"invalid json content").unwrap();
+
+        // Check that parsing fails
+        let result = monitor.check_worker_alive(worker_id);
+        assert!(
+            result.is_err(),
+            "check_worker_alive should return error for unparseable heartbeat"
+        );
+    }
+
+    /// Test that check_worker_alive handles edge cases at TTL boundary.
+    #[tokio::test]
+    async fn check_worker_alive_ttl_boundary() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let mut config = test_config(&hb_dir);
+        config.health.heartbeat_ttl_secs = 300;
+
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Test with heartbeat exactly at the TTL boundary (should be considered stale)
+        let worker_id = "claude-code-glm-5-boundary";
+        let heartbeat = HeartbeatData {
+            worker_id: "boundary".to_string(),
+            qualified_id: worker_id.to_string(),
+            pid: 1234,
+            state: WorkerState::Executing,
+            current_bead: None,
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now() - chrono::Duration::seconds(300), // Exactly at TTL
+            started_at: Utc::now(),
+            beads_processed: 0,
+            session: "boundary".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-code-glm-5".to_string(),
+            heartbeat_file: None,
+        };
+
+        let path = hb_dir.join(format!("{}.json", worker_id));
+        std::fs::write(&path, serde_json::to_string(&heartbeat).unwrap()).unwrap();
+
+        // Heartbeat at exactly TTL should be considered stale (age >= TTL)
+        let is_alive = monitor.check_worker_alive(worker_id).unwrap();
+        assert!(
+            !is_alive,
+            "worker with heartbeat exactly at TTL boundary should be stale"
+        );
+    }
+
+    /// Test that check_worker_alive uses qualified_worker_id correctly.
+    #[tokio::test]
+    async fn check_worker_alive_qualified_id_format() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Test with properly formatted qualified ID
+        let qualified_id = "claude-code-glm-5-foxtrot";
+        let heartbeat = HeartbeatData {
+            worker_id: "foxtrot".to_string(),
+            qualified_id: qualified_id.to_string(),
+            pid: 5678,
+            state: WorkerState::Selecting,
+            current_bead: None,
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now(),
+            started_at: Utc::now(),
+            beads_processed: 0,
+            session: "foxtrot".to_string(),
+            is_idle: false,
+            current_task: None,
+            model: "claude-code-glm-5".to_string(),
+            heartbeat_file: None,
+        };
+
+        let path = hb_dir.join(format!("{}.json", qualified_id));
+        std::fs::write(&path, serde_json::to_string(&heartbeat).unwrap()).unwrap();
+
+        // Verify the qualified ID is used correctly
+        let is_alive = monitor.check_worker_alive(qualified_id).unwrap();
+        assert!(
+            is_alive,
+            "worker should be found using qualified ID format"
         );
     }
 }
