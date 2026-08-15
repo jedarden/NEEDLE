@@ -60,7 +60,16 @@ pub struct Cli {
 pub enum CliCommand {
     /// Launch worker(s) to process beads.
     Run {
-        /// Workspace to process beads from.
+        /// Home workspace for this worker.
+        ///
+        /// NOT an exclusive scope. The Explore strand still auto-discovers every
+        /// directory containing `.beads/` under `strands.explore.workspace_root`,
+        /// so the worker can claim beads in other repos. Setting this only changes
+        /// where the worker starts and which store is its home.
+        ///
+        /// To genuinely restrict a worker to a fixed set of repos, set
+        /// `strands.explore.workspaces` instead (a non-empty list disables
+        /// auto-discovery). Defaults to `workspace.default`.
         #[arg(short = 'w', long)]
         workspace: Option<PathBuf>,
 
