@@ -778,7 +778,7 @@ impl OtlpSink {
     ) -> Result<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)> {
         use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
 
-        let timeout = Duration::from_secs(config.timeout_secs);
+        let timeout = Duration::from_millis(config.timeout_ms);
 
         // Build metadata map from headers
         let mut metadata = MetadataMap::new();
@@ -864,7 +864,7 @@ impl OtlpSink {
         use opentelemetry_otlp::WithHttpConfig;
         use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
 
-        let timeout = Duration::from_secs(config.timeout_secs);
+        let timeout = Duration::from_millis(config.timeout_ms);
 
         // Build headers map from config
         let mut headers_map = HashMap::new();
@@ -1719,10 +1719,11 @@ mod tests {
             enabled: true,
             endpoint: "http://localhost:4317".to_string(),
             protocol: "grpc".to_string(),
-            timeout_secs: 10,
+            timeout_ms: 10_000,
             compression: "gzip".to_string(),
-            tls: "none".to_string(),
+            tls: Default::default(),
             headers: Vec::new(),
+            signals: Default::default(),
             resource_attributes: Vec::new(),
             metrics_interval_secs: 10,
             service_namespace: "needle-fleet".to_string(),

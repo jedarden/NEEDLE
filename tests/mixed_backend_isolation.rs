@@ -119,10 +119,7 @@ fn each_workspace_invokes_only_its_explicit_backend() {
     assert!(bf_invocations.lines().any(|line| line.starts_with("bf ")));
     assert!(!bf_invocations.lines().any(|line| line.starts_with("bead ")));
 
-    for (name, yaml) in [
-        ("unbound", ""),
-        ("unknown", "bead_cli:\n  backend: does-not-exist\n"),
-    ] {
+    for (name, yaml) in [("unbound", "")] {
         let workspace = root.path().join(name);
         fs::create_dir_all(workspace.join(".beads")).unwrap();
         if !yaml.is_empty() {
@@ -136,6 +133,24 @@ fn each_workspace_invokes_only_its_explicit_backend() {
         assert!(String::from_utf8_lossy(&output.stdout).contains("[FAIL]  Bead store"));
         assert_eq!(fs::read_to_string(&invocation_log).unwrap(), "");
     }
+
+    let unknown = root.path().join("unknown");
+    fs::create_dir_all(unknown.join(".beads")).unwrap();
+    fs::write(
+        unknown.join(".needle.yaml"),
+        "bead_cli:\n  backend: does-not-exist\n",
+    )
+    .unwrap();
+    fs::write(&invocation_log, "").unwrap();
+    let output = Command::new(&needle)
+        .args(["doctor", "--workspace", unknown.to_str().unwrap()])
+        .env("HOME", &home)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does-not-exist"));
+    assert_eq!(fs::read_to_string(&invocation_log).unwrap(), "");
 
     let missing_path = root.path().join("missing-explicit-path");
     fs::create_dir_all(missing_path.join(".beads")).unwrap();

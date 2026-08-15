@@ -117,7 +117,7 @@ fn needle_claims_closes_and_restores_a_bead_rs_workspace() {
     fs::write(
         home.join(".config/needle/config.yaml"),
         format!(
-            "agent:\n  default: e2e-agent\n  timeout: 30\n  adapters_dir: {}\n  routing: null\nworker:\n  idle_action: exit\n  enforce_shipped_work: false\nworkspace:\n  home: {}\nstrands:\n  explore:\n    enabled: false\n    workspace_root: {}\n    workspaces: []\n  splice:\n    enabled: false\n  reflect:\n    enabled: false\ntelemetry:\n  file_sink:\n    enabled: true\n    log_dir: {}\n",
+            "agent:\n  default: e2e-agent\n  timeout: 30\n  adapters_dir: {}\n  routing: null\nworker:\n  idle_action: exit\n  enforce_shipped_work: false\n  cpu_load_warn: 1.0\n  memory_free_warn_mb: 1\nworkspace:\n  home: {}\nstrands:\n  explore:\n    enabled: false\n    workspace_root: {}\n    workspaces: []\n  splice:\n    enabled: false\n  reflect:\n    enabled: false\ntelemetry:\n  file_sink:\n    enabled: true\n    log_dir: {}\n",
             adapters.display(),
             home.join(".needle").display(),
             root.path().display(),

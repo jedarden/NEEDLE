@@ -17,7 +17,6 @@
 //! Depends on: `types`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -117,12 +116,12 @@ async fn git_head(workspace: &Path) -> Option<String> {
 ///
 /// `Bead` does not carry `notes`, so the gate reads it the same way the
 /// snapshot did.
-pub async fn current_notes(store: &Arc<dyn BeadStore>, bead_id: &BeadId) -> Option<String> {
+pub async fn current_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<String> {
     read_notes(store, bead_id).await
 }
 
 /// Read notes through the already-resolved workspace backend.
-async fn read_notes(store: &Arc<dyn BeadStore>, bead_id: &BeadId) -> Option<String> {
+async fn read_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<String> {
     store.notes(bead_id).await.ok().flatten()
 }
 

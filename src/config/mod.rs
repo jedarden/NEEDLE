@@ -372,15 +372,18 @@ pub struct WorkspaceLabelsOverride {
 ///
 /// Represents the available bead CLI backends that can be configured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum BeadBackend {
     /// Auto-detect the appropriate backend
+    #[serde(rename = "auto")]
     Auto,
     /// bead-forge (bf) - canonical CLI with atomic claiming
+    #[serde(rename = "bead-forge", alias = "bf")]
     Bf,
     /// br - deprecated alias for bead-rs (legacy support)
+    #[serde(rename = "br")]
     Br,
     /// bead-rs (bead) - native CLI
+    #[serde(rename = "bead-rs", alias = "bead")]
     Bead,
 }
 
@@ -388,9 +391,9 @@ impl std::fmt::Display for BeadBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BeadBackend::Auto => write!(f, "auto"),
-            BeadBackend::Bf => write!(f, "bf"),
+            BeadBackend::Bf => write!(f, "bead-forge"),
             BeadBackend::Br => write!(f, "br"),
-            BeadBackend::Bead => write!(f, "bead"),
+            BeadBackend::Bead => write!(f, "bead-rs"),
         }
     }
 }
@@ -408,7 +411,7 @@ pub struct BeadCliConfig {
     ///
     /// When set, bypasses all discovery and uses this path directly.
     /// Useful for testing or non-standard installations.
-    #[serde(default)]
+    #[serde(default, alias = "explicit_path")]
     pub path: Option<PathBuf>,
 }
 
@@ -683,9 +686,9 @@ mod tests {
         // Test that each backend variant serializes correctly
         let backends = vec![
             (BeadBackend::Auto, "auto"),
-            (BeadBackend::Bf, "bf"),
+            (BeadBackend::Bf, "bead-forge"),
             (BeadBackend::Br, "br"),
-            (BeadBackend::Bead, "bead"),
+            (BeadBackend::Bead, "bead-rs"),
         ];
 
         for (backend, expected_str) in backends {
@@ -4281,7 +4284,7 @@ mod config_tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(".needle.yaml"),
-            "bead_cli:\n  backend: bead\n  path: /opt/bead-rs/bin/bead\n",
+            "bead_cli:\n  backend: bead-rs\n  path: /opt/bead-rs/bin/bead\n",
         )
         .unwrap();
 

@@ -47,7 +47,7 @@ pub fn open_configured(
     harness: Option<String>,
     harness_version: Option<String>,
 ) -> Result<Arc<dyn BeadStore>> {
-    if matches!(config.backend.as_str(), "" | "auto") {
+    if matches!(config.backend, crate::config::BeadBackend::Auto) {
         bail!(
             "workspace {} has no authoritative bead backend binding; set bead_cli.backend in {}",
             workspace.display(),
@@ -1159,8 +1159,8 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let binary = version_fixture(workspace.path(), "custom-bead", "bead 0.1.1");
         let config = crate::config::BeadCliConfig {
-            backend: "bead-rs".to_string(),
-            explicit_path: Some(binary),
+            backend: crate::config::BeadBackend::Bead,
+            path: Some(binary),
         };
         assert!(open_configured(&config, workspace.path().to_path_buf(), None, None, None).is_ok());
     }
@@ -1171,8 +1171,8 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let binary = version_fixture(workspace.path(), "not-bead", "bf 0.4.1");
         let config = crate::config::BeadCliConfig {
-            backend: "bead-rs".to_string(),
-            explicit_path: Some(binary),
+            backend: crate::config::BeadBackend::Bead,
+            path: Some(binary),
         };
         let error = open_configured(&config, workspace.path().to_path_buf(), None, None, None)
             .err()
@@ -1196,8 +1196,8 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&binary, permissions).unwrap();
         let config = crate::config::BeadCliConfig {
-            backend: "bead-rs".to_string(),
-            explicit_path: Some(binary),
+            backend: crate::config::BeadBackend::Bead,
+            path: Some(binary),
         };
         let error = open_configured(&config, workspace.path().to_path_buf(), None, None, None)
             .err()
