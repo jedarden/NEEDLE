@@ -192,7 +192,7 @@ pub enum CliCommand {
         #[arg(long)]
         get: Option<String>,
 
-        /// Set a config key to a value.
+        /// Set a config key to a value (KEY VALUE or KEY=VALUE format).
         ///
         /// Two forms are accepted:
         ///   --set KEY VALUE      (space-separated)
@@ -2410,9 +2410,14 @@ fn cmd_bead_backend(name: &str, workspace: &Path) -> Result<()> {
     let workspace = workspace
         .canonicalize()
         .with_context(|| format!("workspace does not exist: {}", workspace.display()))?;
+    let backend = match name {
+        "bead-rs" => crate::config::BeadBackend::Bead,
+        "bead-forge" => crate::config::BeadBackend::Bf,
+        _ => bail!("unknown builtin bead backend '{name}'"),
+    };
     let config = crate::config::BeadCliConfig {
-        backend: name.to_string(),
-        explicit_path: None,
+        backend,
+        path: None,
     };
     let (_, binary) = crate::config::resolve_bead_cli(&config)?;
     crate::bead_store::open_configured(&config, workspace.clone(), None, None, None)?;
@@ -3430,7 +3435,7 @@ fn doctor_check_checkpoint(
     beads_dir: &Path,
     bead_cli: &crate::config::BeadCliConfig,
 ) -> CheckResult {
-    if matches!(bead_cli.backend.as_str(), "bead" | "bead-rs") {
+    if matches!(bead_cli.backend, crate::config::BeadBackend::Bead | crate::config::BeadBackend::Br) {
         let pointer = beads_dir.join("checkpoint/current.json");
         if !pointer.exists() {
             return CheckResult::fail("Checkpoint", "checkpoint/current.json not found");
@@ -4653,24 +4658,56 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
             Err(_) => continue, // Process may have exited
         };
 
-        // cmdline is null-separated; convert to space-separated for parsing.
-        let cmdline: String = cmdline_bytes
+        // cmdline is null-separated; parse as argv array for strict matching.
+        let args: Vec<String> = cmdline_bytes
             .split(|&b| b == 0)
-            .map(|args| String::from_utf8_lossy(args))
-            .collect::<Vec<_>>()
-            .join(" ");
+            .map(|args| String::from_utf8_lossy(args).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
 
-        // Check if this is a needle run process.
-        // The command line looks like: "/path/to/needle run --workspace /path --count 1 ..."
-        // Also handle NEEDLE_INNER=1 invocations: "NEEDLE_INNER=1 /path/to/needle run ..."
-        // Also handle cases where the binary is called via symlink or absolute path.
-        // Also handle needle binary invocations in general (e.g., "needle --version" for testing).
+        // Build space-separated cmdline for debugging and later parsing
+        let cmdline: String = args.join(" ");
+
+        // Check if this is a needle run process by strictly matching argv.
+        // A genuine needle run process has:
+        // - argv[0] that is the needle binary (basename is "needle")
+        // - argv[1] == "run" (after skipping NEEDLE_INNER=1 if present)
         //
-        // IMPORTANT: Also check the process environment for NEEDLE_INNER.
+        // We also support NEEDLE_INNER test processes via environment variable.
+        //
+        // The strict basename check prevents false positives from:
+        // - Child processes with ".needle/" in their paths
+        // - Random processes with "needle" anywhere in their binary name
+        // - Orphaned processes that happen to match substring patterns
+        let is_needle_run = {
+            // Skip NEEDLE_INNER=1 prefix if present (e.g., "NEEDLE_INNER=1 /path/to/needle run ...")
+            let needle_binary_idx = if args.len() >= 2 && args[0] == "NEEDLE_INNER=1" {
+                1
+            } else {
+                0
+            };
+
+            // Need at least: binary + "run" argument
+            if args.len() < needle_binary_idx + 2 {
+                false
+            } else {
+                let binary_path = &args[needle_binary_idx];
+                let run_arg_idx = needle_binary_idx + 1;
+
+                // Extract basename from binary path (handles "/path/to/needle", "needle", "./needle")
+                let binary_name = match PathBuf::from(binary_path).file_name() {
+                    Some(name) => name.to_string_lossy().to_string(),
+                    None => binary_path.clone(),
+                };
+
+                // Strict match: basename must be exactly "needle" and next arg must be "run"
+                binary_name == "needle" && args[run_arg_idx] == "run"
+            }
+        };
+
+        // Check for NEEDLE_INNER environment variable (test processes).
         // This is critical for integration tests that use NEEDLE_INNER=1 sleep 3600,
         // where the environment variable is set but not visible in cmdline.
-        // The environment variable is set by shell wrappers (bash -c "NEEDLE_INNER=1 ...")
-        // and inherited by child processes, so we need to check environ to discover them.
         let has_needle_inner = if let Ok(environ_bytes) = fs::read(entry.path().join("environ")) {
             let environ: String = environ_bytes
                 .split(|&b| b == 0)
@@ -4682,17 +4719,12 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
             false
         };
 
-        if !cmdline.contains("needle run")
-            && !cmdline.contains("needle-worker")
-            && !cmdline.contains("NEEDLE_INNER")
-            && !has_needle_inner
-            && !std::env::var("CARGO_BIN_EXE_needle")
-                .is_ok_and(|bin_name| cmdline.contains(&format!("{} run", bin_name)))
-            && !cmdline
-                .split_whitespace()
-                .next()
-                .is_some_and(|first| first.ends_with("needle") || first.contains("/needle"))
-        {
+        // Only include genuine needle run processes or NEEDLE_INNER test processes.
+        // This strict matching prevents false positives from:
+        // - Child processes with ".needle/" in their paths
+        // - Random processes with "needle" in their binary name
+        // - Orphaned processes that happen to match substring patterns
+        if !is_needle_run && !has_needle_inner {
             continue;
         }
 
