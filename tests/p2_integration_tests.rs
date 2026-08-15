@@ -1423,6 +1423,8 @@ async fn explore_discovers_work_in_other_workspace() {
         workspace_root: PathBuf::from("/tmp"),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
+        scan_interval_cycles: 1,
+        max_scan_interval_cycles: 8,
     };
     let strand = ExploreStrand::new(
         config,

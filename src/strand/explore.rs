@@ -77,6 +77,65 @@ impl StoreFactory for DefaultStoreFactory {
     }
 }
 
+/// In-memory cadence state for Explore's roaming scan.
+///
+/// The worker's normal selection loop may call Explore frequently while all
+/// discovered workspaces are empty. This state lets those empty scans spread
+/// out without sleeping the worker or changing the waterfall's ordering.
+#[derive(Debug)]
+struct ExploreScanBackoff {
+    base_interval_cycles: u32,
+    max_interval_cycles: u32,
+    consecutive_empty_scans: u32,
+    cycles_until_scan: u32,
+}
+
+impl ExploreScanBackoff {
+    fn new(base_interval_cycles: u32, max_interval_cycles: u32) -> Self {
+        let base_interval_cycles = base_interval_cycles.max(1);
+        let max_interval_cycles = max_interval_cycles.max(base_interval_cycles);
+
+        Self {
+            base_interval_cycles,
+            max_interval_cycles,
+            consecutive_empty_scans: 0,
+            cycles_until_scan: 0,
+        }
+    }
+
+    /// Return the effective interval after the recorded empty scans.
+    fn effective_interval_cycles(&self) -> u32 {
+        let multiplier = 1u32
+            .checked_shl(self.consecutive_empty_scans.min(31))
+            .unwrap_or(u32::MAX);
+        self.base_interval_cycles
+            .saturating_mul(multiplier)
+            .min(self.max_interval_cycles)
+    }
+
+    /// Decide whether this selection cycle should perform an Explore scan.
+    fn should_scan(&mut self) -> bool {
+        if self.cycles_until_scan == 0 {
+            true
+        } else {
+            self.cycles_until_scan -= 1;
+            false
+        }
+    }
+
+    /// Record the outcome of a real scan and schedule the next one.
+    fn record_scan(&mut self, found_candidate: bool) {
+        if found_candidate {
+            self.consecutive_empty_scans = 0;
+            self.cycles_until_scan = self.base_interval_cycles.saturating_sub(1);
+            return;
+        }
+
+        self.consecutive_empty_scans = self.consecutive_empty_scans.saturating_add(1);
+        self.cycles_until_scan = self.effective_interval_cycles().saturating_sub(1);
+    }
+}
+
 /// The Explore strand — discovers beads in other workspaces.
 pub struct ExploreStrand {
     /// Whether this strand is enabled.
@@ -123,6 +182,9 @@ pub struct ExploreStrand {
     /// Tracks when each workspace was last scanned for status reporting.
     #[allow(dead_code)]
     last_scan_per_workspace: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// Adaptive cadence for roaming scans. This is intentionally in-memory and
+    /// scoped to one worker instance.
+    scan_backoff: std::sync::Mutex<ExploreScanBackoff>,
 }
 
 impl ExploreStrand {
@@ -196,6 +258,10 @@ impl ExploreStrand {
             last_successful_claim_seconds: AtomicU64::new(0),
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
+            scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(
+                config.scan_interval_cycles,
+                config.max_scan_interval_cycles,
+            )),
         }
     }
 
@@ -228,6 +294,7 @@ impl ExploreStrand {
             last_successful_claim_seconds: AtomicU64::new(0),
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
+            scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
         }
     }
 
@@ -261,7 +328,26 @@ impl ExploreStrand {
             last_successful_claim_seconds: AtomicU64::new(0),
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
+            scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
         }
+    }
+
+    /// Return whether this cycle should perform the remote workspace scan.
+    fn should_scan_this_cycle(&self) -> bool {
+        self.scan_backoff.lock().unwrap().should_scan()
+    }
+
+    /// Record a completed Explore scan and update its future cadence.
+    fn record_scan_result(&self, found_candidate: bool) {
+        let mut backoff = self.scan_backoff.lock().unwrap();
+        backoff.record_scan(found_candidate);
+        tracing::debug!(
+            worker = %self.qualified_id,
+            found_candidate,
+            consecutive_empty_scans = backoff.consecutive_empty_scans,
+            next_scan_interval_cycles = backoff.effective_interval_cycles(),
+            "updated Explore adaptive scan cadence"
+        );
     }
 
     /// Discover all workspaces under a root path.
@@ -492,6 +578,23 @@ impl super::Strand for ExploreStrand {
             return StrandResult::NoWork;
         }
 
+        // A backoff skip is still reported as NoWork so the waterfall continues
+        // evaluating Weave and all later escalation strands in their normal
+        // order; only Explore's remote scan is deferred.
+        if !self.should_scan_this_cycle() {
+            let _ = self
+                .telemetry
+                .emit(crate::telemetry::EventKind::StrandSkipped {
+                    strand_name: "explore".to_string(),
+                    reason: "adaptive_scan_backoff".to_string(),
+                });
+            tracing::debug!(
+                worker = %self.qualified_id,
+                "Explore scan deferred by adaptive empty-scan backoff"
+            );
+            return StrandResult::NoWork;
+        }
+
         // Re-discover workspaces every cycle (bf-3peh4 / bf-6anj4). The workspace
         // list was captured at boot and only refreshed on a throttle, so a newly
         // created store needed a worker restart to be seen. A plain read_dir over
@@ -521,6 +624,7 @@ impl super::Strand for ExploreStrand {
                         strand_name: "explore".to_string(),
                         reason: "no_workspaces_discovered".to_string(),
                     });
+                self.record_scan_result(false);
                 return StrandResult::NoWork;
             }
         }
@@ -786,6 +890,7 @@ impl super::Strand for ExploreStrand {
             });
 
         if all_candidates.is_empty() {
+            self.record_scan_result(false);
             let _ = self
                 .telemetry
                 .emit(crate::telemetry::EventKind::StrandSkipped {
@@ -794,6 +899,8 @@ impl super::Strand for ExploreStrand {
                 });
             return StrandResult::NoWork;
         }
+
+        self.record_scan_result(true);
 
         // Rank the aggregated candidates globally: priority ASC, created_at ASC,
         // id ASC. Returning the full cross-workspace list lets the outer waterfall
@@ -837,6 +944,8 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/needle-test-root"),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         }
     }
 
@@ -851,6 +960,8 @@ mod tests {
             workspace_root: root,
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         }
     }
 
@@ -945,6 +1056,141 @@ mod tests {
         }
     }
 
+    /// Store factory used to verify Explore's scan cadence without sleeping.
+    struct AdaptiveScanFactory {
+        ready_calls: Arc<std::sync::atomic::AtomicU32>,
+        candidate_on_ready_call: u32,
+    }
+
+    struct AdaptiveScanStore {
+        ready_calls: Arc<std::sync::atomic::AtomicU32>,
+        candidate_on_ready_call: u32,
+        workspace: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for AdaptiveScanFactory {
+        async fn create_store(
+            &self,
+            workspace: &Path,
+        ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            Ok(Arc::new(AdaptiveScanStore {
+                ready_calls: self.ready_calls.clone(),
+                candidate_on_ready_call: self.candidate_on_ready_call,
+                workspace: workspace.to_path_buf(),
+            }))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for AdaptiveScanStore {
+        fn has_valid_store(&self) -> bool {
+            true
+        }
+
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(vec![])
+        }
+
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            let call = self
+                .ready_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            if call == self.candidate_on_ready_call {
+                Ok(vec![Bead {
+                    id: BeadId::from("adaptive-candidate".to_string()),
+                    title: "Adaptive candidate".to_string(),
+                    body: None,
+                    priority: 1,
+                    status: BeadStatus::Open,
+                    assignee: None,
+                    labels: vec![],
+                    workspace: self.workspace.clone(),
+                    dependencies: vec![],
+                    dependents: vec![],
+                    comments: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }])
+            } else {
+                Ok(vec![])
+            }
+        }
+
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("not implemented")
+        }
+
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
+
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+    }
+
     use super::super::Strand;
 
     // ── Tests ────────────────────────────────────────────────────────────────
@@ -975,6 +1221,107 @@ mod tests {
         let store = DummyStore;
         let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
+    }
+
+    #[test]
+    fn adaptive_scan_backoff_doubles_to_ceiling_and_resets() {
+        let mut backoff = ExploreScanBackoff::new(1, 8);
+        let mut observed_intervals = Vec::new();
+
+        for _ in 0..5 {
+            assert!(backoff.should_scan());
+            observed_intervals.push(backoff.effective_interval_cycles());
+            backoff.record_scan(false);
+
+            let next_interval = backoff.effective_interval_cycles();
+            for _ in 1..next_interval {
+                assert!(!backoff.should_scan());
+            }
+        }
+
+        assert_eq!(observed_intervals, vec![1, 2, 4, 8, 8]);
+
+        backoff.record_scan(true);
+        assert_eq!(backoff.effective_interval_cycles(), 1);
+        assert!(backoff.should_scan());
+    }
+
+    /// Pin CPU-relevant behavior by counting actual remote-store queries. The
+    /// test never waits on wall-clock time: skipped selection cycles must not
+    /// create stores or call `ready()`.
+    #[tokio::test]
+    async fn adaptive_scan_backoff_reduces_scan_calls_and_resets_on_candidate() {
+        let temp_root = tempfile::tempdir().unwrap();
+        let workspace = temp_root.path().join("remote");
+        fs::create_dir(&workspace).unwrap();
+        fs::create_dir(workspace.join(".beads")).unwrap();
+
+        let ready_calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let factory = Arc::new(AdaptiveScanFactory {
+            ready_calls: ready_calls.clone(),
+            candidate_on_ready_call: 5,
+        });
+
+        let registry_dir = tempfile::tempdir().unwrap();
+        let config = make_explore_config(true, vec![workspace.clone()]);
+        let mut strand = ExploreStrand::new(
+            config,
+            PathBuf::from("/home/test"),
+            crate::registry::Registry::new(registry_dir.path()),
+            Telemetry::new("adaptive-backoff-test".to_string()),
+            "adaptive-backoff-test".to_string(),
+        );
+        strand.store_factory = factory;
+
+        let store = DummyStore;
+        let mut evaluate_calls = 0;
+        while ready_calls.load(std::sync::atomic::Ordering::SeqCst) < 4 {
+            assert!(matches!(
+                strand.evaluate(&store, &HashSet::new()).await,
+                StrandResult::NoWork
+            ));
+            evaluate_calls += 1;
+        }
+
+        // Empty scans happen on selection cycles 1, 3, 7, and 15: intervals
+        // 1, 2, 4, and 8. The capped interval prevents further scan growth.
+        assert_eq!(ready_calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+        assert_eq!(evaluate_calls, 15);
+
+        let mut candidate_found = false;
+        while ready_calls.load(std::sync::atomic::Ordering::SeqCst) < 5 {
+            candidate_found = matches!(
+                strand.evaluate(&store, &HashSet::new()).await,
+                StrandResult::BeadFound(_)
+            );
+            evaluate_calls += 1;
+        }
+        assert!(candidate_found);
+        assert_eq!(evaluate_calls, 23);
+        assert_eq!(ready_calls.load(std::sync::atomic::Ordering::SeqCst), 5);
+
+        // A candidate resets the cadence immediately: the next Explore call
+        // scans rather than honoring the previous eight-cycle interval.
+        assert!(matches!(
+            strand.evaluate(&store, &HashSet::new()).await,
+            StrandResult::NoWork
+        ));
+        assert_eq!(
+            ready_calls.load(std::sync::atomic::Ordering::SeqCst),
+            6,
+            "the first post-candidate call must perform a scan"
+        );
+
+        // The empty scan after the reset starts a fresh two-cycle interval.
+        assert!(matches!(
+            strand.evaluate(&store, &HashSet::new()).await,
+            StrandResult::NoWork
+        ));
+        assert_eq!(
+            ready_calls.load(std::sync::atomic::Ordering::SeqCst),
+            6,
+            "the fresh backoff should skip the immediately following cycle"
+        );
     }
 
     #[tokio::test]
@@ -2707,6 +3054,8 @@ mod tests {
             workspace_root: root.path().to_path_buf(),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         };
 
         let home = PathBuf::from("/home/test");
@@ -2786,6 +3135,8 @@ mod tests {
             workspace_root: root.path().to_path_buf(),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         };
 
         let home = PathBuf::from("/home/test");
@@ -2888,6 +3239,8 @@ mod tests {
             workspace_root: root.path().to_path_buf(),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         };
 
         let home = PathBuf::from("/home/test");
@@ -2949,6 +3302,8 @@ mod tests {
             workspace_root: nonexistent_root,
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3004,6 +3359,8 @@ mod tests {
             workspace_root: root.path().to_path_buf(),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3062,6 +3419,8 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/irrelevant"),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 15,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3098,6 +3457,8 @@ mod tests {
             workspace_root: root.path().to_path_buf(),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3146,6 +3507,8 @@ mod tests {
             workspace_root: root.path().to_path_buf(),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3220,6 +3583,8 @@ mod tests {
             workspace_root: root.path().to_path_buf(),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3284,6 +3649,8 @@ mod tests {
             workspace_root: root.path().to_path_buf(),
             rediscovery_cycles: 2, // Re-discover every 2 cycles
             starvation_threshold_minutes: 15,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 1,
         };
 
         let home = PathBuf::from("/some/other/home");
@@ -3367,6 +3734,8 @@ mod tests {
             workspace_root: root.path().to_path_buf(),
             rediscovery_cycles: 2, // Should be ignored in pinned mode
             starvation_threshold_minutes: 15,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 1,
         };
 
         let home = PathBuf::from("/some/other/home");
@@ -3435,6 +3804,8 @@ mod tests {
             workspace_root: root.path().to_path_buf(),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 15,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 1,
         };
 
         let home = PathBuf::from("/some/other/home");

@@ -172,6 +172,12 @@ strands:
     # Root for auto-discovery (default: $HOME)
     workspace_root: ~/dev
 
+    # Minimum cycles between scans; empty scans back off geometrically (default: 1)
+    scan_interval_cycles: 1
+
+    # Maximum cycles between scans after backoff (default: 8)
+    max_scan_interval_cycles: 8
+
     # Re-scan for new workspaces every N cycles (default: 60)
     rediscovery_cycles: 60
 
@@ -404,6 +410,8 @@ strands:
     enabled: true
     workspaces: []
     workspace_root: ~/dev
+    scan_interval_cycles: 1
+    max_scan_interval_cycles: 8
     rediscovery_cycles: 60
     starvation_threshold_minutes: 15
   mitosis:

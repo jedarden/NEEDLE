@@ -2251,6 +2251,8 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
         workspace_root: temp_dir.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
+        scan_interval_cycles: 1,
+        max_scan_interval_cycles: 8,
     };
 
     let explore = ExploreStrand::new(
@@ -2391,6 +2393,8 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
         workspace_root: explore_temp_dir.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
+        scan_interval_cycles: 1,
+        max_scan_interval_cycles: 8,
     };
 
     let explore = ExploreStrand::new(
@@ -2498,6 +2502,8 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
         workspace_root: explore_temp_dir.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
+        scan_interval_cycles: 1,
+        max_scan_interval_cycles: 8,
     };
 
     let explore = ExploreStrand::new(

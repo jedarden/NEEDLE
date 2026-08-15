@@ -413,6 +413,8 @@ async fn real_br_explore_discovers_remote_workspace() {
         workspace_root: PathBuf::from("/tmp"),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
+        scan_interval_cycles: 1,
+        max_scan_interval_cycles: 8,
     };
 
     let explore = ExploreStrand::new(
@@ -453,6 +455,8 @@ async fn real_br_explore_skips_home_workspace() {
         workspace_root: PathBuf::from("/tmp"),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
+        scan_interval_cycles: 1,
+        max_scan_interval_cycles: 8,
     };
 
     let reg_dir = tempfile::tempdir().unwrap();
@@ -490,6 +494,8 @@ async fn real_br_explore_disabled_returns_no_work() {
         workspace_root: PathBuf::from("/tmp"),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
+        scan_interval_cycles: 1,
+        max_scan_interval_cycles: 8,
     };
 
     let explore = ExploreStrand::new(

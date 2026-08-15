@@ -1281,6 +1281,18 @@ pub struct ExploreConfig {
     /// beads without making progress.
     #[serde(default = "ExploreConfig::default_starvation_threshold_minutes")]
     pub starvation_threshold_minutes: u64,
+
+    /// Minimum number of selection cycles between Explore scans.
+    ///
+    /// A value of 1 preserves the current behavior before adaptive backoff is
+    /// applied. Empty scans increase the effective interval geometrically.
+    #[serde(default = "ExploreConfig::default_scan_interval_cycles")]
+    pub scan_interval_cycles: u32,
+
+    /// Maximum number of selection cycles between Explore scans after adaptive
+    /// backoff. The effective interval never exceeds this value.
+    #[serde(default = "ExploreConfig::default_max_scan_interval_cycles")]
+    pub max_scan_interval_cycles: u32,
 }
 
 impl Default for ExploreConfig {
@@ -1291,6 +1303,8 @@ impl Default for ExploreConfig {
             workspace_root: Self::default_workspace_root(),
             rediscovery_cycles: Self::default_rediscovery_cycles(),
             starvation_threshold_minutes: Self::default_starvation_threshold_minutes(),
+            scan_interval_cycles: Self::default_scan_interval_cycles(),
+            max_scan_interval_cycles: Self::default_max_scan_interval_cycles(),
         }
     }
 }
@@ -1310,6 +1324,14 @@ impl ExploreConfig {
 
     fn default_rediscovery_cycles() -> u32 {
         60
+    }
+
+    fn default_scan_interval_cycles() -> u32 {
+        1
+    }
+
+    fn default_max_scan_interval_cycles() -> u32 {
+        8
     }
 }
 
@@ -5124,6 +5146,8 @@ strands:
         let config = ExploreConfig::default();
         assert!(config.enabled);
         assert!(config.workspaces.is_empty());
+        assert_eq!(config.scan_interval_cycles, 1);
+        assert_eq!(config.max_scan_interval_cycles, 8);
     }
 
     #[test]
