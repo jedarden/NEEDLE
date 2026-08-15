@@ -1012,54 +1012,36 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn check_heartbeat_file_exists(path: &Path) -> Result<bool> {
-    // Use try_exists() instead of exists() to properly handle permission errors.
-    // exists() returns false for both "not found" and "permission denied", which
-    // can hide actual errors. try_exists() distinguishes between these cases.
-    match path.try_exists() {
-        Ok(exists) => {
-            // File exists - verify it's actually a file, not a directory
-            if exists {
-                match std::fs::metadata(path) {
-                    Ok(metadata) => {
-                        if metadata.is_file() {
-                            Ok(true)
-                        } else {
-                            // Path exists but is a directory, not a file
-                            tracing::debug!(
-                                path = %path.display(),
-                                "heartbeat path exists but is a directory, not a file"
-                            );
-                            Ok(false)
-                        }
-                    }
-                    Err(e) => {
-                        // Metadata check failed - return error with context
-                        Err(e).with_context(|| {
-                            format!(
-                                "failed to read metadata for heartbeat file: {}",
-                                path.display()
-                            )
-                        })
-                    }
-                }
+    // Inspect the directory entry first so a broken symlink remains
+    // distinguishable from a genuinely absent heartbeat file. `try_exists()`
+    // follows symlinks and reports both cases as `Ok(false)`.
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(path = %path.display(), "heartbeat file does not exist");
+            Ok(false)
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to check heartbeat file existence: {}",
+                path.display()
+            )
+        }),
+        Ok(_) => {
+            let metadata = std::fs::metadata(path).with_context(|| {
+                format!(
+                    "failed to read metadata for heartbeat file: {}",
+                    path.display()
+                )
+            })?;
+            if metadata.is_file() {
+                Ok(true)
             } else {
-                // File does not exist
                 tracing::debug!(
                     path = %path.display(),
-                    "heartbeat file does not exist"
+                    "heartbeat path exists but is a directory, not a file"
                 );
                 Ok(false)
             }
-        }
-        Err(e) => {
-            // try_exists() failed - this is typically a permission error
-            // Return the error with context for upstream handling
-            Err(e).with_context(|| {
-                format!(
-                    "failed to check heartbeat file existence: {}",
-                    path.display()
-                )
-            })
         }
     }
 }
