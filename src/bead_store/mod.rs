@@ -29,6 +29,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 
 use crate::types::{Bead, BeadId, ClaimResult};
+use tracing::{debug, warn};
 
 // Re-export the implementations so consumers don't need to change their imports
 pub use backend::{
@@ -376,9 +377,30 @@ where
     let mut last_err = None;
     for attempt in 0..max_attempts {
         match spawn_fn().await {
-            Ok(output) => return Ok(output),
+            Ok(output) => {
+                if attempt > 0 {
+                    debug!(
+                        attempt = attempt + 1,
+                        max_attempts = max_attempts,
+                        function = "spawn_with_etxtbsy_retry",
+                        "ETXTBSY retry succeeded after {} attempts",
+                        attempt + 1
+                    );
+                }
+                return Ok(output);
+            }
             Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < max_attempts => {
                 last_err = Some(e);
+                warn!(
+                    attempt = attempt + 1,
+                    max_attempts = max_attempts,
+                    backoff_ms = backoff_ms,
+                    function = "spawn_with_etxtbsy_retry",
+                    "ETXTBSY error detected (attempt {}/{}), retrying in {}ms",
+                    attempt + 1,
+                    max_attempts,
+                    backoff_ms
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             }
             Err(e) => return Err(e),
@@ -496,7 +518,18 @@ where
 
     for attempt in 0..max_attempts {
         match spawn_fn().await {
-            Ok(output) => return Ok(output),
+            Ok(output) => {
+                if attempt > 0 {
+                    debug!(
+                        attempt = attempt + 1,
+                        max_attempts = max_attempts,
+                        function = "spawn_with_etxtbsy_retry_exponential",
+                        "ETXTBSY exponential retry succeeded after {} attempts",
+                        attempt + 1
+                    );
+                }
+                return Ok(output);
+            }
             Err(e) if e.raw_os_error() == Some(ETXTBSY_ERRNO) && attempt + 1 < max_attempts => {
                 last_err = Some(e);
 
@@ -510,6 +543,16 @@ where
                     .saturating_add(jitter)
                     .saturating_sub(jitter_range);
 
+                warn!(
+                    attempt = attempt + 1,
+                    max_attempts = max_attempts,
+                    delay_ms = delay,
+                    function = "spawn_with_etxtbsy_retry_exponential",
+                    "ETXTBSY error detected (attempt {}/{}), retrying in ~{}ms (exponential backoff with jitter)",
+                    attempt + 1,
+                    max_attempts,
+                    delay
+                );
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }
             Err(e) => return Err(e),
@@ -576,9 +619,30 @@ where
     let mut last_err = None;
     for attempt in 0..max_attempts {
         match spawn_fn() {
-            Ok(output) => return Ok(output),
+            Ok(output) => {
+                if attempt > 0 {
+                    debug!(
+                        attempt = attempt + 1,
+                        max_attempts = max_attempts,
+                        function = "spawn_with_etxtbsy_retry_sync",
+                        "ETXTBSY sync retry succeeded after {} attempts",
+                        attempt + 1
+                    );
+                }
+                return Ok(output);
+            }
             Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < max_attempts => {
                 last_err = Some(e);
+                warn!(
+                    attempt = attempt + 1,
+                    max_attempts = max_attempts,
+                    backoff_ms = backoff_ms,
+                    function = "spawn_with_etxtbsy_retry_sync",
+                    "ETXTBSY error detected (attempt {}/{}), retrying in {}ms",
+                    attempt + 1,
+                    max_attempts,
+                    backoff_ms
+                );
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
             }
             Err(e) => return Err(e),
@@ -648,7 +712,18 @@ where
 
     for attempt in 0..max_attempts {
         match spawn_fn() {
-            Ok(output) => return Ok(output),
+            Ok(output) => {
+                if attempt > 0 {
+                    debug!(
+                        attempt = attempt + 1,
+                        max_attempts = max_attempts,
+                        function = "spawn_with_etxtbsy_retry_sync_exponential",
+                        "ETXTBSY sync exponential retry succeeded after {} attempts",
+                        attempt + 1
+                    );
+                }
+                return Ok(output);
+            }
             Err(e) if e.raw_os_error() == Some(ETXTBSY_ERRNO) && attempt + 1 < max_attempts => {
                 last_err = Some(e);
 
@@ -662,6 +737,16 @@ where
                     .saturating_add(jitter)
                     .saturating_sub(jitter_range);
 
+                warn!(
+                    attempt = attempt + 1,
+                    max_attempts = max_attempts,
+                    delay_ms = delay,
+                    function = "spawn_with_etxtbsy_retry_sync_exponential",
+                    "ETXTBSY error detected (attempt {}/{}), retrying in ~{}ms (exponential backoff with jitter)",
+                    attempt + 1,
+                    max_attempts,
+                    delay
+                );
                 std::thread::sleep(std::time::Duration::from_millis(delay));
             }
             Err(e) => return Err(e),
@@ -2211,5 +2296,548 @@ echo "bf 0.2.0-github"
         assert_eq!(call_count.load(Ordering::SeqCst), 3);
         // With zero base backoff, should complete very quickly
         assert!(elapsed < Duration::from_millis(50));
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_exponential_jitter_randomization() {
+        // This test verifies that jitter actually randomizes delays.
+        // We run the same retry scenario multiple times and verify that
+        // delays vary between runs (not always identical).
+        const BASE_MS: u64 = 20;
+        const NUM_RUNS: usize = 10;
+
+        let mut elapsed_times = Vec::with_capacity(NUM_RUNS);
+
+        for _ in 0..NUM_RUNS {
+            let call_count = Arc::new(AtomicU32::new(0));
+            let call_count_clone = Arc::clone(&call_count);
+
+            let start = Instant::now();
+
+            let result = spawn_with_etxtbsy_retry_exponential(
+                || {
+                    let count = Arc::clone(&call_count_clone);
+                    async move {
+                        let attempt = count.fetch_add(1, Ordering::SeqCst);
+                        if attempt < 2 {
+                            // Fail first 2 attempts with ETXTBSY to trigger 2 retry delays
+                            Err::<_, io::Error>(make_etxtbsy_error())
+                        } else {
+                            Ok::<_, io::Error>(b"success".to_vec())
+                        }
+                    }
+                },
+                10,
+                BASE_MS,
+            )
+            .await;
+
+            let elapsed = start.elapsed();
+            elapsed_times.push(elapsed);
+
+            assert!(result.is_ok());
+            assert_eq!(call_count.load(Ordering::SeqCst), 3); // 2 failures + 1 success
+        }
+
+        // Verify that not all elapsed times are identical (jitter is working)
+        // With ±25% jitter on exponential backoff, times should vary
+        let unique_times: std::collections::HashSet<_> = elapsed_times
+            .iter()
+            .map(|d| d.as_millis())
+            .collect();
+
+        // We expect at least some variation across 10 runs
+        // If jitter wasn't working, all times would be identical
+        assert!(
+            unique_times.len() > 1,
+            "Expected jitter to create varying delays, but got {} unique times out of {} runs: {:?}",
+            unique_times.len(),
+            NUM_RUNS,
+            elapsed_times
+        );
+
+        // Verify that times stay within reasonable bounds
+        // Expected: 20ms + 40ms = ~60ms with jitter (15-75ms range)
+        for elapsed in &elapsed_times {
+            assert!(
+                *elapsed >= Duration::from_millis(10),
+                "Elapsed time {} too short (expected >=10ms with jitter)",
+                elapsed.as_millis()
+            );
+            assert!(
+                *elapsed < Duration::from_millis(150),
+                "Elapsed time {} too long (expected <150ms with jitter)",
+                elapsed.as_millis()
+            );
+        }
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_jitter_randomization() {
+        // Sync version of the jitter randomization test
+        const BASE_MS: u64 = 20;
+        const NUM_RUNS: usize = 10;
+
+        let mut elapsed_times = Vec::with_capacity(NUM_RUNS);
+
+        for _ in 0..NUM_RUNS {
+            let call_count = Arc::new(AtomicU32::new(0));
+            let call_count_clone = Arc::clone(&call_count);
+
+            let start = Instant::now();
+
+            let result = spawn_with_etxtbsy_retry_sync_exponential(
+                || {
+                    let count = Arc::clone(&call_count_clone);
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 2 {
+                        Err::<_, io::Error>(make_etxtbsy_error())
+                    } else {
+                        Ok::<_, io::Error>(b"success".to_vec())
+                    }
+                },
+                10,
+                BASE_MS,
+            );
+
+            let elapsed = start.elapsed();
+            elapsed_times.push(elapsed);
+
+            assert!(result.is_ok());
+            assert_eq!(call_count.load(Ordering::SeqCst), 3);
+        }
+
+        // Verify jitter creates variation
+        let unique_times: std::collections::HashSet<_> = elapsed_times
+            .iter()
+            .map(|d| d.as_millis())
+            .collect();
+
+        assert!(
+            unique_times.len() > 1,
+            "Expected jitter to create varying delays in sync version, but got {} unique times out of {} runs: {:?}",
+            unique_times.len(),
+            NUM_RUNS,
+            elapsed_times
+        );
+
+        // Verify times stay within reasonable bounds
+        for elapsed in &elapsed_times {
+            assert!(
+                *elapsed >= Duration::from_millis(10),
+                "Elapsed time {} too short (expected >=10ms with jitter)",
+                elapsed.as_millis()
+            );
+            assert!(
+                *elapsed < Duration::from_millis(150),
+                "Elapsed time {} too long (expected <150ms with jitter)",
+                elapsed.as_millis()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_exponential_backoff_sequence() {
+        // Verify that exponential backoff actually grows exponentially.
+        // With 5 retries, delays should be: ~20ms, ~40ms, ~80ms, ~160ms, ~320ms
+        const BASE_MS: u64 = 20;
+        const MAX_ATTEMPTS: u32 = 6; // 1 initial + 5 retries
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    // Always fail to trigger all retry delays
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                }
+            },
+            MAX_ATTEMPTS,
+            BASE_MS,
+        )
+        .await;
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert_eq!(call_count.load(Ordering::SeqCst), MAX_ATTEMPTS);
+
+        // With 5 retries at exponential backoff: 20 + 40 + 80 + 160 + 320 = ~620ms
+        // With ±25% jitter, this could range from ~465ms to ~775ms
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "Exponential backoff took {}ms, expected >=400ms (5 retries at exponential backoff)",
+            elapsed.as_millis()
+        );
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "Exponential backoff took {}ms, expected <1000ms (with jitter)",
+            elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_backoff_sequence() {
+        // Sync version of exponential backoff sequence test
+        const BASE_MS: u64 = 20;
+        const MAX_ATTEMPTS: u32 = 6;
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        let result: std::io::Result<Vec<u8>> = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                count.fetch_add(1, Ordering::SeqCst);
+                Err::<_, io::Error>(make_etxtbsy_error())
+            },
+            MAX_ATTEMPTS,
+            BASE_MS,
+        );
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err());
+        assert_eq!(call_count.load(Ordering::SeqCst), MAX_ATTEMPTS);
+
+        // Same bounds as async version
+        assert!(
+            elapsed >= Duration::from_millis(400),
+            "Sync exponential backoff took {}ms, expected >=400ms",
+            elapsed.as_millis()
+        );
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "Sync exponential backoff took {}ms, expected <1000ms",
+            elapsed.as_millis()
+        );
+    }
+
+    #[tokio::test]
+    async fn etxtbsy_retry_linear_consistent_timing() {
+        // Verify that linear backoff produces consistent timing (no jitter).
+        // Multiple runs should produce similar elapsed times.
+        const BACKOFF_MS: u64 = 30;
+        const NUM_RUNS: usize = 5;
+
+        let mut elapsed_times = Vec::with_capacity(NUM_RUNS);
+
+        for _ in 0..NUM_RUNS {
+            let call_count = Arc::new(AtomicU32::new(0));
+            let call_count_clone = Arc::clone(&call_count);
+
+            let start = Instant::now();
+
+            let result = spawn_with_etxtbsy_retry(
+                || {
+                    let count = Arc::clone(&call_count_clone);
+                    async move {
+                        let attempt = count.fetch_add(1, Ordering::SeqCst);
+                        if attempt < 2 {
+                            Err::<_, io::Error>(make_etxtbsy_error())
+                        } else {
+                            Ok::<_, io::Error>(b"success".to_vec())
+                        }
+                    }
+                },
+                5,
+                BACKOFF_MS,
+            )
+            .await;
+
+            let elapsed = start.elapsed();
+            elapsed_times.push(elapsed);
+
+            assert!(result.is_ok());
+            assert_eq!(call_count.load(Ordering::SeqCst), 3);
+        }
+
+        // With 2 retries at 30ms each, should be ~60ms every time (linear, no jitter)
+        for elapsed in &elapsed_times {
+            assert!(
+                *elapsed >= Duration::from_millis(50),
+                "Linear backoff took {}ms, expected >=50ms (2 retries at 30ms each)",
+                elapsed.as_millis()
+            );
+            assert!(
+                *elapsed < Duration::from_millis(100),
+                "Linear backoff took {}ms, expected <100ms",
+                elapsed.as_millis()
+            );
+        }
+    }
+
+    // ─── Retry timing and jitter tests ─────────────────────────────────────────────
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_backoff_increases_exponentially() {
+        // Test that exponential backoff timing actually increases exponentially
+        // With base_ms=10: 10ms, 20ms, 40ms, 80ms, 160ms...
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        let result = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+
+                if attempt < 4 {
+                    // Fail first 4 attempts to measure backoff progression
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                } else {
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            10,
+            10, // Small base_ms for faster test
+        );
+
+        let total_elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 5); // 4 failures + 1 success
+
+        // Expected exponential backoff with ±25% jitter:
+        // Attempt 0: 10ms ± 2.5ms (7.5-12.5ms)
+        // Attempt 1: 20ms ± 5ms (15-25ms)
+        // Attempt 2: 40ms ± 10ms (30-50ms)
+        // Attempt 3: 80ms ± 20ms (60-100ms)
+        // Total expected: 112.5-182.5ms
+
+        // Verify total time is within expected range with jitter
+        assert!(
+            total_elapsed >= Duration::from_millis(100),
+            "Total elapsed {}ms should be >= 100ms (lower bound of exponential backoff)",
+            total_elapsed.as_millis()
+        );
+        assert!(
+            total_elapsed < Duration::from_millis(200),
+            "Total elapsed {}ms should be < 200ms (upper bound with jitter)",
+            total_elapsed.as_millis()
+        );
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_jitter_randomization_is_applied() {
+        // Test that jitter actually randomizes the delay times
+        // Run the same retry pattern multiple times and verify delays vary
+        let mut elapsed_times = Vec::new();
+
+        for _ in 0..10 {
+            let call_count = Arc::new(AtomicU32::new(0));
+            let call_count_clone = Arc::clone(&call_count);
+
+            let start = Instant::now();
+
+            let result = spawn_with_etxtbsy_retry_sync_exponential(
+                || {
+                    let count = Arc::clone(&call_count_clone);
+                    let attempt = count.fetch_add(1, Ordering::SeqCst);
+                    if attempt < 2 {
+                        Err::<_, io::Error>(make_etxtbsy_error())
+                    } else {
+                        Ok::<_, io::Error>(b"success".to_vec())
+                    }
+                },
+                5,
+                20, // base_ms=20: attempts 0,1 should be 20ms ± 5ms, 40ms ± 10ms
+            );
+
+            assert!(result.is_ok());
+            elapsed_times.push(start.elapsed());
+        }
+
+        // With jitter, the 10 runs should have varying elapsed times
+        // If all times are identical, jitter is not working
+        let unique_times: std::collections::HashSet<_> = elapsed_times
+            .iter()
+            .map(|d| d.as_millis())
+            .collect();
+
+        assert!(
+            unique_times.len() > 1,
+            "Jitter should produce varying delay times, but got {} identical results out of 10 runs",
+            unique_times.len()
+        );
+
+        // Verify all times are within expected bounds (60-100ms for 2 retries with jitter)
+        for elapsed in &elapsed_times {
+            assert!(
+                *elapsed >= Duration::from_millis(50),
+                "Jitter delay {}ms should be >= 50ms (lower bound with 2 retries)",
+                elapsed.as_millis()
+            );
+            assert!(
+                *elapsed < Duration::from_millis(120),
+                "Jitter delay {}ms should be < 120ms (upper bound with 2 retries)",
+                elapsed.as_millis()
+            );
+        }
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_timing_bounds_with_jitter() {
+        // Test that timing stays within expected bounds with jitter
+        // Jitter is ±25% of the exponential delay
+        const JITTER_PERCENT: f64 = 0.25;
+        const BASE_MS: u64 = 20;
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        // Fail 3 times then succeed
+        let result = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 3 {
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                } else {
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            10,
+            BASE_MS,
+        );
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 4); // 3 failures + 1 success
+
+        // Calculate expected bounds:
+        // Attempt 0: 20ms * 2^0 = 20ms ± 5ms (15-25ms)
+        // Attempt 1: 20ms * 2^1 = 40ms ± 10ms (30-50ms)
+        // Attempt 2: 20ms * 2^2 = 80ms ± 20ms (60-100ms)
+
+        // Minimum total: (15 + 30 + 60) = 105ms
+        let min_expected = ((BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4) as f64 * (1.0 - JITTER_PERCENT)) as u64;
+
+        // Maximum total: (25 + 50 + 100) = 175ms
+        let max_expected = ((BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4) as f64 * (1.0 + JITTER_PERCENT)) as u64;
+
+        assert!(
+            elapsed >= Duration::from_millis(min_expected),
+            "Elapsed {}ms should be >= {}ms (minimum with jitter)",
+            elapsed.as_millis(),
+            min_expected
+        );
+        assert!(
+            elapsed < Duration::from_millis(max_expected + 20), // +20ms for execution overhead
+            "Elapsed {}ms should be < {}ms (maximum with jitter + overhead)",
+            elapsed.as_millis(),
+            max_expected + 20
+        );
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_single_retry_timing() {
+        // Test timing with just one retry (2 attempts total)
+        const BASE_MS: u64 = 50;
+        const JITTER_PERCENT: f64 = 0.25;
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        let result = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 1 {
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                } else {
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            5,
+            BASE_MS,
+        );
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 2); // 1 failure + 1 success
+
+        // Single retry: 50ms ± 12.5ms (37.5-62.5ms)
+        let min_expected = (BASE_MS as f64 * (1.0 - JITTER_PERCENT)) as u64;
+        let max_expected = (BASE_MS as f64 * (1.0 + JITTER_PERCENT)) as u64;
+
+        assert!(
+            elapsed >= Duration::from_millis(min_expected),
+            "Single retry elapsed {}ms should be >= {}ms",
+            elapsed.as_millis(),
+            min_expected
+        );
+        assert!(
+            elapsed < Duration::from_millis(max_expected + 10),
+            "Single retry elapsed {}ms should be < {}ms",
+            elapsed.as_millis(),
+            max_expected + 10
+        );
+    }
+
+    #[test]
+    fn etxtbsy_retry_sync_exponential_many_retries_timing() {
+        // Test timing with many retries to verify exponential scaling
+        const BASE_MS: u64 = 10;
+        const JITTER_PERCENT: f64 = 0.25;
+
+        let call_count = Arc::new(AtomicU32::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let start = Instant::now();
+
+        // Fail 6 times then succeed (7 attempts total)
+        let result = spawn_with_etxtbsy_retry_sync_exponential(
+            || {
+                let count = Arc::clone(&call_count_clone);
+                let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if attempt < 6 {
+                    Err::<_, io::Error>(make_etxtbsy_error())
+                } else {
+                    Ok::<_, io::Error>(b"success".to_vec())
+                }
+            },
+            10,
+            BASE_MS,
+        );
+
+        let elapsed = start.elapsed();
+
+        assert!(result.is_ok());
+        assert_eq!(call_count.load(Ordering::SeqCst), 7); // 6 failures + 1 success
+
+        // Calculate expected delays:
+        // 10ms, 20ms, 40ms, 80ms, 160ms, 320ms
+        // Sum: 630ms ± 157.5ms (472.5-787.5ms)
+        let base_sum = BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4 + BASE_MS * 8 + BASE_MS * 16 + BASE_MS * 32;
+        let min_expected = (base_sum as f64 * (1.0 - JITTER_PERCENT)) as u64;
+        let max_expected = (base_sum as f64 * (1.0 + JITTER_PERCENT)) as u64;
+
+        assert!(
+            elapsed >= Duration::from_millis(min_expected),
+            "Many retries elapsed {}ms should be >= {}ms",
+            elapsed.as_millis(),
+            min_expected
+        );
+        assert!(
+            elapsed < Duration::from_millis(max_expected + 50),
+            "Many retries elapsed {}ms should be < {}ms",
+            elapsed.as_millis(),
+            max_expected + 50
+        );
     }
 }
