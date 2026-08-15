@@ -2,6 +2,70 @@
 //!
 //! Depends on: nothing (leaf module — only `libc`).
 
+use tokio::process::Child;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ProcessGuard
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Guard for a spawned child process that ensures cleanup on drop.
+///
+/// Wraps a `tokio::process::Child` and provides a `wait()` method. If dropped
+/// before `wait()` is called, the child process is killed to prevent orphaning.
+pub struct ProcessGuard {
+    child: Option<Child>,
+    pid: u32,
+}
+
+impl ProcessGuard {
+    /// Create a new ProcessGuard from a spawned Child.
+    ///
+    /// # Arguments
+    /// * `child` - The spawned child process to guard
+    pub fn new(child: Child) -> Self {
+        let pid = child.id().unwrap_or(0);
+        Self {
+            child: Some(child),
+            pid,
+        }
+    }
+
+    /// Get the process ID.
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
+    /// Wait for the child to exit and return its exit status.
+    ///
+    /// This consumes the guard and returns the exit status. After calling this,
+    /// the child is considered reaped and no cleanup will be performed on drop.
+    pub async fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
+        if let Some(mut child) = self.child.take() {
+            child.wait().await
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "child already reaped",
+            ))
+        }
+    }
+
+    /// Get a mutable reference to the inner child (for operations like start_kill).
+    pub fn get_mut(&mut self) -> Option<&mut Child> {
+        self.child.as_mut()
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            // Child was not waited on - kill it to prevent orphaning.
+            // Best-effort: ignore errors if already dead.
+            let _ = child.start_kill();
+        }
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // ProcessGroupKillGuard
 // ──────────────────────────────────────────────────────────────────────────────

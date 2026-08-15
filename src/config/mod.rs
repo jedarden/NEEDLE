@@ -2337,6 +2337,25 @@ pub struct SupervisorConfig {
     /// When `None`, no socket-based communication is available.
     #[serde(default)]
     pub socket_path: Option<PathBuf>,
+
+    /// Whether to automatically check for GitHub releases and download to :testing channel.
+    ///
+    /// When enabled, the supervisor periodically checks GitHub for newer releases
+    /// and downloads them to `~/.needle/bin/needle-testing`. Workers with auto-promote
+    /// enabled will then run canary validation and promote to :stable if tests pass.
+    ///
+    /// Default: false (opt-in for production fleets).
+    #[serde(default = "SupervisorConfig::default_auto_upgrade_check")]
+    pub auto_upgrade_check: bool,
+
+    /// Interval (seconds) between automatic update checks.
+    ///
+    /// Only applies when `auto_upgrade_check` is true. The supervisor polls
+    /// GitHub releases at this interval to detect new versions.
+    ///
+    /// Default: 21600 (6 hours).
+    #[serde(default = "SupervisorConfig::default_update_check_interval_secs")]
+    pub update_check_interval_secs: u64,
 }
 
 impl Default for SupervisorConfig {
@@ -2344,6 +2363,8 @@ impl Default for SupervisorConfig {
         SupervisorConfig {
             heartbeat_path: Self::default_heartbeat_path(),
             socket_path: Self::default_socket_path(),
+            auto_upgrade_check: Self::default_auto_upgrade_check(),
+            update_check_interval_secs: Self::default_update_check_interval_secs(),
         }
     }
 }
@@ -2355,6 +2376,14 @@ impl SupervisorConfig {
 
     fn default_socket_path() -> Option<PathBuf> {
         None
+    }
+
+    fn default_auto_upgrade_check() -> bool {
+        false
+    }
+
+    fn default_update_check_interval_secs() -> u64 {
+        21600 // 6 hours
     }
 
     /// Returns the resolved heartbeat path, defaulting to `workspace.home/state/supervisor-heartbeat.json`.
@@ -2387,6 +2416,8 @@ impl SupervisorConfig {
         Ok(SupervisorConfig {
             heartbeat_path,
             socket_path,
+            auto_upgrade_check: Self::default_auto_upgrade_check(),
+            update_check_interval_secs: Self::default_update_check_interval_secs(),
         })
     }
 }
