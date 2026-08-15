@@ -24,6 +24,7 @@ use crate::rate_limit::RateLimiter;
 use crate::registry::{Registry, WorkerEntry};
 use crate::telemetry::{self, EventKind, Telemetry};
 use crate::types::IdleAction;
+use crate::upgrade;
 use crate::worker::Worker;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2687,6 +2688,41 @@ fn cmd_status(
                 println!("  Unregistered workers: {} (WARN)", unregistered.len());
             }
             println!();
+
+            // Check for updates with timeout - best-effort, non-fatal
+            let update_check = std::thread::spawn(|| {
+                std::panic::catch_unwind(|| {
+                    upgrade::check_for_update()
+                        .map_err(|e| {
+                            tracing::debug!("update check failed (non-fatal): {}", e);
+                            e
+                        })
+                        .ok()
+                })
+                    .unwrap_or(None)
+            });
+
+            // Wait with 3s timeout using join_timeout simulation
+            let timeout_duration = Duration::from_secs(3);
+            let start = Instant::now();
+            let update_result = loop {
+                if update_check.is_finished() {
+                    break update_check.join().unwrap_or(None);
+                }
+                if start.elapsed() >= timeout_duration {
+                    tracing::debug!("update check timed out after 3s (non-fatal)");
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            };
+
+            if let Some(check) = update_result {
+                if check.update_available {
+                    println!("  ⚠️  Update available: running {}, latest is {} — run `needle upgrade`",
+                        check.current_version, check.latest_version);
+                    println!();
+                }
+            }
 
             // Show ALL discovered workers (both registered and unregistered)
             if !discovered.is_empty() {
