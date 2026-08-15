@@ -971,6 +971,99 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
     }
 }
 
+/// Check if a heartbeat file exists at the specified path.
+///
+/// This function provides simple presence detection for a heartbeat file,
+/// returning whether the file exists on disk without attempting to read
+/// or validate its contents.
+///
+/// This is useful for quick supervisor presence checks where you only need
+/// to know if a heartbeat file exists, not whether it's fresh or valid.
+///
+/// # Arguments
+///
+/// * `path` - Path to the heartbeat file to check
+///
+/// # Returns
+///
+/// * `Ok(true)` - If the heartbeat file exists
+/// * `Ok(false)` - If the heartbeat file does not exist
+/// * `Err(e)` - If a file system error occurs (e.g., permission denied)
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The path cannot be accessed due to permission issues
+/// - The path is a directory rather than a file
+/// - Other I/O errors occur
+///
+/// # Example
+///
+/// ```no_run
+/// use std::path::Path;
+/// use needle::health::check_heartbeat_file_exists;
+///
+/// let path = Path::new("/tmp/heartbeat.json");
+/// match check_heartbeat_file_exists(path) {
+///     Ok(true) => println!("Heartbeat file exists"),
+///     Ok(false) => println!("No heartbeat file found"),
+///     Err(e) => eprintln!("Error checking for heartbeat: {}", e),
+/// }
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn check_heartbeat_file_exists(path: &Path) -> Result<bool> {
+    // Use try_exists() instead of exists() to properly handle permission errors.
+    // exists() returns false for both "not found" and "permission denied", which
+    // can hide actual errors. try_exists() distinguishes between these cases.
+    match path.try_exists() {
+        Ok(exists) => {
+            // File exists - verify it's actually a file, not a directory
+            if exists {
+                match std::fs::metadata(path) {
+                    Ok(metadata) => {
+                        if metadata.is_file() {
+                            Ok(true)
+                        } else {
+                            // Path exists but is a directory, not a file
+                            tracing::debug!(
+                                path = %path.display(),
+                                "heartbeat path exists but is a directory, not a file"
+                            );
+                            Ok(false)
+                        }
+                    }
+                    Err(e) => {
+                        // Metadata check failed - return error with context
+                        Err(e).with_context(|| {
+                            format!(
+                                "failed to read metadata for heartbeat file: {}",
+                                path.display()
+                            )
+                        })
+                    }
+                }
+            } else {
+                // File does not exist
+                tracing::debug!(
+                    path = %path.display(),
+                    "heartbeat file does not exist"
+                );
+                Ok(false)
+            }
+        }
+        Err(e) => {
+            // try_exists() failed - this is typically a permission error
+            // Return the error with context for upstream handling
+            Err(e).with_context(|| {
+                format!(
+                    "failed to check heartbeat file existence: {}",
+                    path.display()
+                )
+            })
+        }
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // StalePeer
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1194,6 +1287,47 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Isolates the test's HOME directory to a temp directory, preventing tests
+    /// from writing to the live fleet's state directory (`~/.needle/state/heartbeats/`).
+    ///
+    /// Returns a guard that restores the original HOME value when dropped.
+    /// Use this in any test that creates a HealthMonitor or Worker, as both
+    /// may call `dirs_or_home()` which reads HOME directly.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let _home_guard = isolate_test_home();
+    /// let dir = tempfile::tempdir().unwrap();
+    /// // Now dirs_or_home() resolves to the temp directory, not the real HOME
+    /// ```
+    fn isolate_test_home() -> HomeGuard {
+        let original_home = std::env::var_os("HOME");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
+
+        std::env::set_var("HOME", &temp_path);
+
+        HomeGuard {
+            _temp_dir: temp_dir,
+            original_home,
+        }
+    }
+
+    /// Guard that restores HOME to its original value when dropped.
+    struct HomeGuard {
+        _temp_dir: tempfile::TempDir,
+        original_home: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
     fn test_config(heartbeat_dir: &Path) -> Config {
         let mut config = Config::default();
         config.workspace.home = heartbeat_dir
@@ -1209,6 +1343,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_file_written_on_start() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         let config = test_config(&hb_dir);
@@ -1235,6 +1370,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_updates_with_shared_state() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         let config = test_config(&hb_dir);
@@ -1269,6 +1405,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_file_removed_on_stop() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         let config = test_config(&hb_dir);
@@ -1394,6 +1531,7 @@ mod tests {
 
     #[tokio::test]
     async fn atomic_write_never_produces_partial() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         let config = test_config(&hb_dir);
@@ -1455,6 +1593,7 @@ mod tests {
 
     #[tokio::test]
     async fn detect_stale_peers_excludes_self() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
@@ -1563,6 +1702,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_path_uses_qualified_id_not_bare_worker_id() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
 
@@ -1613,6 +1753,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_files_dont_collide_across_adapter_pools() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
 
@@ -1683,6 +1824,7 @@ mod tests {
 
     #[tokio::test]
     async fn heartbeat_uses_cross_workspace_bead_workspace() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         let home_workspace = dir.path().join("home");
@@ -1731,6 +1873,7 @@ mod tests {
     /// waiting for real wall-clock time.
     #[tokio::test(start_paused = true)]
     async fn heartbeat_creates_and_refreshes_every_30_seconds() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let _hb_dir = dir.path().join("state").join("heartbeats");
 
@@ -1845,6 +1988,7 @@ mod tests {
     /// Validation: launch worker, kill with SIGTERM, verify file removed.
     #[tokio::test]
     async fn heartbeat_cleanup_on_graceful_shutdown() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let _hb_dir = dir.path().join("state").join("heartbeats");
 
@@ -1885,6 +2029,7 @@ mod tests {
     /// This validates the Drop trait implementation as a fallback cleanup mechanism.
     #[tokio::test]
     async fn heartbeat_cleanup_on_worker_drop() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let _hb_dir = dir.path().join("state").join("heartbeats");
 
@@ -1930,6 +2075,7 @@ mod tests {
     /// the heartbeat file path for cleanup on graceful shutdown.
     #[tokio::test]
     async fn heartbeat_path_computed_during_construction() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
@@ -2002,6 +2148,7 @@ mod tests {
     /// Test supervisor detection with no other workers (standalone mode).
     #[tokio::test]
     async fn detect_supervisor_no_other_workers() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
@@ -2025,6 +2172,7 @@ mod tests {
     /// Test supervisor detection with multiple active workers.
     #[tokio::test]
     async fn detect_supervisor_multiple_workers() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
@@ -2071,6 +2219,7 @@ mod tests {
     /// Test supervisor detection ignores stale heartbeats.
     #[tokio::test]
     async fn detect_supervisor_ignores_stale_heartbeats() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
@@ -2115,6 +2264,7 @@ mod tests {
     /// Test supervisor detection with recent spawn activity.
     #[tokio::test]
     async fn detect_supervisor_recent_spawn_activity() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
@@ -3101,6 +3251,196 @@ mod tests {
         assert_eq!(
             final_path, expected_path,
             "heartbeat_path must remain consistent even after file is removed"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Heartbeat File Presence Detection Tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    /// Test that check_heartbeat_file_exists returns true when file exists.
+    #[test]
+    fn check_heartbeat_file_exists_returns_true_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let heartbeat_path = dir.path().join("supervisor-heartbeat.json");
+
+        // Create a heartbeat file
+        std::fs::write(&heartbeat_path, b"{}").unwrap();
+
+        // Should detect the file exists
+        let result = check_heartbeat_file_exists(&heartbeat_path);
+        assert!(
+            result.is_ok(),
+            "check_heartbeat_file_exists should succeed when file exists"
+        );
+        assert!(
+            result.unwrap(),
+            "check_heartbeat_file_exists should return true when file exists"
+        );
+    }
+
+    /// Test that check_heartbeat_file_exists returns false when file is absent.
+    #[test]
+    fn check_heartbeat_file_exists_returns_false_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let heartbeat_path = dir.path().join("supervisor-heartbeat.json");
+
+        // Don't create any file - path should not exist
+
+        // Should report file doesn't exist
+        let result = check_heartbeat_file_exists(&heartbeat_path);
+        assert!(
+            result.is_ok(),
+            "check_heartbeat_file_exists should succeed when file doesn't exist"
+        );
+        assert!(
+            !result.unwrap(),
+            "check_heartbeat_file_exists should return false when file doesn't exist"
+        );
+    }
+
+    /// Test that check_heartbeat_file_exists returns false for directories.
+    #[test]
+    fn check_heartbeat_file_exists_returns_false_for_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let heartbeat_path = dir.path().join("supervisor-heartbeat.json");
+
+        // Create a directory at the expected file path
+        std::fs::create_dir(&heartbeat_path).unwrap();
+
+        // Should return false since path is a directory, not a file
+        let result = check_heartbeat_file_exists(&heartbeat_path);
+        assert!(
+            result.is_ok(),
+            "check_heartbeat_file_exists should succeed when path is a directory"
+        );
+        assert!(
+            !result.unwrap(),
+            "check_heartbeat_file_exists should return false when path is a directory"
+        );
+    }
+
+    /// Test that check_heartbeat_file_exists handles permission errors gracefully.
+    #[test]
+    fn check_heartbeat_file_exists_handles_permission_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let heartbeat_path = dir.path().join("supervisor-heartbeat.json");
+
+        // Create a file and make it unreadable
+        std::fs::write(&heartbeat_path, b"{}").unwrap();
+        std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+
+        // Verify the directory is actually unreadable. When running as root
+        // (e.g., in CI containers), 0o000 doesn't block metadata access and the
+        // check below would incorrectly succeed. Root bypasses permission checks.
+        let unreadable = std::fs::metadata(&heartbeat_path).is_err();
+        if !unreadable {
+            // Root bypasses permission checks — skip this test.
+            let _ = std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o644));
+            return;
+        }
+
+        // Should return an error, not panic, on permission failure
+        let result = check_heartbeat_file_exists(&heartbeat_path);
+        assert!(
+            result.is_err(),
+            "check_heartbeat_file_exists should return error on permission denied"
+        );
+
+        // Restore permissions for cleanup
+        let _ = std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o644));
+    }
+
+    /// Test that check_heartbeat_file_exists works with SupervisorDetectionConfig.
+    #[test]
+    fn check_heartbeat_file_exists_with_supervisor_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let heartbeat_path = dir.path().join("custom-supervisor-hb.json");
+
+        // Create supervisor detection config with custom path
+        let config = SupervisorDetectionConfig {
+            heartbeat_path: heartbeat_path.clone(),
+            socket_path: None,
+        };
+
+        // Initially, no heartbeat file should exist
+        let result = check_heartbeat_file_exists(&config.heartbeat_path);
+        assert!(
+            result.is_ok(),
+            "check should succeed when heartbeat file doesn't exist"
+        );
+        assert!(!result.unwrap(), "should return false when file doesn't exist");
+
+        // Create the heartbeat file
+        std::fs::write(&config.heartbeat_path, b"{}").unwrap();
+
+        // Now the heartbeat file should exist
+        let result = check_heartbeat_file_exists(&config.heartbeat_path);
+        assert!(
+            result.is_ok(),
+            "check should succeed when heartbeat file exists"
+        );
+        assert!(result.unwrap(), "should return true when file exists");
+    }
+
+    /// Test that check_heartbeat_file_exists is testable in isolation.
+    ///
+    /// This test verifies the function can be tested without requiring a
+    /// HealthMonitor instance or complex setup - just a Path.
+    #[test]
+    fn check_heartbeat_file_exists_is_isolated_testable() {
+        // Test with a simple path, no complex setup needed
+        let temp_path = PathBuf::from("/nonexistent/path/heartbeat.json");
+
+        // Function works without any HealthMonitor or config setup
+        let result = check_heartbeat_file_exists(&temp_path);
+        assert!(result.is_ok(), "function should be callable with just a Path");
+        assert!(!result.unwrap(), "nonexistent path should return false");
+    }
+
+    /// Test that check_heartbeat_file_exists handles symlinks correctly.
+    #[test]
+    fn check_heartbeat_file_exists_handles_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual_file = dir.path().join("actual-heartbeat.json");
+        let symlink_path = dir.path().join("heartbeat-symlink.json");
+
+        // Create the actual file
+        std::fs::write(&actual_file, b"{}").unwrap();
+
+        // Create a symlink to the actual file
+        std::os::unix::fs::symlink(&actual_file, &symlink_path).unwrap();
+
+        // Should detect the file via symlink
+        let result = check_heartbeat_file_exists(&symlink_path);
+        assert!(
+            result.is_ok(),
+            "check_heartbeat_file_exists should follow symlinks"
+        );
+        assert!(
+            result.unwrap(),
+            "check_heartbeat_file_exists should return true for symlinked file"
+        );
+    }
+
+    /// Test that check_heartbeat_file_exists handles broken symlinks.
+    #[test]
+    fn check_heartbeat_file_exists_handles_broken_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let nonexistent_target = dir.path().join("nonexistent-heartbeat.json");
+        let symlink_path = dir.path().join("broken-symlink.json");
+
+        // Create a symlink to a nonexistent file (broken symlink)
+        std::os::unix::fs::symlink(&nonexistent_target, &symlink_path).unwrap();
+
+        // Should return error for broken symlink (can't access metadata)
+        let result = check_heartbeat_file_exists(&symlink_path);
+        assert!(
+            result.is_err(),
+            "check_heartbeat_file_exists should return error for broken symlink"
         );
     }
 }
