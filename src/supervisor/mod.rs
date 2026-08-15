@@ -10,12 +10,13 @@
 //!
 //! Depends on: `bead_store`, `config`, `registry`, `telemetry`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 
 use crate::bead_store::{discover_default, BeadStore, Filters};
 use crate::config::{CliOverrides, Config, ConfigLoader};
@@ -36,20 +37,25 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 const ERROR_BACKOFF_SECS: u64 = 60;
 
 /// Supervisor configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SupervisorConfig {
     /// Workspace to monitor.
     pub workspace: PathBuf,
     /// Maximum number of concurrent workers.
+    #[serde(default = "SupervisorConfig::default_max_workers")]
     pub max_workers: u32,
     /// Polling interval for ready queue (seconds).
+    #[serde(default = "SupervisorConfig::default_poll_interval_secs")]
     pub poll_interval_secs: u64,
     /// Agent adapter to use for spawned workers.
+    #[serde(default)]
     pub agent: Option<String>,
     /// Agent timeout in seconds.
+    #[serde(default)]
     pub agent_timeout: Option<u64>,
     /// Explicit override for the worker binary path (`worker.worker_binary_path`).
     /// When `None`, the supervisor resolves `std::env::current_exe()`.
+    #[serde(default)]
     pub worker_binary_path: Option<PathBuf>,
 }
 
@@ -57,11 +63,89 @@ impl Default for SupervisorConfig {
     fn default() -> Self {
         SupervisorConfig {
             workspace: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            max_workers: 4,
-            poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+            max_workers: Self::default_max_workers(),
+            poll_interval_secs: Self::default_poll_interval_secs(),
             agent: None,
             agent_timeout: None,
             worker_binary_path: None,
+        }
+    }
+}
+
+impl SupervisorConfig {
+    pub fn default_max_workers() -> u32 {
+        4
+    }
+
+    pub fn default_poll_interval_secs() -> u64 {
+        DEFAULT_POLL_INTERVAL_SECS
+    }
+
+    /// Load supervisor configuration from a file (TOML, YAML, or JSON).
+    ///
+    /// Supported formats: `.toml`, `.yaml`, `.yml`, `.json`
+    ///
+    /// # Arguments
+    /// * `path` - Path to the configuration file
+    ///
+    /// # Returns
+    /// * `Ok(SupervisorConfig)` - Loaded configuration
+    /// * `Err(anyhow::Error)` - If file cannot be read or parsed
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// use std::path::PathBuf;
+    ///
+    /// let config = SupervisorConfig::from_file(PathBuf::from("supervisor-config.yaml"))?;
+    /// ```
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("failed to read supervisor config file: {}", path.display()))?;
+
+        // Determine format from file extension
+        let config = match path.extension().and_then(|e| e.to_str()) {
+            Some("toml") => {
+                let config: SupervisorConfig = toml::from_str(&text)
+                    .with_context(|| format!("invalid TOML in supervisor config file: {}", path.display()))?;
+                config
+            }
+            Some("yaml") | Some("yml") => {
+                let config: SupervisorConfig = serde_yaml::from_str(&text)
+                    .with_context(|| format!("invalid YAML in supervisor config file: {}", path.display()))?;
+                config
+            }
+            Some("json") => {
+                let config: SupervisorConfig = serde_json::from_str(&text)
+                    .with_context(|| format!("invalid JSON in supervisor config file: {}", path.display()))?;
+                config
+            }
+            Some(ext) => bail!("unsupported supervisor config file extension: .{} (supported: .toml, .yaml, .yml, .json)", ext),
+            None => bail!("supervisor config file has no extension (supported: .toml, .yaml, .yml, .json)"),
+        };
+
+        Ok(config)
+    }
+
+    /// Create a supervisor config from a NEEDLE Config structure.
+    ///
+    /// Extracts supervisor-relevant settings from the full NEEDLE config
+    /// and returns a SupervisorConfig ready for use.
+    ///
+    /// # Arguments
+    /// * `config` - Full NEEDLE configuration
+    ///
+    /// # Returns
+    /// * `SupervisorConfig` - Configuration for supervisor
+    pub fn from_config(config: &Config) -> Self {
+        SupervisorConfig {
+            workspace: config.workspace.default.clone(),
+            max_workers: config.worker.max_workers,
+            poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+            agent: Some(config.agent.default.clone()),
+            agent_timeout: Some(config.agent.timeout),
+            worker_binary_path: config.worker.worker_binary_path.clone(),
         }
     }
 }
@@ -729,6 +813,232 @@ mod tests {
         assert!(config.workspace.exists() || config.workspace == std::path::Path::new("."));
         assert!(config.max_workers > 0);
         assert!(config.poll_interval_secs > 0);
+    }
+
+    #[test]
+    fn supervisor_config_deserialize_from_yaml() {
+        let yaml_content = r#"
+workspace: /tmp/test-workspace
+max_workers: 8
+poll_interval_secs: 20
+agent: claude
+agent_timeout: 7200
+worker_binary_path: /usr/local/bin/needle
+"#;
+
+        let config: SupervisorConfig = serde_yaml::from_str(yaml_content)
+            .expect("failed to deserialize SupervisorConfig from YAML");
+
+        assert_eq!(config.workspace, PathBuf::from("/tmp/test-workspace"));
+        assert_eq!(config.max_workers, 8);
+        assert_eq!(config.poll_interval_secs, 20);
+        assert_eq!(config.agent, Some("claude".to_string()));
+        assert_eq!(config.agent_timeout, Some(7200));
+        assert_eq!(config.worker_binary_path, Some(PathBuf::from("/usr/local/bin/needle")));
+    }
+
+    #[test]
+    fn supervisor_config_deserialize_from_toml() {
+        let toml_content = r#"
+workspace = "/tmp/test-workspace"
+max_workers = 6
+poll_interval_secs = 15
+agent = "claude"
+agent_timeout = 3600
+"#;
+
+        let config: SupervisorConfig = toml::from_str(toml_content)
+            .expect("failed to deserialize SupervisorConfig from TOML");
+
+        assert_eq!(config.workspace, PathBuf::from("/tmp/test-workspace"));
+        assert_eq!(config.max_workers, 6);
+        assert_eq!(config.poll_interval_secs, 15);
+        assert_eq!(config.agent, Some("claude".to_string()));
+        assert_eq!(config.agent_timeout, Some(3600));
+    }
+
+    #[test]
+    fn supervisor_config_deserialize_from_json() {
+        let json_content = r#"{
+  "workspace": "/tmp/test-workspace",
+  "max_workers": 10,
+  "poll_interval_secs": 30,
+  "agent": "claude",
+  "agent_timeout": 5400
+}"#;
+
+        let config: SupervisorConfig = serde_json::from_str(json_content)
+            .expect("failed to deserialize SupervisorConfig from JSON");
+
+        assert_eq!(config.workspace, PathBuf::from("/tmp/test-workspace"));
+        assert_eq!(config.max_workers, 10);
+        assert_eq!(config.poll_interval_secs, 30);
+        assert_eq!(config.agent, Some("claude".to_string()));
+        assert_eq!(config.agent_timeout, Some(5400));
+    }
+
+    #[test]
+    fn supervisor_config_deserialize_with_defaults() {
+        // Test that optional fields use their defaults when not specified
+        let yaml_content = r#"
+workspace: /tmp/test-workspace
+max_workers: 4
+"#;
+
+        let config: SupervisorConfig = serde_yaml::from_str(yaml_content)
+            .expect("failed to deserialize SupervisorConfig with defaults");
+
+        assert_eq!(config.workspace, PathBuf::from("/tmp/test-workspace"));
+        assert_eq!(config.max_workers, 4);
+        assert_eq!(config.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        assert_eq!(config.agent, None);
+        assert_eq!(config.agent_timeout, None);
+        assert_eq!(config.worker_binary_path, None);
+    }
+
+    #[test]
+    fn supervisor_config_from_file_yaml() {
+        let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
+        let config_file = temp_dir.path().join("supervisor-config.yaml");
+
+        std::fs::write(&config_file, r#"
+workspace: /tmp/test-workspace
+max_workers: 12
+poll_interval_secs: 25
+agent: claude-code
+"#).expect("failed to write config file");
+
+        let config = SupervisorConfig::from_file(&config_file)
+            .expect("failed to load SupervisorConfig from YAML file");
+
+        assert_eq!(config.workspace, PathBuf::from("/tmp/test-workspace"));
+        assert_eq!(config.max_workers, 12);
+        assert_eq!(config.poll_interval_secs, 25);
+        assert_eq!(config.agent, Some("claude-code".to_string()));
+    }
+
+    #[test]
+    fn supervisor_config_from_file_toml() {
+        let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
+        let config_file = temp_dir.path().join("supervisor-config.toml");
+
+        std::fs::write(&config_file, r#"
+workspace = "/tmp/test-workspace"
+max_workers = 7
+poll_interval_secs = 12
+"#).expect("failed to write config file");
+
+        let config = SupervisorConfig::from_file(&config_file)
+            .expect("failed to load SupervisorConfig from TOML file");
+
+        assert_eq!(config.workspace, PathBuf::from("/tmp/test-workspace"));
+        assert_eq!(config.max_workers, 7);
+        assert_eq!(config.poll_interval_secs, 12);
+    }
+
+    #[test]
+    fn supervisor_config_from_file_json() {
+        let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
+        let config_file = temp_dir.path().join("supervisor-config.json");
+
+        std::fs::write(&config_file, r#"{
+  "workspace": "/tmp/test-workspace",
+  "max_workers": 15,
+  "poll_interval_secs": 40
+}"#).expect("failed to write config file");
+
+        let config = SupervisorConfig::from_file(&config_file)
+            .expect("failed to load SupervisorConfig from JSON file");
+
+        assert_eq!(config.workspace, PathBuf::from("/tmp/test-workspace"));
+        assert_eq!(config.max_workers, 15);
+        assert_eq!(config.poll_interval_secs, 40);
+    }
+
+    #[test]
+    fn supervisor_config_from_file_unsupported_extension() {
+        let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
+        let config_file = temp_dir.path().join("supervisor-config.txt");
+
+        std::fs::write(&config_file, "some content").expect("failed to write config file");
+
+        let result = SupervisorConfig::from_file(&config_file);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("unsupported supervisor config file extension"));
+    }
+
+    #[test]
+    fn supervisor_config_from_file_no_extension() {
+        let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
+        let config_file = temp_dir.path().join("supervisor-config");
+
+        std::fs::write(&config_file, "some content").expect("failed to write config file");
+
+        let result = SupervisorConfig::from_file(&config_file);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("no extension"));
+    }
+
+    #[test]
+    fn supervisor_config_from_file_invalid_yaml() {
+        let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
+        let config_file = temp_dir.path().join("supervisor-config.yaml");
+
+        std::fs::write(&config_file, "invalid: yaml: content: [").expect("failed to write config file");
+
+        let result = SupervisorConfig::from_file(&config_file);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("invalid YAML"));
+    }
+
+    #[test]
+    fn supervisor_config_from_file_nonexistent() {
+        let config_file = PathBuf::from("/nonexistent/path/supervisor-config.yaml");
+
+        let result = SupervisorConfig::from_file(&config_file);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("failed to read"));
+    }
+
+    #[test]
+    fn supervisor_config_from_needle_config() {
+        use crate::config::{AgentConfig, TelemetryConfig, WorkerConfig, WorkspaceConfig};
+
+        let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
+        let workspace = temp_dir.path();
+
+        let needle_config = crate::config::Config {
+            workspace: WorkspaceConfig {
+                default: workspace.to_path_buf(),
+                home: workspace.to_path_buf(),
+                labels: Vec::new(),
+            },
+            worker: WorkerConfig {
+                max_workers: 8,
+                worker_binary_path: Some(PathBuf::from("/custom/needle")),
+                ..Default::default()
+            },
+            agent: AgentConfig {
+                default: "claude-code".to_string(),
+                timeout: 7200,
+                ..Default::default()
+            },
+            telemetry: TelemetryConfig::default(),
+            ..Default::default()
+        };
+
+        let supervisor_config = SupervisorConfig::from_config(&needle_config);
+
+        assert_eq!(supervisor_config.workspace, workspace);
+        assert_eq!(supervisor_config.max_workers, 8);
+        assert_eq!(supervisor_config.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        assert_eq!(supervisor_config.agent, Some("claude-code".to_string()));
+        assert_eq!(supervisor_config.agent_timeout, Some(7200));
+        assert_eq!(supervisor_config.worker_binary_path, Some(PathBuf::from("/custom/needle")));
     }
 
     #[test]
