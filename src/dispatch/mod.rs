@@ -21,7 +21,7 @@ use tokio::sync::watch;
 
 use crate::bead_store::spawn_with_etxtbsy_retry_child;
 use crate::config::Config;
-use crate::process_guard::ProcessGroupKillGuard;
+use crate::process_guard::{ProcessGuard, ProcessGroupKillGuard};
 use crate::prompt::BuiltPrompt;
 use crate::sanitize::{CustomPattern, Sanitizer};
 use crate::telemetry::{EventKind, Telemetry};
@@ -1416,7 +1416,7 @@ impl Dispatcher {
                             }
                         }
                         let _ = child.start_kill();
-                        let _ = child.wait().await;
+                        let _ = ProcessGuard::new(child).wait().await;
                         kill_guard.disarm();
 
                         // Compute last output age for telemetry.
