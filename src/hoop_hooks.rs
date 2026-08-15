@@ -105,6 +105,16 @@ pub fn heartbeats_path(workspace: &Path) -> PathBuf {
         .unwrap_or_else(|_| workspace.join(".beads").join("heartbeats.jsonl"))
 }
 
+/// Clean up a heartbeat file.
+///
+/// Removes the heartbeat file at the specified path. This is used when a worker
+/// shuts down cleanly to remove its heartbeat tracking file. Best-effort:
+/// failures are ignored to avoid disrupting shutdown.
+pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
+    // TODO: Implement heartbeat file cleanup
+    Ok(())
+}
+
 /// HOOP Hook 3 — heartbeat.
 ///
 /// Appends one JSONL line per heartbeat tick in HOOP's three-state format
