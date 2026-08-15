@@ -6,6 +6,12 @@
 test_telemetry_write
 test_telemetry_write_debug
 
+# Test output artifacts (root-level noise from development runs)
+test-output*
+test_output*
+p95_*
+*_output.txt
+
 # Benchmark artifacts
 benchmark_*.txt
 
