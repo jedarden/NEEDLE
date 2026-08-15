@@ -39,6 +39,43 @@ pub fn get_home_or_default<S: Into<String>>(default: S) -> String {
     env::var("HOME").unwrap_or_else(|_| default.into())
 }
 
+/// Check if a path starts with a tilde-slash prefix.
+///
+/// Returns `true` if the path starts with exactly "~/", `false` otherwise.
+/// This is a stricter check than just checking for "~" — it requires
+/// the slash to be present.
+///
+/// # Arguments
+///
+/// * `path` - A path string to check
+///
+/// # Returns
+///
+/// * `bool` - `true` if path starts with "~/", `false` otherwise
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::util::is_tilde_prefix;
+///
+/// assert!(is_tilde_prefix("~/foo"));
+/// assert!(is_tilde_prefix("~/"));
+/// assert!(!is_tilde_prefix("~foo"));  // No slash
+/// assert!(!is_tilde_prefix("~"));      // Bare tilde
+/// assert!(!is_tilde_prefix("foo"));
+/// assert!(!is_tilde_prefix("/absolute/path"));
+/// ```
+///
+/// # Edge Cases
+///
+/// * "~" alone returns `false` (no slash)
+/// * "~foo" returns `false` (no slash)
+/// * "~/foo" returns `true` (has slash)
+/// * Empty string returns `false`
+pub fn is_tilde_prefix(path: &str) -> bool {
+    path.starts_with("~/")
+}
+
 /// Expand a tilde-slash path prefix to the HOME directory.
 ///
 /// For paths starting with "~/", replaces the prefix with the HOME directory.
@@ -392,6 +429,83 @@ mod tests {
     use chrono::{Datelike, Timelike};
     use std::env;
     use std::path::PathBuf;
+
+    #[test]
+    fn test_is_tilde_prefix_with_tilde_slash() {
+        // "~/foo" should return true (tilde prefix)
+        assert!(is_tilde_prefix("~/foo"));
+        assert!(is_tilde_prefix("~/"));
+        assert!(is_tilde_prefix("~/Documents/file.txt"));
+        assert!(is_tilde_prefix("~/path/to/file"));
+    }
+
+    #[test]
+    fn test_is_tilde_prefix_without_tilde_slash() {
+        // "foo" should return false (no tilde prefix)
+        assert!(!is_tilde_prefix("foo"));
+        assert!(!is_tilde_prefix("bar"));
+        assert!(!is_tilde_prefix("relative/path"));
+        assert!(!is_tilde_prefix("file.txt"));
+    }
+
+    #[test]
+    fn test_is_tilde_prefix_tilde_without_slash() {
+        // "~foo" (no slash) should return false
+        assert!(!is_tilde_prefix("~foo"));
+        assert!(!is_tilde_prefix("~username"));
+        assert!(!is_tilde_prefix("~backup"));
+        assert!(!is_tilde_prefix("~."));
+        assert!(!is_tilde_prefix("~.."));
+    }
+
+    #[test]
+    fn test_is_tilde_prefix_bare_tilde() {
+        // "~" alone should return false (not "~/")
+        assert!(!is_tilde_prefix("~"));
+    }
+
+    #[test]
+    fn test_is_tilde_prefix_absolute_paths() {
+        // Absolute paths should return false
+        assert!(!is_tilde_prefix("/absolute/path"));
+        assert!(!is_tilde_prefix("/usr/local/bin"));
+        assert!(!is_tilde_prefix("/etc/config.json"));
+        assert!(!is_tilde_prefix("/"));
+    }
+
+    #[test]
+    fn test_is_tilde_prefix_empty_string() {
+        // Empty string should return false
+        assert!(!is_tilde_prefix(""));
+    }
+
+    #[test]
+    fn test_is_tilde_prefix_whitespace_variants() {
+        // Paths with leading whitespace should return false
+        assert!(!is_tilde_prefix(" ~/foo")); // Space before tilde
+        assert!(!is_tilde_prefix("  ~/foo")); // Multiple spaces
+    }
+
+    #[test]
+    fn test_is_tilde_prefix_complex_paths() {
+        // Test with more complex path patterns
+        assert!(is_tilde_prefix("~/deep/nested/path/here"));
+        assert!(is_tilde_prefix("~/config/settings.local.json"));
+        assert!(is_tilde_prefix("~/project/src/main.rs"));
+
+        // Test paths with tilde elsewhere but not at start
+        assert!(!is_tilde_prefix("path/~foo"));
+        assert!(!is_tilde_prefix("a/~/b"));
+        assert!(!is_tilde_prefix("foo~bar"));
+    }
+
+    #[test]
+    fn test_is_tilde_prefix_multiple_tildes() {
+        // Test with multiple tildes
+        assert!(is_tilde_prefix("~/~/path")); // Starts with "~/"
+        assert!(!is_tilde_prefix("~~/path")); // Does not start with "~/"
+        assert!(!is_tilde_prefix("~foo~")); // No slash
+    }
 
     #[test]
     fn test_expand_tilde_with_home() {

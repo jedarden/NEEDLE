@@ -71,7 +71,12 @@ async fn idle_timeout_fires_when_no_activity_occurs() {
 
     // Execute the agent - should timeout after 1 second of no activity
     let result = dispatcher
-        .dispatch(&bead_id, &test_prompt(), &dispatcher.adapter("test-idle").unwrap(), workspace)
+        .dispatch(
+            &bead_id,
+            &test_prompt(),
+            dispatcher.adapter("test-idle").unwrap(),
+            workspace,
+        )
         .await;
 
     let elapsed = start.elapsed();
@@ -110,10 +115,7 @@ async fn idle_timeout_fires_when_no_activity_occurs() {
                 last_output_age_secs
             );
         }
-        other => panic!(
-            "expected TimeoutReason::Idle, got {:?}",
-            other
-        ),
+        other => panic!("expected TimeoutReason::Idle, got {:?}", other),
     }
 
     // Verify the timeout fired in reasonable time (within 2 seconds of configured timeout)
@@ -172,15 +174,12 @@ async fn idle_deadline_resets_on_activity_prevents_timeout() {
         .dispatch(
             &bead_id,
             &test_prompt(),
-            &dispatcher.adapter("test-activity").unwrap(),
+            dispatcher.adapter("test-activity").unwrap(),
             workspace,
         )
         .await;
 
-    assert!(
-        result.is_ok(),
-        "dispatch should complete successfully"
-    );
+    assert!(result.is_ok(), "dispatch should complete successfully");
 
     let exec_result = result.unwrap();
 
@@ -231,15 +230,12 @@ async fn idle_timeout_disabled_when_config_is_zero() {
         .dispatch(
             &bead_id,
             &test_prompt(),
-            &dispatcher.adapter("test-disabled").unwrap(),
+            dispatcher.adapter("test-disabled").unwrap(),
             workspace,
         )
         .await;
 
-    assert!(
-        result.is_ok(),
-        "dispatch should complete successfully"
-    );
+    assert!(result.is_ok(), "dispatch should complete successfully");
 
     let exec_result = result.unwrap();
 
@@ -268,7 +264,7 @@ async fn idle_timeout_with_config_none_falls_back_to_global() {
         input_method: InputMethod::Stdin,
         invoke_template: "sleep 0".to_string(),
         environment: HashMap::new(),
-        timeout_secs: 0,     // No legacy timeout
+        timeout_secs: 0,      // No legacy timeout
         idle_timeout_secs: 0, // No idle timeout configured
         hard_timeout_secs: 0, // No hard timeout configured
         provider: None,
@@ -294,15 +290,12 @@ async fn idle_timeout_with_config_none_falls_back_to_global() {
         .dispatch(
             &bead_id,
             &test_prompt(),
-            &dispatcher.adapter("test-fallback").unwrap(),
+            dispatcher.adapter("test-fallback").unwrap(),
             workspace,
         )
         .await;
 
-    assert!(
-        result.is_ok(),
-        "dispatch should complete successfully"
-    );
+    assert!(result.is_ok(), "dispatch should complete successfully");
 
     let exec_result = result.unwrap();
 
@@ -342,17 +335,14 @@ async fn idle_timeout_very_short_deadline_fires_immediately() {
         .dispatch(
             &bead_id,
             &test_prompt(),
-            &dispatcher.adapter("test-short").unwrap(),
+            dispatcher.adapter("test-short").unwrap(),
             workspace,
         )
         .await;
 
     // With idle_timeout_secs = 0, the deadline is disabled
     // So this should complete normally
-    assert!(
-        result.is_ok(),
-        "dispatch should complete successfully"
-    );
+    assert!(result.is_ok(), "dispatch should complete successfully");
 
     let exec_result = result.unwrap();
     assert_eq!(
@@ -403,15 +393,12 @@ async fn idle_timeout_mixed_activity_pattern() {
         .dispatch(
             &bead_id,
             &test_prompt(),
-            &dispatcher.adapter("test-mixed").unwrap(),
+            dispatcher.adapter("test-mixed").unwrap(),
             workspace,
         )
         .await;
 
-    assert!(
-        result.is_ok(),
-        "dispatch should complete with timeout"
-    );
+    assert!(result.is_ok(), "dispatch should complete with timeout");
 
     let exec_result = result.unwrap();
 
@@ -426,10 +413,7 @@ async fn idle_timeout_mixed_activity_pattern() {
         Some(TimeoutReason::Idle { .. }) => {
             // Success - idle timeout fired as expected
         }
-        other => panic!(
-            "expected TimeoutReason::Idle, got {:?}",
-            other
-        ),
+        other => panic!("expected TimeoutReason::Idle, got {:?}", other),
     }
 
     // Verify some output was captured before timeout

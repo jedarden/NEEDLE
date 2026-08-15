@@ -70,7 +70,7 @@ pub struct RoutingConfig {
 ///
 /// Defines timeout parameters for agent process execution, separating
 /// timeout configuration from other agent settings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProcessLimits {
     /// Idle timeout duration (None means disabled).
     ///
@@ -98,14 +98,6 @@ pub struct ProcessLimits {
     /// ```
     #[serde(default)]
     pub idle_timeout: Option<u64>,
-}
-
-impl Default for ProcessLimits {
-    fn default() -> Self {
-        ProcessLimits {
-            idle_timeout: None,
-        }
-    }
 }
 
 /// Agent (AI model CLI) configuration.
@@ -5001,6 +4993,8 @@ strands:
         let config = SupervisorConfig {
             heartbeat_path: Some(PathBuf::from("/custom/heartbeat.json")),
             socket_path: Some(PathBuf::from("/tmp/supervisor.sock")),
+            auto_upgrade_check: false,
+            update_check_interval_secs: 21600,
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -5021,6 +5015,8 @@ strands:
         let config = SupervisorConfig {
             heartbeat_path: Some(PathBuf::from("/var/lib/supervisor/heartbeat.json")),
             socket_path: None,
+            auto_upgrade_check: false,
+            update_check_interval_secs: 21600,
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -5038,6 +5034,8 @@ strands:
         let config = SupervisorConfig {
             heartbeat_path: None,
             socket_path: Some(PathBuf::from("/run/supervisor/control.sock")),
+            auto_upgrade_check: false,
+            update_check_interval_secs: 21600,
         };
 
         let yaml = serde_yaml::to_string(&config).unwrap();
@@ -5099,6 +5097,8 @@ worker:
         let config = SupervisorConfig {
             heartbeat_path: Some(PathBuf::from("/heartbeat.json")),
             socket_path: Some(PathBuf::from("/supervisor.sock")),
+            auto_upgrade_check: false,
+            update_check_interval_secs: 21600,
         };
 
         let json = serde_json::to_string(&config).unwrap();

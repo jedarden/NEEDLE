@@ -43,10 +43,7 @@ impl ProcessGuard {
         if let Some(mut child) = self.child.take() {
             child.wait().await
         } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "child already reaped",
-            ))
+            Err(std::io::Error::other("child already reaped"))
         }
     }
 

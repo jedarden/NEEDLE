@@ -110,7 +110,7 @@ pub fn heartbeats_path(workspace: &Path) -> PathBuf {
 /// Removes the heartbeat file at the specified path. This is used when a worker
 /// shuts down cleanly to remove its heartbeat tracking file. Best-effort:
 /// failures are ignored to avoid disrupting shutdown.
-pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
+pub fn cleanup_heartbeat_file(_path: &Path) -> Result<()> {
     // TODO: Implement heartbeat file cleanup
     Ok(())
 }
