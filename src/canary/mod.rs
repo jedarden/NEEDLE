@@ -208,19 +208,15 @@ pub struct CanaryRunner {
     canary_workspace: PathBuf,
     /// Timeout for individual tests (seconds).
     test_timeout: u64,
-    /// Path to the br CLI.
-    br_path: PathBuf,
 }
 
 impl CanaryRunner {
     /// Create a new canary runner.
     pub fn new(needle_home: PathBuf, canary_workspace: PathBuf, test_timeout: u64) -> Self {
-        let br_path = dirs_or_home(".local/bin/br");
         CanaryRunner {
             needle_home,
             canary_workspace,
             test_timeout,
-            br_path,
         }
     }
 
@@ -469,20 +465,55 @@ impl CanaryRunner {
 
     /// Get the actual outcome for a test bead by querying the bead store.
     fn get_actual_outcome(&self, bead_id: &str, exit_code: Option<i32>) -> Result<ActualOutcome> {
-        // Use br to query the bead status.
-        let output = Command::new(&self.br_path)
+        let workspace_config = crate::config::ConfigLoader::load_workspace(&self.canary_workspace)?
+            .with_context(|| {
+                format!(
+                    "canary workspace {} has no .needle.yaml",
+                    self.canary_workspace.display()
+                )
+            })?;
+        let bead_cli = workspace_config.bead_cli.with_context(|| {
+            format!(
+                "canary workspace {} has no authoritative bead_cli.backend binding",
+                self.canary_workspace.display()
+            )
+        })?;
+        let (_, binary) = crate::config::resolve_bead_cli(&bead_cli).with_context(|| {
+            format!(
+                "failed to resolve canary workspace bead backend '{}'",
+                bead_cli.backend
+            )
+        })?;
+
+        let output = Command::new(&binary)
             .args(["show", bead_id, "--json"])
             .current_dir(&self.canary_workspace)
             .output()
-            .context("failed to run br show")?;
+            .with_context(|| {
+                format!(
+                    "failed to run {} show for backend '{}'",
+                    binary.display(),
+                    bead_cli.backend
+                )
+            })?;
 
         if !output.status.success() {
-            bail!("br show failed for bead {}", bead_id);
+            bail!(
+                "backend '{}' show failed for bead {}: {}",
+                bead_cli.backend,
+                bead_id,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let bead: serde_json::Value =
-            serde_json::from_str(&stdout).context("failed to parse br show output")?;
+        let projection: serde_json::Value = serde_json::from_str(&stdout)
+            .with_context(|| format!("failed to parse '{}' show output", bead_cli.backend))?;
+        // bead-rs returns a one-element array; bead-forge returns an object.
+        let bead = projection
+            .as_array()
+            .and_then(|items| items.first())
+            .unwrap_or(&projection);
 
         let final_status = bead["status"].as_str().unwrap_or("unknown").to_string();
         let labels = bead["labels"]
@@ -764,25 +795,52 @@ pub struct ChannelStatus {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// Resolve a path relative to the user's home directory.
-fn dirs_or_home(relative: &str) -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(relative)
-    } else {
-        PathBuf::from("/tmp").join(relative)
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn actual_outcome_uses_workspace_backend_and_accepts_both_show_shapes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        for (backend, projection) in [
+            ("bead-rs", r#"[{"status":"closed","labels":["native"]}]"#),
+            ("bead-forge", r#"{"status":"open","labels":["forge"]}"#),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let binary = root.path().join("bound-backend");
+            std::fs::write(
+                &binary,
+                format!("#!/bin/sh\nprintf '%s\\n' '{projection}'\n"),
+            )
+            .unwrap();
+            let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&binary, permissions).unwrap();
+            std::fs::write(
+                root.path().join(".needle.yaml"),
+                format!(
+                    "bead_cli:\n  backend: {backend}\n  path: {}\n",
+                    binary.display()
+                ),
+            )
+            .unwrap();
+
+            let runner = CanaryRunner::new(root.path().join("needle"), root.path().into(), 30);
+            let actual = runner.get_actual_outcome("example-1", Some(0)).unwrap();
+            if backend == "bead-rs" {
+                assert_eq!(actual.final_status, "closed");
+                assert_eq!(actual.labels, vec!["native"]);
+            } else {
+                assert_eq!(actual.final_status, "open");
+                assert_eq!(actual.labels, vec!["forge"]);
+            }
+        }
+    }
 
     #[test]
     fn canary_test_result_is_pass() {
