@@ -74,6 +74,11 @@ verification passes. Existing bead-forge repositories receive an explicit
 or rehydrated workspaces receive `bead-rs` only after their native store and
 recovery checkpoint have been verified.
 
+The `jedarden/bead-forge` repository is a permanent explicit exception to the
+broader bead-rs migration: its own work queue remains bead-forge-owned and its
+binding remains `bead-forge`. Fleet inventory and migration completion checks
+must report this exception as compliant, not as an outstanding migration.
+
 The fleet rollout must not silently insert bindings. During a bounded warning
 period, an unbound workspace may be reported as a legacy bead-forge candidate,
 but it remains ineligible for dispatch. Removing that warning later is a

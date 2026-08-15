@@ -4534,6 +4534,7 @@ Authored in priority order, so the backend furthest from NEEDLE's baked-in `bf` 
 
 ### 16.12 Explicit workspace binding and transition audit
 - Add `bead_cli.backend: <descriptor-name>` to repository `.needle.yaml`; existing bead-forge repositories bind to `bead-forge`, while verified native bead-rs repositories bind to `bead-rs`.
+- Retain `jedarden/bead-forge` on bead-forge as a permanent explicit exception; migration inventory treats that binding as the desired terminal state.
 - Add a read-only audit/onboarding command that reports unbound workspaces, resolved descriptor/path/version, identity result, and a proposed binding without writing it.
 - Add an explicit bind command that updates only the selected repository configuration after operator invocation; it must state that binding is routing, not data migration.
 - Remove independent PATH-probe chains from worker, supervisor, strands, validation, prompts, recovery, and doctor. All receive one resolved backend context.
