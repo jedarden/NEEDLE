@@ -1268,8 +1268,8 @@ impl MendStrand {
             }
             Err(e) => {
                 let msg = format!("{e:#}");
-                if crate::bead_store::is_corruption_error(&msg) {
-                    tracing::warn!(error = %e, "br doctor detected corruption");
+                if store.is_corruption_error(&msg) {
+                    tracing::warn!(error = %e, "bead backend doctor detected corruption");
                     true
                 } else {
                     // Non-corruption error (e.g., br not found). Propagate.

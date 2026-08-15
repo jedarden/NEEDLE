@@ -290,6 +290,21 @@ impl CliBeadStore {
 
 #[async_trait]
 impl BeadStore for CliBeadStore {
+    fn is_corruption_error(&self, message: &str) -> bool {
+        self.backend
+            .error_contains_any(message, &self.backend.error_markers.corruption)
+    }
+
+    fn is_lock_error(&self, message: &str) -> bool {
+        self.backend
+            .error_contains_any(message, &self.backend.error_markers.lock)
+    }
+
+    fn is_sync_conflict(&self, message: &str) -> bool {
+        self.backend
+            .error_contains_any(message, &self.backend.error_markers.sync_conflict)
+    }
+
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
         let values = HashMap::from([("limit", "999999".to_string())]);
         let stdout = self.run_operation("ready", &values).await?;

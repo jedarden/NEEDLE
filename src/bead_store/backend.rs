@@ -122,6 +122,14 @@ fn default_version_command() -> Vec<String> {
 }
 
 impl BeadBackend {
+    /// Classify an error using only this backend's declared markers.
+    pub fn error_contains_any(&self, message: &str, markers: &[String]) -> bool {
+        let message = message.to_lowercase();
+        markers
+            .iter()
+            .any(|marker| message.contains(&marker.to_lowercase()))
+    }
+
     /// Validate everything that could otherwise fail during the first claim.
     pub fn validate(&self, source: &Path) -> Result<()> {
         if self.name.trim().is_empty() {
@@ -473,7 +481,20 @@ fn builtin_bead_rs() -> BeadBackend {
             velocity_metadata: false,
         },
         quirks: Vec::new(),
-        error_markers: BeadBackendErrorMarkers::default(),
+        error_markers: BeadBackendErrorMarkers {
+            corruption: vec![
+                "database disk image is malformed".to_string(),
+                "database or disk is full".to_string(),
+                "attempt to write a readonly database".to_string(),
+                "file is not a database".to_string(),
+            ],
+            lock: vec![
+                "database is locked".to_string(),
+                "sqlite error: 5".to_string(),
+                "sqlite error: 6".to_string(),
+            ],
+            sync_conflict: Vec::new(),
+        },
     }
 }
 
@@ -489,6 +510,11 @@ fn builtin_bead_forge() -> BeadBackend {
         transactional_batch: true,
         velocity_metadata: true,
     };
+    backend.error_markers.sync_conflict = vec![
+        "SYNC_CONFLICT".to_string(),
+        "JSONL is newer".to_string(),
+        "sync conflict".to_string(),
+    ];
 
     let operations = &mut backend.operations;
     operations.insert(
@@ -553,4 +579,28 @@ fn builtin_bead_forge() -> BeadBackend {
         operation(&["sync", "--import-only"], Some("bare"), None),
     );
     backend
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builtins_classify_errors_per_descriptor() {
+        let bead_rs = builtin_bead_rs();
+        let bead_forge = builtin_bead_forge();
+
+        assert!(bead_rs.error_contains_any(
+            "Error: database disk image is malformed",
+            &bead_rs.error_markers.corruption
+        ));
+        assert!(!bead_rs.error_contains_any(
+            "SYNC_CONFLICT detected",
+            &bead_rs.error_markers.sync_conflict
+        ));
+        assert!(bead_forge.error_contains_any(
+            "SYNC_CONFLICT detected",
+            &bead_forge.error_markers.sync_conflict
+        ));
+    }
 }

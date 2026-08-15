@@ -946,6 +946,21 @@ pub struct NewChild<'a> {
 /// Abstract interface to the bead backend.
 #[async_trait]
 pub trait BeadStore: Send + Sync {
+    /// Whether an error indicates corruption according to this store's backend.
+    fn is_corruption_error(&self, _message: &str) -> bool {
+        false
+    }
+
+    /// Whether an error indicates a transient lock according to this store's backend.
+    fn is_lock_error(&self, _message: &str) -> bool {
+        false
+    }
+
+    /// Whether an error indicates a sync conflict according to this store's backend.
+    fn is_sync_conflict(&self, _message: &str) -> bool {
+        false
+    }
+
     /// List all beads with no incomplete blockers (ready to work on).
     ///
     /// Returns an empty `Vec` when the queue is empty — that is not an error.
