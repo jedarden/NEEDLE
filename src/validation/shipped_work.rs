@@ -8,7 +8,7 @@
 //!   snapshot) that touches at least one file outside `notes/`/`.beads/`, and
 //!   that commit has been pushed to the upstream remote; or
 //! - the bead's own `notes` field changed during this dispatch — i.e. the agent
-//!   ran `bf update --notes` to record why no code change was needed.
+//!   recorded a bead note explaining why no code change was needed.
 //!
 //! With no snapshot the gate has no baseline and **fails open** — it cannot tell
 //! a commit made during the dispatch from one that predates it, and releasing on
@@ -20,7 +20,7 @@
 //! happily satisfy a bare "must have a commit" rule by committing a trivial
 //! "still blocked" doc file every cycle, each one triggering paired CI
 //! version-bump commits. Recording that kind of status belongs on the bead
-//! (via `bf update`/`bf comments add`), not in git history.
+//! through the workspace's configured backend, not in git history.
 //!
 //! # Why not `updated_at`
 //!
@@ -30,8 +30,7 @@
 //! shipped nothing. Combined with a missing snapshot writer, this made the gate
 //! inert from the day it shipped (2026-07-30) until this change: no closure was
 //! ever rejected, and no bead ever received the `verification-failed` label.
-//! Comparing the `notes` field instead keys on something only a deliberate
-//! `bf update --notes` changes.
+//! Comparing the `notes` field instead keys on a deliberate note update.
 //!
 //! Depends on: `types`, `validation::predispatch`.
 
@@ -118,7 +117,7 @@ async fn evaluate(
 
     Ok(GateResult::Fail(
         "no substantial pushed commit and no bead note recorded for this dispatch — \
-         commit real work, or run `bf update --notes \"...\"` explaining why none was needed"
+         commit real work, or record an explanatory note with the configured bead backend"
             .to_string(),
     ))
 }

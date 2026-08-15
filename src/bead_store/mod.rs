@@ -1111,13 +1111,13 @@ pub trait BeadStore: Send + Sync {
     /// Returns warnings if any issues are detected, without attempting to fix them.
     async fn doctor_check(&self) -> Result<RepairReport>;
 
-    /// Full database rebuild: remove SQLite DB and reimport from JSONL.
+    /// Full database rebuild from the configured backend's durable checkpoint.
     ///
-    /// 1. rm .beads/beads.db
-    /// 2. br sync --import
-    /// 3. Verify: br doctor
+    /// The existing SQLite file set remains in a rollback backup until the
+    /// public backend import and doctor verification both succeed.
     ///
-    /// Returns `Err` if rebuild or verification fails (JSONL itself may be corrupt).
+    /// Returns `Err` if rebuild or verification fails; the original database
+    /// is restored in that case.
     async fn full_rebuild(&self) -> Result<()>;
 
     /// Check if this store has a valid bead store (i.e., has a `.beads/` directory).

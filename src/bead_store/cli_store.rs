@@ -589,28 +589,96 @@ impl BeadStore for CliBeadStore {
             );
         }
 
-        let db_path = self.workspace.join(".beads/beads.db");
-        if db_path.exists() {
-            tokio::fs::remove_file(&db_path)
-                .await
-                .with_context(|| format!("failed to remove {}", db_path.display()))?;
+        let checkpoint = if self.backend.name == "bead-forge" {
+            self.workspace.join(".beads/issues.jsonl")
+        } else {
+            self.workspace.join(".beads/checkpoint")
+        };
+        if !checkpoint.exists() {
+            bail!(
+                "refusing to rebuild backend '{}' without checkpoint {}",
+                self.backend.name,
+                checkpoint.display()
+            );
         }
-        for suffix in ["-wal", "-shm"] {
-            let sidecar = self.workspace.join(format!(".beads/beads.db{suffix}"));
-            if sidecar.exists() {
-                tokio::fs::remove_file(&sidecar)
-                    .await
-                    .with_context(|| format!("failed to remove {}", sidecar.display()))?;
+
+        // Keep the complete SQLite file set recoverable until import and
+        // doctor verification both succeed. A failed import must never turn a
+        // repairable store into an empty or partially initialized one.
+        let db_paths = [
+            self.workspace.join(".beads/beads.db"),
+            self.workspace.join(".beads/beads.db-wal"),
+            self.workspace.join(".beads/beads.db-shm"),
+        ];
+        let backup_paths = db_paths
+            .iter()
+            .map(|path| {
+                path.with_extension(format!(
+                    "{}needle-rebuild-backup",
+                    path.extension()
+                        .and_then(|extension| extension.to_str())
+                        .map(|extension| format!("{extension}."))
+                        .unwrap_or_default()
+                ))
+            })
+            .collect::<Vec<_>>();
+        for backup in &backup_paths {
+            if backup.exists() {
+                bail!(
+                    "refusing to overwrite prior rebuild backup {}",
+                    backup.display()
+                );
+            }
+        }
+        for (path, backup) in db_paths.iter().zip(&backup_paths) {
+            if path.exists() {
+                if let Err(preserve_error) = tokio::fs::rename(path, backup).await {
+                    for (original, preserved) in db_paths.iter().zip(&backup_paths) {
+                        if preserved.exists() {
+                            let _ = tokio::fs::rename(preserved, original).await;
+                        }
+                    }
+                    return Err(preserve_error).with_context(|| {
+                        format!(
+                            "failed to preserve {} as {}; prior files were restored",
+                            path.display(),
+                            backup.display()
+                        )
+                    });
+                }
             }
         }
 
-        if self.backend.name == "bead-forge" {
-            self.run_argv(
-                "full_rebuild.import",
-                &["sync".to_string(), "--import-only".to_string()],
-                DEFAULT_TIMEOUT_SECS,
-            )
-            .await?;
+        let rebuild = async {
+            if self.backend.name == "bead-forge" {
+                self.run_argv(
+                    "full_rebuild.import",
+                    &["sync".to_string(), "--import-only".to_string()],
+                    DEFAULT_TIMEOUT_SECS,
+                )
+                .await?;
+            } else {
+                self.run_argv(
+                    "full_rebuild.init",
+                    &["init".to_string()],
+                    DEFAULT_TIMEOUT_SECS,
+                )
+                .await?;
+                let checkpoint = checkpoint
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("checkpoint path is not valid UTF-8"))?;
+                let args = vec![
+                    "sync".to_string(),
+                    "import-only".to_string(),
+                    "--input".to_string(),
+                    checkpoint.to_string(),
+                    "--restore-into-empty".to_string(),
+                    "--actor".to_string(),
+                    "needle".to_string(),
+                ];
+                self.run_argv("full_rebuild.import", &args, DEFAULT_TIMEOUT_SECS)
+                    .await?;
+            }
             let report = self.doctor_check().await?;
             if !report.warnings.is_empty() {
                 bail!(
@@ -618,36 +686,51 @@ impl BeadStore for CliBeadStore {
                     report.warnings
                 );
             }
-            return Ok(());
+            Ok(())
+        }
+        .await;
+
+        if let Err(rebuild_error) = rebuild {
+            let mut rollback_errors = Vec::new();
+            for path in &db_paths {
+                if path.exists() {
+                    if let Err(error) = tokio::fs::remove_file(path).await {
+                        rollback_errors.push(format!(
+                            "failed to remove incomplete rebuild {}: {error}",
+                            path.display()
+                        ));
+                    }
+                }
+            }
+            for (path, backup) in db_paths.iter().zip(&backup_paths) {
+                if backup.exists() {
+                    if let Err(error) = tokio::fs::rename(backup, path).await {
+                        rollback_errors.push(format!(
+                            "failed to restore {} from {}: {error}",
+                            path.display(),
+                            backup.display()
+                        ));
+                    }
+                }
+            }
+            if !rollback_errors.is_empty() {
+                bail!(
+                    "rebuild failed ({rebuild_error:#}); rollback was incomplete: {}",
+                    rollback_errors.join("; ")
+                );
+            }
+            return Err(rebuild_error.context("rebuild failed; original database restored"));
         }
 
-        self.run_argv(
-            "full_rebuild.init",
-            &["init".to_string()],
-            DEFAULT_TIMEOUT_SECS,
-        )
-        .await?;
-        let checkpoint = self.workspace.join(".beads/checkpoint");
-        let checkpoint = checkpoint
-            .to_str()
-            .ok_or_else(|| anyhow::anyhow!("checkpoint path is not valid UTF-8"))?;
-        let args = vec![
-            "sync".to_string(),
-            "import-only".to_string(),
-            "--input".to_string(),
-            checkpoint.to_string(),
-            "--restore-into-empty".to_string(),
-            "--actor".to_string(),
-            "needle".to_string(),
-        ];
-        self.run_argv("full_rebuild.import", &args, DEFAULT_TIMEOUT_SECS)
-            .await?;
-        let report = self.doctor_check().await?;
-        if !report.warnings.is_empty() {
-            bail!(
-                "database still has issues after rebuild: {:?}",
-                report.warnings
-            );
+        for backup in &backup_paths {
+            if backup.exists() {
+                tokio::fs::remove_file(backup).await.with_context(|| {
+                    format!(
+                        "rebuild succeeded but failed to remove {}",
+                        backup.display()
+                    )
+                })?;
+            }
         }
         Ok(())
     }
@@ -898,7 +981,8 @@ fn parse_beads_with_claim_history(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_beads_with_claim_history, ParseShape};
+    use super::{parse_beads_with_claim_history, CliBeadStore, ParseShape};
+    use crate::bead_store::{builtin_bead_backends, BeadStore};
 
     #[test]
     fn claim_history_parser_counts_only_claim_mutations() {
@@ -937,5 +1021,49 @@ mod tests {
 
         let parsed = parse_beads_with_claim_history(ParseShape::JsonObject, json).unwrap();
         assert_eq!(parsed[0].1, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_native_rebuild_restores_original_database() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let beads = workspace.path().join(".beads");
+        std::fs::create_dir_all(beads.join("checkpoint")).unwrap();
+        std::fs::write(beads.join("checkpoint/forensic.jsonl"), "checkpoint\n").unwrap();
+        std::fs::write(beads.join("beads.db"), "original database").unwrap();
+
+        let binary = workspace.path().join("fake-bead");
+        std::fs::write(
+            &binary,
+            "#!/bin/sh\nif [ \"$1\" = init ]; then printf incomplete > .beads/beads.db; exit 0; fi\necho import-failed >&2\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            workspace.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let error = store.full_rebuild().await.unwrap_err();
+        assert!(error.to_string().contains("original database restored"));
+        assert_eq!(
+            std::fs::read_to_string(beads.join("beads.db")).unwrap(),
+            "original database"
+        );
+        assert!(!beads.join("beads.db.needle-rebuild-backup").exists());
     }
 }
