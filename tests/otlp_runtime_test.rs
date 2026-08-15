@@ -14,6 +14,22 @@
 
 use std::sync::{Arc, Mutex};
 
+/// Helper function to create a test Config with OTLP enabled.
+///
+/// This helper configures OTLP telemetry sink with a placeholder endpoint
+/// for testing purposes. The endpoint doesn't need to be reachable — tests
+/// only verify that initialization doesn't panic, not that OTLP actually works.
+///
+/// # Returns
+///
+/// A `Config` with OTLP sink enabled and endpoint set to "http://localhost:4317".
+fn test_config_with_otlp() -> needle::config::Config {
+    let mut config = needle::config::Config::default();
+    config.telemetry.otlp_sink.enabled = true;
+    config.telemetry.otlp_sink.endpoint = "http://localhost:4317".to_string();
+    config
+}
+
 /// Test that verifies tokio::spawn panics without an entered runtime.
 ///
 /// This test demonstrates the bug pattern: tokio::spawn will panic if
@@ -154,11 +170,8 @@ fn test_otlp_initialization_pattern_with_runtime_guard() {
 /// then calling `init_tracing_subscriber` with OTLP enabled should succeed.
 #[test]
 fn test_init_tracing_subscriber_with_otlp_and_entered_runtime() {
-    use needle::config::Config;
-
-    // Create a default config and enable OTLP
-    let mut config = Config::default();
-    config.telemetry.otlp_sink.enabled = true;
+    // Use the helper to create a config with OTLP enabled
+    let config = test_config_with_otlp();
 
     // Create a runtime
     let rt = tokio::runtime::Runtime::new().expect("failed to create runtime");
