@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 
 use crate::bead_store::BeadStore;
@@ -54,7 +54,16 @@ pub async fn cleanup_orphaned_in_progress(
     qualified_id: &str,
 ) -> Result<u32> {
     let all_beads = store.list_all().await?;
-    let workers = registry.list()?;
+
+    // Registry::list() does blocking file I/O and PID checks.
+    // Use spawn_blocking to avoid blocking the async executor.
+    let registry_for_blocking = registry.clone();
+    let workers = tokio::task::spawn_blocking(move || {
+        registry_for_blocking.list()
+    })
+    .await
+    .context("spawn_blocking task for registry.list() failed")?
+    .context("registry.list() failed")?;
 
     // Build a set of fully-qualified worker IDs for registered, alive workers.
     let live_worker_ids: std::collections::HashSet<String> = workers
