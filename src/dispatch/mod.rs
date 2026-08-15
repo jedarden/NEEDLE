@@ -21,7 +21,7 @@ use tokio::sync::watch;
 
 use crate::bead_store::spawn_with_etxtbsy_retry_child;
 use crate::config::Config;
-use crate::process_guard::{ProcessGuard, ProcessGroupKillGuard};
+use crate::process_guard::{ProcessGroupKillGuard, ProcessGuard};
 use crate::prompt::BuiltPrompt;
 use crate::sanitize::{CustomPattern, Sanitizer};
 use crate::telemetry::{EventKind, Telemetry};
@@ -1521,29 +1521,32 @@ impl Dispatcher {
 
             // Extract PID before moving t_child into ProcessGuard
             let t_pid = t_child.id();
-            let outcome = match tokio::time::timeout(TRANSFORM_EXIT_GRACE, ProcessGuard::new(t_child).wait()).await {
-                Ok(Ok(status)) => TransformOutcome::NaturalExit(status),
-                Ok(Err(_)) | Err(_) => {
-                    // wait() itself errored, or T2 elapsed with no exit. Kill the
-                    // transform's entire process group (it was spawned into its
-                    // own group above), not just the direct child — a plain
-                    // start_kill() leaves any subprocess it forked (e.g. a
-                    // `sleep` from a hung pipeline) alive as an orphan holding
-                    // the stdout pipe open, wedging the log-writer task's EOF
-                    // read forever. Mirrors the agent's own timeout-kill path.
-                    if let Some(pid) = t_pid {
-                        unsafe {
-                            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            let outcome =
+                match tokio::time::timeout(TRANSFORM_EXIT_GRACE, ProcessGuard::new(t_child).wait())
+                    .await
+                {
+                    Ok(Ok(status)) => TransformOutcome::NaturalExit(status),
+                    Ok(Err(_)) | Err(_) => {
+                        // wait() itself errored, or T2 elapsed with no exit. Kill the
+                        // transform's entire process group (it was spawned into its
+                        // own group above), not just the direct child — a plain
+                        // start_kill() leaves any subprocess it forked (e.g. a
+                        // `sleep` from a hung pipeline) alive as an orphan holding
+                        // the stdout pipe open, wedging the log-writer task's EOF
+                        // read forever. Mirrors the agent's own timeout-kill path.
+                        if let Some(pid) = t_pid {
+                            unsafe {
+                                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                            }
+                        }
+                        // ProcessGuard already owns t_child - it will clean up on drop
+                        if feeder_drained {
+                            TransformOutcome::KilledAfterDrain
+                        } else {
+                            TransformOutcome::KilledNoDrain
                         }
                     }
-                    // ProcessGuard already owns t_child - it will clean up on drop
-                    if feeder_drained {
-                        TransformOutcome::KilledAfterDrain
-                    } else {
-                        TransformOutcome::KilledNoDrain
-                    }
-                }
-            };
+                };
 
             // Await log writer: flushes and closes the file before we return
             // (i.e., before HANDLING state begins).

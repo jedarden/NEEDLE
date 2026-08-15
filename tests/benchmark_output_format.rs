@@ -129,9 +129,21 @@ fn test_output_format_consistent_with_other_metrics() {
     let output = format_latency_output(&result);
 
     // All three metrics should follow the same format: "{NAME}: {value} µs ({value_ms:.2} ms)"
-    let median_pattern = format!("Median: {} µs ({:.2} ms)", result.median_us, result.median_us as f64 / 1000.0);
-    let p95_pattern = format!("P95: {} µs ({:.2} ms)", result.p95_us, result.p95_us as f64 / 1000.0);
-    let p99_pattern = format!("P99: {} µs ({:.2} ms)", result.p99_us, result.p99_us as f64 / 1000.0);
+    let median_pattern = format!(
+        "Median: {} µs ({:.2} ms)",
+        result.median_us,
+        result.median_us as f64 / 1000.0
+    );
+    let p95_pattern = format!(
+        "P95: {} µs ({:.2} ms)",
+        result.p95_us,
+        result.p95_us as f64 / 1000.0
+    );
+    let p99_pattern = format!(
+        "P99: {} µs ({:.2} ms)",
+        result.p99_us,
+        result.p99_us as f64 / 1000.0
+    );
 
     assert!(
         output.contains(&median_pattern),
@@ -147,8 +159,14 @@ fn test_output_format_consistent_with_other_metrics() {
     );
 
     // Verify all use the same unit formatting: "{value} µs ({value_ms:.2} ms)"
-    assert!(output.contains(" µs ("), "All metrics should use 'µs (' before ms value");
-    assert!(output.contains(" ms)"), "All metrics should use ' ms)' at the end");
+    assert!(
+        output.contains(" µs ("),
+        "All metrics should use 'µs (' before ms value"
+    );
+    assert!(
+        output.contains(" ms)"),
+        "All metrics should use ' ms)' at the end"
+    );
 }
 
 #[test]

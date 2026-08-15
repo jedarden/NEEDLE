@@ -173,7 +173,6 @@ fn configured_forge_store(workspace: PathBuf) -> needle::bead_store::CliBeadStor
 /// ```
 struct ProcessGuard {
     inner: Option<std::process::Child>,
-    pid: Option<u32>,
 }
 
 impl ProcessGuard {
@@ -182,11 +181,8 @@ impl ProcessGuard {
     /// # Arguments
     /// * `child` - The spawned child process
     /// * `pid` - Optional PID for logging/debugging (can be obtained via `child.id()`)
-    fn new(child: std::process::Child, pid: Option<u32>) -> Self {
-        Self {
-            inner: Some(child),
-            pid,
-        }
+    fn new(child: std::process::Child, _pid: Option<u32>) -> Self {
+        Self { inner: Some(child) }
     }
 
     /// Try to wait for the process to exit without blocking.
@@ -200,11 +196,6 @@ impl ProcessGuard {
         } else {
             Ok(None)
         }
-    }
-
-    /// Get the PID of the child process, if available.
-    fn pid(&self) -> Option<u32> {
-        self.pid
     }
 
     /// Send a kill signal to the child process.
@@ -2901,7 +2892,7 @@ async fn dead_worker_cleanup_integration() {
         .stderr(Stdio::piped());
 
     // Spawn the process and wait with timeout to prevent hangs
-    let mut child = cmd.spawn().expect("Failed to spawn worker");
+    let child = cmd.spawn().expect("Failed to spawn worker");
     let pid = child.id();
 
     // ProcessGuard ensures cleanup if test panics
@@ -3966,8 +3957,14 @@ async fn worker_binary_path_tilde_expansion_parent_directories() {
     println!("  Isolated home: {}", isolated_home.display());
     println!("  ~/.. -> {}", isolated_home.join("..").display());
     println!("  ~/../ -> {}", isolated_home.join("..").join("").display());
-    println!("  ~/bin/.. -> {}", isolated_home.join("bin").join("..").display());
-    println!("  ~/../.. -> {}", isolated_home.join("..").join("..").display());
+    println!(
+        "  ~/bin/.. -> {}",
+        isolated_home.join("bin").join("..").display()
+    );
+    println!(
+        "  ~/../.. -> {}",
+        isolated_home.join("..").join("..").display()
+    );
 }
 
 /// Test absolute and relative paths in worker_binary_path configuration.

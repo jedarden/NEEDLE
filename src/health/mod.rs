@@ -3136,7 +3136,10 @@ mod tests {
         let result = cleanup_heartbeat_file(&path);
 
         // Should return an error (not panic)
-        assert!(result.is_err(), "cleanup should return Err when trying to remove a directory");
+        assert!(
+            result.is_err(),
+            "cleanup should return Err when trying to remove a directory"
+        );
 
         // Verify the error message provides context
         let err = result.unwrap_err();
@@ -3148,14 +3151,20 @@ mod tests {
         );
 
         // The directory should still exist (cleanup failed, but didn't crash)
-        assert!(path.exists(), "directory should still exist after failed cleanup");
+        assert!(
+            path.exists(),
+            "directory should still exist after failed cleanup"
+        );
 
         // Test 2: Nonexistent file should succeed (idempotent cleanup)
         let nonexistent_path = dir.path().join("nonexistent-heartbeat.json");
         assert!(!nonexistent_path.exists(), "test file should not exist");
 
         let result = cleanup_heartbeat_file(&nonexistent_path);
-        assert!(result.is_ok(), "cleanup should succeed when file doesn't exist");
+        assert!(
+            result.is_ok(),
+            "cleanup should succeed when file doesn't exist"
+        );
 
         // Test 3: Successful removal should work normally
         let test_file = dir.path().join("real-heartbeat.json");
@@ -3163,8 +3172,14 @@ mod tests {
         assert!(test_file.exists(), "test file should exist before cleanup");
 
         let result = cleanup_heartbeat_file(&test_file);
-        assert!(result.is_ok(), "cleanup should succeed when removing a real file");
-        assert!(!test_file.exists(), "file should be removed after successful cleanup");
+        assert!(
+            result.is_ok(),
+            "cleanup should succeed when removing a real file"
+        );
+        assert!(
+            !test_file.exists(),
+            "file should be removed after successful cleanup"
+        );
     }
 
     /// Test that heartbeat_path field is correctly set for shutdown handler access.
@@ -3330,8 +3345,7 @@ mod tests {
 
         // Create a file and make it unreadable
         std::fs::write(&heartbeat_path, b"{}").unwrap();
-        std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o000))
-            .unwrap();
+        std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         // Verify the directory is actually unreadable. When running as root
         // (e.g., in CI containers), 0o000 doesn't block metadata access and the
@@ -3339,7 +3353,8 @@ mod tests {
         let unreadable = std::fs::metadata(&heartbeat_path).is_err();
         if !unreadable {
             // Root bypasses permission checks — skip this test.
-            let _ = std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o644));
+            let _ =
+                std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o644));
             return;
         }
 
@@ -3372,7 +3387,10 @@ mod tests {
             result.is_ok(),
             "check should succeed when heartbeat file doesn't exist"
         );
-        assert!(!result.unwrap(), "should return false when file doesn't exist");
+        assert!(
+            !result.unwrap(),
+            "should return false when file doesn't exist"
+        );
 
         // Create the heartbeat file
         std::fs::write(&config.heartbeat_path, b"{}").unwrap();
@@ -3397,7 +3415,10 @@ mod tests {
 
         // Function works without any HealthMonitor or config setup
         let result = check_heartbeat_file_exists(&temp_path);
-        assert!(result.is_ok(), "function should be callable with just a Path");
+        assert!(
+            result.is_ok(),
+            "function should be callable with just a Path"
+        );
         assert!(!result.unwrap(), "nonexistent path should return false");
     }
 

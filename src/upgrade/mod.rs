@@ -203,11 +203,10 @@ pub fn download_to_testing_channel() -> Result<DownloadToTestingResult> {
     // Write the new binary to :testing channel.
     let temp_path = testing_binary.with_extension("tmp");
     {
-        let mut file = fs::File::create(&temp_path)
-            .context("failed to create testing binary file")?;
+        let mut file =
+            fs::File::create(&temp_path).context("failed to create testing binary file")?;
         let mut cursor = Cursor::new(&content);
-        io::copy(&mut cursor, &mut file)
-            .context("failed to write testing binary")?;
+        io::copy(&mut cursor, &mut file).context("failed to write testing binary")?;
     }
 
     // Make it executable.

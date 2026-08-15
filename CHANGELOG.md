@@ -4,6 +4,30 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-15
+
+Patch release completing the fleet cutover introduced in 0.3.0 and hardening
+the release/canary path used to deploy it.
+
+### Fixed
+
+- Canonical `bead-rs` and `bead-forge` configured names now resolve to the
+  correct descriptor and executable without mixing backend ownership.
+- Database recovery errors are descriptor-scoped, and full rebuilds retain a
+  rollback copy of the original SQLite database and sidecars until import and
+  doctor verification succeed.
+- Canary workspaces honor their own backend binding, with bounded retries for
+  transient capability-probe and bead-show failures.
+- Operator and shipped-work guidance no longer directs bead-rs workspaces to
+  stale bead-forge commands.
+
+### Added
+
+- Release downloads can be staged into the existing `needle-testing` channel
+  so the automatic updater can use the normal canary and promotion path.
+- The completed Jed Arden repository migration is documented, including the
+  explicit permanent `jedarden/bead-forge` exception.
+
 ## [0.3.0] - 2026-08-14
 
 Version-correction release. No new functionality relative to 0.2.20; this

@@ -2184,7 +2184,7 @@ pub struct HookConfig {
 }
 
 /// OTLP TLS configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OtlpTlsConfig {
     /// Disable TLS verification (not recommended for production).
@@ -2197,15 +2197,6 @@ pub struct OtlpTlsConfig {
     /// Leave empty to use the system's default trust store.
     #[serde(default)]
     pub ca_file: String,
-}
-
-impl Default for OtlpTlsConfig {
-    fn default() -> Self {
-        OtlpTlsConfig {
-            insecure: false,
-            ca_file: String::new(),
-        }
-    }
 }
 
 /// OTLP signal export configuration.
