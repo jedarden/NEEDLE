@@ -598,7 +598,7 @@ impl Worker {
         // Create the watchdog trigger flag before creating the Worker.
         let watchdog_triggered = Arc::new(AtomicBool::new(false));
 
-        Worker {
+        let worker = Worker {
             config,
             worker_name,
             home_store: store.clone(),
@@ -643,7 +643,22 @@ impl Worker {
             last_workspace_mtime: None,
             found_but_excluded: false,
             spawn_path_metadata: None,
+        };
+
+        // Warn if both budget thresholds are disabled (0.0 = no cap).
+        if worker.config.budget.warn_usd <= 0.0 && worker.config.budget.stop_usd <= 0.0 {
+            tracing::warn!(
+                warn_usd = 0.0,
+                stop_usd = 0.0,
+                "Budget enforcement is DISABLED: both warn_usd and stop_usd are set to 0.0. \
+                 Daily spend is fully uncapped — no warnings, no halting. \
+                 To enable budget protection, set non-zero values in .needle.yaml under 'budget:' \
+                 (e.g., 'budget: {{warn_usd: 10.0, stop_usd: 50.0}}'). \
+                 For fleet-wide governance, consider claude-governor (https://github.com/jedarden/claude-governor)."
+            );
         }
+
+        worker
     }
 
     /// Start the watchdog thread that monitors HANDLING state duration.
@@ -5166,6 +5181,21 @@ mod tests {
         worker.check_budget().unwrap();
         // State should still be Selecting — warn doesn't stop the worker.
         assert_eq!(*worker.state(), WorkerState::Selecting);
+    }
+
+    #[tokio::test]
+    async fn worker_boots_with_zero_budget_thresholds() {
+        // Regression test: worker must boot successfully even when both budget
+        // thresholds are 0.0 (disabled). A warning is emitted, but boot completes.
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let config = valid_test_config();
+        // Verify defaults are 0.0
+        assert_eq!(config.budget.warn_usd, 0.0);
+        assert_eq!(config.budget.stop_usd, 0.0);
+
+        let mut worker = Worker::new(config, "test-zero-budget".to_string(), store);
+        // Worker must boot without error
+        assert!(worker.boot().is_ok());
     }
 
     // ── Invariant violation tests for dispatch/execute/handle ──
