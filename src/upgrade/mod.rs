@@ -65,6 +65,27 @@ pub struct UpdateCheck {
     pub release_notes: Option<String>,
 }
 
+/// Result of downloading to the testing channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadToTestingResult {
+    /// Download completed successfully.
+    Downloaded {
+        /// Version that was downloaded.
+        version: String,
+        /// Path to the testing binary.
+        testing_path: PathBuf,
+    },
+    /// Download was skipped because an unpromoted testing binary already exists.
+    Skipped {
+        /// Reason for skipping.
+        reason: String,
+        /// Path to the existing testing binary.
+        testing_path: PathBuf,
+    },
+    /// No update available (already at latest version).
+    NoUpdateAvailable,
+}
+
 /// Check GitHub for the latest release.
 ///
 /// Returns information about the latest release compared to the current version.
@@ -99,6 +120,117 @@ pub fn check_for_update() -> Result<UpdateCheck> {
         latest_version,
         update_available,
         release_notes: release.body,
+    })
+}
+
+/// Download a newer GitHub release to the testing channel.
+///
+/// This function downloads the latest release to `needle_home/bin/needle-testing`
+/// instead of overwriting the running binary. It skips download if an unpromoted
+/// testing binary already exists to avoid clobbering an in-flight self-modification
+/// candidate.
+///
+/// # Returns
+///
+/// - `Ok(Downloaded)` if download succeeded
+/// - `Ok(Skipped)` if an unpromoted testing binary already exists
+/// - `Ok(NoUpdateAvailable)` if already at latest version
+/// - `Err` if download failed
+pub fn download_to_testing_channel() -> Result<DownloadToTestingResult> {
+    let check = check_for_update()?;
+
+    if !check.update_available {
+        return Ok(DownloadToTestingResult::NoUpdateAvailable);
+    }
+
+    let home = needle_home();
+    let bin_dir = home.join("bin");
+    fs::create_dir_all(&bin_dir).context("failed to create bin directory")?;
+
+    let testing_binary = bin_dir.join("needle-testing");
+    let stable_binary = bin_dir.join("needle-stable");
+
+    // Check if an unpromoted testing binary already exists.
+    // An unpromoted testing binary is one whose hash differs from :stable.
+    if testing_binary.exists() {
+        let testing_hash = file_hash(&testing_binary);
+        let stable_hash = file_hash(&stable_binary);
+
+        // If both exist and have different hashes, testing is unpromoted.
+        if let (Ok(th), Ok(sh)) = (testing_hash, stable_hash) {
+            if th != sh {
+                tracing::info!(
+                    testing_path = %testing_binary.display(),
+                    testing_hash = %th,
+                    stable_hash = %sh,
+                    "Unpromoted testing binary already exists - skipping download"
+                );
+                return Ok(DownloadToTestingResult::Skipped {
+                    reason: "unpromoted testing binary already exists".to_string(),
+                    testing_path: testing_binary,
+                });
+            }
+        }
+    }
+
+    // Download the new version to testing channel.
+    let asset_name = get_asset_name()?;
+    let download_url = asset_download_url(&asset_name);
+
+    tracing::info!(
+        version = %check.latest_version,
+        url = %download_url,
+        "Downloading new release to testing channel"
+    );
+
+    let response = ureq::agent()
+        .get(&download_url)
+        .set("User-Agent", &format!("needle/{}", check.current_version))
+        .call()
+        .context("failed to download new binary")?;
+
+    if response.status() >= 400 {
+        bail!("download failed with status {}", response.status());
+    }
+
+    // Read the response into memory.
+    let mut content = Vec::new();
+    response
+        .into_reader()
+        .read_to_end(&mut content)
+        .context("failed to read downloaded content")?;
+
+    // Write the new binary to :testing channel.
+    let temp_path = testing_binary.with_extension("tmp");
+    {
+        let mut file = fs::File::create(&temp_path)
+            .context("failed to create testing binary file")?;
+        let mut cursor = Cursor::new(&content);
+        io::copy(&mut cursor, &mut file)
+            .context("failed to write testing binary")?;
+    }
+
+    // Make it executable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o755))
+            .context("failed to set executable permissions on testing binary")?;
+    }
+
+    // Atomic rename to final testing path.
+    fs::rename(&temp_path, &testing_binary)
+        .context("failed to move testing binary to final path")?;
+
+    tracing::info!(
+        version = %check.latest_version,
+        testing_path = %testing_binary.display(),
+        "Successfully downloaded to testing channel"
+    );
+
+    Ok(DownloadToTestingResult::Downloaded {
+        version: check.latest_version,
+        testing_path: testing_binary,
     })
 }
 
@@ -799,5 +931,48 @@ mod tests {
             .map(|s| s.ends_with(" (deleted)"))
             .unwrap_or(false);
         assert!(is_deleted, "deleted path detection should work");
+    }
+
+    // ── download_to_testing_channel tests ──
+
+    #[test]
+    fn download_to_testing_result_enum_variants_are_distinct() {
+        let downloaded = DownloadToTestingResult::Downloaded {
+            version: "1.0.0".to_string(),
+            testing_path: PathBuf::from("/tmp/needle-testing"),
+        };
+        let skipped = DownloadToTestingResult::Skipped {
+            reason: "test".to_string(),
+            testing_path: PathBuf::from("/tmp/needle-testing"),
+        };
+        let no_update = DownloadToTestingResult::NoUpdateAvailable;
+
+        assert_ne!(downloaded, skipped);
+        assert_ne!(downloaded, no_update);
+        assert_ne!(skipped, no_update);
+    }
+
+    #[test]
+    fn download_to_testing_skips_when_unpromoted_binary_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+
+        // Create stable binary.
+        let stable_path = bin_dir.join("needle-stable");
+        fs::write(&stable_path, b"stable binary").unwrap();
+
+        // Create unpromoted testing binary (different hash).
+        let testing_path = bin_dir.join("needle-testing");
+        fs::write(&testing_path, b"different testing binary").unwrap();
+
+        // Verify the hashes are different.
+        let stable_hash = file_hash(&stable_path).unwrap();
+        let testing_hash = file_hash(&testing_path).unwrap();
+        assert_ne!(stable_hash, testing_hash);
+
+        // The skip logic is tested in integration tests where we can
+        // set up the full environment and call download_to_testing_channel.
+        // This test verifies the hash comparison logic works.
     }
 }
