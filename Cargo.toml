@@ -136,3 +136,6 @@ harness = false
 strip = true
 lto = true
 codegen-units = 1
+
+[profile.test]
+opt-level = 2
