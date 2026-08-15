@@ -4082,14 +4082,13 @@ Fix: a short-lived per-workspace advisory lock (e.g. `flock` on `<workspace>/.gi
 ### 6.8 Deployment
 - Version bump, needle-ci (fmt + clippy + test on iad-ci), GitHub Release, then staged fleet rollout through the canary channel (`:testing` → `:stable`).
 
-### 6.9 Open question: worktree isolation covers only the commit race, not the shared working directory itself
+### 6.9 Concurrent same-repo worker isolation
+
+**Status:** Resolved — ADR-015 accepted 2026-08-15.
+
 §6.6's fix (a `flock` around `inject_bead_id_trailer`'s read-HEAD→verify→amend sequence) closes the specific commit-mislabeling race, but the broader condition that makes it possible is untouched: NEEDLE gives every worker assigned to a repo the *same* working directory (`bead.workspace` is passed straight through as a raw path into `run_process()`, `src/dispatch/mod.rs:709`, and rendered verbatim as `{workspace}` — no per-worker suffix, clone, or `git worktree` derivation anywhere in `src/`). The per-workspace claim `flock` (§6.1/plan.md line 219) guards only the CLAIMING step's `br update --claim` call, not the EXECUTING phase — so once two workers are each dispatched into the same repo, their agents can run concurrent `git add`/`commit`/`reset --hard`/`checkout` in that one shared tree for the full duration of both dispatches, with nothing serializing them beyond whatever the agents themselves happen to do. §6.6's lock only protects NEEDLE's own post-hoc trailer amend, not the agent's own work — one agent's `git reset --hard` or `checkout` can still discard another's uncommitted changes while both are mid-execution.
 
-Not solved by this phase. Two directions, not yet decided between:
-- **Full worktree isolation:** `git worktree add <workspace>/.needle-worktrees/<worker-id> <branch>` per worker, dispatching the agent into the isolated worktree instead of the shared root, then merging/rebasing back on successful completion. Closes the problem structurally but is a bigger change — needs a decision on merge-back strategy (rebase vs. fast-forward vs. explicit merge commit), what happens to `commit_hook`'s trailer injection once commits land on a worktree branch instead of directly on the shared branch, and whether beads that expect to see other in-flight workers' commits (rare, but possible for coordination-dependent beads) still function correctly.
-- **Accept it as a known constraint and steer around it operationally:** document plainly (this section, plus a `needle run --help` / docs callout) that more than one worker in the same repo is unsafe unless the repo's own beads are structured to avoid overlapping file/branch state — i.e., push the mitigation to bead authoring and fleet-dispatch discipline (as already practiced: pin one worker per repo for anything Rust/build-heavy) rather than to NEEDLE itself.
-
-Whichever direction is chosen should be captured as its own ADR before implementation — this is a bigger design decision than the rest of Phase 6's incident-driven fixes, and deserves the same explicit Context/Decision/Alternatives/Consequences treatment.
+**Decision:** Reject full per-worktree isolation. Accept shared working directories as a deliberate design constraint and enforce it operationally through fleet dispatch discipline (one worker per repository for build-heavy workspaces) and bead authoring guidelines (explicit blocking dependencies for overlapping work). See [ADR-015](../adr/015-concurrent-same-repo-worker-isolation.md) for full context, alternatives considered, and consequences.
 
 ## Exit criteria
 - A workspace with beads Pluck cannot claim produces zero new beads in that workspace and one telemetry event in NEEDLE's own stream.
