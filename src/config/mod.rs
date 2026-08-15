@@ -66,6 +66,48 @@ pub struct RoutingConfig {
     pub strict: bool,
 }
 
+/// Process timeout limits configuration.
+///
+/// Defines timeout parameters for agent process execution, separating
+/// timeout configuration from other agent settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessLimits {
+    /// Idle timeout duration (None means disabled).
+    ///
+    /// When set, the agent process will be terminated if no stdout/stderr
+    /// activity occurs for this duration. This prevents hung processes from
+    /// blocking indefinitely when they stop producing output but don't exit.
+    ///
+    /// Set to `None` to disable idle timeout detection (processes can run
+    /// indefinitely as long as they produce no output).
+    ///
+    /// # Examples
+    ///
+    /// ```yaml
+    /// # Disable idle timeout (processes can hang indefinitely)
+    /// process_limits:
+    ///     idle_timeout: null
+    ///
+    /// # 5 minute idle timeout
+    /// process_limits:
+    ///     idle_timeout: 300s
+    ///
+    /// # 30 second idle timeout
+    /// process_limits:
+    ///     idle_timeout: 30s
+    /// ```
+    #[serde(default)]
+    pub idle_timeout: Option<u64>,
+}
+
+impl Default for ProcessLimits {
+    fn default() -> Self {
+        ProcessLimits {
+            idle_timeout: None,
+        }
+    }
+}
+
 /// Agent (AI model CLI) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -431,10 +473,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
             };
             return Ok((backend, path.clone()));
         } else {
-            bail!(
-                "explicit bead CLI path does not exist: {}",
-                path.display()
-            );
+            bail!("explicit bead CLI path does not exist: {}", path.display());
         }
     }
 
@@ -634,7 +673,10 @@ mod tests {
         // Test deserialization from YAML
         let deserialized: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(deserialized.backend, BeadBackend::Bead);
-        assert_eq!(deserialized.path, Some(PathBuf::from("/usr/local/bin/bead")));
+        assert_eq!(
+            deserialized.path,
+            Some(PathBuf::from("/usr/local/bin/bead"))
+        );
     }
 
     #[test]
@@ -656,7 +698,12 @@ mod tests {
 
         for (backend, expected_str) in backends {
             let yaml = serde_yaml::to_string(&backend).unwrap();
-            assert!(yaml.contains(expected_str), "Expected '{}' in YAML for {:?}", expected_str, backend);
+            assert!(
+                yaml.contains(expected_str),
+                "Expected '{}' in YAML for {:?}",
+                expected_str,
+                backend
+            );
 
             // Test round-trip
             let deserialized: BeadBackend = serde_yaml::from_str(&yaml).unwrap();
