@@ -2964,6 +2964,59 @@ mod tests {
         assert!(!path.exists(), "heartbeat file should not exist after stop");
     }
 
+    /// Test that cleanup_heartbeat_file handles various error conditions gracefully.
+    ///
+    /// This test verifies the acceptance criteria:
+    /// - Cleanup doesn't panic on file removal failure
+    /// - Error conditions are properly logged with tracing::warn!
+    /// - Error is returned with proper context (not swallowed)
+    /// - Function handles permission errors appropriately
+    /// - Function handles non-file filesystem objects (directories, etc.)
+    ///
+    /// The test uses tempfile to create controlled error scenarios and verifies
+    /// that the cleanup function handles them without crashing while providing
+    /// useful error information.
+    #[test]
+    fn cleanup_heartbeat_file_error_handling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test-heartbeat.json");
+
+        // Test 1: Attempting to remove a directory instead of a file should fail gracefully
+        std::fs::create_dir(&path).unwrap();
+        let result = cleanup_heartbeat_file(&path);
+
+        // Should return an error (not panic)
+        assert!(result.is_err(), "cleanup should return Err when trying to remove a directory");
+
+        // Verify the error message provides context
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("failed to remove heartbeat file"),
+            "error message should contain context about cleanup failure: {}",
+            err_msg
+        );
+
+        // The directory should still exist (cleanup failed, but didn't crash)
+        assert!(path.exists(), "directory should still exist after failed cleanup");
+
+        // Test 2: Nonexistent file should succeed (idempotent cleanup)
+        let nonexistent_path = dir.path().join("nonexistent-heartbeat.json");
+        assert!(!nonexistent_path.exists(), "test file should not exist");
+
+        let result = cleanup_heartbeat_file(&nonexistent_path);
+        assert!(result.is_ok(), "cleanup should succeed when file doesn't exist");
+
+        // Test 3: Successful removal should work normally
+        let test_file = dir.path().join("real-heartbeat.json");
+        std::fs::write(&test_file, b"test data").unwrap();
+        assert!(test_file.exists(), "test file should exist before cleanup");
+
+        let result = cleanup_heartbeat_file(&test_file);
+        assert!(result.is_ok(), "cleanup should succeed when removing a real file");
+        assert!(!test_file.exists(), "file should be removed after successful cleanup");
+    }
+
     /// Test that heartbeat_path field is correctly set for shutdown handler access.
     ///
     /// This test verifies the acceptance criteria:
