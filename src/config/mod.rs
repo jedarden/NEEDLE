@@ -3135,6 +3135,41 @@ impl std::fmt::Display for ConfigError {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Key path validation
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Validate a dot-notation key path string.
+///
+/// This is a stub that accepts any key path for now. Full validation logic
+/// will be added in a follow-up task.
+///
+/// # Arguments
+///
+/// * `key_path` - A dot-separated configuration key path (e.g., "agent.default")
+///
+/// # Returns
+///
+/// * `Ok(())` - The key path is valid (currently always returns Ok for any input)
+/// * `Err(ConfigError)` - The key path is invalid (to be implemented)
+///
+/// # Examples
+///
+/// ```
+/// use needle::config::validate_key_path;
+///
+/// // Currently accepts any key path
+/// assert!(validate_key_path("agent.default").is_ok());
+/// assert!(validate_key_path("worker.max_workers").is_ok());
+/// assert!(validate_key_path("strands.explore.enabled").is_ok());
+/// ```
+pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
+    // Stub implementation: accepts any key path
+    // Full validation logic will be added in a subsequent task
+    let _ = key_path;
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // CLI overrides
 // ──────────────────────────────────────────────────────────────────────────────
 
