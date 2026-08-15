@@ -1492,7 +1492,7 @@ impl Dispatcher {
         const FEEDER_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
         const TRANSFORM_EXIT_GRACE: Duration = Duration::from_secs(2);
 
-        if let Some(mut t_child) = transform_child_opt {
+        if let Some(t_child) = transform_child_opt {
             // T1: did the feeder actually finish forwarding and close stdin?
             let feeder_drained = match transform_feeder_task {
                 Some(feeder) => tokio::time::timeout(FEEDER_DRAIN_TIMEOUT, feeder)
@@ -1519,7 +1519,9 @@ impl Dispatcher {
                 KilledNoDrain,
             }
 
-            let outcome = match tokio::time::timeout(TRANSFORM_EXIT_GRACE, t_child.wait()).await {
+            // Extract PID before moving t_child into ProcessGuard
+            let t_pid = t_child.id();
+            let outcome = match tokio::time::timeout(TRANSFORM_EXIT_GRACE, ProcessGuard::new(t_child).wait()).await {
                 Ok(Ok(status)) => TransformOutcome::NaturalExit(status),
                 Ok(Err(_)) | Err(_) => {
                     // wait() itself errored, or T2 elapsed with no exit. Kill the
@@ -1529,13 +1531,12 @@ impl Dispatcher {
                     // `sleep` from a hung pipeline) alive as an orphan holding
                     // the stdout pipe open, wedging the log-writer task's EOF
                     // read forever. Mirrors the agent's own timeout-kill path.
-                    if let Some(t_pid) = t_child.id() {
+                    if let Some(pid) = t_pid {
                         unsafe {
-                            libc::killpg(t_pid as libc::pid_t, libc::SIGKILL);
+                            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
                         }
                     }
-                    let _ = t_child.start_kill();
-                    let _ = t_child.wait().await;
+                    // ProcessGuard already owns t_child - it will clean up on drop
                     if feeder_drained {
                         TransformOutcome::KilledAfterDrain
                     } else {
