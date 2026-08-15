@@ -485,17 +485,23 @@ impl CanaryRunner {
             )
         })?;
 
-        let output = Command::new(&binary)
-            .args(["show", bead_id, "--json"])
-            .current_dir(&self.canary_workspace)
-            .output()
-            .with_context(|| {
-                format!(
-                    "failed to run {} show for backend '{}'",
-                    binary.display(),
-                    bead_cli.backend
-                )
-            })?;
+        let output = crate::bead_store::spawn_with_etxtbsy_retry_sync(
+            || {
+                Command::new(&binary)
+                    .args(["show", bead_id, "--json"])
+                    .current_dir(&self.canary_workspace)
+                    .output()
+            },
+            5,
+            20,
+        )
+        .with_context(|| {
+            format!(
+                "failed to run {} show for backend '{}'",
+                binary.display(),
+                bead_cli.backend
+            )
+        })?;
 
         if !output.status.success() {
             bail!(
