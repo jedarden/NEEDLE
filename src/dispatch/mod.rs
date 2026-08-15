@@ -1449,7 +1449,7 @@ impl Dispatcher {
                             }
                         }
                         let _ = child.start_kill();
-                        let _ = child.wait().await;
+                        let _ = ProcessGuard::new(child).wait().await;
                         kill_guard.disarm();
 
                         let reason = TimeoutReason::Hard {
