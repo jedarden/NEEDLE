@@ -101,8 +101,9 @@ impl SupervisorConfig {
     /// ```
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read supervisor config file: {}", path.display()))?;
+        let text = std::fs::read_to_string(path).with_context(|| {
+            format!("failed to read supervisor config file: {}", path.display())
+        })?;
 
         // Determine format from file extension
         let config = match path.extension().and_then(|e| e.to_str()) {
@@ -834,7 +835,10 @@ worker_binary_path: /usr/local/bin/needle
         assert_eq!(config.poll_interval_secs, 20);
         assert_eq!(config.agent, Some("claude".to_string()));
         assert_eq!(config.agent_timeout, Some(7200));
-        assert_eq!(config.worker_binary_path, Some(PathBuf::from("/usr/local/bin/needle")));
+        assert_eq!(
+            config.worker_binary_path,
+            Some(PathBuf::from("/usr/local/bin/needle"))
+        );
     }
 
     #[test]
@@ -847,8 +851,8 @@ agent = "claude"
 agent_timeout = 3600
 "#;
 
-        let config: SupervisorConfig = toml::from_str(toml_content)
-            .expect("failed to deserialize SupervisorConfig from TOML");
+        let config: SupervisorConfig =
+            toml::from_str(toml_content).expect("failed to deserialize SupervisorConfig from TOML");
 
         assert_eq!(config.workspace, PathBuf::from("/tmp/test-workspace"));
         assert_eq!(config.max_workers, 6);
@@ -901,12 +905,16 @@ max_workers: 4
         let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
         let config_file = temp_dir.path().join("supervisor-config.yaml");
 
-        std::fs::write(&config_file, r#"
+        std::fs::write(
+            &config_file,
+            r#"
 workspace: /tmp/test-workspace
 max_workers: 12
 poll_interval_secs: 25
 agent: claude-code
-"#).expect("failed to write config file");
+"#,
+        )
+        .expect("failed to write config file");
 
         let config = SupervisorConfig::from_file(&config_file)
             .expect("failed to load SupervisorConfig from YAML file");
@@ -922,11 +930,15 @@ agent: claude-code
         let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
         let config_file = temp_dir.path().join("supervisor-config.toml");
 
-        std::fs::write(&config_file, r#"
+        std::fs::write(
+            &config_file,
+            r#"
 workspace = "/tmp/test-workspace"
 max_workers = 7
 poll_interval_secs = 12
-"#).expect("failed to write config file");
+"#,
+        )
+        .expect("failed to write config file");
 
         let config = SupervisorConfig::from_file(&config_file)
             .expect("failed to load SupervisorConfig from TOML file");
@@ -941,11 +953,15 @@ poll_interval_secs = 12
         let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
         let config_file = temp_dir.path().join("supervisor-config.json");
 
-        std::fs::write(&config_file, r#"{
+        std::fs::write(
+            &config_file,
+            r#"{
   "workspace": "/tmp/test-workspace",
   "max_workers": 15,
   "poll_interval_secs": 40
-}"#).expect("failed to write config file");
+}"#,
+        )
+        .expect("failed to write config file");
 
         let config = SupervisorConfig::from_file(&config_file)
             .expect("failed to load SupervisorConfig from JSON file");
@@ -986,7 +1002,8 @@ poll_interval_secs = 12
         let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
         let config_file = temp_dir.path().join("supervisor-config.yaml");
 
-        std::fs::write(&config_file, "invalid: yaml: content: [").expect("failed to write config file");
+        std::fs::write(&config_file, "invalid: yaml: content: [")
+            .expect("failed to write config file");
 
         let result = SupervisorConfig::from_file(&config_file);
         assert!(result.is_err());
@@ -1035,10 +1052,16 @@ poll_interval_secs = 12
 
         assert_eq!(supervisor_config.workspace, workspace);
         assert_eq!(supervisor_config.max_workers, 8);
-        assert_eq!(supervisor_config.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        assert_eq!(
+            supervisor_config.poll_interval_secs,
+            DEFAULT_POLL_INTERVAL_SECS
+        );
         assert_eq!(supervisor_config.agent, Some("claude-code".to_string()));
         assert_eq!(supervisor_config.agent_timeout, Some(7200));
-        assert_eq!(supervisor_config.worker_binary_path, Some(PathBuf::from("/custom/needle")));
+        assert_eq!(
+            supervisor_config.worker_binary_path,
+            Some(PathBuf::from("/custom/needle"))
+        );
     }
 
     #[test]

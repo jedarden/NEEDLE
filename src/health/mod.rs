@@ -1012,54 +1012,36 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn check_heartbeat_file_exists(path: &Path) -> Result<bool> {
-    // Use try_exists() instead of exists() to properly handle permission errors.
-    // exists() returns false for both "not found" and "permission denied", which
-    // can hide actual errors. try_exists() distinguishes between these cases.
-    match path.try_exists() {
-        Ok(exists) => {
-            // File exists - verify it's actually a file, not a directory
-            if exists {
-                match std::fs::metadata(path) {
-                    Ok(metadata) => {
-                        if metadata.is_file() {
-                            Ok(true)
-                        } else {
-                            // Path exists but is a directory, not a file
-                            tracing::debug!(
-                                path = %path.display(),
-                                "heartbeat path exists but is a directory, not a file"
-                            );
-                            Ok(false)
-                        }
-                    }
-                    Err(e) => {
-                        // Metadata check failed - return error with context
-                        Err(e).with_context(|| {
-                            format!(
-                                "failed to read metadata for heartbeat file: {}",
-                                path.display()
-                            )
-                        })
-                    }
-                }
+    // Inspect the directory entry first so a broken symlink remains
+    // distinguishable from a genuinely absent heartbeat file. `try_exists()`
+    // follows symlinks and reports both cases as `Ok(false)`.
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(path = %path.display(), "heartbeat file does not exist");
+            Ok(false)
+        }
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to check heartbeat file existence: {}",
+                path.display()
+            )
+        }),
+        Ok(_) => {
+            let metadata = std::fs::metadata(path).with_context(|| {
+                format!(
+                    "failed to read metadata for heartbeat file: {}",
+                    path.display()
+                )
+            })?;
+            if metadata.is_file() {
+                Ok(true)
             } else {
-                // File does not exist
                 tracing::debug!(
                     path = %path.display(),
-                    "heartbeat file does not exist"
+                    "heartbeat path exists but is a directory, not a file"
                 );
                 Ok(false)
             }
-        }
-        Err(e) => {
-            // try_exists() failed - this is typically a permission error
-            // Return the error with context for upstream handling
-            Err(e).with_context(|| {
-                format!(
-                    "failed to check heartbeat file existence: {}",
-                    path.display()
-                )
-            })
         }
     }
 }
@@ -3136,7 +3118,10 @@ mod tests {
         let result = cleanup_heartbeat_file(&path);
 
         // Should return an error (not panic)
-        assert!(result.is_err(), "cleanup should return Err when trying to remove a directory");
+        assert!(
+            result.is_err(),
+            "cleanup should return Err when trying to remove a directory"
+        );
 
         // Verify the error message provides context
         let err = result.unwrap_err();
@@ -3148,14 +3133,20 @@ mod tests {
         );
 
         // The directory should still exist (cleanup failed, but didn't crash)
-        assert!(path.exists(), "directory should still exist after failed cleanup");
+        assert!(
+            path.exists(),
+            "directory should still exist after failed cleanup"
+        );
 
         // Test 2: Nonexistent file should succeed (idempotent cleanup)
         let nonexistent_path = dir.path().join("nonexistent-heartbeat.json");
         assert!(!nonexistent_path.exists(), "test file should not exist");
 
         let result = cleanup_heartbeat_file(&nonexistent_path);
-        assert!(result.is_ok(), "cleanup should succeed when file doesn't exist");
+        assert!(
+            result.is_ok(),
+            "cleanup should succeed when file doesn't exist"
+        );
 
         // Test 3: Successful removal should work normally
         let test_file = dir.path().join("real-heartbeat.json");
@@ -3163,8 +3154,14 @@ mod tests {
         assert!(test_file.exists(), "test file should exist before cleanup");
 
         let result = cleanup_heartbeat_file(&test_file);
-        assert!(result.is_ok(), "cleanup should succeed when removing a real file");
-        assert!(!test_file.exists(), "file should be removed after successful cleanup");
+        assert!(
+            result.is_ok(),
+            "cleanup should succeed when removing a real file"
+        );
+        assert!(
+            !test_file.exists(),
+            "file should be removed after successful cleanup"
+        );
     }
 
     /// Test that heartbeat_path field is correctly set for shutdown handler access.
@@ -3330,8 +3327,7 @@ mod tests {
 
         // Create a file and make it unreadable
         std::fs::write(&heartbeat_path, b"{}").unwrap();
-        std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o000))
-            .unwrap();
+        std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         // Verify the directory is actually unreadable. When running as root
         // (e.g., in CI containers), 0o000 doesn't block metadata access and the
@@ -3339,7 +3335,8 @@ mod tests {
         let unreadable = std::fs::metadata(&heartbeat_path).is_err();
         if !unreadable {
             // Root bypasses permission checks — skip this test.
-            let _ = std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o644));
+            let _ =
+                std::fs::set_permissions(&heartbeat_path, std::fs::Permissions::from_mode(0o644));
             return;
         }
 
@@ -3372,7 +3369,10 @@ mod tests {
             result.is_ok(),
             "check should succeed when heartbeat file doesn't exist"
         );
-        assert!(!result.unwrap(), "should return false when file doesn't exist");
+        assert!(
+            !result.unwrap(),
+            "should return false when file doesn't exist"
+        );
 
         // Create the heartbeat file
         std::fs::write(&config.heartbeat_path, b"{}").unwrap();
@@ -3397,7 +3397,10 @@ mod tests {
 
         // Function works without any HealthMonitor or config setup
         let result = check_heartbeat_file_exists(&temp_path);
-        assert!(result.is_ok(), "function should be callable with just a Path");
+        assert!(
+            result.is_ok(),
+            "function should be callable with just a Path"
+        );
         assert!(!result.unwrap(), "nonexistent path should return false");
     }
 

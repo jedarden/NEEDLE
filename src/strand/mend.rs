@@ -58,12 +58,10 @@ pub async fn cleanup_orphaned_in_progress(
     // Registry::list() does blocking file I/O and PID checks.
     // Use spawn_blocking to avoid blocking the async executor.
     let registry_for_blocking = registry.clone();
-    let workers = tokio::task::spawn_blocking(move || {
-        registry_for_blocking.list()
-    })
-    .await
-    .context("spawn_blocking task for registry.list() failed")?
-    .context("registry.list() failed")?;
+    let workers = tokio::task::spawn_blocking(move || registry_for_blocking.list())
+        .await
+        .context("spawn_blocking task for registry.list() failed")?
+        .context("registry.list() failed")?;
 
     // Build a set of fully-qualified worker IDs for registered, alive workers.
     let live_worker_ids: std::collections::HashSet<String> = workers

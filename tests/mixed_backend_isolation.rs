@@ -119,20 +119,15 @@ fn each_workspace_invokes_only_its_explicit_backend() {
     assert!(bf_invocations.lines().any(|line| line.starts_with("bf ")));
     assert!(!bf_invocations.lines().any(|line| line.starts_with("bead ")));
 
-    for (name, yaml) in [("unbound", "")] {
-        let workspace = root.path().join(name);
-        fs::create_dir_all(workspace.join(".beads")).unwrap();
-        if !yaml.is_empty() {
-            fs::write(workspace.join(".needle.yaml"), yaml).unwrap();
-        }
-        fs::write(&invocation_log, "").unwrap();
-        let output = run(Command::new(&needle)
-            .args(["doctor", "--workspace", workspace.to_str().unwrap()])
-            .env("HOME", &home)
-            .env("PATH", &path));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("[FAIL]  Bead store"));
-        assert_eq!(fs::read_to_string(&invocation_log).unwrap(), "");
-    }
+    let workspace = root.path().join("unbound");
+    fs::create_dir_all(workspace.join(".beads")).unwrap();
+    fs::write(&invocation_log, "").unwrap();
+    let output = run(Command::new(&needle)
+        .args(["doctor", "--workspace", workspace.to_str().unwrap()])
+        .env("HOME", &home)
+        .env("PATH", &path));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("[FAIL]  Bead store"));
+    assert_eq!(fs::read_to_string(&invocation_log).unwrap(), "");
 
     let unknown = root.path().join("unknown");
     fs::create_dir_all(unknown.join(".beads")).unwrap();
