@@ -167,16 +167,22 @@ fn verify_backend_identity(
 }
 
 fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<()> {
-    let output = std::process::Command::new(binary)
-        .args(["capabilities", "--profile", "native-v1"])
-        .current_dir(workspace)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to probe bead-rs capabilities at {}",
-                binary.display()
-            )
-        })?;
+    let output = spawn_with_etxtbsy_retry_sync(
+        || {
+            std::process::Command::new(binary)
+                .args(["capabilities", "--profile", "native-v1"])
+                .current_dir(workspace)
+                .output()
+        },
+        5,
+        20,
+    )
+    .with_context(|| {
+        format!(
+            "failed to probe bead-rs capabilities at {}",
+            binary.display()
+        )
+    })?;
     if !output.status.success() {
         bail!(
             "bead-rs capability probe failed for workspace {} at {}: {}",
