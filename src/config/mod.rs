@@ -1136,14 +1136,68 @@ impl MendConfig {
 
 /// Supervisor detection configuration.
 ///
-/// Used to detect if a supervisor process is running via heartbeat files
-/// or Unix domain sockets.
+/// Controls how NEEDLE detects whether it's running under a supervisor process.
+/// Supervisor detection is used for graceful shutdown coordination, resource cleanup,
+/// and inter-process communication between workers and the supervisor.
+///
+/// ## Detection Mechanism
+///
+/// The supervisor process writes a heartbeat file at a regular interval to signal liveness.
+/// Workers monitor this file to determine if the supervisor is still running.
+/// If the file is missing or stale, workers may initiate graceful shutdown procedures.
+///
+/// ## Environment Variables
+///
+/// The following environment variables can override config file settings:
+///
+/// - `NEEDLE_SUPERVISOR_HEARTBEAT_PATH`: Path to the supervisor's heartbeat file
+/// - `NEEDLE_SUPERVISOR_SOCKET_PATH`: Path to the supervisor's control socket (Unix domain socket)
+///
+/// ## Configuration Example
+///
+/// ```yaml
+/// supervisor_detection:
+///   heartbeat_path: ~/.needle/state/supervisor-heartbeat.json
+///   socket_path: ~/.needle/supervisor.sock
+/// ```
+///
+/// ## Fields
+///
+/// - **heartbeat_path**: Path to the supervisor's heartbeat file for liveness detection
+/// - **socket_path**: Optional Unix domain socket path for supervisor IPC
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupervisorDetectionConfig {
-    /// Path to the supervisor's heartbeat file for liveness detection.
+    /// Path to the supervisor's heartbeat file.
+    ///
+    /// The supervisor writes this file at a regular interval to signal liveness.
+    /// Workers check this file to determine if the supervisor is still running.
+    /// If the file is missing or stale, workers may initiate graceful shutdown.
+    ///
+    /// **Environment Variable**: `NEEDLE_SUPERVISOR_HEARTBEAT_PATH`
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// supervisor_detection:
+    ///   heartbeat_path: ~/.needle/state/supervisor-heartbeat.json
+    /// ```
     pub heartbeat_path: PathBuf,
 
-    /// Optional Unix domain socket path for communication with the supervisor.
+    /// Path to the supervisor's control socket (Unix domain socket).
+    ///
+    /// Some supervisors use a control socket for IPC. If set, workers can use
+    /// this socket to send status updates or receive commands from the supervisor.
+    ///
+    /// **Environment Variable**: `NEEDLE_SUPERVISOR_SOCKET_PATH`
+    ///
+    /// When `None`, no socket-based communication is available.
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// supervisor_detection:
+    ///   socket_path: ~/.needle/supervisor.sock
+    /// ```
     #[serde(default)]
     pub socket_path: Option<PathBuf>,
 }
@@ -2126,11 +2180,80 @@ pub struct HookConfig {
     pub url: Option<String>,
 }
 
+/// OTLP TLS configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OtlpTlsConfig {
+    /// Disable TLS verification (not recommended for production).
+    #[serde(default)]
+    pub insecure: bool,
+
+    /// Path to a custom CA certificate file.
+    ///
+    /// When set, this CA certificate is used to verify the server's identity.
+    /// Leave empty to use the system's default trust store.
+    #[serde(default)]
+    pub ca_file: String,
+}
+
+impl Default for OtlpTlsConfig {
+    fn default() -> Self {
+        OtlpTlsConfig {
+            insecure: false,
+            ca_file: String::new(),
+        }
+    }
+}
+
+/// OTLP signal export configuration.
+///
+/// Controls which telemetry signal types are exported to the OTLP endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OtlpSignalsConfig {
+    /// Export tracing spans.
+    #[serde(default = "OtlpSignalsConfig::default_traces")]
+    pub traces: bool,
+
+    /// Export metrics.
+    #[serde(default = "OtlpSignalsConfig::default_metrics")]
+    pub metrics: bool,
+
+    /// Export log records.
+    #[serde(default = "OtlpSignalsConfig::default_logs")]
+    pub logs: bool,
+}
+
+impl Default for OtlpSignalsConfig {
+    fn default() -> Self {
+        OtlpSignalsConfig {
+            traces: Self::default_traces(),
+            metrics: Self::default_metrics(),
+            logs: Self::default_logs(),
+        }
+    }
+}
+
+impl OtlpSignalsConfig {
+    fn default_traces() -> bool {
+        true
+    }
+
+    fn default_metrics() -> bool {
+        true
+    }
+
+    fn default_logs() -> bool {
+        true
+    }
+}
+
 /// OTLP sink configuration for OpenTelemetry export.
 ///
 /// When enabled, NEEDLE exports traces, metrics, and logs to any OTLP-compliant
 /// collector (e.g., Grafana Tempo, Jaeger, OpenTelemetry Collector).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OtlpSinkConfig {
     /// Enable or disable the OTLP sink.
     #[serde(default = "OtlpSinkConfig::default_enabled")]
@@ -2144,21 +2267,27 @@ pub struct OtlpSinkConfig {
     #[serde(default = "OtlpSinkConfig::default_protocol")]
     pub protocol: String,
 
-    /// Request timeout in seconds (default: 10).
-    #[serde(default = "OtlpSinkConfig::default_timeout_secs")]
-    pub timeout_secs: u64,
+    /// Request timeout in milliseconds (default: 5000).
+    ///
+    /// Backward compatibility: also accepts `timeout_secs` (converted to ms).
+    #[serde(alias = "timeout_secs", default = "OtlpSinkConfig::default_timeout_ms")]
+    pub timeout_ms: u64,
 
     /// Compression: "gzip", "none", or "zstd".
     #[serde(default = "OtlpSinkConfig::default_compression")]
     pub compression: String,
 
-    /// TLS configuration: "none", "tls", or "mtls".
-    #[serde(default = "OtlpSinkConfig::default_tls")]
-    pub tls: String,
+    /// TLS configuration.
+    #[serde(default)]
+    pub tls: OtlpTlsConfig,
 
     /// HTTP headers to send with each request (format: "key: value").
     #[serde(default)]
     pub headers: Vec<String>,
+
+    /// Signal export configuration (traces, metrics, logs).
+    #[serde(default)]
+    pub signals: OtlpSignalsConfig,
 
     /// Resource attributes attached to all exported signals (format: "key=value").
     /// Reserved keys `service.name` and `service.instance.id` cannot be overridden.
@@ -2186,10 +2315,11 @@ impl Default for OtlpSinkConfig {
             enabled: Self::default_enabled(),
             endpoint: Self::default_endpoint(),
             protocol: Self::default_protocol(),
-            timeout_secs: Self::default_timeout_secs(),
+            timeout_ms: Self::default_timeout_ms(),
             compression: Self::default_compression(),
-            tls: Self::default_tls(),
+            tls: OtlpTlsConfig::default(),
             headers: Vec::new(),
+            signals: OtlpSignalsConfig::default(),
             resource_attributes: Vec::new(),
             metrics_interval_secs: Self::default_metrics_interval_secs(),
             service_namespace: Self::default_service_namespace(),
@@ -2211,16 +2341,12 @@ impl OtlpSinkConfig {
         "grpc".to_string()
     }
 
-    fn default_timeout_secs() -> u64 {
-        10
+    fn default_timeout_ms() -> u64 {
+        5000
     }
 
     fn default_compression() -> String {
         "gzip".to_string()
-    }
-
-    fn default_tls() -> String {
-        "none".to_string()
     }
 
     fn default_metrics_interval_secs() -> u64 {
@@ -2307,6 +2433,30 @@ impl HealthConfig {
 ///
 /// Controls how NEEDLE detects whether it's running under a supervisor process.
 /// Supervisor detection is used for graceful shutdown and resource cleanup.
+///
+/// ## Environment Variables
+///
+/// The following environment variables can override config file settings:
+///
+/// - `NEEDLE_SUPERVISOR_HEARTBEAT_PATH`: Path to the supervisor's heartbeat file
+/// - `NEEDLE_SUPERVISOR_SOCKET_PATH`: Path to the supervisor's control socket (Unix domain socket)
+///
+/// ## Configuration Example
+///
+/// ```yaml
+/// supervisor:
+///   heartbeat_path: ~/.needle/state/supervisor-heartbeat.json
+///   socket_path: ~/.needle/supervisor.sock
+///   auto_upgrade_check: true
+///   update_check_interval_secs: 21600
+/// ```
+///
+/// ## Fields
+///
+/// - **heartbeat_path**: Path to the supervisor's heartbeat file for liveness detection
+/// - **socket_path**: Optional Unix domain socket path for supervisor IPC
+/// - **auto_upgrade_check**: Enable automatic GitHub release checking
+/// - **update_check_interval_secs**: Seconds between update checks (when auto_upgrade_check is true)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupervisorConfig {
     /// Path to the supervisor's heartbeat file.
@@ -2315,9 +2465,16 @@ pub struct SupervisorConfig {
     /// Workers check this file to determine if the supervisor is still running.
     /// If the file is missing or stale, workers may initiate graceful shutdown.
     ///
+    /// **Environment Variable**: `NEEDLE_SUPERVISOR_HEARTBEAT_PATH`
+    ///
     /// When not set, defaults to `state/supervisor-heartbeat.json` under `workspace.home`.
     ///
-    /// Example: `~/.needle/state/supervisor-heartbeat.json`
+    /// # Example
+    ///
+    /// ```yaml
+    /// supervisor:
+    ///   heartbeat_path: ~/.needle/state/supervisor-heartbeat.json
+    /// ```
     #[serde(default)]
     pub heartbeat_path: Option<PathBuf>,
 
@@ -2326,7 +2483,16 @@ pub struct SupervisorConfig {
     /// Some supervisors use a control socket for IPC. If set, workers can use
     /// this socket to send status updates or receive commands from the supervisor.
     ///
+    /// **Environment Variable**: `NEEDLE_SUPERVISOR_SOCKET_PATH`
+    ///
     /// When `None`, no socket-based communication is available.
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// supervisor:
+    ///   socket_path: ~/.needle/supervisor.sock
+    /// ```
     #[serde(default)]
     pub socket_path: Option<PathBuf>,
 
@@ -2336,7 +2502,17 @@ pub struct SupervisorConfig {
     /// and downloads them to `~/.needle/bin/needle-testing`. Workers with auto-promote
     /// enabled will then run canary validation and promote to :stable if tests pass.
     ///
-    /// Default: false (opt-in for production fleets).
+    /// **Environment Variable**: `NEEDLE_SUPERVISOR_AUTO_UPGRADE_CHECK`
+    ///
+    /// Default: `false` (opt-in for production fleets).
+    ///
+    /// # Example
+    ///
+    /// ```yaml
+    /// supervisor:
+    ///   auto_upgrade_check: true
+    ///   update_check_interval_secs: 21600
+    /// ```
     #[serde(default = "SupervisorConfig::default_auto_upgrade_check")]
     pub auto_upgrade_check: bool,
 
@@ -2345,7 +2521,9 @@ pub struct SupervisorConfig {
     /// Only applies when `auto_upgrade_check` is true. The supervisor polls
     /// GitHub releases at this interval to detect new versions.
     ///
-    /// Default: 21600 (6 hours).
+    /// **Environment Variable**: `NEEDLE_SUPERVISOR_UPDATE_CHECK_INTERVAL_SECS`
+    ///
+    /// Default: `21600` (6 hours).
     #[serde(default = "SupervisorConfig::default_update_check_interval_secs")]
     pub update_check_interval_secs: u64,
 }
@@ -2379,6 +2557,29 @@ impl SupervisorConfig {
     }
 
     /// Returns the resolved heartbeat path, defaulting to `workspace.home/state/supervisor-heartbeat.json`.
+    ///
+    /// If `heartbeat_path` is set in the config, returns that path. Otherwise, constructs
+    /// a default path under the provided `workspace_home` directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `workspace_home` - The workspace home directory (typically `~/.needle`)
+    ///
+    /// # Returns
+    ///
+    /// The resolved heartbeat path as a `PathBuf`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use needle::config::SupervisorConfig;
+    /// use std::path::Path;
+    ///
+    /// let config = SupervisorConfig::default();
+    /// let workspace_home = Path::new("/home/user/.needle");
+    /// let heartbeat_path = config.resolved_heartbeat_path(workspace_home);
+    /// // Returns: /home/user/.needle/state/supervisor-heartbeat.json
+    /// ```
     pub fn resolved_heartbeat_path(&self, workspace_home: &Path) -> PathBuf {
         self.heartbeat_path
             .clone()
@@ -2388,10 +2589,22 @@ impl SupervisorConfig {
     /// Create a supervisor config from environment variables.
     ///
     /// Reads the following environment variables:
-    /// - `SUPERVISOR_HEARTBEAT_PATH`: Path to the supervisor's heartbeat file (optional)
-    /// - `SUPERVISOR_SOCKET_PATH`: Path to the supervisor's control socket (optional)
+    ///
+    /// - `NEEDLE_SUPERVISOR_HEARTBEAT_PATH`: Path to the supervisor's heartbeat file (optional)
+    /// - `NEEDLE_SUPERVISOR_SOCKET_PATH`: Path to the supervisor's control socket (optional)
+    /// - `NEEDLE_SUPERVISOR_AUTO_UPGRADE_CHECK`: Enable automatic upgrade checks (optional)
+    /// - `NEEDLE_SUPERVISOR_UPDATE_CHECK_INTERVAL_SECS`: Seconds between update checks (optional)
     ///
     /// Returns a config with sensible defaults if environment variables are not set.
+    ///
+    /// # Example
+    ///
+    /// ```bash
+    /// export NEEDLE_SUPERVISOR_HEARTBEAT_PATH=/tmp/supervisor-heartbeat.json
+    /// export NEEDLE_SUPERVISOR_SOCKET_PATH=/tmp/supervisor.sock
+    /// export NEEDLE_SUPERVISOR_AUTO_UPGRADE_CHECK=true
+    /// export NEEDLE_SUPERVISOR_UPDATE_CHECK_INTERVAL_SECS=3600
+    /// ```
     ///
     /// # Errors
     ///
