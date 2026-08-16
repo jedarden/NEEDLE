@@ -283,12 +283,26 @@ telemetry:
     protocol: "grpc"            # grpc | http
     timeout_secs: 10            # Request timeout (default: 10)
     compression: "gzip"          # gzip | none | zstd
-    tls: "none"                 # none | tls | mtls
-    headers: []
+    tls:                        # Canonical TLS configuration
+      insecure: false           # Disable TLS verification (not recommended for production)
+      ca_file: ""               # Path to custom CA certificate (empty = system trust store)
+    headers: []                 # e.g. ["Authorization: env:NEEDLE_OTLP_AUTHORIZATION"]
     resource_attributes: []     # Format: "key=value"
     metrics_interval_secs: 10   # Metrics export interval (default: 10)
     service_namespace: "needle-fleet"
 ```
+
+The mapping above is the canonical representation in v0.3.1 and later. For
+upgrade compatibility, legacy `tls: none` and `tls: tls` values are still
+accepted and normalize to `{insecure: true, ca_file: ""}` and
+`{insecure: false, ca_file: ""}` respectively. Convert those values to the
+mapping above when editing a config; unsupported values such as `mtls` produce
+a validation error before the worker starts.
+
+If the collector requires authorization, keep the secret out of YAML and use
+an environment reference in `headers`, for example
+`Authorization: env:NEEDLE_OTLP_AUTHORIZATION`. The environment variable must
+contain the complete header value (such as `Bearer <token>`).
 
 ### Webhooks (Hooks)
 

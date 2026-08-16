@@ -12,10 +12,11 @@
 //! Leaf module — depends only on `types`.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
 
 use crate::cost::{BudgetConfig, PricingConfig};
 use crate::types::{IdentifierScheme, IdleAction};
@@ -2206,8 +2207,16 @@ pub struct HookConfig {
 }
 
 /// OTLP TLS configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// Supports backward-compatible deserialization from both:
+/// - Legacy string format: `"none"`, `"tls"`, or `"mtls"`
+/// - New structured format: `{ insecure: bool, ca_file: string }`
+///
+/// # Legacy format mapping
+/// - `"none"` → `{ insecure: true, ca_file: "" }` (no TLS, for internal networks)
+/// - `"tls"` → `{ insecure: false, ca_file: "" }` (TLS with system certs)
+/// - `"mtls"` → rejected with error (mutual TLS not yet supported)
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct OtlpTlsConfig {
     /// Disable TLS verification (not recommended for production).
     #[serde(default)]
@@ -2219,6 +2228,87 @@ pub struct OtlpTlsConfig {
     /// Leave empty to use the system's default trust store.
     #[serde(default)]
     pub ca_file: String,
+}
+
+impl<'de> Deserialize<'de> for OtlpTlsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // First try to deserialize as a string (legacy format)
+        struct OtlpTlsConfigVisitor;
+
+        impl<'de> Visitor<'de> for OtlpTlsConfigVisitor {
+            type Value = OtlpTlsConfig;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a string (\"none\", \"tls\", or \"mtls\") or a map with \"insecure\" and \"ca_file\" fields")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                match value {
+                    "none" => Ok(OtlpTlsConfig {
+                        insecure: true,
+                        ca_file: String::new(),
+                    }),
+                    "tls" => Ok(OtlpTlsConfig {
+                        insecure: false,
+                        ca_file: String::new(),
+                    }),
+                    "mtls" => Err(serde::de::Error::custom(
+                        "legacy TLS value \"mtls\" is unsupported: mutual TLS client certificates are not implemented; use \"none\", \"tls\", or structured { insecure, ca_file } settings",
+                    )),
+                    other => Err(serde::de::Error::custom(
+                        format!("invalid TLS value: \"{other}\". Expected \"none\", \"tls\", or a structured config with \"insecure\" and \"ca_file\" fields.")
+                    )),
+                }
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(field_identifier)]
+                enum Field {
+                    #[serde(alias = "insecure")]
+                    Insecure,
+                    #[serde(alias = "ca_file")]
+                    CaFile,
+                }
+
+                let mut insecure = None;
+                let mut ca_file = None;
+
+                while let Some(key) = access.next_key()? {
+                    match key {
+                        Field::Insecure => {
+                            if insecure.is_some() {
+                                return Err(serde::de::Error::duplicate_field("insecure"));
+                            }
+                            insecure = Some(access.next_value()?);
+                        }
+                        Field::CaFile => {
+                            if ca_file.is_some() {
+                                return Err(serde::de::Error::duplicate_field("ca_file"));
+                            }
+                            ca_file = Some(access.next_value()?);
+                        }
+                    }
+                }
+
+                let insecure = insecure.unwrap_or(false);
+                let ca_file = ca_file.unwrap_or_default();
+
+                Ok(OtlpTlsConfig { insecure, ca_file })
+            }
+        }
+
+        deserializer.deserialize_any(OtlpTlsConfigVisitor)
+    }
 }
 
 /// OTLP signal export configuration.
@@ -7129,5 +7219,239 @@ agent:
         // Without HOME, paths should remain unchanged
         assert_eq!(config.workspace.default, PathBuf::from("~/workspace"));
         assert_eq!(config.workspace.home, PathBuf::from("~/.needle"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────
+    // OTLP TLS Configuration Deserialization Tests
+    // ─────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_otlp_tls_config_legacy_string_none() {
+        // Legacy format: "none" should map to insecure: true
+        let yaml = "none";
+        let result: Result<OtlpTlsConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "Legacy string 'none' should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert!(config.insecure, "Legacy 'none' should set insecure to true");
+        assert_eq!(config.ca_file, "", "Legacy 'none' should set empty ca_file");
+    }
+
+    #[test]
+    fn test_otlp_tls_config_legacy_string_tls() {
+        // Legacy format: "tls" should map to insecure: false
+        let yaml = "tls";
+        let result: Result<OtlpTlsConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "Legacy string 'tls' should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert!(
+            !config.insecure,
+            "Legacy 'tls' should set insecure to false"
+        );
+        assert_eq!(config.ca_file, "", "Legacy 'tls' should set empty ca_file");
+    }
+
+    #[test]
+    fn test_otlp_tls_config_legacy_string_mtls_fails() {
+        // Legacy format: "mtls" should fail with helpful error
+        let yaml = "mtls";
+        let result: Result<OtlpTlsConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "Legacy string 'mtls' should fail deserialization"
+        );
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("mTLS") || err_msg.contains("mutual TLS"),
+            "Error should mention mTLS is not supported"
+        );
+    }
+
+    #[test]
+    fn test_otlp_tls_config_legacy_string_invalid() {
+        // Invalid legacy string should fail with helpful error
+        let yaml = "invalid";
+        let result: Result<OtlpTlsConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "Invalid legacy string should fail deserialization"
+        );
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("invalid TLS value") || err_msg.contains("invalid"),
+            "Error should mention invalid value: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_otlp_tls_config_structured_format() {
+        // New structured format
+        let yaml = r#"
+insecure: true
+ca_file: "/path/to/ca.crt"
+"#;
+        let result: Result<OtlpTlsConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "Structured format should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert!(
+            config.insecure,
+            "Structured format should preserve insecure value"
+        );
+        assert_eq!(
+            config.ca_file, "/path/to/ca.crt",
+            "Structured format should preserve ca_file value"
+        );
+    }
+
+    #[test]
+    fn test_otlp_tls_config_structured_format_defaults() {
+        // Structured format with omitted fields should use defaults
+        let yaml = "{}";
+        let result: Result<OtlpTlsConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "Empty structured format should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert!(!config.insecure, "Default insecure should be false");
+        assert_eq!(config.ca_file, "", "Default ca_file should be empty");
+    }
+
+    #[test]
+    fn test_otlp_tls_config_structured_format_only_insecure() {
+        // Structured format with only insecure field
+        let yaml = r#"
+insecure: false
+"#;
+        let result: Result<OtlpTlsConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "Partial structured format should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert!(!config.insecure, "Should preserve insecure value");
+        assert_eq!(
+            config.ca_file, "",
+            "Missing ca_file should default to empty"
+        );
+    }
+
+    #[test]
+    fn test_otlp_tls_config_structured_format_only_ca_file() {
+        // Structured format with only ca_file field
+        let yaml = r#"
+ca_file: "/custom/ca.crt"
+"#;
+        let result: Result<OtlpTlsConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "Partial structured format should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert!(!config.insecure, "Missing insecure should default to false");
+        assert_eq!(
+            config.ca_file, "/custom/ca.crt",
+            "Should preserve ca_file value"
+        );
+    }
+
+    #[test]
+    fn test_otlp_tls_config_in_otlp_sink_legacy() {
+        // Test legacy format in full OtlpSinkConfig
+        let yaml = r#"
+enabled: true
+endpoint: "http://localhost:4317"
+protocol: "grpc"
+timeout_secs: 10
+compression: "gzip"
+tls: "none"
+headers: []
+"#;
+        let result: Result<OtlpSinkConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "Legacy format in OtlpSinkConfig should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert!(
+            config.tls.insecure,
+            "Legacy 'none' should set insecure to true"
+        );
+        assert_eq!(
+            config.tls.ca_file, "",
+            "Legacy 'none' should set empty ca_file"
+        );
+    }
+
+    #[test]
+    fn test_otlp_tls_config_in_otlp_sink_structured() {
+        // Test structured format in full OtlpSinkConfig
+        let yaml = r#"
+enabled: true
+endpoint: "http://localhost:4317"
+protocol: "grpc"
+timeout_secs: 10
+compression: "gzip"
+tls:
+  insecure: false
+  ca_file: "/etc/ssl/certs/ca.pem"
+headers: []
+"#;
+        let result: Result<OtlpSinkConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "Structured format in OtlpSinkConfig should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert!(!config.tls.insecure, "Should preserve insecure value");
+        assert_eq!(
+            config.tls.ca_file, "/etc/ssl/certs/ca.pem",
+            "Should preserve ca_file value"
+        );
+    }
+
+    #[test]
+    fn test_otlp_tls_config_serialization_roundtrip() {
+        // Test that serialization preserves the structured format
+        let original = OtlpTlsConfig {
+            insecure: true,
+            ca_file: "/test/ca.crt".to_string(),
+        };
+
+        // Serialize to YAML
+        let yaml = serde_yaml::to_string(&original).expect("Serialization should succeed");
+        assert!(yaml.contains("insecure: true"));
+        assert!(yaml.contains("ca_file: /test/ca.crt"));
+
+        // Deserialize back
+        let restored: OtlpTlsConfig =
+            serde_yaml::from_str(&yaml).expect("Deserialization should succeed");
+
+        assert_eq!(
+            restored.insecure, original.insecure,
+            "insecure should roundtrip"
+        );
+        assert_eq!(
+            restored.ca_file, original.ca_file,
+            "ca_file should roundtrip"
+        );
+    }
+
+    #[test]
+    fn test_otlp_tls_config_default() {
+        // Test default values
+        let config = OtlpTlsConfig::default();
+        assert!(!config.insecure, "Default insecure should be false");
+        assert_eq!(config.ca_file, "", "Default ca_file should be empty");
     }
 }

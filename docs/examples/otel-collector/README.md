@@ -26,9 +26,17 @@ In your workspace `.needle.yaml`:
 telemetry:
   otlp_sink:
     enabled: true
-    endpoint: "http://localhost:4317"
-    protocol: "grpc"
+    endpoint: "http://localhost:4318"
+    protocol: "http"
+    tls:
+      insecure: true
+      ca_file: ""
 ```
+
+The `tls` mapping is the canonical configuration form. For a local
+collector using plain HTTP, set `insecure: true`; credentials, when needed,
+should be supplied through an environment-referenced header rather than
+embedded in this file.
 
 3. **Start NEEDLE:**
 
