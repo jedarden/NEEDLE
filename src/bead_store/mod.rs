@@ -106,18 +106,38 @@ fn verify_backend_identity(
 ) -> Result<()> {
     use std::io::Read;
     use std::process::Stdio;
+    use regex::Regex;
 
-    let mut child = std::process::Command::new(binary)
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to inspect bead CLI identity at {}",
-                binary.display()
-            )
+    // Get the backend descriptor for this backend type
+    let descriptor_name = match backend {
+        crate::config::Backend::Bf => "bead-forge",
+        crate::config::Backend::Bead => "bead-rs",
+    };
+
+    let descriptor = builtin_bead_backends()
+        .into_iter()
+        .find(|d| d.name == descriptor_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!("built-in backend descriptor '{}' not found", descriptor_name)
         })?;
+
+    let mut child = spawn_with_etxtbsy_retry_sync_child(
+        || {
+            std::process::Command::new(binary)
+                .args(&descriptor.version_command)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+        },
+        5,  // max_attempts
+        20, // backoff_ms
+    )
+    .with_context(|| {
+        format!(
+            "failed to inspect bead CLI identity at {}",
+            binary.display()
+        )
+    })?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let status = loop {
         if let Some(status) = child.try_wait().with_context(|| {
@@ -150,20 +170,69 @@ fn verify_backend_identity(
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
     let identity = format!("{stdout}{stderr}");
-    let expected_prefix = match backend {
-        crate::config::Backend::Bf => "bf ",
-        crate::config::Backend::Bead => "bead ",
-    };
 
-    if !status.success() || !identity.trim_start().starts_with(expected_prefix) {
+    if !status.success() {
         bail!(
-            "bead backend identity mismatch for workspace {}: {} must report a version beginning with {:?}, found {:?}",
+            "bead backend identity check failed for workspace {}: {} --version exited with code {} (output: {:?})",
             workspace.display(),
             binary.display(),
-            expected_prefix,
+            status.code().unwrap_or(-1),
             identity.trim()
         );
     }
+
+    // Parse the version output using the descriptor's identity_pattern
+    let identity_pattern = Regex::new(&descriptor.identity_pattern).with_context(|| {
+        format!(
+            "invalid identity_pattern regex for backend '{}': {:?}",
+            descriptor.name, descriptor.identity_pattern
+        )
+    })?;
+
+    let trimmed_output = identity.trim_start();
+    if !identity_pattern.is_match(trimmed_output) {
+        bail!(
+            "bead backend identity mismatch for workspace {}: binary at {} reported version {:?}, which does not match expected pattern {:?} for backend '{}'",
+            workspace.display(),
+            binary.display(),
+            trimmed_output,
+            descriptor.identity_pattern,
+            descriptor.name
+        );
+    }
+
+    // Extract the backend name from the version output
+    // The pattern captures the name at the start (e.g., "bf " or "bead ")
+    let captured_name = trimmed_output
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "bead backend identity extraction failed for workspace {}: binary at {} reported empty version output",
+                workspace.display(),
+                binary.display()
+            )
+        })?;
+
+    // Map the captured name to the expected backend name
+    // Both "bf" and "bead" should map to their respective backend names
+    let expected_names = match descriptor.name.as_str() {
+        "bead-forge" => vec!["bf", "bead-forge"],
+        "bead-rs" => vec!["bead", "bead-rs"],
+        _ => vec![descriptor.name.as_str()],
+    };
+
+    if !expected_names.iter().any(|&name| captured_name == name) {
+        bail!(
+            "bead backend identity mismatch for workspace {}: binary at {} reported name {:?}, but expected one of {:?} for backend '{}'",
+            workspace.display(),
+            binary.display(),
+            captured_name,
+            expected_names,
+            descriptor.name
+        );
+    }
+
     Ok(())
 }
 
