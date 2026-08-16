@@ -1317,76 +1317,211 @@ async fn worker_boot_rejects_invalid_config() {
     );
 }
 
-/// Test that worker rejects a nonexistent adapter at boot.
+/// Test that worker rejects a nonexistent adapter at boot AND produces detailed stderr.
 ///
-/// This test builds a Worker in-process with a nonexistent adapter name.
-/// The Explore strand MUST be isolated to prevent scanning real user directories.
+/// This test spawns the needle binary as a subprocess to verify that:
+/// 1. The error message written to stderr contains the adapter name
+/// 2. The error message includes configuration directory guidance
+/// 3. The error message is actionable (user knows how to fix)
 ///
-/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+/// ISOLATION REQUIRED: This test spawns a real needle binary subprocess.
+/// The test must isolate HOME to prevent the Explore strand from scanning
+/// the real user workspace. Without this, the spawned needle binary would leak
+/// into the real $HOME and scan real repos, contaminating the test environment.
 ///
-/// Why isolation is required for in-process Worker tests:
-/// - Workers built in-process never go through a child process, so setting
-///   `HOME` in a Command::new() call has no effect (no child process exists)
-/// - Without explicit config, Explore uses `ExploreConfig::default()`: `workspaces: []`
-///   (= auto-discover) with `workspace_root` defaulting to the real home directory
-///   (`ExploreConfig::default_workspace_root()` -> `dirs_or_home("")`)
-/// - Left unchecked, Explore scans every directory under $HOME containing a
-///   `.beads/` and claims REAL beads from REAL repos under the fixture
-///   adapter/worker identity
-///
-/// 2026-08-05 contamination incident: An in-process Worker test without
-/// isolation let an orphaned `integration_tests` binary roam into bead-forge's
-/// live store, mutate 2302 beads to `in_progress` under assignee
-/// `echo-test-test-worker`, and truncate `.beads/issues.jsonl` to 0 bytes.
+/// See CLAUDE.md Test Isolation Policy and ADR-006 for full details.
 #[tokio::test]
 async fn worker_boot_rejects_nonexistent_adapter() {
+    // Create a temporary workspace for the test
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("test-workspace");
+    std::fs::create_dir(&workspace).unwrap();
+
+    // Initialize bead workspace (bead-rs CLI)
+    let bead_result = std::process::Command::new("bead")
+        .arg("init")
+        .current_dir(&workspace)
+        .output();
+
+    // bead init may fail if the workspace is already initialized - that's OK for this test
+    if let Ok(init_output) = bead_result {
+        if !init_output.status.success() {
+            let stderr = String::from_utf8_lossy(&init_output.stderr);
+            // Only fail hard if it's a real error, not "already initialized"
+            if !stderr.contains("already") && !stderr.contains("exists") {
+                panic!("bead init failed: {}", stderr);
+            }
+        }
+    }
+
+    // Create .needle.yaml configuration to enable bead store discovery
+    // Use bead-rs backend since that's the active CLI in this workspace
+    std::fs::write(
+        workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .expect("failed to create .needle.yaml configuration");
+
+    // Get the needle binary path
+    let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
+
+    // Use a clearly fake adapter name that will never exist
     let nonexistent_adapter = "nonexistent-test-adapter-xyz-999";
-    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
-    let _home_dir = tempfile::tempdir().unwrap();
-    let mut config = Config::default();
-    config.agent.default = nonexistent_adapter.to_string();
-    config.workspace.home = _home_dir.path().to_path_buf();
-    // Confine Explore strand to test's tempdir to prevent scanning real user directories
-    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
-    config.strands.explore.workspaces = Vec::new();
 
-    let mut worker = Worker::new(config, "test-worker".to_string(), store);
-    let result = worker.run().await;
+    // Spawn the needle binary with the nonexistent adapter
+    let output = std::process::Command::new(&bin_path)
+        .arg("run")
+        .arg("--agent")
+        .arg(nonexistent_adapter)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--identifier")
+        .arg("test-worker") // Use explicit identifier for deterministic behavior
+        .env("HOME", temp_dir.path()) // ISOLATION: Prevent scanning real user directories
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("needle run command failed to execute");
 
-    // Worker should fail immediately with nonzero exit
+    // Capture stderr for analysis
+    let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+    // The worker should fail (nonzero exit code)
     assert!(
-        result.is_err(),
-        "worker should fail to boot with nonexistent adapter"
+        !output.status.success(),
+        "needle run should fail with nonexistent adapter, but it succeeded. \
+         stderr: {}",
+        stderr_output
     );
 
-    let error_msg = result.unwrap_err().to_string();
-
-    // Error message must include the adapter name
+    // ASSERTION 1: Error message must contain the nonexistent adapter name
     assert!(
-        error_msg.contains(nonexistent_adapter),
-        "error should mention the nonexistent adapter name: {error_msg}"
+        stderr_output.contains(nonexistent_adapter),
+        "error message should mention the nonexistent adapter name '{}'. \
+         Got stderr:\n{}",
+        nonexistent_adapter,
+        stderr_output
     );
 
-    // Error message must mention it's an adapter error
+    // ASSERTION 2: Error message must indicate this is an adapter error
     assert!(
-        error_msg.contains("adapter") && error_msg.contains("not found"),
-        "error should indicate adapter not found: {error_msg}"
+        stderr_output.contains("adapter")
+            && (stderr_output.contains("not found")
+                || stderr_output.contains("unknown")
+                || stderr_output.contains("no such")),
+        "error message should indicate adapter not found. \
+         Got stderr:\n{}",
+        stderr_output
     );
 
-    // Error message must include configuration directory guidance
+    // ASSERTION 3: Error message must include configuration directory guidance
     assert!(
-        error_msg.contains("~/.needle/agents/")
-            || error_msg.contains(".needle/agents/")
-            || error_msg.contains("claude-config/agents/")
-            || error_msg.contains(".config/needle/adapters/"),
-        "error should include configuration directory guidance: {error_msg}"
+        stderr_output.contains("~/.needle/agents/")
+            || stderr_output.contains(".needle/agents/")
+            || stderr_output.contains("claude-config/agents/")
+            || stderr_output.contains(".config/needle/adapters/"),
+        "error message should include configuration directory guidance. Got stderr:\n{}",
+        stderr_output
     );
 
-    // Worker should not have claimed any work
-    assert_eq!(
-        worker.beads_processed(),
-        0,
-        "worker should not process any beads when adapter is invalid"
+    // ASSERTION 4: Error message must contain the adapter name in file path examples
+    // This ensures users see exactly where their adapter file should be located
+    assert!(
+        stderr_output.contains(&format!("{nonexistent_adapter}.yaml"))
+            || stderr_output.contains(&format!("{nonexistent_adapter}/config.json"))
+            || stderr_output.contains(&format!("agents/{nonexistent_adapter}")),
+        "error message should show the adapter name in file path examples. Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 5: Error message must include remediation language
+    // Phrases like "To fix this" indicate actionable guidance
+    assert!(
+        stderr_output.contains("To fix this")
+            || stderr_output.contains("To resolve this")
+            || stderr_output.contains("To correct this")
+            || stderr_output.contains("fix this")
+            || stderr_output.contains("resolve this"),
+        "error message should include remediation language (e.g., 'To fix this'). Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 6: Error message must include a "Common causes" or similar section
+    // This helps users diagnose why the error occurred
+    assert!(
+        stderr_output.contains("Common causes")
+            || stderr_output.contains("common causes")
+            || stderr_output.contains("Possible causes")
+            || stderr_output.contains("possible causes")
+            || stderr_output.contains("Reasons")
+            || stderr_output.contains("reasons"),
+        "error message should include a 'Common causes' section to help diagnose the issue. \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 7: Error message must be structured with bullet points or numbered lists
+    // Multi-step guidance is easier to follow when formatted as a list
+    assert!(
+        stderr_output.contains("  -") ||  // Markdown-style bullets
+        stderr_output.contains("•") ||   // Unicode bullets
+        stderr_output.contains("*") ||   // Asterisk bullets
+        stderr_output.contains("1.") ||  // Numbered lists
+        stderr_output.contains("\n\n"), // At minimum, multi-paragraph structure
+        "error message should be structured with bullets or multiple paragraphs for readability. \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 8: Error message must indicate the problem occurred at startup
+    // This prevents users from thinking it's a runtime issue
+    assert!(
+        stderr_output.contains("startup")
+            || stderr_output.contains("Startup")
+            || stderr_output.contains("boot")
+            || stderr_output.contains("initialization")
+            || stderr_output.contains("aborting"),
+        "error message should indicate the problem occurred at startup/boot time. \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 9: Error message must prevent bead claiming with invalid config
+    // This is critical - the error should explain WHY startup is aborting
+    assert!(
+        stderr_output.contains("claiming") ||
+        stderr_output.contains("prevent") ||
+        stderr_output.contains("invalid adapter") ||
+        stderr_output.contains("invalid configuration") ||
+        stderr_output.contains("aborting to prevent"),
+        "error message should explain why startup is aborting (to prevent claiming beads with bad config). \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION 10: Verify the error message is substantial and multi-line
+    // A good error message should be detailed, not a single line
+    let line_count = stderr_output.lines().count();
+    assert!(
+        line_count >= 5,
+        "error message should be substantial (at least 5 lines), but got {} lines. \
+         Got stderr:\n{}",
+        line_count,
+        stderr_output
+    );
+
+    // ASSERTION 11: Error message must include actionable configuration directory guidance
+    // This is distinct from path checking - it validates the presence of remediation language
+    // that explicitly directs users to check their configuration directory
+    assert!(
+        stderr_output.contains("check your configuration directory") ||
+        stderr_output.contains("check your config") ||
+        stderr_output.contains("check the config") ||
+        stderr_output.contains("configuration directory") ||
+        (stderr_output.contains("check") && stderr_output.contains("config")),
+        "error message should include actionable guidance about checking the configuration directory. \
+         Got stderr:\n{}",
+        stderr_output
     );
 }
 
@@ -3976,6 +4111,343 @@ async fn worker_binary_path_tilde_expansion_parent_directories() {
     println!(
         "  ~/../.. -> {}",
         isolated_home.join("..").join("..").display()
+    );
+}
+
+/// Test tilde expansion in workspace.home configuration.
+///
+/// This test validates that tilde-prefixed paths in workspace.home are
+/// correctly expanded to the HOME directory during config loading, with proper
+/// tempdir isolation to avoid contaminating the real user environment.
+#[tokio::test]
+async fn workspace_home_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create a custom needle home directory in the isolated location
+    let custom_needle_home = isolated_home.join(".custom-needle");
+    fs::create_dir_all(&custom_needle_home).expect("failed to create custom needle home");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+
+    // Verify our test is using isolated HOME
+    let real_home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    assert_ne!(
+        isolated_home.as_path(),
+        std::path::PathBuf::from(real_home.clone()),
+        "test should use isolated temp directory, not real HOME"
+    );
+
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde-prefixed path (~/.custom-needle)
+    let tilde_path = "~/.custom-needle";
+    let expanded = expand_tilde(tilde_path);
+
+    assert_eq!(
+        expanded,
+        custom_needle_home.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Tilde expansion works in workspace.home config context
+    let yaml = format!(
+        r#"
+workspace:
+  home: {}
+"#,
+        tilde_path
+    );
+
+    // Load config - this should trigger tilde expansion
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+
+    // The config should expand tildes
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    // Verify the workspace.home was expanded
+    assert!(
+        config_expanded.workspace.home.starts_with(&isolated_home),
+        "workspace.home should be expanded to isolated home, got: {}",
+        config_expanded.workspace.home.display()
+    );
+
+    assert_eq!(
+        config_expanded.workspace.home,
+        custom_needle_home,
+        "workspace.home should point to our custom needle home"
+    );
+
+    // Test 3: Absolute path should pass through unchanged
+    let absolute_yaml = r#"
+workspace:
+  home: /absolute/path/to/needle-home
+"#;
+
+    let config_absolute: Config = serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let mut config_absolute_expanded = config_absolute;
+    config_absolute_expanded.expand_tildes();
+
+    assert_eq!(
+        config_absolute_expanded.workspace.home,
+        std::path::PathBuf::from("/absolute/path/to/needle-home"),
+        "absolute paths should pass through unchanged"
+    );
+
+    // Test 4: Relative path should pass through unchanged
+    let relative_yaml = r#"
+workspace:
+  home: relative/path/to/needle-home
+"#;
+
+    let config_relative: Config = serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let mut config_relative_expanded = config_relative;
+    config_relative_expanded.expand_tildes();
+
+    assert_eq!(
+        config_relative_expanded.workspace.home,
+        std::path::PathBuf::from("relative/path/to/needle-home"),
+        "relative paths should pass through unchanged"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Workspace home tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Tilde path ~/.custom-needle -> {}", custom_needle_home.display());
+    println!("  Absolute path preserved: /absolute/path/to/needle-home");
+    println!("  Relative path preserved: relative/path/to/needle-home");
+}
+
+/// Test tilde expansion in workspace.default configuration.
+///
+/// This test validates that tilde-prefixed paths in workspace.default are
+/// correctly expanded to the HOME directory during config loading, with proper
+/// tempdir isolation to avoid contaminating the real user environment.
+#[tokio::test]
+async fn workspace_default_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create a custom workspace directory in the isolated location
+    let custom_workspace = isolated_home.join("dev").join("my-workspace");
+    fs::create_dir_all(&custom_workspace).expect("failed to create custom workspace");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+
+    // Verify our test is using isolated HOME
+    let real_home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    assert_ne!(
+        isolated_home.as_path(),
+        std::path::PathBuf::from(real_home.clone()),
+        "test should use isolated temp directory, not real HOME"
+    );
+
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde-prefixed path (~/dev/my-workspace)
+    let tilde_path = "~/dev/my-workspace";
+    let expanded = expand_tilde(tilde_path);
+
+    assert_eq!(
+        expanded,
+        custom_workspace.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Tilde expansion works in workspace.default config context
+    let yaml = format!(
+        r#"
+workspace:
+  default: {}
+"#,
+        tilde_path
+    );
+
+    // Load config - this should trigger tilde expansion
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+
+    // The config should expand tildes
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    // Verify the workspace.default was expanded
+    assert!(
+        config_expanded.workspace.default.starts_with(&isolated_home),
+        "workspace.default should be expanded to isolated home, got: {}",
+        config_expanded.workspace.default.display()
+    );
+
+    assert_eq!(
+        config_expanded.workspace.default,
+        custom_workspace,
+        "workspace.default should point to our custom workspace"
+    );
+
+    // Test 3: Absolute path should pass through unchanged
+    let absolute_yaml = r#"
+workspace:
+  default: /absolute/path/to/workspace
+"#;
+
+    let config_absolute: Config = serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let mut config_absolute_expanded = config_absolute;
+    config_absolute_expanded.expand_tildes();
+
+    assert_eq!(
+        config_absolute_expanded.workspace.default,
+        std::path::PathBuf::from("/absolute/path/to/workspace"),
+        "absolute paths should pass through unchanged"
+    );
+
+    // Test 4: Relative path should pass through unchanged
+    let relative_yaml = r#"
+workspace:
+  default: relative/path/to/workspace
+"#;
+
+    let config_relative: Config = serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let mut config_relative_expanded = config_relative;
+    config_relative_expanded.expand_tildes();
+
+    assert_eq!(
+        config_relative_expanded.workspace.default,
+        std::path::PathBuf::from("relative/path/to/workspace"),
+        "relative paths should pass through unchanged"
+    );
+
+    // Test 5: Current directory reference (.)
+    let current_yaml = r#"
+workspace:
+  default: .
+"#;
+
+    let config_current: Config = serde_yaml::from_str(current_yaml).expect("failed to parse config");
+    let mut config_current_expanded = config_current;
+    config_current_expanded.expand_tildes();
+
+    assert_eq!(
+        config_current_expanded.workspace.default,
+        std::path::PathBuf::from("."),
+        "current directory reference should pass through unchanged"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Workspace default tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Tilde path ~/dev/my-workspace -> {}", custom_workspace.display());
+    println!("  Absolute path preserved: /absolute/path/to/workspace");
+    println!("  Relative path preserved: relative/path/to/workspace");
+    println!("  Current directory preserved: .");
+}
+
+/// Test tilde expansion with both workspace.home and workspace.default simultaneously.
+///
+/// This test validates that both workspace path fields can use tilde expansion
+/// in the same configuration, and both are expanded correctly.
+#[tokio::test]
+async fn workspace_home_and_default_tilde_expansion_combined() {
+    use needle::config::Config;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create custom directories
+    let custom_needle_home = isolated_home.join(".custom-needle");
+    fs::create_dir_all(&custom_needle_home).expect("failed to create custom needle home");
+
+    let custom_workspace = isolated_home.join("dev").join("my-workspace");
+    fs::create_dir_all(&custom_workspace).expect("failed to create custom workspace");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test combined tilde expansion in both fields
+    let yaml = format!(
+        r#"
+workspace:
+  home: ~/.custom-needle
+  default: ~/dev/my-workspace
+"#
+    );
+
+    // Load config - this should trigger tilde expansion for both fields
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+
+    // The config should expand tildes in both fields
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    // Verify both fields were expanded correctly
+    assert_eq!(
+        config_expanded.workspace.home,
+        custom_needle_home,
+        "workspace.home should be expanded to custom needle home"
+    );
+
+    assert_eq!(
+        config_expanded.workspace.default,
+        custom_workspace,
+        "workspace.default should be expanded to custom workspace"
+    );
+
+    // Verify both paths start with the isolated home directory
+    assert!(
+        config_expanded.workspace.home.starts_with(&isolated_home),
+        "workspace.home should start with isolated home"
+    );
+
+    assert!(
+        config_expanded.workspace.default.starts_with(&isolated_home),
+        "workspace.default should start with isolated home"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Combined workspace home and default tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  workspace.home: ~/.custom-needle -> {}", custom_needle_home.display());
+    println!(
+        "  workspace.default: ~/dev/my-workspace -> {}",
+        custom_workspace.display()
     );
 }
 
