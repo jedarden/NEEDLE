@@ -3882,6 +3882,22 @@ impl ConfigLoader {
             });
         }
 
+        // Validate supervisor update check interval.
+        if config.supervisor.update_check_interval_secs == 0 {
+            errors.push(ConfigError {
+                field: "supervisor.update_check_interval_secs".to_string(),
+                message: "must be at least 60 seconds".to_string(),
+            });
+        } else if config.supervisor.update_check_interval_secs < 60 {
+            errors.push(ConfigError {
+                field: "supervisor.update_check_interval_secs".to_string(),
+                message: format!(
+                    "{} is too small; minimum is 60 seconds to avoid excessive polling",
+                    config.supervisor.update_check_interval_secs
+                ),
+            });
+        }
+
         // Emit boot-time warnings for configuration issues that should be addressed
         // but are not fatal errors.
         Self::emit_warnings(config);
