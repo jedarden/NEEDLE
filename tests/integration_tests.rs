@@ -1249,7 +1249,7 @@ fn outcome_classify_covers_all_exit_code_ranges() {
         // Verify specific mappings.
         match code {
             0 => assert_eq!(outcome, Outcome::Success),
-            1 => assert_eq!(outcome, Outcome::Failure),
+            1 => assert_eq!(outcome, Outcome::Success), // TEMPORARY BREAK FOR CI VERIFICATION - needle-318c33ba
             124 => assert_eq!(outcome, Outcome::Timeout),
             127 => assert_eq!(outcome, Outcome::AgentNotFound),
             c if c > 128 => assert_eq!(outcome, Outcome::Crash(c)),
