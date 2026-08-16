@@ -23,6 +23,7 @@ use opentelemetry_sdk::trace::{
 };
 use std::collections::HashMap;
 use std::panic::catch_unwind;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -58,6 +59,19 @@ fn resolve_headers(headers: &[String]) -> Result<Vec<(String, String)>> {
             Ok((key.to_string(), value))
         })
         .collect()
+}
+
+/// Return the repository name used in browser-visible OTLP attributes.
+///
+/// Workspace paths are useful locally but are machine-specific and can expose
+/// filesystem details in the dashboard. Keep only the final path component.
+fn workspace_label(workspace: &str) -> String {
+    Path::new(workspace)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(workspace)
+        .to_string()
 }
 
 /// Drop event signal type (traces, metrics, or logs).
@@ -541,7 +555,7 @@ impl OtlpSink {
         // Clone Arc for queue depth callback
         let queue_state = observable_state.clone();
         // Capture workspace for queue depth attribute (bounded cardinality: one per worker)
-        let workspace_attr = workspace.map(|s| s.to_string());
+        let workspace_attr = workspace.map(workspace_label);
 
         let queue_depth = meter
             .u64_observable_gauge("needle.queue.depth")
@@ -742,7 +756,7 @@ impl OtlpSink {
         if let Some(workspace_value) = workspace {
             builder = builder.with_attributes([KeyValue::new(
                 "needle.workspace",
-                workspace_value.to_string(),
+                workspace_label(workspace_value),
             )]);
         }
 
@@ -1217,7 +1231,8 @@ impl OtlpSink {
         }
 
         // Build and add attributes - explicit type to avoid inference errors
-        let mut attrs: Vec<(&str, AnyValue)> = Vec::with_capacity(8);
+        let mut attrs: Vec<(&str, AnyValue)> = Vec::with_capacity(9);
+        attrs.push(("service.version", AnyValue::from(env!("CARGO_PKG_VERSION"))));
         attrs.push(("event_type", event.event_type.clone().into()));
         attrs.push(("worker_id", event.worker_id.clone().into()));
         attrs.push(("session_id", event.session_id.clone().into()));
@@ -1228,7 +1243,10 @@ impl OtlpSink {
         }
 
         if let Some(ref workspace) = event.workspace {
-            attrs.push(("workspace", workspace.display().to_string().into()));
+            attrs.push((
+                "workspace",
+                workspace_label(&workspace.to_string_lossy()).into(),
+            ));
         }
 
         if let Some(duration_ms) = event.duration_ms {
@@ -1848,6 +1866,71 @@ mod tests {
             attr_keys.contains(&"needle.workspace"),
             "missing needle.workspace"
         );
+
+        let workspace_attr = resource
+            .iter()
+            .find(|(key, _)| key.as_str() == "needle.workspace")
+            .expect("needle.workspace should be present");
+        assert_eq!(workspace_attr.1.as_str(), "workspace");
+        assert!(
+            !workspace_attr.1.as_str().contains("/test/"),
+            "OTLP resource must not expose the full workspace path"
+        );
+    }
+
+    #[test]
+    fn test_exported_log_record_contains_service_version() {
+        use opentelemetry_sdk::logs::{LogBatch, SdkLogRecord, SdkLoggerProvider};
+
+        #[derive(Debug, Clone, Default)]
+        struct CapturingLogExporter {
+            records: Arc<Mutex<Vec<SdkLogRecord>>>,
+        }
+
+        impl SdkLogExporter for CapturingLogExporter {
+            async fn export(&self, batch: LogBatch<'_>) -> opentelemetry_sdk::error::OTelSdkResult {
+                let mut records = self.records.lock().expect("log exporter mutex poisoned");
+                records.extend(batch.iter().map(|(record, _)| record.clone()));
+                Ok(())
+            }
+        }
+
+        let exporter = CapturingLogExporter::default();
+        let mut sink = make_test_sink();
+        sink.logger_provider = Arc::new(
+            SdkLoggerProvider::builder()
+                .with_simple_exporter(exporter.clone())
+                .build(),
+        );
+
+        sink.emit_log(&make_test_event(
+            "worker.started",
+            None,
+            serde_json::json!({}),
+        ))
+        .expect("log record should be emitted");
+
+        let records = exporter
+            .records
+            .lock()
+            .expect("log exporter mutex poisoned");
+        let attr = |name: &str| {
+            records[0]
+                .attributes_iter()
+                .find(|(key, _)| key.as_str() == name)
+                .and_then(|(_, value)| match value {
+                    AnyValue::String(value) => Some(value.as_str().to_string()),
+                    _ => None,
+                })
+        };
+        assert_eq!(
+            attr("service.version").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(attr("workspace").as_deref(), Some("workspace"));
+        assert!(!attr("workspace")
+            .expect("workspace log attribute should be present")
+            .contains("/test/"));
     }
 
     #[test]

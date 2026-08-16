@@ -2866,6 +2866,17 @@ pub struct Telemetry {
     otlp_shutdown: Arc<std::sync::Mutex<Option<OtlpShutdown>>>,
 }
 
+/// Worker identity used to populate OTLP resource attributes.
+#[derive(Debug, Clone, Default)]
+pub struct TelemetryIdentity {
+    /// The configured worker agent or harness name.
+    pub agent: Option<String>,
+    /// The resolved model identifier, when the adapter declares one.
+    pub model: Option<String>,
+    /// The worker's workspace. OTLP sinks reduce this to its basename before export.
+    pub workspace: Option<PathBuf>,
+}
+
 /// Internal message type for the writer task.
 #[allow(clippy::large_enum_variant)]
 enum WriterMessage {
@@ -3094,6 +3105,20 @@ impl Telemetry {
     /// - Stdout enabled     → [`with_stdout`](Self::with_stdout)
     /// - Otherwise          → [`new`](Self::new) (file sink only)
     pub fn from_config(worker_id: WorkerId, config: &TelemetryConfig) -> Result<Self> {
+        Self::from_config_with_identity(worker_id, config, &TelemetryIdentity::default())
+    }
+
+    /// Create a telemetry emitter from configuration with worker identity metadata.
+    ///
+    /// This is the construction path used by a running worker. Keeping the
+    /// identity separate from `TelemetryConfig` avoids putting runtime-resolved
+    /// adapter details into persisted configuration while ensuring every OTLP
+    /// signal receives the same worker metadata.
+    pub fn from_config_with_identity(
+        worker_id: WorkerId,
+        config: &TelemetryConfig,
+        identity: &TelemetryIdentity,
+    ) -> Result<Self> {
         let session_id = generate_session_id();
         let (sender, receiver) = mpsc::unbounded_channel();
 
@@ -3156,9 +3181,9 @@ impl Telemetry {
                     session_id.clone(),
                     &config.otlp_sink,
                     file_sink_for_otlp,
-                    None, // agent - not available at config time
-                    None, // model - not available at config time
-                    None, // workspace - not available at config time
+                    identity.agent.as_deref(),
+                    identity.model.as_deref(),
+                    identity.workspace.as_deref().and_then(Path::to_str),
                 ) {
                     Ok(otlp) => {
                         let otlp_arc = Arc::new(otlp);

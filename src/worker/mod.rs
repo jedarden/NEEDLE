@@ -812,13 +812,21 @@ impl Worker {
 
         // Create the worker.session root span that encompasses the entire worker lifecycle.
         let worker_id = self.qualified_id();
+        let workspace_name = self
+            .config
+            .workspace
+            .default
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+            .unwrap_or_else(|| self.config.workspace.default.to_string_lossy().into_owned());
         let session_span = tracing::info_span!(
             "worker.session",
             needle.worker_id = %worker_id,
             needle.session_id = %self.telemetry.session_id(),
             needle.agent = %self.config.agent.default,
             needle.model = %self.config.agent.default, // Will be updated when adapter is resolved
-            needle.workspace = %self.config.workspace.default.display(),
+            needle.workspace = %workspace_name,
         );
 
         // Instrumenting the future re-enters this span on every poll. Holding an
