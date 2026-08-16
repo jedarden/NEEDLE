@@ -3062,3 +3062,482 @@ fn error_category_equality() {
     assert_ne!(ErrorCategory::Syntax, ErrorCategory::Macro);
     assert_ne!(ErrorCategory::DeadCode, ErrorCategory::Unknown);
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Timeout Mitosis Decomposition Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mitosis_mode_display() {
+    assert_eq!(MitosisMode::Timeout.to_string(), "timeout");
+    assert_eq!(MitosisMode::Ordinary.to_string(), "ordinary");
+}
+
+#[test]
+fn mitosis_mode_serde_roundtrip() {
+    let modes = vec![MitosisMode::Timeout, MitosisMode::Ordinary];
+    for mode in modes {
+        let json = serde_json::to_string(&mode).unwrap();
+        let parsed: MitosisMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, mode);
+    }
+}
+
+#[test]
+fn decomposition_proposal_timeout_splittable() {
+    let proposal = DecompositionProposal::Timeout {
+        phases: vec![TimeoutPhaseProposal {
+            title: "Phase 1".to_string(),
+            description: "Complete work".to_string(),
+            is_completed: false,
+            depends_on_phases: vec![],
+            estimated_duration_secs: Some(3600),
+            completion_criteria: vec!["All tests pass".to_string()],
+        }],
+        refusal_reason: None,
+    };
+
+    assert!(proposal.is_splittable());
+    assert_eq!(proposal.mode(), MitosisMode::Timeout);
+    assert_eq!(proposal.child_count(), 1);
+    assert!(proposal.refusal_reason().is_none());
+}
+
+#[test]
+fn decomposition_proposal_timeout_refused() {
+    let proposal = DecompositionProposal::Timeout {
+        phases: vec![],
+        refusal_reason: Some("Task is atomic".to_string()),
+    };
+
+    assert!(!proposal.is_splittable());
+    assert_eq!(proposal.mode(), MitosisMode::Timeout);
+    assert_eq!(proposal.child_count(), 0);
+    assert_eq!(proposal.refusal_reason(), Some("Task is atomic"));
+}
+
+#[test]
+fn decomposition_proposal_ordinary_splittable() {
+    let proposal = DecompositionProposal::Ordinary {
+        tasks: vec![OrdinaryTaskProposal {
+            title: "Sub-task A".to_string(),
+            description: "Do A".to_string(),
+            is_completed: false,
+        }],
+        refusal_reason: None,
+    };
+
+    assert!(proposal.is_splittable());
+    assert_eq!(proposal.mode(), MitosisMode::Ordinary);
+    assert_eq!(proposal.child_count(), 1);
+    assert!(proposal.refusal_reason().is_none());
+}
+
+#[test]
+fn timeout_refusal_reason_atomic() {
+    let reason = TimeoutRefusalReason::Atomic {
+        explanation: "Full test suite cannot be decomposed".to_string(),
+    };
+
+    assert_eq!(reason.as_str(), "atomic");
+    assert_eq!(
+        reason.explanation(),
+        "Full test suite cannot be decomposed"
+    );
+    assert_eq!(
+        reason.to_string(),
+        "atomic: Full test suite cannot be decomposed"
+    );
+}
+
+#[test]
+fn timeout_refusal_reason_unsafe_overlap() {
+    let reason = TimeoutRefusalReason::UnsafeOverlap {
+        explanation: "Splitting would redo incomplete work".to_string(),
+    };
+
+    assert_eq!(reason.as_str(), "unsafe_overlap");
+    assert!(matches!(reason, TimeoutRefusalReason::UnsafeOverlap { .. }));
+}
+
+#[test]
+fn timeout_refusal_reason_infrastructure_failure() {
+    let reason = TimeoutRefusalReason::InfrastructureFailure {
+        explanation: "Network hang caused timeout".to_string(),
+    };
+
+    assert_eq!(reason.as_str(), "infrastructure_failure");
+}
+
+#[test]
+fn timeout_refusal_reason_insufficient_context() {
+    let reason = TimeoutRefusalReason::InsufficientContext {
+        explanation: "Git state shows no commits".to_string(),
+    };
+
+    assert_eq!(reason.as_str(), "insufficient_context");
+}
+
+#[test]
+fn timeout_refusal_reason_depth_limit() {
+    let reason = TimeoutRefusalReason::DepthLimit {
+        max_depth: 2,
+        current_depth: 3,
+    };
+
+    assert_eq!(reason.as_str(), "depth_limit");
+    assert_eq!(
+        reason.explanation(),
+        "bead has reached maximum generation depth for mitosis"
+    );
+}
+
+#[test]
+fn timeout_refusal_reason_out_of_scope() {
+    let reason = TimeoutRefusalReason::OutOfScope {
+        explanation: "Bead references Pluck configuration".to_string(),
+    };
+
+    assert_eq!(reason.as_str(), "out_of_scope");
+}
+
+#[test]
+fn timeout_refusal_reason_serde_roundtrip() {
+    let reasons = vec![
+        TimeoutRefusalReason::Atomic {
+            explanation: "atomic task".to_string(),
+        },
+        TimeoutRefusalReason::UnsafeOverlap {
+            explanation: "unsafe overlap".to_string(),
+        },
+        TimeoutRefusalReason::InfrastructureFailure {
+            explanation: "infrastructure".to_string(),
+        },
+        TimeoutRefusalReason::InsufficientContext {
+            explanation: "no context".to_string(),
+        },
+        TimeoutRefusalReason::DepthLimit {
+            max_depth: 5,
+            current_depth: 6,
+        },
+        TimeoutRefusalReason::OutOfScope {
+            explanation: "out of scope".to_string(),
+        },
+    ];
+
+    for reason in reasons {
+        let json = serde_json::to_string(&reason).unwrap();
+        let parsed: TimeoutRefusalReason = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, reason);
+    }
+}
+
+#[test]
+fn decomposition_safety_safe() {
+    let safety = DecompositionSafety::Safe {
+        confidence: 0.85,
+        evidence: vec!["Git commits show clear progress".to_string()],
+    };
+
+    assert!(safety.is_safe());
+    assert_eq!(safety.confidence(), 0.85);
+}
+
+#[test]
+fn decomposition_safety_unsafe() {
+    let safety = DecompositionSafety::Unsafe {
+        reason: TimeoutRefusalReason::Atomic {
+            explanation: "atomic task".to_string(),
+        },
+    };
+
+    assert!(!safety.is_safe());
+    assert_eq!(safety.confidence(), 0.0);
+}
+
+#[test]
+fn timeout_phase_proposal_serialization() {
+    let phase = TimeoutPhaseProposal {
+        title: "Phase 1: Complete OAuth".to_string(),
+        description: "Implement token endpoint".to_string(),
+        is_completed: false,
+        depends_on_phases: vec![],
+        estimated_duration_secs: Some(1800),
+        completion_criteria: vec!["Tests pass".to_string()],
+    };
+
+    let json = serde_json::to_string(&phase).unwrap();
+    let parsed: TimeoutPhaseProposal = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.title, phase.title);
+    assert_eq!(parsed.description, phase.description);
+    assert_eq!(parsed.is_completed, phase.is_completed);
+    assert_eq!(parsed.estimated_duration_secs, phase.estimated_duration_secs);
+}
+
+#[test]
+fn ordinary_task_proposal_serialization() {
+    let task = OrdinaryTaskProposal {
+        title: "Add endpoint".to_string(),
+        description: "Create REST endpoint".to_string(),
+        is_completed: false,
+    };
+
+    let json = serde_json::to_string(&task).unwrap();
+    let parsed: OrdinaryTaskProposal = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(parsed.title, task.title);
+    assert_eq!(parsed.description, task.description);
+}
+
+#[test]
+fn decomposition_proposal_mode_detection() {
+    let timeout_proposal = DecompositionProposal::Timeout {
+        phases: vec![],
+        refusal_reason: None,
+    };
+
+    let ordinary_proposal = DecompositionProposal::Ordinary {
+        tasks: vec![],
+        refusal_reason: None,
+    };
+
+    assert_eq!(timeout_proposal.mode(), MitosisMode::Timeout);
+    assert_eq!(ordinary_proposal.mode(), MitosisMode::Ordinary);
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Timeout Mitosis Decomposition Types
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Mitosis mode: distinguishes timeout-triggered from ordinary failure decomposition.
+///
+/// Timeout mode uses different decomposition criteria and produces phase-based
+/// children that can close independently when their portion of work completes.
+/// Ordinary failure mode splits multi-task beads without phase awareness.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MitosisMode {
+    /// Timeout-triggered mitosis: splits bead based on completed vs remaining work.
+    /// Uses timeout context (elapsed time, activity evidence, git state) to infer
+    /// decomposition boundaries and produce independently closable phases.
+    Timeout,
+    /// Ordinary failure mitosis: splits multi-task beads based on task analysis.
+    /// Triggered by failure count thresholds without timeout context.
+    Ordinary,
+}
+
+impl fmt::Display for MitosisMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MitosisMode::Timeout => write!(f, "timeout"),
+            MitosisMode::Ordinary => write!(f, "ordinary"),
+        }
+    }
+}
+
+/// A child bead proposal in timeout-triggered mitosis.
+///
+/// Unlike ordinary mitosis children, timeout-phase children are designed to
+/// close independently when their specific portion of work completes. They
+/// carry phase metadata and completion criteria.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TimeoutPhaseProposal {
+    /// Human-readable title for this phase (e.g., "Phase 1: Complete OAuth implementation").
+    pub title: String,
+    /// Detailed description of what this phase accomplishes and its acceptance criteria.
+    pub description: String,
+    /// Whether this phase represents work already completed before the timeout.
+    /// Completed phases are created as closed beads to track progress without blocking.
+    pub is_completed: bool,
+    /// Dependencies on other phase beads by title (linearized by mitosis evaluator).
+    #[serde(default)]
+    pub depends_on_phases: Vec<String>,
+    /// Estimated or observed duration for this phase (if known).
+    #[serde(default)]
+    pub estimated_duration_secs: Option<u64>,
+    /// Completion criteria: what conditions must be met to close this phase bead.
+    #[serde(default)]
+    pub completion_criteria: Vec<String>,
+}
+
+/// A child bead proposal in ordinary failure mitosis.
+///
+/// Ordinary mitosis splits multi-task beads without phase awareness. Children
+/// are independent sub-tasks that must all complete before the parent closes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct OrdinaryTaskProposal {
+    /// Title for this sub-task (e.g., "Add endpoint" not "Phase 1: ...").
+    pub title: String,
+    /// Description of the sub-task deliverables and acceptance criteria.
+    pub description: String,
+    /// Whether this sub-task was already completed (observed via git state).
+    pub is_completed: bool,
+}
+
+/// Unified decomposition proposal that can represent either timeout or ordinary mode.
+///
+/// This enum provides type-safe discrimination between the two mitosis modes
+/// while maintaining a common API for the evaluator and caller.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum DecompositionProposal {
+    /// Timeout-triggered decomposition with phase-based children.
+    #[serde(rename = "timeout")]
+    Timeout {
+        /// Phases that split the bead's work into independently closable units.
+        phases: Vec<TimeoutPhaseProposal>,
+        /// Reason if decomposition was refused (empty if proposing children).
+        #[serde(default)]
+        refusal_reason: Option<String>,
+    },
+    /// Ordinary failure decomposition with task-based children.
+    #[serde(rename = "ordinary")]
+    Ordinary {
+        /// Sub-tasks that split the bead's work into independent units.
+        tasks: Vec<OrdinaryTaskProposal>,
+        /// Reason if decomposition was refused (empty if proposing children).
+        #[serde(default)]
+        refusal_reason: Option<String>,
+    },
+}
+
+impl DecompositionProposal {
+    /// Returns true if the proposal indicates the bead should be split.
+    pub fn is_splittable(&self) -> bool {
+        match self {
+            DecompositionProposal::Timeout { phases, refusal_reason, .. } => {
+                refusal_reason.is_none() && !phases.is_empty()
+            }
+            DecompositionProposal::Ordinary { tasks, refusal_reason, .. } => {
+                refusal_reason.is_none() && !tasks.is_empty()
+            }
+        }
+    }
+
+    /// Returns the mitosis mode for this proposal.
+    pub fn mode(&self) -> MitosisMode {
+        match self {
+            DecompositionProposal::Timeout { .. } => MitosisMode::Timeout,
+            DecompositionProposal::Ordinary { .. } => MitosisMode::Ordinary,
+        }
+    }
+
+    /// Returns the refusal reason if decomposition was refused.
+    pub fn refusal_reason(&self) -> Option<&str> {
+        match self {
+            DecompositionProposal::Timeout { refusal_reason, .. } => refusal_reason.as_deref(),
+            DecompositionProposal::Ordinary { refusal_reason, .. } => refusal_reason.as_deref(),
+        }
+    }
+
+    /// Returns the number of proposed children (0 if refused).
+    pub fn child_count(&self) -> usize {
+        match self {
+            DecompositionProposal::Timeout { phases, .. } => phases.len(),
+            DecompositionProposal::Ordinary { tasks, .. } => tasks.len(),
+        }
+    }
+}
+
+/// Timeout decomposition refusal categories.
+///
+/// These are canonical reasons why timeout-triggered mitosis might refuse to
+/// split a bead, used for telemetry and consistent agent prompting.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutRefusalReason {
+    /// The task is atomic and cannot be meaningfully decomposed.
+    Atomic { explanation: String },
+
+    /// Splitting would require unsafe overlap with incomplete work.
+    UnsafeOverlap { explanation: String },
+
+    /// The timeout was caused by infrastructure failure, not productive work.
+    InfrastructureFailure { explanation: String },
+
+    /// Insufficient context to determine a safe decomposition boundary.
+    InsufficientContext { explanation: String },
+
+    /// The bead has exceeded maximum mitosis depth.
+    DepthLimit { max_depth: u32, current_depth: u32 },
+
+    /// The bead references NEEDLE-internal configuration (out of scope).
+    OutOfScope { explanation: String },
+}
+
+impl TimeoutRefusalReason {
+    /// Returns a human-readable explanation.
+    pub fn explanation(&self) -> &str {
+        match self {
+            TimeoutRefusalReason::Atomic { explanation } => explanation,
+            TimeoutRefusalReason::UnsafeOverlap { explanation } => explanation,
+            TimeoutRefusalReason::InfrastructureFailure { explanation } => explanation,
+            TimeoutRefusalReason::InsufficientContext { explanation } => explanation,
+            TimeoutRefusalReason::DepthLimit { .. } => {
+                "bead has reached maximum generation depth for mitosis"
+            }
+            TimeoutRefusalReason::OutOfScope { explanation } => explanation,
+        }
+    }
+
+    /// Returns a refusal reason suitable for logging/telemetry.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TimeoutRefusalReason::Atomic { .. } => "atomic",
+            TimeoutRefusalReason::UnsafeOverlap { .. } => "unsafe_overlap",
+            TimeoutRefusalReason::InfrastructureFailure { .. } => "infrastructure_failure",
+            TimeoutRefusalReason::InsufficientContext { .. } => "insufficient_context",
+            TimeoutRefusalReason::DepthLimit { .. } => "depth_limit",
+            TimeoutRefusalReason::OutOfScope { .. } => "out_of_scope",
+        }
+    }
+}
+
+impl fmt::Display for TimeoutRefusalReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.as_str(), self.explanation())
+    }
+}
+
+/// Decomposition safety assessment for timeout-triggered mitosis.
+///
+/// This type captures the analysis of whether splitting a timeout bead is
+/// safe, combining eligibility, context analysis, and agent judgment.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecompositionSafety {
+    /// Safe to split: the timeout represents productive long-running work
+    /// that can be decomposed into independently completable phases.
+    Safe {
+        /// Confidence level in this assessment (0.0 to 1.0).
+        confidence: f32,
+        /// Evidence supporting the safety decision.
+        evidence: Vec<String>,
+    },
+
+    /// Unsafe to split: decomposition would risk corruption, duplication, or loss.
+    Unsafe {
+        /// Why splitting is unsafe.
+        reason: TimeoutRefusalReason,
+    },
+}
+
+impl DecompositionSafety {
+    /// Returns true if the assessment indicates safe decomposition.
+    pub fn is_safe(&self) -> bool {
+        matches!(self, DecompositionSafety::Safe { .. })
+    }
+
+    /// Returns the confidence level (0.0 if unsafe).
+    pub fn confidence(&self) -> f32 {
+        match self {
+            DecompositionSafety::Safe { confidence, .. } => *confidence,
+            DecompositionSafety::Unsafe { .. } => 0.0,
+        }
+    }
+}
