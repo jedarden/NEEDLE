@@ -267,6 +267,184 @@ impl Outcome {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// DecompositionMode
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Mode distinguishing timeout-driven decomposition from ordinary failure handling.
+///
+/// This enum defines the API boundary between two distinct failure-handling paths:
+/// - **Timeout mode**: Activated when a bead times out. The bead is decomposed
+///   into smaller child beads via `ChildBeadProposal`, each representing a
+///   phase of the original work. This is a recovery strategy for work that
+///   exceeded its time budget but may still be completable in smaller pieces.
+/// - **OrdinaryFailure mode**: Activated for any non-timeout failure (compilation
+///   error, test failure, agent crash, etc.). The bead is NOT decomposed.
+///   It is either retried, released, or escalated based on the failure type
+///   and consecutive failure count.
+///
+/// # When to use each mode
+///
+/// **Use `Timeout` mode when:**
+/// - An agent process exits with code 124 (GNU timeout) or times out via another wrapper
+/// - The bead has made progress but exceeded its time budget
+/// - The work can be meaningfully split into discrete phases
+/// - Child beads can complete the work with the same or reduced timeout
+///
+/// **Use `OrdinaryFailure` mode when:**
+/// - Exit codes 1-123, 125-128 (failure codes) or 127 (agent not found)
+/// - Exit codes >128 (signal crashes)
+/// - Negative exit codes (abnormal termination)
+/// - The failure is NOT time-related and splitting won't help
+///
+/// # API boundary
+///
+/// This enum is the sole discriminator for whether the decomposition path is
+/// activated. No other code should check timeout status or exit codes to make
+/// this decision — all decomposition logic should route through this enum.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecompositionMode {
+    /// Timeout-driven decomposition mode.
+    ///
+    /// Contains timeout-specific context for use in generating child bead
+    /// proposals (e.g., original timeout value, elapsed time, progress indicators).
+    Timeout {
+        /// The timeout duration that was exceeded (in seconds).
+        timeout_seconds: u64,
+        /// Optional hint about what phase was being worked on when timeout occurred.
+        /// This can be used to name the first child bead (e.g., "Phase 1: Routing Rules").
+        current_phase_hint: Option<String>,
+    },
+    /// Ordinary failure mode — no decomposition.
+    ///
+    /// Used for all non-timeout failures where splitting the bead into child
+    /// beads would not help. The bead should be retried, released, or escalated
+    /// via the normal failure-handling path.
+    OrdinaryFailure,
+}
+
+impl DecompositionMode {
+    /// Returns true if this is timeout decomposition mode.
+    ///
+    /// This is the primary query method for routing to the decomposition path.
+    /// All code that needs to know whether to decompose should call this method
+    /// rather than inspecting the enum directly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::types::DecompositionMode;
+    ///
+    /// let mode = DecompositionMode::Timeout {
+    ///     timeout_seconds: 120,
+    ///     current_phase_hint: Some("Phase 1".to_string()),
+    /// };
+    /// assert!(mode.is_timeout());
+    ///
+    /// let mode = DecompositionMode::OrdinaryFailure;
+    /// assert!(!mode.is_timeout());
+    /// ```
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, DecompositionMode::Timeout { .. })
+    }
+
+    /// Returns true if this is ordinary failure mode.
+    ///
+    /// This is the primary query method for routing to the normal failure
+    /// handling path (retry, release, or escalate without decomposition).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::types::DecompositionMode;
+    ///
+    /// let mode = DecompositionMode::OrdinaryFailure;
+    /// assert!(mode.is_ordinary_failure());
+    ///
+    /// let mode = DecompositionMode::Timeout {
+    ///     timeout_seconds: 120,
+    ///     current_phase_hint: None,
+    /// };
+    /// assert!(!mode.is_ordinary_failure());
+    /// ```
+    pub fn is_ordinary_failure(&self) -> bool {
+        matches!(self, DecompositionMode::OrdinaryFailure)
+    }
+
+    /// Returns the timeout duration if in timeout mode, None otherwise.
+    ///
+    /// This is a convenience method for extracting the timeout value without
+    /// pattern matching. Returns `None` for `OrdinaryFailure` mode.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::types::DecompositionMode;
+    ///
+    /// let mode = DecompositionMode::Timeout {
+    ///     timeout_seconds: 120,
+    ///     current_phase_hint: None,
+    /// };
+    /// assert_eq!(mode.timeout_seconds(), Some(120));
+    ///
+    /// let mode = DecompositionMode::OrdinaryFailure;
+    /// assert_eq!(mode.timeout_seconds(), None);
+    /// ```
+    pub fn timeout_seconds(&self) -> Option<u64> {
+        match self {
+            DecompositionMode::Timeout {
+                timeout_seconds, ..
+            } => Some(*timeout_seconds),
+            DecompositionMode::OrdinaryFailure => None,
+        }
+    }
+
+    /// Returns the current phase hint if in timeout mode, None otherwise.
+    ///
+    /// This is a convenience method for extracting the optional phase hint
+    /// without pattern matching. Returns `None` for `OrdinaryFailure` mode
+    /// or when the hint is not set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::types::DecompositionMode;
+    ///
+    /// let mode = DecompositionMode::Timeout {
+    ///     timeout_seconds: 120,
+    ///     current_phase_hint: Some("Phase 1".to_string()),
+    /// };
+    /// assert_eq!(mode.current_phase_hint(), Some(&"Phase 1".to_string()));
+    ///
+    /// let mode = DecompositionMode::Timeout {
+    ///     timeout_seconds: 120,
+    ///     current_phase_hint: None,
+    /// };
+    /// assert_eq!(mode.current_phase_hint(), None);
+    /// ```
+    pub fn current_phase_hint(&self) -> Option<&String> {
+        match self {
+            DecompositionMode::Timeout {
+                current_phase_hint, ..
+            } => current_phase_hint.as_ref(),
+            DecompositionMode::OrdinaryFailure => None,
+        }
+    }
+}
+
+impl fmt::Display for DecompositionMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DecompositionMode::Timeout {
+                timeout_seconds, ..
+            } => write!(f, "timeout ({}s)", timeout_seconds),
+            DecompositionMode::OrdinaryFailure => write!(f, "ordinary_failure"),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // StrandError / StrandResult
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -2092,6 +2270,200 @@ test foo ... ok"#;
             5,
         );
         assert!(p5.is_err());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // DecompositionMode tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn decomposition_mode_timeout_is_timeout() {
+        let mode = DecompositionMode::Timeout {
+            timeout_seconds: 120,
+            current_phase_hint: Some("Phase 1".to_string()),
+        };
+        assert!(mode.is_timeout());
+        assert!(!mode.is_ordinary_failure());
+    }
+
+    #[test]
+    fn decomposition_mode_ordinary_failure_is_not_timeout() {
+        let mode = DecompositionMode::OrdinaryFailure;
+        assert!(!mode.is_timeout());
+        assert!(mode.is_ordinary_failure());
+    }
+
+    #[test]
+    fn decomposition_mode_timeout_with_hint() {
+        let mode = DecompositionMode::Timeout {
+            timeout_seconds: 300,
+            current_phase_hint: Some("Phase 2: Analysis".to_string()),
+        };
+        assert!(mode.is_timeout());
+        assert_eq!(mode.timeout_seconds(), Some(300));
+        assert_eq!(
+            mode.current_phase_hint(),
+            Some(&"Phase 2: Analysis".to_string())
+        );
+    }
+
+    #[test]
+    fn decomposition_mode_timeout_without_hint() {
+        let mode = DecompositionMode::Timeout {
+            timeout_seconds: 60,
+            current_phase_hint: None,
+        };
+        assert!(mode.is_timeout());
+        assert_eq!(mode.timeout_seconds(), Some(60));
+        assert_eq!(mode.current_phase_hint(), None);
+    }
+
+    #[test]
+    fn decomposition_mode_ordinary_failure_no_timeout() {
+        let mode = DecompositionMode::OrdinaryFailure;
+        assert_eq!(mode.timeout_seconds(), None);
+        assert_eq!(mode.current_phase_hint(), None);
+    }
+
+    #[test]
+    fn decomposition_mode_timeout_seconds_zero() {
+        let mode = DecompositionMode::Timeout {
+            timeout_seconds: 0,
+            current_phase_hint: None,
+        };
+        assert_eq!(mode.timeout_seconds(), Some(0));
+        assert!(mode.is_timeout());
+    }
+
+    #[test]
+    fn decomposition_mode_timeout_seconds_large() {
+        let mode = DecompositionMode::Timeout {
+            timeout_seconds: 86400, // 1 day
+            current_phase_hint: None,
+        };
+        assert_eq!(mode.timeout_seconds(), Some(86400));
+        assert!(mode.is_timeout());
+    }
+
+    #[test]
+    fn decomposition_mode_display_timeout() {
+        let mode = DecompositionMode::Timeout {
+            timeout_seconds: 120,
+            current_phase_hint: Some("Phase 1".to_string()),
+        };
+        assert_eq!(mode.to_string(), "timeout (120s)");
+    }
+
+    #[test]
+    fn decomposition_mode_display_ordinary_failure() {
+        let mode = DecompositionMode::OrdinaryFailure;
+        assert_eq!(mode.to_string(), "ordinary_failure");
+    }
+
+    #[test]
+    fn decomposition_mode_equality_timeout() {
+        let mode1 = DecompositionMode::Timeout {
+            timeout_seconds: 120,
+            current_phase_hint: Some("Phase 1".to_string()),
+        };
+        let mode2 = DecompositionMode::Timeout {
+            timeout_seconds: 120,
+            current_phase_hint: Some("Phase 1".to_string()),
+        };
+        assert_eq!(mode1, mode2);
+    }
+
+    #[test]
+    fn decomposition_mode_inequality_different_timeout() {
+        let mode1 = DecompositionMode::Timeout {
+            timeout_seconds: 120,
+            current_phase_hint: None,
+        };
+        let mode2 = DecompositionMode::Timeout {
+            timeout_seconds: 300,
+            current_phase_hint: None,
+        };
+        assert_ne!(mode1, mode2);
+    }
+
+    #[test]
+    fn decomposition_mode_inequality_timeout_vs_ordinary() {
+        let timeout_mode = DecompositionMode::Timeout {
+            timeout_seconds: 120,
+            current_phase_hint: None,
+        };
+        let ordinary_mode = DecompositionMode::OrdinaryFailure;
+        assert_ne!(timeout_mode, ordinary_mode);
+    }
+
+    #[test]
+    fn decomposition_mode_serde_timeout_roundtrip() {
+        let mode = DecompositionMode::Timeout {
+            timeout_seconds: 180,
+            current_phase_hint: Some("Test Phase".to_string()),
+        };
+
+        let json = serde_json::to_string(&mode).unwrap();
+        assert!(json.contains("timeout"));
+        assert!(json.contains("180"));
+
+        let deserialized: DecompositionMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, mode);
+        assert_eq!(deserialized.timeout_seconds(), Some(180));
+        assert_eq!(
+            deserialized.current_phase_hint(),
+            Some(&"Test Phase".to_string())
+        );
+    }
+
+    #[test]
+    fn decomposition_mode_serde_ordinary_failure_roundtrip() {
+        let mode = DecompositionMode::OrdinaryFailure;
+
+        let json = serde_json::to_string(&mode).unwrap();
+        assert_eq!(json, r#""ordinary_failure""#);
+
+        let deserialized: DecompositionMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, mode);
+        assert!(deserialized.is_ordinary_failure());
+    }
+
+    #[test]
+    fn decomposition_mode_serde_timeout_without_hint() {
+        let mode = DecompositionMode::Timeout {
+            timeout_seconds: 60,
+            current_phase_hint: None,
+        };
+
+        let json = serde_json::to_string(&mode).unwrap();
+        let deserialized: DecompositionMode = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized, mode);
+        assert_eq!(deserialized.timeout_seconds(), Some(60));
+        assert_eq!(deserialized.current_phase_hint(), None);
+    }
+
+    #[test]
+    fn decomposition_mode_current_phase_hint_empty_string() {
+        let mode = DecompositionMode::Timeout {
+            timeout_seconds: 120,
+            current_phase_hint: Some("".to_string()),
+        };
+        // Empty string is still Some, just empty
+        assert_eq!(mode.current_phase_hint(), Some(&"".to_string()));
+    }
+
+    #[test]
+    fn decomposition_mode_all_variants_have_display() {
+        let timeout = DecompositionMode::Timeout {
+            timeout_seconds: 120,
+            current_phase_hint: None,
+        };
+        let ordinary = DecompositionMode::OrdinaryFailure;
+
+        // Should not panic
+        let _ = format!("{}", timeout);
+        let _ = format!("{}", ordinary);
     }
 }
 
