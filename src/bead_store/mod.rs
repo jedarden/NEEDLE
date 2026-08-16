@@ -2341,10 +2341,8 @@ echo "bf 0.2.0-github"
 
         // Verify that not all elapsed times are identical (jitter is working)
         // With ±25% jitter on exponential backoff, times should vary
-        let unique_times: std::collections::HashSet<_> = elapsed_times
-            .iter()
-            .map(|d| d.as_millis())
-            .collect();
+        let unique_times: std::collections::HashSet<_> =
+            elapsed_times.iter().map(|d| d.as_millis()).collect();
 
         // We expect at least some variation across 10 runs
         // If jitter wasn't working, all times would be identical
@@ -2408,10 +2406,8 @@ echo "bf 0.2.0-github"
         }
 
         // Verify jitter creates variation
-        let unique_times: std::collections::HashSet<_> = elapsed_times
-            .iter()
-            .map(|d| d.as_millis())
-            .collect();
+        let unique_times: std::collections::HashSet<_> =
+            elapsed_times.iter().map(|d| d.as_millis()).collect();
 
         assert!(
             unique_times.len() > 1,
@@ -2658,10 +2654,8 @@ echo "bf 0.2.0-github"
 
         // With jitter, the 10 runs should have varying elapsed times
         // If all times are identical, jitter is not working
-        let unique_times: std::collections::HashSet<_> = elapsed_times
-            .iter()
-            .map(|d| d.as_millis())
-            .collect();
+        let unique_times: std::collections::HashSet<_> =
+            elapsed_times.iter().map(|d| d.as_millis()).collect();
 
         assert!(
             unique_times.len() > 1,
@@ -2722,10 +2716,12 @@ echo "bf 0.2.0-github"
         // Attempt 2: 20ms * 2^2 = 80ms ± 20ms (60-100ms)
 
         // Minimum total: (15 + 30 + 60) = 105ms
-        let min_expected = ((BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4) as f64 * (1.0 - JITTER_PERCENT)) as u64;
+        let min_expected =
+            ((BASE_MS + BASE_MS * 2 + BASE_MS * 4) as f64 * (1.0 - JITTER_PERCENT)) as u64;
 
         // Maximum total: (25 + 50 + 100) = 175ms
-        let max_expected = ((BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4) as f64 * (1.0 + JITTER_PERCENT)) as u64;
+        let max_expected =
+            ((BASE_MS + BASE_MS * 2 + BASE_MS * 4) as f64 * (1.0 + JITTER_PERCENT)) as u64;
 
         assert!(
             elapsed >= Duration::from_millis(min_expected),
@@ -2823,7 +2819,8 @@ echo "bf 0.2.0-github"
         // Calculate expected delays:
         // 10ms, 20ms, 40ms, 80ms, 160ms, 320ms
         // Sum: 630ms ± 157.5ms (472.5-787.5ms)
-        let base_sum = BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4 + BASE_MS * 8 + BASE_MS * 16 + BASE_MS * 32;
+        let base_sum =
+            BASE_MS + BASE_MS * 2 + BASE_MS * 4 + BASE_MS * 8 + BASE_MS * 16 + BASE_MS * 32;
         let min_expected = (base_sum as f64 * (1.0 - JITTER_PERCENT)) as u64;
         let max_expected = (base_sum as f64 * (1.0 + JITTER_PERCENT)) as u64;
 

@@ -148,7 +148,7 @@ impl<E> ResilientGrpcSpanExporter<E> {
     }
 }
 
-#[allow(refining_impl_trait_internal)]
+#[allow(refining_impl_trait_internal, refining_impl_trait_reachable)]
 impl<E> SdkSpanExporter for ResilientGrpcSpanExporter<E>
 where
     E: SdkSpanExporter + 'static,
@@ -213,7 +213,7 @@ impl<E> ResilientHttpSpanExporter<E> {
     }
 }
 
-#[allow(refining_impl_trait_internal)]
+#[allow(refining_impl_trait_internal, refining_impl_trait_reachable)]
 impl<E> SdkSpanExporter for ResilientHttpSpanExporter<E>
 where
     E: SdkSpanExporter + 'static,
@@ -278,7 +278,7 @@ impl<E> ResilientGrpcLogExporter<E> {
     }
 }
 
-#[allow(refining_impl_trait_internal)]
+#[allow(refining_impl_trait_internal, refining_impl_trait_reachable)]
 impl<E> SdkLogExporter for ResilientGrpcLogExporter<E>
 where
     E: SdkLogExporter + 'static,
@@ -343,7 +343,7 @@ impl<E> ResilientHttpLogExporter<E> {
     }
 }
 
-#[allow(refining_impl_trait_internal)]
+#[allow(refining_impl_trait_internal, refining_impl_trait_reachable)]
 impl<E> SdkLogExporter for ResilientHttpLogExporter<E>
 where
     E: SdkLogExporter + 'static,
