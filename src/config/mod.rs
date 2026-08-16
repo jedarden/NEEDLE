@@ -440,6 +440,15 @@ pub enum Backend {
     Bead,
 }
 
+impl std::fmt::Display for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Backend::Bf => write!(f, "bead-forge"),
+            Backend::Bead => write!(f, "bead-rs"),
+        }
+    }
+}
+
 /// Resolve the bead CLI binary path from configuration.
 ///
 /// Takes a `BeadCliConfig` and returns the backend type and binary path.
@@ -1960,10 +1969,52 @@ pub struct StrandsConfig {
     #[serde(default)]
     pub reflect: ReflectConfig,
     #[serde(default)]
+    pub resolve: ResolveConfig,
+    #[serde(default)]
     pub splice: SpliceConfig,
     /// Learning and trace retention configuration.
     #[serde(default)]
     pub learning: LearningConfig,
+}
+
+/// Resolve strand configuration for post-Pluck decision analysis.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolveConfig {
+    /// Enable the Resolve strand (default: false).
+    #[serde(default = "ResolveConfig::default_enabled")]
+    pub enabled: bool,
+    /// Timeout in seconds for the LLM resolver call (default: 60).
+    #[serde(default = "ResolveConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Path to a custom resolve prompt template (optional).
+    #[serde(default)]
+    pub custom_template_path: Option<PathBuf>,
+    /// Whether to use the default template when no custom template is provided (default: true).
+    #[serde(default = "ResolveConfig::default_use_default_template")]
+    pub use_default_template: bool,
+}
+
+impl Default for ResolveConfig {
+    fn default() -> Self {
+        ResolveConfig {
+            enabled: Self::default_enabled(),
+            timeout_secs: Self::default_timeout_secs(),
+            custom_template_path: None,
+            use_default_template: Self::default_use_default_template(),
+        }
+    }
+}
+
+impl ResolveConfig {
+    fn default_enabled() -> bool {
+        false
+    }
+    fn default_timeout_secs() -> u64 {
+        60
+    }
+    fn default_use_default_template() -> bool {
+        true
+    }
 }
 
 /// A workspace-specific custom sanitization pattern.
@@ -3083,6 +3134,8 @@ pub struct WorkspaceStrandsOverrides {
     pub pulse: Option<serde_yaml::Value>,
     #[serde(default)]
     pub unravel: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub resolve: Option<ResolveConfig>,
 }
 
 /// Non-overridable top-level keys in workspace config.
