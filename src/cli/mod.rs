@@ -842,6 +842,26 @@ fn worker_log_writer(
     (BoxMakeWriter::new(writer), use_ansi)
 }
 
+/// Resolve the identity fields that are available before the worker starts.
+///
+/// `agent.default` names an adapter, so load the same built-ins and user
+/// adapters that `Dispatcher` will use to obtain the actual model identifier.
+fn worker_telemetry_identity(config: &Config) -> telemetry::TelemetryIdentity {
+    let model = dispatch::load_adapters(&config.agent.adapters_dir, &dispatch::builtin_adapters())
+        .ok()
+        .and_then(|adapters| {
+            adapters
+                .get(&config.agent.default)
+                .and_then(|adapter| adapter.model.clone())
+        });
+
+    telemetry::TelemetryIdentity {
+        agent: Some(config.agent.default.clone()),
+        model,
+        workspace: Some(config.workspace.default.clone()),
+    }
+}
+
 /// This must be called before any tracing spans are created so that the OTLP
 /// layer can export them to the configured collector.
 ///
@@ -874,15 +894,16 @@ pub fn init_tracing_subscriber(
     // OTLP is enabled - create the OTLP layer inline
     // We create it inline to avoid type erasure issues with boxed layers
     let otlp_config = &config.telemetry.otlp_sink;
+    let identity = worker_telemetry_identity(config);
 
     // Build resource attributes
     let resource = crate::telemetry::otlp::OtlpSink::build_resource(
         &worker_id,
         &session_id,
         otlp_config,
-        Some(&config.agent.default),
-        None, // model - not available in AgentConfig
-        config.workspace.default.to_str(),
+        identity.agent.as_deref(),
+        identity.model.as_deref(),
+        identity.workspace.as_deref().and_then(Path::to_str),
     )
     .context("failed to build OTel resource")?;
 
@@ -984,6 +1005,7 @@ fn generate_session_id_for_worker() -> String {
 fn run_worker(config: Config, worker_name: String) -> Result<()> {
     let boot_start = Instant::now();
     let qualified_id = format!("{}-{}", config.agent.default, worker_name);
+    let telemetry_identity = worker_telemetry_identity(&config);
 
     // HOOP Hook 5 (spawn ack): prove this worker started, before anything else
     // can fail silently. Best-effort — a failed write must never abort boot.
@@ -1004,11 +1026,15 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
     eprintln!("NEEDLE worker boot: tracing subscriber initialized");
 
     eprintln!("NEEDLE worker boot: creating telemetry...");
-    let telemetry =
-        Telemetry::from_config(qualified_id.clone(), &config.telemetry).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
-            Telemetry::new(qualified_id.clone())
-        });
+    let telemetry = Telemetry::from_config_with_identity(
+        qualified_id.clone(),
+        &config.telemetry,
+        &telemetry_identity,
+    )
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
+        Telemetry::new(qualified_id.clone())
+    });
     eprintln!("NEEDLE worker boot: telemetry created");
 
     // Emit worker.booting SYNCHRONOUSLY before starting the async writer.
@@ -5281,6 +5307,46 @@ mod tests {
         let expected = format!("needle {version} (rust, {os} {arch})");
         assert!(expected.starts_with("needle 0."));
         assert!(expected.contains("rust"));
+    }
+
+    #[cfg(feature = "otlp")]
+    #[test]
+    fn worker_construction_identity_populates_otlp_resource() {
+        let mut config = Config::default();
+        config.agent.default = "claude-sonnet".to_string();
+        config.agent.adapters_dir = PathBuf::from("/definitely/missing/needle-adapters");
+        config.workspace.default = PathBuf::from("/private/workspaces/needle-repo");
+
+        // This is the same identity builder used by run_worker before it
+        // constructs the structured event sink and the tracing layer.
+        let identity = worker_telemetry_identity(&config);
+        let resource = crate::telemetry::otlp::OtlpSink::build_resource(
+            "claude-sonnet-alpha",
+            "test-session",
+            &config.telemetry.otlp_sink,
+            identity.agent.as_deref(),
+            identity.model.as_deref(),
+            identity.workspace.as_deref().and_then(Path::to_str),
+        )
+        .expect("worker identity should produce an OTLP resource");
+
+        let attr = |key: &str| {
+            resource
+                .iter()
+                .find(|(candidate, _)| candidate.as_str() == key)
+                .map(|(_, value)| value.as_str().to_string())
+        };
+
+        assert_eq!(attr("needle.agent").as_deref(), Some("claude-sonnet"));
+        assert_eq!(attr("needle.model").as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(attr("needle.workspace").as_deref(), Some("needle-repo"));
+        assert_eq!(
+            attr("service.version").as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert!(!attr("needle.workspace")
+            .expect("workspace resource attribute should be present")
+            .contains("/private/"));
     }
 
     #[test]
