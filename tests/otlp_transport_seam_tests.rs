@@ -23,6 +23,7 @@ struct CapturingSpanExporter {
     resource: Arc<Mutex<Option<Resource>>>,
 }
 
+#[allow(refining_impl_trait_internal, refining_impl_trait_reachable)]
 impl SdkSpanExporter for CapturingSpanExporter {
     fn set_resource(&mut self, resource: &Resource) {
         *self.resource.lock().expect("span resource mutex poisoned") = Some(resource.clone());
@@ -46,11 +47,8 @@ impl SdkLogExporter for CapturingLogExporter {
         *self.resource.lock().expect("log resource mutex poisoned") = Some(resource.clone());
     }
 
-    fn export(
-        &self,
-        _batch: LogBatch<'_>,
-    ) -> impl std::future::Future<Output = Result<(), OTelSdkError>> + Send {
-        async { Ok(()) }
+    async fn export(&self, _batch: LogBatch<'_>) -> Result<(), OTelSdkError> {
+        Ok(())
     }
 }
 
@@ -106,22 +104,23 @@ impl Drop for IsolatedTest {
 }
 
 fn test_config(protocol: &str) -> OtlpSinkConfig {
-    let mut config = OtlpSinkConfig::default();
-    config.enabled = true;
-    config.protocol = protocol.to_string();
-    config.endpoint = if protocol == "http" {
-        "http://127.0.0.1:4318".to_string()
-    } else {
-        "http://127.0.0.1:4317".to_string()
-    };
-    config.timeout_ms = 100;
-    config.metrics_interval_secs = 3600;
-    config.service_namespace = "transport-seam-tests".to_string();
-    config.resource_attributes = vec![
-        "deployment.environment=transport-test".to_string(),
-        "needle.test.marker=exporter-boundary".to_string(),
-    ];
-    config
+    OtlpSinkConfig {
+        enabled: true,
+        protocol: protocol.to_string(),
+        endpoint: if protocol == "http" {
+            "http://127.0.0.1:4318".to_string()
+        } else {
+            "http://127.0.0.1:4317".to_string()
+        },
+        timeout_ms: 100,
+        metrics_interval_secs: 3600,
+        service_namespace: "transport-seam-tests".to_string(),
+        resource_attributes: vec![
+            "deployment.environment=transport-test".to_string(),
+            "needle.test.marker=exporter-boundary".to_string(),
+        ],
+        ..Default::default()
+    }
 }
 
 fn test_resource(config: &OtlpSinkConfig) -> Resource {
@@ -155,7 +154,11 @@ fn assert_resource_attributes(resource: &Resource) {
             .iter()
             .find(|(attribute, _)| attribute.as_str() == key)
             .map(|(_, value)| value.as_str());
-        assert_eq!(value, Some(expected_value), "wrong or missing {key}");
+        assert_eq!(
+            value.as_deref(),
+            Some(expected_value),
+            "wrong or missing {key}"
+        );
     }
 }
 
