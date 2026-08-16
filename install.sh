@@ -120,10 +120,16 @@ main() {
     # Construct download URL
     download_url="https://github.com/${REPO}/releases/download/${version}/${asset_name}"
 
-    # Create temporary directory for download
+    # Create temporary directory for download.
+    #
+    # The trap must bake in the PATH, not defer expansion: `temp_dir` is a
+    # `main`-local, so by the time an EXIT trap runs the shell has left that
+    # scope and `$temp_dir` is unset. Under `set -u` that made the trap itself
+    # fail with "temp_dir: unbound variable", so the installer exited 1 after a
+    # completely successful install and skipped its own cleanup.
     local temp_dir
     temp_dir=$(mktemp -d)
-    trap 'rm -rf "$temp_dir"' EXIT
+    trap "rm -rf '$temp_dir'" EXIT
 
     local temp_binary="$temp_dir/needle"
 
