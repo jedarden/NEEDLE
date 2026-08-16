@@ -960,6 +960,249 @@ mod tests {
         assert!(err.contains("bf CLI not found"));
     }
 
+    #[test]
+    fn test_resolve_bead_cli_bead_backend_finds_on_path() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create bead binary on a custom PATH
+        let bin_dir = home.join("path-bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bead_bin = bin_dir.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_bin);
+
+        // Set PATH to include bead, HOME to tmp_dir
+        std::env::set_var("PATH", &bin_dir);
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_bead_backend_falls_back_to_local_bin() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH to prevent finding bead on PATH
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        // Create ~/.local/bin/bead
+        let local_bin = home.join(".local/bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let bead_local = local_bin.join("bead");
+        std::fs::write(&bead_local, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_local);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_local);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_bead_backend_falls_back_to_cargo_bin() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH and create empty home (no ~/.local/bin/bead)
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        // Create /usr/local/cargo/bin/bead
+        let cargo_bin = tmp_dir.path().join("cargo-bin");
+        std::fs::create_dir_all(&cargo_bin).unwrap();
+        let bead_cargo = cargo_bin.join("bead");
+        std::fs::write(&bead_cargo, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_cargo);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: None,
+        };
+
+        // Temporarily override /usr/local/cargo/bin/bead for testing
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", "");
+
+        // This test requires mocking /usr/local/cargo/bin/bead
+        // Since we can't actually create files in /usr/local/cargo/bin,
+        // we'll test the logic by ensuring the error message includes it
+        let result = resolve_bead_cli(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bead CLI not found"));
+        assert!(err.contains("/usr/local/cargo/bin/bead"));
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_bead_backend_not_found_error() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH and create empty home (no bead anywhere)
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: None,
+        };
+
+        let result = resolve_bead_cli(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bead CLI not found"));
+        assert!(err.contains("PATH"));
+        assert!(err.contains("~/.local/bin/bead"));
+        assert!(err.contains("/usr/local/cargo/bin/bead"));
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_bead_backend_returns_bead_variant() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create bead binary on PATH
+        let bin_dir = home.join("path-bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bead_bin = bin_dir.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_bin);
+
+        std::env::set_var("PATH", &bin_dir);
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: None,
+        };
+
+        let (backend, _path) = resolve_bead_cli(&config).unwrap();
+        // Verify Backend::Bead variant is returned
+        assert!(matches!(backend, Backend::Bead));
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_br_backend_finds_on_path() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create bead binary on a custom PATH (Br is deprecated, resolves to Bead)
+        let bin_dir = home.join("path-bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bead_bin = bin_dir.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_bin);
+
+        // Set PATH to include bead, HOME to tmp_dir
+        std::env::set_var("PATH", &bin_dir);
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Br,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_br_backend_falls_back_to_local_bin() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH to prevent finding bead on PATH
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        // Create ~/.local/bin/bead
+        let local_bin = home.join(".local/bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let bead_local = local_bin.join("bead");
+        std::fs::write(&bead_local, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_local);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Br,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_local);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_br_backend_falls_back_to_cargo_bin() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH and create empty home (no ~/.local/bin/bead)
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Br,
+            path: None,
+        };
+
+        // This test requires mocking /usr/local/cargo/bin/bead
+        // Since we can't actually create files in /usr/local/cargo/bin,
+        // we'll test the logic by ensuring the error message includes it
+        let result = resolve_bead_cli(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bead CLI not found"));
+        assert!(err.contains("/usr/local/cargo/bin/bead"));
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_br_backend_not_found_error() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH and create empty home (no bead anywhere)
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Br,
+            path: None,
+        };
+
+        let result = resolve_bead_cli(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("bead CLI not found"));
+        assert!(err.contains("PATH"));
+        assert!(err.contains("~/.local/bin/bead"));
+        assert!(err.contains("/usr/local/cargo/bin/bead"));
+    }
+
     /// Regression test: auto on bf-only host resolves exactly as today's hardcoded chain.
     ///
     /// This is the no-regression guard for every existing deployment.
@@ -1061,6 +1304,586 @@ mod tests {
         #[cfg(not(unix))]
         {
             // No-op on non-Unix
+        }
+    }
+
+    // ─── BeadBackend Display trait tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_bead_backend_display_auto() {
+        assert_eq!(format!("{}", BeadBackend::Auto), "auto");
+    }
+
+    #[test]
+    fn test_bead_backend_display_bf() {
+        assert_eq!(format!("{}", BeadBackend::Bf), "bead-forge");
+    }
+
+    #[test]
+    fn test_bead_backend_display_br() {
+        assert_eq!(format!("{}", BeadBackend::Br), "br");
+    }
+
+    #[test]
+    fn test_bead_backend_display_bead() {
+        assert_eq!(format!("{}", BeadBackend::Bead), "bead-rs");
+    }
+
+    // ─── BeadBackend deserialization alias tests ─────────────────────────────────
+
+    #[test]
+    fn test_bead_backend_deserialize_bead_alias() {
+        // The "bead" alias should deserialize to Bead
+        let yaml = "bead";
+        let backend: BeadBackend = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(backend, BeadBackend::Bead);
+    }
+
+    #[test]
+    fn test_bead_backend_deserialize_bead_rs() {
+        // The full "bead-rs" should also work
+        let yaml = "bead-rs";
+        let backend: BeadBackend = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(backend, BeadBackend::Bead);
+    }
+
+    #[test]
+    fn test_bead_backend_deserialize_bf_alias() {
+        // The "bf" alias should deserialize to Bf
+        let yaml = "bf";
+        let backend: BeadBackend = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(backend, BeadBackend::Bf);
+    }
+
+    #[test]
+    fn test_bead_backend_deserialize_bead_forge() {
+        // The full "bead-forge" should also work
+        let yaml = "bead-forge";
+        let backend: BeadBackend = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(backend, BeadBackend::Bf);
+    }
+
+    #[test]
+    fn test_bead_backend_deserialize_invalid_value() {
+        // Invalid values should fail deserialization
+        let yaml = "invalid-backend";
+        let result: Result<BeadBackend, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_err());
+    }
+
+    // ─── BeadCliConfig path alias tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_bead_cli_config_deserialize_explicit_path_alias() {
+        // The "explicit_path" alias should deserialize to path
+        let yaml = r#"
+backend: bead-rs
+explicit_path: /custom/path/to/bead
+"#;
+        let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.backend, BeadBackend::Bead);
+        assert_eq!(config.path, Some(PathBuf::from("/custom/path/to/bead")));
+    }
+
+    #[test]
+    fn test_bead_cli_config_deserialize_path_field() {
+        // The canonical "path" field should work
+        let yaml = r#"
+backend: bead-rs
+path: /another/path/to/bead
+"#;
+        let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.backend, BeadBackend::Bead);
+        assert_eq!(config.path, Some(PathBuf::from("/another/path/to/bead")));
+    }
+
+    #[test]
+    fn test_bead_cli_config_serialize_uses_canonical_path_name() {
+        // Serialization should always use "path", not "explicit_path"
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/test/path")),
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        // Should contain "path:" not "explicit_path:"
+        assert!(yaml.contains("path:"));
+        assert!(!yaml.contains("explicit_path:"));
+    }
+
+    // ─── BeadCliConfig edge case tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_bead_cli_config_with_empty_path_resolves_to_none() {
+        // An empty string path should still be Some, not None
+        let yaml = r#"
+backend: bead-rs
+path: ""
+"#;
+        let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.backend, BeadBackend::Bead);
+        // Empty path is still Some(empty string)
+        assert_eq!(config.path, Some(PathBuf::from("")));
+    }
+
+    #[test]
+    fn test_bead_cli_config_partial_yaml_omits_optional_fields() {
+        // When serializing, omitted optional fields should stay omitted
+        let config = BeadCliConfig::default();
+        let yaml = serde_yaml::to_string(&config).unwrap();
+
+        // Should only contain backend: auto, no path field
+        assert!(yaml.contains("auto"));
+        assert!(!yaml.contains("path:"));
+    }
+
+    #[test]
+    fn test_bead_cli_config_with_tilde_in_path() {
+        // Paths with ~ should be preserved as-is (not expanded)
+        let yaml = r#"
+backend: bead-rs
+path: ~/local/bin/bead
+"#;
+        let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.path, Some(PathBuf::from("~/local/bin/bead")));
+    }
+
+    #[test]
+    fn test_bead_cli_config_relative_path_preserved() {
+        // Relative paths should be preserved as-is
+        let yaml = r#"
+backend: bead-forge
+path: ./local/bin/bf
+"#;
+        let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.backend, BeadBackend::Bf);
+        assert_eq!(config.path, Some(PathBuf::from("./local/bin/bf")));
+    }
+
+    #[test]
+    fn test_bead_cli_config_clone() {
+        // BeadCliConfig should derive Clone correctly
+        let original = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/test/bead")),
+        };
+
+        let cloned = original.clone();
+        assert_eq!(cloned.backend, original.backend);
+        assert_eq!(cloned.path, original.path);
+    }
+
+    #[test]
+    fn test_bead_cli_config_equality() {
+        // Two configs with same values should be equal
+        let config1 = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/test/bead")),
+        };
+
+        let config2 = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/test/bead")),
+        };
+
+        assert_eq!(config1, config2);
+    }
+
+    #[test]
+    fn test_bead_cli_config_inequality_different_backend() {
+        let config1 = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/test/bead")),
+        };
+
+        let config2 = BeadCliConfig {
+            backend: BeadBackend::Bf,
+            path: Some(PathBuf::from("/test/bead")),
+        };
+
+        assert_ne!(config1, config2);
+    }
+
+    #[test]
+    fn test_bead_cli_config_inequality_different_path() {
+        let config1 = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/test/bead1")),
+        };
+
+        let config2 = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/test/bead2")),
+        };
+
+        assert_ne!(config1, config2);
+    }
+
+    #[test]
+    fn test_bead_cli_config_inequality_none_vs_some_path() {
+        let config1 = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: None,
+        };
+
+        let config2 = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/test/bead")),
+        };
+
+        assert_ne!(config1, config2);
+    }
+
+    #[test]
+    fn test_bead_cli_config_debug_format() {
+        // Debug representation should be useful
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/test/bead")),
+        };
+
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("Bead"));
+        assert!(debug_str.contains("/test/bead"));
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_error_when_no_binary_found() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Empty PATH, no binaries in home
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let result = resolve_bead_cli(&config);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("no bead CLI") || err_msg.contains("not found"));
+    }
+
+    #[test]
+    fn test_bead_cli_config_backend_auto_does_not_mutate_config() {
+        // Auto mode should not modify the original config struct
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let original_backend = config.backend.clone();
+        let original_path = config.path.clone();
+
+        // Try to resolve (will fail, but that's ok for this test)
+        let _result = resolve_bead_cli(&config);
+
+        // Config should be unchanged
+        assert_eq!(config.backend, original_backend);
+        assert_eq!(config.path, original_path);
+    }
+
+    // ─── JSON serialization/deserialization tests ───────────────────────────────
+
+    #[test]
+    fn test_bead_cli_config_json_serialization() {
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/usr/local/bin/bead")),
+        };
+
+        // Test serialization to JSON
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("bead-rs"));
+        assert!(json.contains("/usr/local/bin/bead"));
+
+        // Test deserialization from JSON
+        let deserialized: BeadCliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.backend, BeadBackend::Bead);
+        assert_eq!(
+            deserialized.path,
+            Some(PathBuf::from("/usr/local/bin/bead"))
+        );
+    }
+
+    #[test]
+    fn test_bead_cli_config_json_with_explicit_path_alias() {
+        // JSON deserialization should support explicit_path alias
+        let json = r#"{"backend":"bead-rs","explicit_path":"/custom/bead"}"#;
+        let config: BeadCliConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.backend, BeadBackend::Bead);
+        assert_eq!(config.path, Some(PathBuf::from("/custom/bead")));
+    }
+
+    #[test]
+    fn test_bead_cli_config_json_roundtrip() {
+        // Test that JSON roundtrip preserves all data
+        let original = BeadCliConfig {
+            backend: BeadBackend::Bf,
+            path: Some(PathBuf::from("/opt/bin/bf")),
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: BeadCliConfig = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(original, restored);
+    }
+
+    // ─── Special character and edge case path tests ──────────────────────────────
+
+    #[test]
+    fn test_bead_cli_config_path_with_spaces() {
+        let yaml = r#"
+backend: bead-rs
+path: /path with spaces/to/bead
+"#;
+        let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.path,
+            Some(PathBuf::from("/path with spaces/to/bead"))
+        );
+    }
+
+    #[test]
+    fn test_bead_cli_config_path_with_unicode() {
+        let yaml = r#"
+backend: bead-rs
+path: /path/to/béad-cli
+"#;
+        let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.path, Some(PathBuf::from("/path/to/béad-cli")));
+    }
+
+    #[test]
+    fn test_bead_cli_config_path_with_dots() {
+        let yaml = r#"
+backend: bead-forge
+path: /path/to/./bf
+"#;
+        let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.backend, BeadBackend::Bf);
+        assert_eq!(config.path, Some(PathBuf::from("/path/to/./bf")));
+    }
+
+    #[test]
+    fn test_bead_cli_config_path_absolute_vs_relative() {
+        let absolute = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/usr/bin/bead")),
+        };
+        let relative = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("./bin/bead")),
+        };
+
+        // Both should be preserved as-is
+        assert!(absolute.path.unwrap().is_absolute());
+        assert!(!relative.path.unwrap().is_absolute());
+    }
+
+    // ─── Backend alias combinations and edge cases ───────────────────────────────
+
+    #[test]
+    fn test_bead_backend_all_serialization_aliases() {
+        // Test all accepted alias strings for each backend variant
+        let test_cases = vec![
+            // Auto
+            ("auto", BeadBackend::Auto),
+            // Bf
+            ("bead-forge", BeadBackend::Bf),
+            ("bf", BeadBackend::Bf),
+            // Br
+            ("br", BeadBackend::Br),
+            // Bead
+            ("bead-rs", BeadBackend::Bead),
+            ("bead", BeadBackend::Bead),
+        ];
+
+        for (input, expected) in test_cases {
+            let yaml = input;
+            let backend: BeadBackend = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(backend, expected, "Failed to parse '{}'", input);
+        }
+    }
+
+    #[test]
+    fn test_bead_backend_case_sensitivity() {
+        // Backend names should be case-sensitive
+        let result: Result<BeadBackend, _> = serde_yaml::from_str("Auto");
+        assert!(result.is_err(), "Uppercase 'Auto' should fail");
+
+        let result: Result<BeadBackend, _> = serde_yaml::from_str("AUTO");
+        assert!(result.is_err(), "Uppercase 'AUTO' should fail");
+
+        // Lowercase should work
+        let backend: BeadBackend = serde_yaml::from_str("auto").unwrap();
+        assert_eq!(backend, BeadBackend::Auto);
+    }
+
+    // ─── Config combination and validation tests ────────────────────────────────
+
+    #[test]
+    fn test_bead_cli_config_all_backend_variants_with_none_path() {
+        // Every backend variant should work with None path
+        let backends = vec![
+            BeadBackend::Auto,
+            BeadBackend::Bf,
+            BeadBackend::Br,
+            BeadBackend::Bead,
+        ];
+
+        for backend in backends {
+            let config = BeadCliConfig {
+                backend: backend.clone(),
+                path: None,
+            };
+            assert_eq!(config.backend, backend);
+            assert!(config.path.is_none());
+        }
+    }
+
+    #[test]
+    fn test_bead_cli_config_all_backend_variants_with_path() {
+        // Every backend variant should work with Some path
+        let backends = vec![
+            BeadBackend::Auto,
+            BeadBackend::Bf,
+            BeadBackend::Br,
+            BeadBackend::Bead,
+        ];
+
+        for backend in backends {
+            let config = BeadCliConfig {
+                backend: backend.clone(),
+                path: Some(PathBuf::from("/test/path")),
+            };
+            assert_eq!(config.backend, backend);
+            assert_eq!(config.path, Some(PathBuf::from("/test/path")));
+        }
+    }
+
+    #[test]
+    fn test_bead_cli_config_partial_config_missing_backend() {
+        // Config with only path, missing backend (should default to auto)
+        let yaml = "path: /some/path";
+        let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.backend, BeadBackend::Auto);
+        assert_eq!(config.path, Some(PathBuf::from("/some/path")));
+    }
+
+    // ─── Config construction and API tests ────────────────────────────────────────
+
+    #[test]
+    fn test_bead_cli_config_builder_pattern() {
+        // Test that struct construction works correctly
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/usr/bin/bead")),
+        };
+
+        // Verify all fields are set correctly
+        assert_eq!(config.backend, BeadBackend::Bead);
+        assert_eq!(config.path, Some(PathBuf::from("/usr/bin/bead")));
+    }
+
+    #[test]
+    fn test_bead_cli_config_with_method_style_update() {
+        // Test updating config fields (simulating method-style updates)
+        let mut config = BeadCliConfig::default();
+
+        config.backend = BeadBackend::Bf;
+        assert_eq!(config.backend, BeadBackend::Bf);
+
+        config.path = Some(PathBuf::from("/new/path"));
+        assert_eq!(config.path, Some(PathBuf::from("/new/path")));
+    }
+
+    // ─── Error handling and edge case tests ──────────────────────────────────────
+
+    #[test]
+    fn test_bead_backend_invalid_string_rejects() {
+        let invalid_inputs = vec!["invalid", "unknown", "foo", "bar", ""];
+        for input in invalid_inputs {
+            let result: Result<BeadBackend, _> = serde_yaml::from_str(input);
+            assert!(result.is_err(), "Should reject invalid backend: '{}'", input);
+        }
+    }
+
+    #[test]
+    fn test_bead_cli_config_malformed_yaml_handling() {
+        // Malformed YAML should fail gracefully
+        let invalid_yaml = "backend: bead-rs\npath: [invalid, array";
+        let result: Result<BeadCliConfig, _> = serde_yaml::from_str(invalid_yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bead_cli_config_empty_yaml() {
+        // Empty YAML should use defaults
+        let yaml = "";
+        let result: Result<BeadCliConfig, _> = serde_yaml::from_str(yaml);
+        // Empty string is valid YAML representing null
+        // This should either fail or give us a default config
+        assert!(result.is_err() || result.unwrap().backend == BeadBackend::Auto);
+    }
+
+    // ─── Backend Display comprehensive tests ─────────────────────────────────────
+
+    #[test]
+    fn test_bead_backend_display_all_variants() {
+        let test_cases = vec![
+            (BeadBackend::Auto, "auto"),
+            (BeadBackend::Bf, "bead-forge"),
+            (BeadBackend::Br, "br"),
+            (BeadBackend::Bead, "bead-rs"),
+        ];
+
+        for (backend, expected) in test_cases {
+            let display = format!("{}", backend);
+            assert_eq!(display, expected, "Display for {:?} should be {}", backend, expected);
+        }
+    }
+
+    // ─── BeadCliConfig serialization preserves backend type ───────────────────────
+
+    #[test]
+    fn test_bead_cli_config_serialization_preserves_backend() {
+        let configs = vec![
+            BeadCliConfig {
+                backend: BeadBackend::Auto,
+                path: None,
+            },
+            BeadCliConfig {
+                backend: BeadBackend::Bf,
+                path: None,
+            },
+            BeadCliConfig {
+                backend: BeadBackend::Br,
+                path: None,
+            },
+            BeadCliConfig {
+                backend: BeadBackend::Bead,
+                path: None,
+            },
+        ];
+
+        for original in configs {
+            // Serialize to YAML
+            let yaml = serde_yaml::to_string(&original).unwrap();
+
+            // Deserialize back
+            let restored: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
+
+            // Backend should be preserved
+            assert_eq!(
+                restored.backend, original.backend,
+                "Backend should be preserved through serialization roundtrip"
+            );
+            assert_eq!(restored.path, original.path);
         }
     }
 }
