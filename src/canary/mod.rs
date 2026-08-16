@@ -327,26 +327,32 @@ impl CanaryRunner {
         let workspace_config = crate::config::ConfigLoader::load_workspace(&self.canary_workspace)
             .with_context(|| {
                 format!(
-                    "canary workspace {} has no .needle.yaml",
+                    "failed to load .needle.yaml for canary workspace {}",
                     self.canary_workspace.display()
                 )
             })?;
 
-        // Check that bead_cli.backend is explicitly set (not Auto)
-        let backend = &workspace_config.bead_cli.backend;
-        if matches!(backend, crate::config::BeadBackend::Auto) {
-            bail!(
+        // Both a missing `.needle.yaml` (`load_workspace` yields `None`) and a
+        // missing `bead_cli` section leave the canary on the same implicit
+        // `auto` binding as an explicit one, so all three are rejected here.
+        let bead_cli = match workspace_config
+            .as_ref()
+            .and_then(|overrides| overrides.bead_cli.as_ref())
+        {
+            Some(cli) if !matches!(cli.backend, crate::config::BeadBackend::Auto) => cli,
+            _ => bail!(
                 "canary workspace {} has no authoritative bead_cli.backend binding (currently set to 'auto'). \
                  This causes environmental failures when the canary inherits a machine-local legacy binding. \
                  Fix by adding to {}/.needle.yaml:\n  bead_cli:\n    backend: bead-rs\nor\n    backend: bead-forge",
                 self.canary_workspace.display(),
                 self.canary_workspace.display()
-            );
-        }
+            ),
+        };
+        let backend = &bead_cli.backend;
 
         // Verify the backend binary exists
-        let (backend_type, binary_path) = crate::config::resolve_bead_cli(&workspace_config.bead_cli)
-            .with_context(|| {
+        let (backend_type, binary_path) =
+            crate::config::resolve_bead_cli(bead_cli).with_context(|| {
                 format!(
                     "failed to resolve bead CLI backend '{}' for canary workspace {}",
                     backend,
@@ -356,7 +362,7 @@ impl CanaryRunner {
 
         if !binary_path.exists() {
             bail!(
-                "bead CLI backend '{}' binary not found: {} (backend: {})\n\
+                "bead CLI backend '{}' binary not found: {} (backend: {:?})\n\
                  Ensure the backend is installed and accessible, or update bead_cli.path in {}/.needle.yaml",
                 backend,
                 binary_path.display(),
@@ -365,10 +371,11 @@ impl CanaryRunner {
             );
         }
 
+        // `Backend` has no `Display` impl, unlike `BeadBackend` — debug-format it.
         tracing::info!(
             backend = %backend,
             binary = %binary_path.display(),
-            resolved_backend = %backend_type,
+            resolved_backend = ?backend_type,
             "canary workspace bead backend validated"
         );
 
@@ -1794,7 +1801,10 @@ mod tests {
         // it passes the auto check at least
         // In a real scenario, we'd need to set up PATH or use explicit path
         assert!(
-            result.is_ok() || result.unwrap_err().to_string().contains("binary not found"),
+            match &result {
+                Ok(()) => true,
+                Err(err) => err.to_string().contains("binary not found"),
+            },
             "should accept bead-rs backend or fail only with binary not found: {:?}",
             result
         );
@@ -1835,7 +1845,10 @@ mod tests {
         // This will fail because bf is not on PATH, but we're testing that
         // it passes the auto check at least
         assert!(
-            result.is_ok() || result.unwrap_err().to_string().contains("binary not found"),
+            match &result {
+                Ok(()) => true,
+                Err(err) => err.to_string().contains("binary not found"),
+            },
             "should accept bead-forge backend or fail only with binary not found: {:?}",
             result
         );
