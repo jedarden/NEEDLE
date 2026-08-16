@@ -154,8 +154,12 @@ pricing: {}
 budget:
   warn_usd: 0.0
   stop_usd: 0.0
-verification: []
-gates: []
+verification:
+  outcome_timeout_seconds: 300  # Raised from default 50s to accommodate worktree build
+gates:
+  - type: command
+    commands:
+      - scripts/verify-shipped-commit.sh
 self_modification:
   enabled: false
   canary_workspace: /home/coding/.needle/canary
