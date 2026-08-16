@@ -132,7 +132,7 @@ impl FailureTracker {
 /// It implements `SpanExporter` and detects failures, reporting them
 /// to the drop monitor channel.
 #[derive(Debug)]
-struct ResilientGrpcSpanExporter {
+pub struct ResilientGrpcSpanExporter {
     inner: Arc<opentelemetry_otlp::SpanExporter>,
     drop_tx: mpsc::UnboundedSender<DropEvent>,
     failure_tracker: FailureTracker,
@@ -197,7 +197,7 @@ impl SdkSpanExporter for ResilientGrpcSpanExporter {
 
 /// Span exporter wrapper for HTTP that detects export failures.
 #[derive(Debug)]
-struct ResilientHttpSpanExporter {
+pub struct ResilientHttpSpanExporter {
     inner: Arc<opentelemetry_otlp::SpanExporter>,
     drop_tx: mpsc::UnboundedSender<DropEvent>,
     failure_tracker: FailureTracker,
@@ -262,7 +262,7 @@ impl SdkSpanExporter for ResilientHttpSpanExporter {
 
 /// Log exporter wrapper for gRPC that detects export failures.
 #[derive(Debug)]
-struct ResilientGrpcLogExporter {
+pub struct ResilientGrpcLogExporter {
     inner: Arc<opentelemetry_otlp::LogExporter>,
     drop_tx: mpsc::UnboundedSender<DropEvent>,
     failure_tracker: FailureTracker,
@@ -327,7 +327,7 @@ impl SdkLogExporter for ResilientGrpcLogExporter {
 
 /// Log exporter wrapper for HTTP that detects export failures.
 #[derive(Debug)]
-struct ResilientHttpLogExporter {
+pub struct ResilientHttpLogExporter {
     inner: Arc<opentelemetry_otlp::LogExporter>,
     drop_tx: mpsc::UnboundedSender<DropEvent>,
     failure_tracker: FailureTracker,
