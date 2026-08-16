@@ -35,6 +35,7 @@
 //! Depends on: `types`, `validation::predispatch`.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -62,12 +63,12 @@ const TRIVIAL_PATH_PREFIXES: &[&str] = &["notes/", ".beads/", ".needle-predispat
 pub async fn verify_shipped_work(
     post: &Bead,
     workspace: &Path,
-    store: &dyn BeadStore,
+    store: &Arc<dyn BeadStore>,
 ) -> Result<GateResult> {
     let snapshot = predispatch::load(workspace, &post.id).await;
     // `Bead` does not carry `notes`, so read the current value the same way the
     // snapshot did.
-    let post_notes = predispatch::current_notes(store, &post.id)
+    let post_notes = predispatch::current_notes(store.as_ref(), &post.id)
         .await
         .unwrap_or_default();
 
