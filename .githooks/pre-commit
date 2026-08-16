@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Reject a checkpoint pointer commit whose dynamically named roots are absent.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+"$repo_root/scripts/checkpoint-publish.sh" verify-index

@@ -127,7 +127,15 @@ Flush explicitly before committing bead state:
 
 ```bash
 bead sync flush-only
+./scripts/checkpoint-publish.sh stage
 ```
+
+The staging helper resolves and verifies the generation objects named by both
+checkpoint pointers, stages those objects atomically with the pointers, and
+removes superseded `objects/gen-*.jsonl` files from the working tree. Install
+the tracked pre-commit check once per clone with
+`./scripts/install-git-hooks.sh`. Do not use `git add -A` for checkpoint
+publication.
 
 `bead doctor` is read-only by default. If a database is missing, wrong-schema,
 or corrupt, confirm the backend first and restore an empty native store from
