@@ -153,6 +153,14 @@ impl ResilientGrpcSpanExporter {
 
 #[allow(refining_impl_trait_internal)]
 impl SdkSpanExporter for ResilientGrpcSpanExporter {
+    fn set_resource(&mut self, resource: &Resource) {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.set_resource(resource);
+        } else {
+            warn!("Failed to set resource on gRPC span exporter: Arc is not unique");
+        }
+    }
+
     fn export(
         &self,
         batch: Vec<SpanData>,
@@ -210,6 +218,14 @@ impl ResilientHttpSpanExporter {
 
 #[allow(refining_impl_trait_internal)]
 impl SdkSpanExporter for ResilientHttpSpanExporter {
+    fn set_resource(&mut self, resource: &Resource) {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.set_resource(resource);
+        } else {
+            warn!("Failed to set resource on HTTP span exporter: Arc is not unique");
+        }
+    }
+
     fn export(
         &self,
         batch: Vec<SpanData>,
@@ -267,6 +283,14 @@ impl ResilientGrpcLogExporter {
 
 #[allow(refining_impl_trait_internal)]
 impl SdkLogExporter for ResilientGrpcLogExporter {
+    fn set_resource(&mut self, resource: &Resource) {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.set_resource(resource);
+        } else {
+            warn!("Failed to set resource on gRPC log exporter: Arc is not unique");
+        }
+    }
+
     fn export(
         &self,
         batch: LogBatch<'_>,
@@ -324,6 +348,14 @@ impl ResilientHttpLogExporter {
 
 #[allow(refining_impl_trait_internal)]
 impl SdkLogExporter for ResilientHttpLogExporter {
+    fn set_resource(&mut self, resource: &Resource) {
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.set_resource(resource);
+        } else {
+            warn!("Failed to set resource on HTTP log exporter: Arc is not unique");
+        }
+    }
+
     fn export(
         &self,
         batch: LogBatch<'_>,
