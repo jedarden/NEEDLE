@@ -573,7 +573,7 @@ async fn outcome_path_success_exit_0() {
         "expected terminal state, got {:?}",
         result
     );
-    assert_eq!(worker.beads_processed(), 1);
+    assert_eq!(worker.beads_processed(), 999, "DELIBERATE BREAK FOR CI VERIFICATION - needle-fcf0d892");
 }
 
 #[tokio::test]
@@ -4182,8 +4182,7 @@ workspace:
     );
 
     assert_eq!(
-        config_expanded.workspace.home,
-        custom_needle_home,
+        config_expanded.workspace.home, custom_needle_home,
         "workspace.home should point to our custom needle home"
     );
 
@@ -4193,7 +4192,8 @@ workspace:
   home: /absolute/path/to/needle-home
 "#;
 
-    let config_absolute: Config = serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let config_absolute: Config =
+        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
     let mut config_absolute_expanded = config_absolute;
     config_absolute_expanded.expand_tildes();
 
@@ -4209,7 +4209,8 @@ workspace:
   home: relative/path/to/needle-home
 "#;
 
-    let config_relative: Config = serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let config_relative: Config =
+        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
     let mut config_relative_expanded = config_relative;
     config_relative_expanded.expand_tildes();
 
@@ -4228,7 +4229,10 @@ workspace:
 
     println!("✓ Workspace home tilde expansion test passed");
     println!("  Isolated home: {}", isolated_home.display());
-    println!("  Tilde path ~/.custom-needle -> {}", custom_needle_home.display());
+    println!(
+        "  Tilde path ~/.custom-needle -> {}",
+        custom_needle_home.display()
+    );
     println!("  Absolute path preserved: /absolute/path/to/needle-home");
     println!("  Relative path preserved: relative/path/to/needle-home");
 }
@@ -4295,14 +4299,16 @@ workspace:
 
     // Verify the workspace.default was expanded
     assert!(
-        config_expanded.workspace.default.starts_with(&isolated_home),
+        config_expanded
+            .workspace
+            .default
+            .starts_with(&isolated_home),
         "workspace.default should be expanded to isolated home, got: {}",
         config_expanded.workspace.default.display()
     );
 
     assert_eq!(
-        config_expanded.workspace.default,
-        custom_workspace,
+        config_expanded.workspace.default, custom_workspace,
         "workspace.default should point to our custom workspace"
     );
 
@@ -4312,7 +4318,8 @@ workspace:
   default: /absolute/path/to/workspace
 "#;
 
-    let config_absolute: Config = serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let config_absolute: Config =
+        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
     let mut config_absolute_expanded = config_absolute;
     config_absolute_expanded.expand_tildes();
 
@@ -4328,7 +4335,8 @@ workspace:
   default: relative/path/to/workspace
 "#;
 
-    let config_relative: Config = serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let config_relative: Config =
+        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
     let mut config_relative_expanded = config_relative;
     config_relative_expanded.expand_tildes();
 
@@ -4344,7 +4352,8 @@ workspace:
   default: .
 "#;
 
-    let config_current: Config = serde_yaml::from_str(current_yaml).expect("failed to parse config");
+    let config_current: Config =
+        serde_yaml::from_str(current_yaml).expect("failed to parse config");
     let mut config_current_expanded = config_current;
     config_current_expanded.expand_tildes();
 
@@ -4363,7 +4372,10 @@ workspace:
 
     println!("✓ Workspace default tilde expansion test passed");
     println!("  Isolated home: {}", isolated_home.display());
-    println!("  Tilde path ~/dev/my-workspace -> {}", custom_workspace.display());
+    println!(
+        "  Tilde path ~/dev/my-workspace -> {}",
+        custom_workspace.display()
+    );
     println!("  Absolute path preserved: /absolute/path/to/workspace");
     println!("  Relative path preserved: relative/path/to/workspace");
     println!("  Current directory preserved: .");
@@ -4413,14 +4425,12 @@ workspace:
 
     // Verify both fields were expanded correctly
     assert_eq!(
-        config_expanded.workspace.home,
-        custom_needle_home,
+        config_expanded.workspace.home, custom_needle_home,
         "workspace.home should be expanded to custom needle home"
     );
 
     assert_eq!(
-        config_expanded.workspace.default,
-        custom_workspace,
+        config_expanded.workspace.default, custom_workspace,
         "workspace.default should be expanded to custom workspace"
     );
 
@@ -4431,7 +4441,10 @@ workspace:
     );
 
     assert!(
-        config_expanded.workspace.default.starts_with(&isolated_home),
+        config_expanded
+            .workspace
+            .default
+            .starts_with(&isolated_home),
         "workspace.default should start with isolated home"
     );
 
@@ -4444,7 +4457,10 @@ workspace:
 
     println!("✓ Combined workspace home and default tilde expansion test passed");
     println!("  Isolated home: {}", isolated_home.display());
-    println!("  workspace.home: ~/.custom-needle -> {}", custom_needle_home.display());
+    println!(
+        "  workspace.home: ~/.custom-needle -> {}",
+        custom_needle_home.display()
+    );
     println!(
         "  workspace.default: ~/dev/my-workspace -> {}",
         custom_workspace.display()
