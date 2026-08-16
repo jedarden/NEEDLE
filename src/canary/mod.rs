@@ -362,7 +362,7 @@ impl CanaryRunner {
 
         if !binary_path.exists() {
             bail!(
-                "bead CLI backend '{}' binary not found: {} (backend: {:?})\n\
+                "bead CLI backend '{}' binary not found: {} (backend: {})\n\
                  Ensure the backend is installed and accessible, or update bead_cli.path in {}/.needle.yaml",
                 backend,
                 binary_path.display(),
@@ -371,11 +371,10 @@ impl CanaryRunner {
             );
         }
 
-        // `Backend` has no `Display` impl, unlike `BeadBackend` — debug-format it.
         tracing::info!(
             backend = %backend,
             binary = %binary_path.display(),
-            resolved_backend = ?backend_type,
+            resolved_backend = %backend_type,
             "canary workspace bead backend validated"
         );
 
