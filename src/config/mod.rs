@@ -5259,6 +5259,51 @@ mod config_tests {
         std::env::remove_var("HOME");
     }
 
+    #[test]
+    fn expand_tilde_str_needle_d_directory() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~/.needle.d/");
+        assert_eq!(result, "/home/testuser/.needle.d/");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_needle_d_config_path() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~/.needle.d/config.yaml");
+        assert_eq!(result, "/home/testuser/.needle.d/config.yaml");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_str_needle_d_nested_path() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde_str("~/.needle.d/subdir/file.md");
+        assert_eq!(result, "/home/testuser/.needle.d/subdir/file.md");
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_path_needle_d_directory() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(&PathBuf::from("~/.needle.d/"));
+        assert_eq!(result, PathBuf::from("/home/testuser/.needle.d/"));
+        std::env::remove_var("HOME");
+    }
+
+    #[test]
+    fn expand_tilde_path_needle_d_config_path() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let result = expand_tilde(&PathBuf::from("~/.needle.d/config.yaml"));
+        assert_eq!(result, PathBuf::from("/home/testuser/.needle.d/config.yaml"));
+        std::env::remove_var("HOME");
+    }
+
     // ── Workspace config tests ──
 
     #[test]
