@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](rust-toolchain.toml)
-[![Version](https://img.shields.io/badge/version-0.2.12-green.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.3.1-green.svg)](Cargo.toml)
 
 **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
@@ -17,16 +17,19 @@ NEEDLE is a universal wrapper for headless coding CLI agents. It processes a sha
 ## 🚀 Quickstart
 
 ```bash
-# Install the latest release
-curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
+# Install the latest release (prebuilt binary, Linux x86_64/aarch64)
+curl -fsSL https://raw.githubusercontent.com/jedarden/NEEDLE/main/install.sh | bash
 
-# Or build from source
+# Or build from source (needs Rust 1.75+, see rust-toolchain.toml)
 cargo install --git https://github.com/jedarden/NEEDLE
 
 # Run a worker against a bead-tracked workspace
 cd /path/to/your/workspace
 needle run --agent claude --identity alpha
 ```
+
+The installer drops `needle` in `~/.local/bin` (override with `NEEDLE_INSTALL_PATH`);
+make sure that directory is on your `PATH`.
 
 A worker starts, claims the next bead, dispatches to your chosen agent CLI, and loops. Multiple workers can run in parallel against the same workspace — coordination is handled by the shared bead queue (no central orchestrator).
 
