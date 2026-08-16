@@ -527,16 +527,8 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
             // Auto is diagnostics-only; explicit workspace binding remains
             // mandatory for production store construction.
 
-            // Try bf first
-            if let Ok(path) = find_on_path("bf") {
-                return Ok((Backend::Bf, path));
-            }
-            let bf_local = PathBuf::from(format!("{home}/.local/bin/bf"));
-            if bf_local.exists() {
-                return Ok((Backend::Bf, bf_local));
-            }
-
-            // Then bead
+            // Per ADR-013: auto detection prefers bead, then bf, then br
+            // Try bead first
             if let Ok(path) = find_on_path("bead") {
                 return Ok((Backend::Bead, path));
             }
@@ -549,9 +541,18 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
                 return Ok((Backend::Bead, bead_cargo));
             }
 
+            // Then bf
+            if let Ok(path) = find_on_path("bf") {
+                return Ok((Backend::Bf, path));
+            }
+            let bf_local = PathBuf::from(format!("{home}/.local/bin/bf"));
+            if bf_local.exists() {
+                return Ok((Backend::Bf, bf_local));
+            }
+
             // Nothing found
             bail!(
-                "no bead CLI found (tried: bf on PATH, {home}/.local/bin/bf, bead on PATH, {home}/.local/bin/bead, /usr/local/cargo/bin/bead)"
+                "no bead CLI found (tried: bead on PATH, {home}/.local/bin/bead, /usr/local/cargo/bin/bead, bf on PATH, {home}/.local/bin/bf)"
             )
         }
     }
@@ -814,12 +815,43 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_bead_cli_auto_precedence_bf_first() {
+    fn test_resolve_bead_cli_auto_precedence_bead_first() {
         let (_lock, _env) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
-        // Create ~/.local/bin/bf
+        // Create both ~/.local/bin/bf and ~/.local/bin/bead
+        let bin_dir = home.join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bf_bin = bin_dir.join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_bin);
+        let bead_bin = bin_dir.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_bin);
+
+        // Set HOME to tmp_dir
+        std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", "");
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        // Per ADR-013: auto detection prefers bead, then bf
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_fallback_to_bf() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create ~/.local/bin/bf (no bead available)
         let bin_dir = home.join(".local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let bf_bin = bin_dir.join("bf");
@@ -1810,7 +1842,11 @@ path: /path/to/./bf
         let invalid_inputs = vec!["invalid", "unknown", "foo", "bar", ""];
         for input in invalid_inputs {
             let result: Result<BeadBackend, _> = serde_yaml::from_str(input);
-            assert!(result.is_err(), "Should reject invalid backend: '{}'", input);
+            assert!(
+                result.is_err(),
+                "Should reject invalid backend: '{}'",
+                input
+            );
         }
     }
 
@@ -1845,7 +1881,11 @@ path: /path/to/./bf
 
         for (backend, expected) in test_cases {
             let display = format!("{}", backend);
-            assert_eq!(display, expected, "Display for {:?} should be {}", backend, expected);
+            assert_eq!(
+                display, expected,
+                "Display for {:?} should be {}",
+                backend, expected
+            );
         }
     }
 
@@ -8112,6 +8152,294 @@ agent:
         // Without HOME, paths should remain unchanged
         assert_eq!(config.workspace.default, PathBuf::from("~/workspace"));
         assert_eq!(config.workspace.home, PathBuf::from("~/.needle"));
+    }
+
+    #[test]
+    fn test_config_expand_tildes_bead_cli_path() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.bead_cli.path = Some(PathBuf::from("~/.local/bin/bead"));
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.bead_cli.path,
+            Some(PathBuf::from("/home/testuser/.local/bin/bead"))
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_worker_binary_path() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.worker.worker_binary_path = Some(PathBuf::from("~/bin/needle"));
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.worker.worker_binary_path,
+            Some(PathBuf::from("/home/testuser/bin/needle"))
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_context_files_vector() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.prompt.context_files = vec![
+            PathBuf::from("~/docs/CLAUDE.md"),
+            PathBuf::from("~/config/AGENTS.md"),
+            PathBuf::from("/absolute/path.md"),
+        ];
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.prompt.context_files,
+            vec![
+                PathBuf::from("/home/testuser/docs/CLAUDE.md"),
+                PathBuf::from("/home/testuser/config/AGENTS.md"),
+                PathBuf::from("/absolute/path.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_telemetry_log_dir() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.telemetry.file_sink.log_dir = Some(PathBuf::from("~/.needle/logs"));
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.telemetry.file_sink.log_dir,
+            Some(PathBuf::from("/home/testuser/.needle/logs"))
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_self_modification_canary_workspace() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.self_modification.canary_workspace = PathBuf::from("~/test-canary");
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.self_modification.canary_workspace,
+            PathBuf::from("/home/testuser/test-canary")
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_tilde_in_middle_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        // Tilde in the middle of a path should not be expanded
+        config.workspace.default = PathBuf::from("/path/~user/workspace");
+        config.workspace.home = PathBuf::from("/tmp/~/.needle");
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        // These should remain unchanged
+        assert_eq!(
+            config.workspace.default,
+            PathBuf::from("/path/~user/workspace")
+        );
+        assert_eq!(config.workspace.home, PathBuf::from("/tmp/~/.needle"));
+    }
+
+    #[test]
+    fn test_config_expand_tildes_tilde_at_end_unchanged() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        // Tilde at the end of a path should not be expanded
+        config.workspace.default = PathBuf::from("/path/to/~");
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(config.workspace.default, PathBuf::from("/path/to/~"));
+    }
+
+    #[test]
+    fn test_config_expand_tildes_bare_tilde_only() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.workspace.default = PathBuf::from("~");
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(config.workspace.default, PathBuf::from("/home/testuser"));
+    }
+
+    #[test]
+    fn test_config_expand_tildes_tilde_slash_only() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        config.workspace.default = PathBuf::from("~/");
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(config.workspace.default, PathBuf::from("/home/testuser"));
+    }
+
+    #[test]
+    fn test_config_expand_tildes_multiple_fields() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        // Set multiple tilde paths across different config sections
+        config.workspace.default = PathBuf::from("~/workspace");
+        config.workspace.home = PathBuf::from("~/.needle");
+        config.agent.adapters_dir = PathBuf::from("~/adapters");
+        config.bead_cli.path = Some(PathBuf::from("~/bin/bead"));
+        config.strands.explore.workspace_root = PathBuf::from("~/code");
+        config.strands.learning.global_learnings_file = PathBuf::from("~/.needle/learnings.md");
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        // All tilde paths should be expanded
+        assert_eq!(
+            config.workspace.default,
+            PathBuf::from("/home/testuser/workspace")
+        );
+        assert_eq!(
+            config.workspace.home,
+            PathBuf::from("/home/testuser/.needle")
+        );
+        assert_eq!(
+            config.agent.adapters_dir,
+            PathBuf::from("/home/testuser/adapters")
+        );
+        assert_eq!(
+            config.bead_cli.path,
+            Some(PathBuf::from("/home/testuser/bin/bead"))
+        );
+        assert_eq!(
+            config.strands.explore.workspace_root,
+            PathBuf::from("/home/testuser/code")
+        );
+        assert_eq!(
+            config.strands.learning.global_learnings_file,
+            PathBuf::from("/home/testuser/.needle/learnings.md")
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_needle_dot_d_directory() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        // Test ~/.needle.d/ directory path expansion
+        config.workspace.home = PathBuf::from("~/.needle.d");
+        config.agent.adapters_dir = PathBuf::from("~/.needle.d/adapters");
+        config.telemetry.file_sink.log_dir = Some(PathBuf::from("~/.needle.d/logs"));
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.workspace.home,
+            PathBuf::from("/home/testuser/.needle.d")
+        );
+        assert_eq!(
+            config.agent.adapters_dir,
+            PathBuf::from("/home/testuser/.needle.d/adapters")
+        );
+        assert_eq!(
+            config.telemetry.file_sink.log_dir,
+            Some(PathBuf::from("/home/testuser/.needle.d/logs"))
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_needle_dot_d_config_file() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        // Test ~/.needle.d/config.yaml nested file path
+        config.strands.learning.global_learnings_file =
+            PathBuf::from("~/.needle.d/global-learnings.md");
+        config.health.heartbeat_dir = Some(PathBuf::from("~/.needle.d/heartbeats"));
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.strands.learning.global_learnings_file,
+            PathBuf::from("/home/testuser/.needle.d/global-learnings.md")
+        );
+        assert_eq!(
+            config.health.heartbeat_dir,
+            Some(PathBuf::from("/home/testuser/.needle.d/heartbeats"))
+        );
+    }
+
+    #[test]
+    fn test_config_expand_tildes_multiple_tildes_in_vector() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", "/home/testuser");
+        let mut config = Config::default();
+        // Test multiple tilde paths in a vector field
+        config.strands.explore.workspaces = vec![
+            PathBuf::from("~/workspace1"),
+            PathBuf::from("~/workspace2"),
+            PathBuf::from("~/.needle.d/workspaces"),
+        ];
+        config.strands.weave.exclude_workspaces = vec![
+            PathBuf::from("~/private"),
+            PathBuf::from("~/.needle.d/exclude"),
+        ];
+        config.prompt.context_files = vec![
+            PathBuf::from("~/.needle.d/context.txt"),
+            PathBuf::from("~/.needle.d/prompts/default.txt"),
+        ];
+
+        config.expand_tildes();
+        std::env::remove_var("HOME");
+
+        assert_eq!(
+            config.strands.explore.workspaces,
+            vec![
+                PathBuf::from("/home/testuser/workspace1"),
+                PathBuf::from("/home/testuser/workspace2"),
+                PathBuf::from("/home/testuser/.needle.d/workspaces"),
+            ]
+        );
+        assert_eq!(
+            config.strands.weave.exclude_workspaces,
+            vec![
+                PathBuf::from("/home/testuser/private"),
+                PathBuf::from("/home/testuser/.needle.d/exclude"),
+            ]
+        );
+        assert_eq!(
+            config.prompt.context_files,
+            vec![
+                PathBuf::from("/home/testuser/.needle.d/context.txt"),
+                PathBuf::from("/home/testuser/.needle.d/prompts/default.txt"),
+            ]
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────────────
