@@ -306,13 +306,18 @@ The worker loop is a finite state machine. Every state has defined entry conditi
 **Actions:**
 1. Classify outcome by exit code
 2. Execute the handler for that outcome class
-3. Emit `bead.outcome` telemetry
+3. Re-read the bead after the agent process has terminated
+4. If the bead is still `in_progress` and is still assigned to this dispatching
+   worker, invoke the dedicated `resolve` prompt to determine the attempt's
+   semantic outcome
+5. Apply and verify the resulting bead transition
+6. Emit `bead.outcome` telemetry
 
 **Outcome Table:**
 
 | Outcome | Exit Code | Handler | Bead Action |
 |---------|-----------|---------|-------------|
-| **Success** | 0 | Verify bead was closed by agent. If not, log warning (do not auto-close). | None (agent owns closure) |
+| **Success** | 0 | Verify bead state. If it remains claimed by this worker, run Resolve. | Closed, released, blocked, or split |
 | **Failure** | 1 | Evaluate for mitosis (see Mitosis section). If splittable, split and block parent. If not, release bead (`br update --status open --unassign`). Increment failure count via label. | Split or released |
 | **Timeout** | 124 | Release bead. Add `deferred` label. | Released + deferred |
 | **Crash** | >128 (signal) | Release bead. Create alert bead in workspace. | Released + alert |
@@ -321,7 +326,30 @@ The worker loop is a finite state machine. Every state has defined entry conditi
 | **Agent Not Found** | 127 | Release bead. Emit error. Do not retry (config issue). | Released |
 | **Build Failure** | — | Release bead. Emit error. | Released |
 
-**Agent-owned closure:** NEEDLE does not close beads. The agent is instructed (via prompt) to run `br close <id>` upon successful completion. If the bead is still open after a success exit code, NEEDLE logs a warning but does not intervene. This is a deliberate design choice based on operational experience (see `docs/notes/bead-lifecycle-bugs.md`).
+**Agent-owned closure remains the normal path:** the Pluck agent is instructed
+to close the bead itself. Resolve is an exception-recovery path and runs only
+when the agent process has ended while the bead remains `in_progress` and
+assigned to the same worker. It is not invoked for beads the agent already
+closed, released, or blocked.
+
+**Post-dispatch invariant:** once the dispatched agent process and any Resolve
+pass have ended, that dispatch must not leave its bead `in_progress`. A Resolve
+failure, timeout, invalid response, or failed state mutation falls back to a
+best-effort release with an explicit `resolution_failed` reason. Ownership is
+checked again before every mutation so a stale dispatch cannot alter a bead
+that has since changed hands.
+
+**Resolve decisions:**
+
+| Decision | NEEDLE action |
+|----------|---------------|
+| `complete` | Run configured gates and shipped-work verification; close only if they pass, otherwise release as retryable |
+| `retry` | Record a concise attempt result and retry guidance, increment the failure count, and release with normal retry/backoff policy |
+| `blocked` | Record the concrete external prerequisite and move the bead to the backend's blocked state |
+| `split` | Send the structured child proposal through Mitosis validation/deduplication and apply the parent/child dependency policy |
+
+Resolve is advisory: NEEDLE owns validation and all bead mutations. The
+resolver must not edit files, commit, push, or mutate bead state.
 
 **Transitions:**
 | Condition | Next State |
@@ -839,7 +867,10 @@ fn classify(result: &ExecutionResult, was_interrupted: bool) -> Outcome {
 **Design notes:**
 - The match is exhaustive. Every exit code maps to exactly one outcome.
 - The `Outcome` enum is the sole input to the handler. There is no ad-hoc exit code checking elsewhere.
-- `Outcome::Success` does NOT mean the bead is closed. It means the agent exited cleanly. Bead closure is the agent's responsibility.
+- `Outcome::Success` does NOT mean the bead is closed. It means the agent exited cleanly.
+- Exit classification and semantic resolution are separate. Semantic Resolve
+  is considered only after the process exits and only if the bead remains
+  `in_progress` under the dispatching worker's ownership.
 
 ### telemetry
 
@@ -1108,6 +1139,30 @@ The waterfall is the answer to "what does a worker do when it has no beads?" It 
 | Bead store error | Emit telemetry, return `Error` → fall through to Strand 2 |
 
 **Determinism guarantee:** The sort key `(priority, created_at)` produces the same ordering for all workers viewing the same queue state. Workers will compete for the same top-priority bead, and the claim mechanism resolves contention.
+
+### Post-Pluck Resolve pass
+
+Resolve is a bounded follow-up dispatch attached to Pluck outcome handling,
+not a general waterfall strand. It is triggered only when all three conditions
+hold after the Pluck agent terminates:
+
+1. the bead is still `in_progress`;
+2. its assignee still matches the dispatching worker; and
+3. no agent subprocess is still working on that bead.
+
+Before invoking an agent, NEEDLE performs deterministic inspection. Outcomes
+that are already unambiguous (for example, an interrupted process that should
+be released) do not require Resolve. For an ambiguous claimed bead, the
+resolver receives the bead and acceptance criteria, the prior agent's final
+output, exit reason, pre/post-dispatch Git state, commits and diff summary,
+validation results, failure history, and a bounded trace tail.
+
+The resolver returns exactly one structured decision: `complete`, `retry`,
+`blocked`, or `split`, with evidence and decision-specific fields. NEEDLE
+parses this response strictly, validates it against current repository and
+bead state, and performs the transition. Resolve runs at most once per Pluck
+dispatch. If it cannot produce a valid decision within its configured timeout,
+NEEDLE records the failure and releases the bead.
 
 ## Strand 2: Mend
 
@@ -1816,7 +1871,9 @@ All events share a common envelope:
 | `bead.claim.failed` | Claim failed (not race) | `bead_id`, `reason` |
 | `bead.released` | Bead released back to queue | `bead_id`, `reason` (`failure`, `timeout`, `crash`, `interrupted`) |
 | `bead.completed` | Bead closed by agent (detected) | `bead_id`, `duration_ms` |
-| `bead.orphaned` | Agent exited 0 but bead still open | `bead_id` |
+| `bead.orphaned` | Agent process ended while its bead remained claimed; Resolve will run | `bead_id`, `worker_id`, `exit_code` |
+| `bead.resolution.applied` | Resolve decision was validated and applied | `bead_id`, `decision`, `reason`, `attempt` |
+| `bead.resolution.failed` | Resolve failed or returned invalid output and NEEDLE released the bead | `bead_id`, `failure`, `release_succeeded` |
 
 ### Agent Dispatch
 
@@ -2764,7 +2821,7 @@ model: claude-sonnet-4-6
 
 ## Prompt Templates
 
-Prompts are configurable at both the global and workspace level. Every agent-invoking operation (Pluck execution, Weave gap analysis, Unravel alternatives, Pulse scanning, Mitosis splitting) uses a named prompt template. Templates are deterministic functions of their inputs — same bead state produces the same prompt.
+Prompts are configurable at both the global and workspace level. Every agent-invoking operation (Pluck execution, post-Pluck resolution, Weave gap analysis, Unravel alternatives, Pulse scanning, Mitosis splitting) uses a named prompt template. Templates are deterministic functions of their inputs — same bead state produces the same prompt.
 
 ### Template Variables
 
@@ -2780,6 +2837,7 @@ All templates have access to these variables:
 | `{workspace_instructions}` | All | Instructions from `.needle.yaml` |
 | `{worker_id}` | All | Worker identifier |
 | `{existing_children}` | Mitosis | Parent's current children (titles + IDs) |
+| `{attempt_evidence}` | Resolve | Bounded evidence from the completed Pluck dispatch |
 | `{human_bead_context}` | Unravel | The HUMAN-blocked bead being analyzed |
 | `{scan_results}` | Pulse | Output from configured scanners |
 | `{doc_files}` | Weave | Documentation file listing and contents |
@@ -2846,6 +2904,32 @@ If yes, list each independent task as a structured child bead with:
 If this bead describes a single task (even a complex one), respond with: SINGLE_TASK
 
 Do not propose children that duplicate any existing children listed above.
+```
+
+**`resolve` — Post-Pluck outcome resolution:**
+
+```markdown
+## Outcome Resolution
+
+The prior Pluck agent process has ended, but this bead is still in progress.
+Determine what happened. Do not continue implementation. Do not modify files,
+commit, push, or mutate bead state.
+
+### Bead
+
+ID: {bead_id}
+Title: {bead_title}
+Description: {bead_body}
+
+### Attempt Evidence
+
+{attempt_evidence}
+
+Return exactly one structured decision: `complete`, `retry`, `blocked`, or
+`split`. Include a concise reason and concrete evidence. A retry must include
+retry guidance; blocked must name the external prerequisite; split must
+propose independent child deliverables. Do not declare completion solely from
+the prior agent's narrative.
 ```
 
 **`weave` — Gap analysis:**
@@ -2954,12 +3038,18 @@ If a template is not overridden at the workspace level, the built-in default is 
 
 ### Agent-Owned Closure
 
-The pluck template instructs the agent to close the bead via `br close`. NEEDLE does not close beads itself. This is a deliberate design decision based on v1 experience:
+The Pluck template instructs the agent to close the bead via `bead close`. That
+remains the normal completion path. NEEDLE may close a bead from a Resolve
+`complete` decision only after configured gates and shipped-work verification
+pass. This preserves the useful parts of agent-owned closure while preventing
+a terminated dispatch from retaining a permanent claim:
 
 - The agent knows whether the work is actually done
 - NEEDLE's post-dispatch parsing of agent output was fragile
 - Exit code 0 does not guarantee the work was completed correctly
 - The agent can include a meaningful closure message
+- Resolve is invoked only for the exceptional still-`in_progress` state
+- NEEDLE, rather than the resolver, applies the validated transition
 
 ## Adapter Validation
 
@@ -4549,3 +4639,53 @@ Authored in priority order, so the backend furthest from NEEDLE's baked-in `bf` 
 - No store can bind to a binary speaking a different dialect: identity is verified against the descriptor that supplies the argv.
 - `grep -rn '"bf"\|"br"' src/` returns nothing outside descriptor definitions and their tests.
 - `needle doctor` names the resolved backend, its path, and its capability gaps.
+
+# Phase 17: OTLP Resource Propagation and Roaming-Worker Identity
+
+**Status:** proposed (ADR-016). Supersedes the incomplete fix closed under `needle-501aa991` / commit `519468a`.
+
+**Goal:** make the fleet dashboard's worker card describe the worker that actually exists — which repository it is working in *right now*, which harness and model it dispatched with, and which NEEDLE version it is running — instead of showing `Unknown`. Driven by a 2026-08-16 investigation: four of the five facts on every worker card render `Unknown`, and `Repo`, `semver`, and `worker_pool` render `Unknown` for **every** worker in the fleet, always. Full evidence and rationale in [ADR-016](../adr/016-otlp-resource-propagation-and-roaming-worker-identity.md).
+
+Three independent defects stack:
+
+1. **The OTel Resource never reaches the wire.** `src/telemetry/otlp.rs` interposes four resilience wrappers (`ResilientHttp/GrpcLogExporter`, `ResilientHttp/GrpcSpanExporter`) that implement `export()` and nothing else. `LogExporter::set_resource` and `SpanExporter::set_resource` are **defaulted no-ops** on the SDK traits, so each wrapper silently absorbs the Resource that `SdkLoggerProvider::build()` pushes down and never forwards it to the inner `opentelemetry_otlp` exporter. A raw capture of the deployed 0.3.1 binary's `/v1/logs` payload contains **zero** resource attributes — no `service.name`, no `service.version`, no `deployment.cluster`, no `needle.worker.pool`, none of the `needle.*` trio. `OtlpSink::build_resource()` is correct; its output is discarded one hop before the socket. Metrics are unaffected (`MetricExporter` is not wrapped), which is why `deployment.cluster` — injected by the *collector*, not by NEEDLE — is the one dashboard field that works.
+
+2. **`TelemetryEvent.workspace` is a dead field.** It is declared (`telemetry/mod.rs:71`), documented in the telemetry module spec above, filterable (`mod.rs:4023`), read by `OtlpSink::emit_log` — and hardcoded to `None` at both emit sites (`mod.rs:3323`, `mod.rs:3488`). The dashboard's *first* choice for `repo` is exactly this attribute.
+
+3. **Identity is resolved once at boot, from config, onto an immutable Resource.** `worker_telemetry_identity()` (`cli/mod.rs:849`) reads `config.agent.default` and `config.workspace.default`. But `needle run -w` states in its own help text that the home workspace is "NOT an exclusive scope" — the Explore strand roams, and model selection is per-dispatch whenever `agent.routing` is set. A Resource attribute cannot track either. Fixing (1) alone would make `Repo` confidently wrong rather than blank.
+
+## Changes
+
+### 17.1 Forward `set_resource` through every exporter wrapper
+- Implement `set_resource` on `ResilientHttpLogExporter`, `ResilientGrpcLogExporter`, `ResilientHttpSpanExporter`, and `ResilientGrpcSpanExporter`, delegating to the inner exporter via `Arc::get_mut` (unique at provider-build time, which is when the SDK calls it). WARN if the unique reference cannot be obtained — a silently resource-less exporter is the bug being fixed.
+- **Normative rule:** a wrapper interposed on an OTel SDK exporter trait must implement *every* method of that trait, including defaulted no-ops. `export()` alone is never a complete implementation.
+
+### 17.2 Split identity between Resource and record
+- Resource keeps what is fixed for the process or host: `service.*`, `host.name`, `process.pid`, `needle.session_id`, and every operator-supplied `telemetry.otlp.resource_attributes` entry (`deployment.cluster`, `needle.worker.pool` — currently discarded entirely).
+- The log record carries what changes: `workspace` (repo basename), plus `needle.agent` / `needle.model` as dispatched.
+- `needle.agent` / `needle.model` appear at both layers: Resource documents the configured default, the record wins. State this in the Semantic Mapping table so consumers do not guess.
+
+### 17.3 Populate `TelemetryEvent.workspace` at emit time
+- `Telemetry` gains a current-workspace cell updated when a claim binds the worker to a workspace; `emit`/`emit_sync` read it instead of writing `None`.
+- `Bead.workspace` (`claim/mod.rs:609`) is the authoritative source and is already known before dispatch — no new cross-module plumbing.
+- Basename reduction stays in `workspace_label`; full filesystem paths must never reach the browser contract.
+
+### 17.4 Test at the transport seam, not the builder
+- Every telemetry-attribute test runs through the real `build_http_providers` / `build_grpc_providers` path with a capturing exporter substituted at the transport seam, asserting on the Resource and attributes the *exporter* is handed.
+- Regression test specifically covering the wrapper hop: build providers via the real path, assert the wrapper forwarded the Resource.
+- A test asserting on `build_resource()`'s return value is insufficient by construction — that is how `needle-501aa991` was closed while the dashboard stayed blank.
+
+### 17.5 Check in the wire-capture harness
+- Script the isolated capture used to diagnose this: throwaway `HOME` + `XDG_CONFIG_HOME`, a single-workspace `strands.explore.workspaces` pin, `compression: none`, a local OTLP receiver that dumps the raw payload. It is safe against the live fleet and is the only check that observes the actual defect class.
+
+### 17.6 Live verification
+- Re-fetch `/api/dashboard` and confirm no `null` in `repo`, `harness`, `model`, `semver`, or `worker_pool` for a freshly restarted worker; confirm `repo` follows a roaming worker across repositories.
+- Coordinate with the existing open beads for the OTLP startup panic and end-to-end verification rather than duplicating them.
+
+## Exit criteria
+- A raw OTLP payload captured from a real `needle` binary contains `service.name`, `service.version`, `service.instance.id`, `deployment.cluster`, `needle.worker.pool`, and the `needle.*` identity attributes.
+- Spans exported to Tempo carry service identity; today every NEEDLE span arrives with an empty Resource.
+- The dashboard worker card shows no `Unknown` for Environment, Harness, Model, Repo, or the semver badge on a freshly restarted worker.
+- `Repo` changes when a roaming worker claims a bead in a different repository, and never shows a full filesystem path.
+- Operator-supplied `telemetry.otlp.resource_attributes` entries reach the collector — currently none of them do.
+- A test fails if any resilient exporter wrapper stops forwarding the Resource.
