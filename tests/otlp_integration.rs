@@ -671,7 +671,10 @@ async fn otlp_integration_happy_path() -> Result<()> {
         protocol: "grpc".to_string(),
         timeout_secs: 5,
         compression: "none".to_string(),
-        tls: "none".to_string(),
+        tls: needle::config::OtlpTlsConfig {
+            insecure: true,
+            ca_file: String::new(),
+        },
         headers: vec![],
         resource_attributes: vec![],
         metrics_interval_secs: 10,
@@ -990,7 +993,10 @@ async fn otlp_integration_drop_path() -> Result<()> {
         protocol: "http".to_string(),                  // Use HTTP instead of gRPC
         timeout_secs: 1,                               // Short timeout for faster test
         compression: "none".to_string(),
-        tls: "none".to_string(),
+        tls: needle::config::OtlpTlsConfig {
+            insecure: true,
+            ca_file: String::new(),
+        },
         headers: vec![],
         resource_attributes: vec![],
         metrics_interval_secs: 1, // Short metrics interval for faster test

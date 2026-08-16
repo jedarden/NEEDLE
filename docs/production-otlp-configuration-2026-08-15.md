@@ -25,6 +25,12 @@ telemetry:
   otlp_sink:
     enabled: true
     endpoint: http://needle-otel-ex44-apexalgo-iad-ts.ardenone.com:4318
+    protocol: http
+    tls:
+      insecure: true
+      ca_file: ""
+    headers:
+      - "Authorization: env:NEEDLE_OTLP_AUTHORIZATION"
 ```
 
 ## OTLP Sink Configuration
@@ -38,7 +44,9 @@ The production OTLP sink is configured with the following settings:
 | `protocol` | `http` | HTTP/protobuf transport |
 | `timeout_secs` | `10` | Request timeout in seconds |
 | `compression` | `gzip` | Payload compression |
-| `tls` | `none` | No TLS (internal Tailscale network) |
+| `tls.insecure` | `true` | No certificate verification; traffic remains inside the Tailscale network |
+| `tls.ca_file` | `""` | Use no custom CA file |
+| `headers` | `Authorization: env:NEEDLE_OTLP_AUTHORIZATION` | Read the complete authorization value from the environment |
 | `metrics_interval_secs` | `10` | Metrics export interval |
 | `service_namespace` | `needle-fleet` | Service namespace for resource attributes |
 | `max_queue_size` | `2048` | Maximum queue size for batching |
@@ -77,5 +85,5 @@ The production worker configuration is now ready for launch with OTLP telemetry 
 
 - The OTLP collector endpoint is hosted on `apexalgo-iad` cluster
 - Traffic flows over Tailscale VPN for security
-- Authorization is via Bearer token (stored in config, managed securely)
+- Authorization is via a Bearer token supplied by the `NEEDLE_OTLP_AUTHORIZATION` environment variable; no secret is stored in this document or config YAML
 - All production workers will now emit traces, metrics, and logs to the centralized collector

@@ -2286,7 +2286,9 @@ telemetry:
     protocol: grpc
     timeout_secs: 10
     compression: gzip
-    tls: none
+    tls:
+      insecure: false
+      ca_file: ""
     headers: []
     resource_attributes: []
     metrics_interval_secs: 10
