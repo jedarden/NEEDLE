@@ -1,36 +1,23 @@
-//! Transport-seam OTLP attribute tests.
+//! OTLP resource propagation tests at the transport seam.
 //!
-//! These tests verify that OTLP resource attributes are correctly propagated
-//! through the resilient exporter wrappers to the actual transport layer.
-//!
-//! Unlike the unit tests in src/telemetry/otlp.rs which assert on
-//! OtlpSink::build_resource() return values (which were always correct),
-//! these tests assert on what the EXPORTER is actually handed - testing the
-//! full path from build_resource() through the wrapper hop to the transport.
-//!
-//! This catches the class of bug where build_resource() is correct but the
-//! resilient wrappers fail to forward the resource to the inner exporter.
+//! The capturing exporters are substituted immediately before the resilient
+//! wrappers, while provider construction still goes through the same builder
+//! path used by the production HTTP and gRPC builders. Assertions therefore
+//! observe the `Resource` handed to the exporter, rather than the value
+//! returned by `OtlpSink::build_resource()`.
 
-use std::sync::{Arc, Mutex};
-use needle::config::OtlpSinkConfig;
-use opentelemetry::KeyValue;
-use opentelemetry_sdk::logs::{
-    LogBatch, LogExporter as SdkLogExporter, SdkLoggerProvider,
-};
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use opentelemetry_sdk::resource::Resource;
-use opentelemetry_sdk::trace::{
-    BatchSpanProcessor, SpanData, SpanExporter as SdkSpanExporter, SdkTracerProvider,
-};
-use opentelemetry_sdk::error::OTelSdkError;
+use std::ffi::OsString;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
+
+use needle::config::{Config, OtlpSinkConfig};
+use needle::telemetry::otlp::OtlpSink;
+use opentelemetry_sdk::error::OTelSdkError;
+use opentelemetry_sdk::logs::{LogBatch, LogExporter as SdkLogExporter};
+use opentelemetry_sdk::resource::Resource;
+use opentelemetry_sdk::trace::{SpanData, SpanExporter as SdkSpanExporter};
 use tokio::sync::mpsc;
 
-// ─────────────────────────────────────────────────────────────────────────────────
-// Capturing Exporters
-// ─────────────────────────────────────────────────────────────────────────────────
-
-/// Span exporter that captures the resource set on it.
 #[derive(Debug, Clone, Default)]
 struct CapturingSpanExporter {
     resource: Arc<Mutex<Option<Resource>>>,
@@ -38,7 +25,7 @@ struct CapturingSpanExporter {
 
 impl SdkSpanExporter for CapturingSpanExporter {
     fn set_resource(&mut self, resource: &Resource) {
-        *self.resource.lock().unwrap() = Some(resource.clone());
+        *self.resource.lock().expect("span resource mutex poisoned") = Some(resource.clone());
     }
 
     fn export(
@@ -49,7 +36,6 @@ impl SdkSpanExporter for CapturingSpanExporter {
     }
 }
 
-/// Log exporter that captures the resource set on it.
 #[derive(Debug, Clone, Default)]
 struct CapturingLogExporter {
     resource: Arc<Mutex<Option<Resource>>>,
@@ -57,351 +43,249 @@ struct CapturingLogExporter {
 
 impl SdkLogExporter for CapturingLogExporter {
     fn set_resource(&mut self, resource: &Resource) {
-        *self.resource.lock().unwrap() = Some(resource.clone());
+        *self.resource.lock().expect("log resource mutex poisoned") = Some(resource.clone());
     }
 
     fn export(
         &self,
         _batch: LogBatch<'_>,
     ) -> impl std::future::Future<Output = Result<(), OTelSdkError>> + Send {
-        async move { Ok(()) }
+        async { Ok(()) }
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────────
-// gRPC Wrapper Tests
-// ─────────────────────────────────────────────────────────────────────────────────
+// `HOME` is process-global. Keep these tests' temporary HOME and Explore root
+// together, and serialize their lifetime so the cleanup cannot race another
+// test in this file.
+static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-#[test]
-fn test_grpc_span_exporter_forwards_resource_to_inner() {
-    // Create a capturing exporter to record what resource is set
-    let capturing = CapturingSpanExporter::default();
-    let resource_clone = capturing.resource.clone();
-
-    // Wrap it in a ResilientGrpcSpanExporter (simulating build_grpc_providers)
-    let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
-    let wrapper = needle::telemetry::otlp::ResilientGrpcSpanExporter::new(
-        capturing,
-        drop_tx,
-    );
-
-    // Set a resource via the wrapper
-    let test_resource = Resource::builder()
-        .with_attributes([
-            KeyValue::new("service.name", "needle"),
-            KeyValue::new("service.instance.id", "test-worker"),
-            KeyValue::new("needle.session_id", "test-session"),
-            KeyValue::new("needle.agent", "claude-anthropic-sonnet"),
-        ])
-        .build();
-
-    // This must forward to the inner exporter
-    wrapper.set_resource(&test_resource);
-
-    // Verify the inner exporter received the resource
-    let received = resource_clone.lock().unwrap();
-    let received = received.as_ref().expect("inner exporter should have resource set");
-
-    // Verify key attributes made it through
-    let attrs: Vec<_> = received.iter().map(|(k, _)| k.as_str().to_string()).collect();
-    assert!(attrs.contains(&"service.name".to_string()), "missing service.name");
-    assert!(attrs.contains(&"service.instance.id".to_string()), "missing service.instance.id");
-    assert!(attrs.contains(&"needle.session_id".to_string()), "missing needle.session_id");
-    assert!(attrs.contains(&"needle.agent".to_string()), "missing needle.agent");
-
-    // Verify actual values match
-    let service_name = received
-        .iter()
-        .find(|(k, _)| k.as_str() == "service.name")
-        .map(|(_, v)| v.as_str());
-    assert_eq!(service_name, Some("needle"), "service.name should match");
+struct IsolatedTest {
+    _lock: MutexGuard<'static, ()>,
+    _home: tempfile::TempDir,
+    previous_home: Option<OsString>,
+    config: Config,
 }
 
-#[test]
-fn test_grpc_log_exporter_forwards_resource_to_inner() {
-    let capturing = CapturingLogExporter::default();
-    let resource_clone = capturing.resource.clone();
+impl IsolatedTest {
+    fn new() -> Self {
+        let lock = TEST_ENV_LOCK.get_or_init(|| Mutex::new(()));
+        let lock = lock.lock().expect("test environment mutex poisoned");
+        let home = tempfile::tempdir().expect("failed to create isolated HOME");
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
 
-    let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
-    let wrapper = needle::telemetry::otlp::ResilientGrpcLogExporter::new(
-        capturing,
-        drop_tx,
-    );
+        let mut config = Config::default();
+        config.workspace.home = home.path().to_path_buf();
+        config.strands.explore.workspace_root = home.path().to_path_buf();
+        config.strands.explore.workspaces.clear();
 
-    let test_resource = Resource::builder()
-        .with_attributes([
-            KeyValue::new("service.name", "needle"),
-            KeyValue::new("service.namespace", "test-namespace"),
-            KeyValue::new("needle.model", "claude-sonnet-4-6"),
-            KeyValue::new("needle.workspace", "test-workspace"),
-        ])
-        .build();
-
-    wrapper.set_resource(&test_resource);
-
-    let received = resource_clone.lock().unwrap();
-    let received = received.as_ref().expect("inner exporter should have resource set");
-
-    let attrs: Vec<_> = received.iter().map(|(k, _)| k.as_str().to_string()).collect();
-    assert!(attrs.contains(&"service.namespace".to_string()), "missing service.namespace");
-    assert!(attrs.contains(&"needle.model".to_string()), "missing needle.model");
-    assert!(attrs.contains(&"needle.workspace".to_string()), "missing needle.workspace");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────
-// HTTP Wrapper Tests
-// ─────────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_http_span_exporter_forwards_resource_to_inner() {
-    let capturing = CapturingSpanExporter::default();
-    let resource_clone = capturing.resource.clone();
-
-    let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
-    let wrapper = needle::telemetry::otlp::ResilientHttpSpanExporter::new(
-        capturing,
-        drop_tx,
-    );
-
-    let test_resource = Resource::builder()
-        .with_attributes([
-            KeyValue::new("service.name", "needle"),
-            KeyValue::new("service.version", "0.1.0"),
-            KeyValue::new("host.name", "test-host"),
-            KeyValue::new("process.pid", "12345"),
-        ])
-        .build();
-
-    wrapper.set_resource(&test_resource);
-
-    let received = resource_clone.lock().unwrap();
-    let received = received.as_ref().expect("inner exporter should have resource set");
-
-    let attrs: Vec<_> = received.iter().map(|(k, _)| k.as_str().to_string()).collect();
-    assert!(attrs.contains(&"service.version".to_string()), "missing service.version");
-    assert!(attrs.contains(&"host.name".to_string()), "missing host.name");
-    assert!(attrs.contains(&"process.pid".to_string()), "missing process.pid");
-}
-
-#[test]
-fn test_http_log_exporter_forwards_resource_to_inner() {
-    let capturing = CapturingLogExporter::default();
-    let resource_clone = capturing.resource.clone();
-
-    let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
-    let wrapper = needle::telemetry::otlp::ResilientHttpLogExporter::new(
-        capturing,
-        drop_tx,
-    );
-
-    let test_resource = Resource::builder()
-        .with_attributes([
-            KeyValue::new("service.name", "needle"),
-            KeyValue::new("deployment.environment", "production"),
-            KeyValue::new("custom.attribute", "custom-value"),
-        ])
-        .build();
-
-    wrapper.set_resource(&test_resource);
-
-    let received = resource_clone.lock().unwrap();
-    let received = received.as_ref().expect("inner exporter should have resource set");
-
-    let attrs: Vec<_> = received.iter().map(|(k, _)| k.as_str().to_string()).collect();
-    assert!(attrs.contains(&"deployment.environment".to_string()), "missing deployment.environment");
-    assert!(attrs.contains(&"custom.attribute".to_string()), "missing custom.attribute");
-
-    let custom_attr = received
-        .iter()
-        .find(|(k, _)| k.as_str() == "custom.attribute")
-        .map(|(_, v)| v.as_str());
-    assert_eq!(custom_attr, Some("custom-value"), "custom.attribute should match");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────
-// Full Pipeline Tests
-// ─────────────────────────────────────────────────────────────────────────────────
-
-/// Test that the full gRPC provider pipeline correctly propagates resources.
-///
-/// This test simulates what happens in build_grpc_providers() and verifies
-/// that the resource makes it through the BatchSpanProcessor → ResilientGrpcSpanExporter → inner exporter path.
-#[test]
-fn test_grpc_span_pipeline_propagates_resource() {
-    let capturing = CapturingSpanExporter::default();
-    let resource_clone = capturing.resource.clone();
-
-    let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
-    let resilient = needle::telemetry::otlp::ResilientGrpcSpanExporter::new(
-        capturing.clone(),
-        drop_tx,
-    );
-
-    // Build a BatchSpanProcessor (as done in build_grpc_providers)
-    let batch_processor = BatchSpanProcessor::builder(resilient).build();
-
-    // Build a SdkTracerProvider with the resource (as done in build_grpc_providers)
-    let test_resource = Resource::builder()
-        .with_attributes([
-            KeyValue::new("service.name", "needle"),
-            KeyValue::new("service.instance.id", "test-worker-grpc-pipeline"),
-            KeyValue::new("needle.session_id", "pipeline-test-session"),
-        ])
-        .build();
-
-    let _tracer_provider = SdkTracerProvider::builder()
-        .with_span_processor(batch_processor)
-        .with_resource(test_resource.clone())
-        .build();
-
-    // The resource should have been propagated through the pipeline
-    // Give it a moment to process
-    std::thread::sleep(Duration::from_millis(100));
-
-    let received = resource_clone.lock().unwrap();
-    let received = received.as_ref().expect("resource should propagate through pipeline");
-
-    // Verify the resource made it through
-    let instance_id = received
-        .iter()
-        .find(|(k, _)| k.as_str() == "service.instance.id")
-        .map(|(_, v)| v.as_str());
-    assert_eq!(
-        instance_id,
-        Some("test-worker-grpc-pipeline"),
-        "service.instance.id should propagate through pipeline"
-    );
-}
-
-/// Test that the full HTTP provider pipeline correctly propagates resources for logs.
-#[test]
-fn test_http_log_pipeline_propagates_resource() {
-    let capturing = CapturingLogExporter::default();
-    let resource_clone = capturing.resource.clone();
-
-    let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
-    let resilient = needle::telemetry::otlp::ResilientHttpLogExporter::new(
-        capturing.clone(),
-        drop_tx,
-    );
-
-    // Build a BatchLogProcessor (as done in build_http_providers)
-    use opentelemetry_sdk::logs::BatchLogProcessor;
-    let batch_processor = BatchLogProcessor::builder(resilient).build();
-
-    // Build a SdkLoggerProvider with the resource
-    let test_resource = Resource::builder()
-        .with_attributes([
-            KeyValue::new("service.name", "needle"),
-            KeyValue::new("service.namespace", "http-pipeline-test"),
-            KeyValue::new("needle.agent", "test-agent"),
-        ])
-        .build();
-
-    let _logger_provider = SdkLoggerProvider::builder()
-        .with_log_processor(batch_processor)
-        .with_resource(test_resource.clone())
-        .build();
-
-    // The resource should have been propagated
-    std::thread::sleep(Duration::from_millis(100));
-
-    let received = resource_clone.lock().unwrap();
-    let received = received.as_ref().expect("resource should propagate through log pipeline");
-
-    let namespace = received
-        .iter()
-        .find(|(k, _)| k.as_str() == "service.namespace")
-        .map(|(_, v)| v.as_str());
-    assert_eq!(
-        namespace,
-        Some("http-pipeline-test"),
-        "service.namespace should propagate through HTTP log pipeline"
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────
-// Regression Test: All Four Wrappers Forward Resources
-// ─────────────────────────────────────────────────────────────────────────────────
-
-/// Regression test that all four resilient wrappers forward set_resource.
-///
-/// This test must fail if any wrapper stops forwarding the resource to its inner exporter.
-/// It covers all four wrappers: gRPC span, gRPC log, HTTP span, HTTP log.
-#[test]
-fn test_all_four_wrappers_forward_set_resource() {
-    let test_resource = Resource::builder()
-        .with_attributes([
-            KeyValue::new("regression.test", "all-wrappers"),
-            KeyValue::new("service.instance.id", "regression-test"),
-        ])
-        .build();
-
-    // Test ResilientGrpcSpanExporter
-    {
-        let capturing = CapturingSpanExporter::default();
-        let resource_clone = capturing.resource.clone();
-        let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
-        let wrapper = needle::telemetry::otlp::ResilientGrpcSpanExporter::new(
-            capturing,
-            drop_tx,
-        );
-        wrapper.set_resource(&test_resource);
-        let received = resource_clone.lock().unwrap();
-        assert!(
-            received.is_some(),
-            "ResilientGrpcSpanExporter must forward resource"
-        );
+        Self {
+            _lock: lock,
+            _home: home,
+            previous_home,
+            config,
+        }
     }
 
-    // Test ResilientGrpcLogExporter
-    {
-        let capturing = CapturingLogExporter::default();
-        let resource_clone = capturing.resource.clone();
-        let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
-        let wrapper = needle::telemetry::otlp::ResilientGrpcLogExporter::new(
-            capturing,
-            drop_tx,
+    fn assert_explore_isolated(&self) {
+        assert_eq!(
+            self.config.strands.explore.workspace_root,
+            self.config.workspace.home
         );
-        wrapper.set_resource(&test_resource);
-        let received = resource_clone.lock().unwrap();
-        assert!(
-            received.is_some(),
-            "ResilientGrpcLogExporter must forward resource"
-        );
+        assert!(self.config.strands.explore.workspaces.is_empty());
     }
+}
 
-    // Test ResilientHttpSpanExporter
-    {
-        let capturing = CapturingSpanExporter::default();
-        let resource_clone = capturing.resource.clone();
-        let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
-        let wrapper = needle::telemetry::otlp::ResilientHttpSpanExporter::new(
-            capturing,
-            drop_tx,
-        );
-        wrapper.set_resource(&test_resource);
-        let received = resource_clone.lock().unwrap();
-        assert!(
-            received.is_some(),
-            "ResilientHttpSpanExporter must forward resource"
-        );
+impl Drop for IsolatedTest {
+    fn drop(&mut self) {
+        match &self.previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
+}
 
-    // Test ResilientHttpLogExporter
-    {
-        let capturing = CapturingLogExporter::default();
-        let resource_clone = capturing.resource.clone();
-        let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
-        let wrapper = needle::telemetry::otlp::ResilientHttpLogExporter::new(
-            capturing,
-            drop_tx,
-        );
-        wrapper.set_resource(&test_resource);
-        let received = resource_clone.lock().unwrap();
-        assert!(
-            received.is_some(),
-            "ResilientHttpLogExporter must forward resource"
-        );
+fn test_config(protocol: &str) -> OtlpSinkConfig {
+    let mut config = OtlpSinkConfig::default();
+    config.enabled = true;
+    config.protocol = protocol.to_string();
+    config.endpoint = if protocol == "http" {
+        "http://127.0.0.1:4318".to_string()
+    } else {
+        "http://127.0.0.1:4317".to_string()
+    };
+    config.timeout_ms = 100;
+    config.metrics_interval_secs = 3600;
+    config.service_namespace = "transport-seam-tests".to_string();
+    config.resource_attributes = vec![
+        "deployment.environment=transport-test".to_string(),
+        "needle.test.marker=exporter-boundary".to_string(),
+    ];
+    config
+}
+
+fn test_resource(config: &OtlpSinkConfig) -> Resource {
+    OtlpSink::build_resource(
+        "transport-worker",
+        "transport-session",
+        config,
+        Some("test-agent"),
+        Some("test-model"),
+        Some("/private/path/transport-workspace"),
+    )
+    .expect("test resource should build")
+}
+
+fn assert_resource_attributes(resource: &Resource) {
+    let expected = [
+        ("service.name", "needle"),
+        ("service.namespace", "transport-seam-tests"),
+        ("service.version", env!("CARGO_PKG_VERSION")),
+        ("service.instance.id", "transport-worker"),
+        ("needle.session_id", "transport-session"),
+        ("needle.agent", "test-agent"),
+        ("needle.model", "test-model"),
+        ("needle.workspace", "transport-workspace"),
+        ("deployment.environment", "transport-test"),
+        ("needle.test.marker", "exporter-boundary"),
+    ];
+
+    for (key, expected_value) in expected {
+        let value = resource
+            .iter()
+            .find(|(attribute, _)| attribute.as_str() == key)
+            .map(|(_, value)| value.as_str());
+        assert_eq!(value, Some(expected_value), "wrong or missing {key}");
     }
+}
+
+fn wait_for_resource(resource: &Arc<Mutex<Option<Resource>>>, signal: &str) -> Resource {
+    for _ in 0..100 {
+        if let Some(resource) = resource
+            .lock()
+            .expect("captured resource mutex poisoned")
+            .clone()
+        {
+            return resource;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("{signal} exporter did not receive a resource from its provider");
+}
+
+fn shutdown_providers(
+    tracer_provider: opentelemetry_sdk::trace::SdkTracerProvider,
+    meter_provider: opentelemetry_sdk::metrics::SdkMeterProvider,
+    logger_provider: opentelemetry_sdk::logs::SdkLoggerProvider,
+) {
+    let _ = tracer_provider.shutdown();
+    let _ = logger_provider.shutdown();
+    let _ = meter_provider.shutdown();
+}
+
+#[test]
+fn http_provider_path_hands_resource_to_transport_exporters() {
+    let isolated = IsolatedTest::new();
+    isolated.assert_explore_isolated();
+
+    let config = test_config("http");
+    let resource = test_resource(&config);
+    let span_exporter = CapturingSpanExporter::default();
+    let log_exporter = CapturingLogExporter::default();
+    let span_resource = span_exporter.resource.clone();
+    let log_resource = log_exporter.resource.clone();
+    let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
+
+    let providers = OtlpSink::build_http_providers_with_exporters(
+        &config,
+        &resource,
+        drop_tx,
+        span_exporter,
+        log_exporter,
+    )
+    .expect("HTTP providers should build through the transport seam");
+
+    let captured_span_resource = wait_for_resource(&span_resource, "HTTP trace");
+    let captured_log_resource = wait_for_resource(&log_resource, "HTTP log");
+    assert_resource_attributes(&captured_span_resource);
+    assert_resource_attributes(&captured_log_resource);
+
+    shutdown_providers(providers.0, providers.1, providers.2);
+}
+
+#[test]
+fn grpc_provider_path_hands_resource_to_transport_exporters() {
+    let isolated = IsolatedTest::new();
+    isolated.assert_explore_isolated();
+
+    let config = test_config("grpc");
+    let resource = test_resource(&config);
+    let span_exporter = CapturingSpanExporter::default();
+    let log_exporter = CapturingLogExporter::default();
+    let span_resource = span_exporter.resource.clone();
+    let log_resource = log_exporter.resource.clone();
+    let (drop_tx, _drop_rx) = mpsc::unbounded_channel();
+
+    let providers = OtlpSink::build_grpc_providers_with_exporters(
+        &config,
+        &resource,
+        drop_tx,
+        span_exporter,
+        log_exporter,
+    )
+    .expect("gRPC providers should build through the transport seam");
+
+    let captured_span_resource = wait_for_resource(&span_resource, "gRPC trace");
+    let captured_log_resource = wait_for_resource(&log_resource, "gRPC log");
+    assert_resource_attributes(&captured_span_resource);
+    assert_resource_attributes(&captured_log_resource);
+
+    shutdown_providers(providers.0, providers.1, providers.2);
+}
+
+/// Regression coverage for the wrapper hop. Each provider path constructs its
+/// two resilient wrappers before handing the provider resource to them, so all
+/// four wrapper/resource edges are exercised here.
+#[test]
+fn all_four_resilient_wrappers_forward_provider_resource() {
+    let isolated = IsolatedTest::new();
+    isolated.assert_explore_isolated();
+
+    let config = test_config("http");
+    let resource = test_resource(&config);
+    let http_span_exporter = CapturingSpanExporter::default();
+    let http_log_exporter = CapturingLogExporter::default();
+    let grpc_span_exporter = CapturingSpanExporter::default();
+    let grpc_log_exporter = CapturingLogExporter::default();
+    let http_span_resource = http_span_exporter.resource.clone();
+    let http_log_resource = http_log_exporter.resource.clone();
+    let grpc_span_resource = grpc_span_exporter.resource.clone();
+    let grpc_log_resource = grpc_log_exporter.resource.clone();
+    let (http_drop_tx, _http_drop_rx) = mpsc::unbounded_channel();
+    let (grpc_drop_tx, _grpc_drop_rx) = mpsc::unbounded_channel();
+
+    let http_providers = OtlpSink::build_http_providers_with_exporters(
+        &config,
+        &resource,
+        http_drop_tx,
+        http_span_exporter,
+        http_log_exporter,
+    )
+    .expect("HTTP providers should build");
+    let grpc_providers = OtlpSink::build_grpc_providers_with_exporters(
+        &config,
+        &resource,
+        grpc_drop_tx,
+        grpc_span_exporter,
+        grpc_log_exporter,
+    )
+    .expect("gRPC providers should build");
+
+    assert_resource_attributes(&wait_for_resource(&http_span_resource, "HTTP trace"));
+    assert_resource_attributes(&wait_for_resource(&http_log_resource, "HTTP log"));
+    assert_resource_attributes(&wait_for_resource(&grpc_span_resource, "gRPC trace"));
+    assert_resource_attributes(&wait_for_resource(&grpc_log_resource, "gRPC log"));
+
+    shutdown_providers(http_providers.0, http_providers.1, http_providers.2);
+    shutdown_providers(grpc_providers.0, grpc_providers.1, grpc_providers.2);
 }

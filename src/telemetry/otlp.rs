@@ -132,17 +132,14 @@ impl FailureTracker {
 /// It implements `SpanExporter` and detects failures, reporting them
 /// to the drop monitor channel.
 #[derive(Debug)]
-pub struct ResilientGrpcSpanExporter {
-    inner: Arc<opentelemetry_otlp::SpanExporter>,
+pub struct ResilientGrpcSpanExporter<E = opentelemetry_otlp::SpanExporter> {
+    inner: Arc<E>,
     drop_tx: mpsc::UnboundedSender<DropEvent>,
     failure_tracker: FailureTracker,
 }
 
-impl ResilientGrpcSpanExporter {
-    fn new(
-        inner: opentelemetry_otlp::SpanExporter,
-        drop_tx: mpsc::UnboundedSender<DropEvent>,
-    ) -> Self {
+impl<E> ResilientGrpcSpanExporter<E> {
+    pub fn new(inner: E, drop_tx: mpsc::UnboundedSender<DropEvent>) -> Self {
         Self {
             inner: Arc::new(inner),
             drop_tx,
@@ -152,7 +149,10 @@ impl ResilientGrpcSpanExporter {
 }
 
 #[allow(refining_impl_trait_internal)]
-impl SdkSpanExporter for ResilientGrpcSpanExporter {
+impl<E> SdkSpanExporter for ResilientGrpcSpanExporter<E>
+where
+    E: SdkSpanExporter + 'static,
+{
     fn set_resource(&mut self, resource: &Resource) {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {
             inner.set_resource(resource);
@@ -197,17 +197,14 @@ impl SdkSpanExporter for ResilientGrpcSpanExporter {
 
 /// Span exporter wrapper for HTTP that detects export failures.
 #[derive(Debug)]
-pub struct ResilientHttpSpanExporter {
-    inner: Arc<opentelemetry_otlp::SpanExporter>,
+pub struct ResilientHttpSpanExporter<E = opentelemetry_otlp::SpanExporter> {
+    inner: Arc<E>,
     drop_tx: mpsc::UnboundedSender<DropEvent>,
     failure_tracker: FailureTracker,
 }
 
-impl ResilientHttpSpanExporter {
-    fn new(
-        inner: opentelemetry_otlp::SpanExporter,
-        drop_tx: mpsc::UnboundedSender<DropEvent>,
-    ) -> Self {
+impl<E> ResilientHttpSpanExporter<E> {
+    pub fn new(inner: E, drop_tx: mpsc::UnboundedSender<DropEvent>) -> Self {
         Self {
             inner: Arc::new(inner),
             drop_tx,
@@ -217,7 +214,10 @@ impl ResilientHttpSpanExporter {
 }
 
 #[allow(refining_impl_trait_internal)]
-impl SdkSpanExporter for ResilientHttpSpanExporter {
+impl<E> SdkSpanExporter for ResilientHttpSpanExporter<E>
+where
+    E: SdkSpanExporter + 'static,
+{
     fn set_resource(&mut self, resource: &Resource) {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {
             inner.set_resource(resource);
@@ -262,17 +262,14 @@ impl SdkSpanExporter for ResilientHttpSpanExporter {
 
 /// Log exporter wrapper for gRPC that detects export failures.
 #[derive(Debug)]
-pub struct ResilientGrpcLogExporter {
-    inner: Arc<opentelemetry_otlp::LogExporter>,
+pub struct ResilientGrpcLogExporter<E = opentelemetry_otlp::LogExporter> {
+    inner: Arc<E>,
     drop_tx: mpsc::UnboundedSender<DropEvent>,
     failure_tracker: FailureTracker,
 }
 
-impl ResilientGrpcLogExporter {
-    fn new(
-        inner: opentelemetry_otlp::LogExporter,
-        drop_tx: mpsc::UnboundedSender<DropEvent>,
-    ) -> Self {
+impl<E> ResilientGrpcLogExporter<E> {
+    pub fn new(inner: E, drop_tx: mpsc::UnboundedSender<DropEvent>) -> Self {
         Self {
             inner: Arc::new(inner),
             drop_tx,
@@ -282,7 +279,10 @@ impl ResilientGrpcLogExporter {
 }
 
 #[allow(refining_impl_trait_internal)]
-impl SdkLogExporter for ResilientGrpcLogExporter {
+impl<E> SdkLogExporter for ResilientGrpcLogExporter<E>
+where
+    E: SdkLogExporter + 'static,
+{
     fn set_resource(&mut self, resource: &Resource) {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {
             inner.set_resource(resource);
@@ -327,17 +327,14 @@ impl SdkLogExporter for ResilientGrpcLogExporter {
 
 /// Log exporter wrapper for HTTP that detects export failures.
 #[derive(Debug)]
-pub struct ResilientHttpLogExporter {
-    inner: Arc<opentelemetry_otlp::LogExporter>,
+pub struct ResilientHttpLogExporter<E = opentelemetry_otlp::LogExporter> {
+    inner: Arc<E>,
     drop_tx: mpsc::UnboundedSender<DropEvent>,
     failure_tracker: FailureTracker,
 }
 
-impl ResilientHttpLogExporter {
-    fn new(
-        inner: opentelemetry_otlp::LogExporter,
-        drop_tx: mpsc::UnboundedSender<DropEvent>,
-    ) -> Self {
+impl<E> ResilientHttpLogExporter<E> {
+    pub fn new(inner: E, drop_tx: mpsc::UnboundedSender<DropEvent>) -> Self {
         Self {
             inner: Arc::new(inner),
             drop_tx,
@@ -347,7 +344,10 @@ impl ResilientHttpLogExporter {
 }
 
 #[allow(refining_impl_trait_internal)]
-impl SdkLogExporter for ResilientHttpLogExporter {
+impl<E> SdkLogExporter for ResilientHttpLogExporter<E>
+where
+    E: SdkLogExporter + 'static,
+{
     fn set_resource(&mut self, resource: &Resource) {
         if let Some(inner) = Arc::get_mut(&mut self.inner) {
             inner.set_resource(resource);
@@ -822,11 +822,116 @@ impl OtlpSink {
         resource: &Resource,
         drop_tx: mpsc::UnboundedSender<DropEvent>,
     ) -> Result<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)> {
-        use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
+        let metadata = Self::build_grpc_metadata(config)?;
+        let timeout = Duration::from_millis(config.timeout_ms);
+
+        // Import the tonic-specific exporters
+        use opentelemetry_otlp::WithTonicConfig;
+        use opentelemetry_otlp::{LogExporter, SpanExporter, WithExportConfig};
+
+        // Build the transport exporters, then use the same provider path as the
+        // transport-seam tests below.
+        let base_span_exporter = SpanExporter::builder()
+            .with_tonic()
+            .with_endpoint(config.endpoint.clone())
+            .with_timeout(timeout)
+            .with_metadata(metadata.clone())
+            .build()?;
+        let base_log_exporter = LogExporter::builder()
+            .with_tonic()
+            .with_endpoint(config.endpoint.clone())
+            .with_timeout(timeout)
+            .with_metadata(metadata.clone())
+            .build()?;
+
+        Self::build_grpc_providers_with_exporters_inner(
+            config,
+            resource,
+            drop_tx,
+            metadata,
+            base_span_exporter,
+            base_log_exporter,
+        )
+    }
+
+    /// Build gRPC providers with transport exporters supplied by the caller.
+    ///
+    /// This is the transport seam used by tests: the provider construction,
+    /// batch processors, resource assignment, and resilient wrappers are the
+    /// same path as [`Self::build_grpc_providers`], while the exporter at the
+    /// transport boundary can capture the resource it receives.
+    #[doc(hidden)]
+    pub fn build_grpc_providers_with_exporters<S, L>(
+        config: &OtlpSinkConfig,
+        resource: &Resource,
+        drop_tx: mpsc::UnboundedSender<DropEvent>,
+        span_exporter: S,
+        log_exporter: L,
+    ) -> Result<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)>
+    where
+        S: SdkSpanExporter + 'static,
+        L: SdkLogExporter + 'static,
+    {
+        Self::build_grpc_providers_with_exporters_inner(
+            config,
+            resource,
+            drop_tx,
+            Self::build_grpc_metadata(config)?,
+            span_exporter,
+            log_exporter,
+        )
+    }
+
+    fn build_grpc_providers_with_exporters_inner<S, L>(
+        config: &OtlpSinkConfig,
+        resource: &Resource,
+        drop_tx: mpsc::UnboundedSender<DropEvent>,
+        metadata: tonic::metadata::MetadataMap,
+        base_span_exporter: S,
+        base_log_exporter: L,
+    ) -> Result<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)>
+    where
+        S: SdkSpanExporter + 'static,
+        L: SdkLogExporter + 'static,
+    {
+        use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithTonicConfig};
 
         let timeout = Duration::from_millis(config.timeout_ms);
 
-        // Build metadata map from headers
+        let span_exporter = ResilientGrpcSpanExporter::new(base_span_exporter, drop_tx.clone());
+        let batch_span_processor = BatchSpanProcessor::builder(span_exporter).build();
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_span_processor(batch_span_processor)
+            .with_resource(resource.clone())
+            .build();
+
+        let metric_exporter = MetricExporter::builder()
+            .with_tonic()
+            .with_endpoint(config.endpoint.clone())
+            .with_timeout(timeout)
+            .with_metadata(metadata.clone())
+            .build()?;
+        let metric_reader = PeriodicReader::builder(metric_exporter)
+            .with_interval(Duration::from_secs(config.metrics_interval_secs))
+            .build();
+        let meter_provider = SdkMeterProvider::builder()
+            .with_reader(metric_reader)
+            .with_resource(resource.clone())
+            .build();
+
+        let log_exporter = ResilientGrpcLogExporter::new(base_log_exporter, drop_tx);
+        let batch_log_processor = BatchLogProcessor::builder(log_exporter).build();
+        let logger_provider = SdkLoggerProvider::builder()
+            .with_log_processor(batch_log_processor)
+            .with_resource(resource.clone())
+            .build();
+
+        Ok((tracer_provider, meter_provider, logger_provider))
+    }
+
+    fn build_grpc_metadata(config: &OtlpSinkConfig) -> Result<tonic::metadata::MetadataMap> {
+        use tonic::metadata::{MetadataKey, MetadataMap, MetadataValue};
+
         let mut metadata = MetadataMap::new();
         for (key, value) in resolve_headers(&config.headers)? {
             let key_val = MetadataKey::from_bytes(key.as_bytes())
@@ -835,70 +940,7 @@ impl OtlpSink {
                 .map_err(|_| anyhow::anyhow!("invalid value for OTLP metadata header '{key}'"))?;
             metadata.insert(key_val, metadata_value);
         }
-
-        // Import the tonic-specific exporters
-        use opentelemetry_otlp::WithTonicConfig;
-        use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
-
-        // Build span exporter with tonic config, then wrap for resilience
-        let base_span_exporter = SpanExporter::builder()
-            .with_tonic()
-            .with_endpoint(config.endpoint.clone())
-            .with_timeout(timeout)
-            .with_metadata(metadata.clone())
-            .build()?;
-        let span_exporter = ResilientGrpcSpanExporter::new(base_span_exporter, drop_tx.clone());
-
-        // Use BatchSpanProcessor for traces (required by spec)
-        // Note: with_max_queue_size is not available in this version of OTel SDK
-        // The default queue size is used instead
-        let batch_span_processor = BatchSpanProcessor::builder(span_exporter).build();
-
-        let tracer_provider = SdkTracerProvider::builder()
-            .with_span_processor(batch_span_processor)
-            .with_resource(resource.clone())
-            .build();
-
-        // Build metric exporter with tonic config
-        // Note: In OpenTelemetry SDK 0.31, metric exporters use async PushMetricExporter trait
-        // The PeriodicReader handles retries internally, so we use the exporter directly
-        let metric_exporter = MetricExporter::builder()
-            .with_tonic()
-            .with_endpoint(config.endpoint.clone())
-            .with_timeout(timeout)
-            .with_metadata(metadata.clone())
-            .build()?;
-
-        // Use PeriodicReader for metrics with 10s export interval (required by spec)
-        let metric_reader = PeriodicReader::builder(metric_exporter)
-            .with_interval(Duration::from_secs(config.metrics_interval_secs))
-            .build();
-
-        let meter_provider = SdkMeterProvider::builder()
-            .with_reader(metric_reader)
-            .with_resource(resource.clone())
-            .build();
-
-        // Build log exporter with tonic config, then wrap for resilience
-        let base_log_exporter = LogExporter::builder()
-            .with_tonic()
-            .with_endpoint(config.endpoint.clone())
-            .with_timeout(timeout)
-            .with_metadata(metadata)
-            .build()?;
-        let log_exporter = ResilientGrpcLogExporter::new(base_log_exporter, drop_tx);
-
-        // Use BatchLogProcessor for logs (required by spec)
-        // Note: with_max_queue_size is not available in this version of OTel SDK
-        // The default queue size is used instead
-        let batch_log_processor = BatchLogProcessor::builder(log_exporter).build();
-
-        let logger_provider = SdkLoggerProvider::builder()
-            .with_log_processor(batch_log_processor)
-            .with_resource(resource.clone())
-            .build();
-
-        Ok((tracer_provider, meter_provider, logger_provider))
+        Ok(metadata)
     }
 
     /// Build providers using HTTP/protobuf transport (reqwest).
@@ -908,15 +950,11 @@ impl OtlpSink {
         drop_tx: mpsc::UnboundedSender<DropEvent>,
     ) -> Result<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)> {
         use opentelemetry_otlp::WithHttpConfig;
-        use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+        use opentelemetry_otlp::{LogExporter, SpanExporter, WithExportConfig};
 
         let timeout = Duration::from_millis(config.timeout_ms);
 
-        // Build headers map from config
-        let mut headers_map = HashMap::new();
-        for (key, value) in resolve_headers(&config.headers)? {
-            headers_map.insert(key, value);
-        }
+        let headers_map = Self::build_http_headers(config)?;
 
         // opentelemetry-otlp only auto-appends the per-signal path
         // (/v1/traces, /v1/metrics, /v1/logs) when the endpoint is resolved from
@@ -930,65 +968,110 @@ impl OtlpSink {
         let http_signal_endpoint =
             |path: &str| format!("{}{}", config.endpoint.trim_end_matches('/'), path);
 
-        // Build span exporter, then wrap for resilience
+        // Build the transport exporters, then use the same provider path as the
+        // transport-seam tests below.
         let base_span_exporter = SpanExporter::builder()
             .with_http()
             .with_endpoint(http_signal_endpoint("/v1/traces"))
             .with_timeout(timeout)
             .with_headers(headers_map.clone())
             .build()?;
+        let base_log_exporter = LogExporter::builder()
+            .with_http()
+            .with_endpoint(http_signal_endpoint("/v1/logs"))
+            .with_timeout(timeout)
+            .with_headers(headers_map.clone())
+            .build()?;
+
+        Self::build_http_providers_with_exporters_inner(
+            config,
+            resource,
+            drop_tx,
+            headers_map,
+            base_span_exporter,
+            base_log_exporter,
+        )
+    }
+
+    /// Build HTTP providers with transport exporters supplied by the caller.
+    ///
+    /// This is the transport seam used by tests: the provider construction,
+    /// batch processors, resource assignment, and resilient wrappers are the
+    /// same path as [`Self::build_http_providers`], while the exporter at the
+    /// transport boundary can capture the resource it receives.
+    #[doc(hidden)]
+    pub fn build_http_providers_with_exporters<S, L>(
+        config: &OtlpSinkConfig,
+        resource: &Resource,
+        drop_tx: mpsc::UnboundedSender<DropEvent>,
+        span_exporter: S,
+        log_exporter: L,
+    ) -> Result<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)>
+    where
+        S: SdkSpanExporter + 'static,
+        L: SdkLogExporter + 'static,
+    {
+        Self::build_http_providers_with_exporters_inner(
+            config,
+            resource,
+            drop_tx,
+            Self::build_http_headers(config)?,
+            span_exporter,
+            log_exporter,
+        )
+    }
+
+    fn build_http_providers_with_exporters_inner<S, L>(
+        config: &OtlpSinkConfig,
+        resource: &Resource,
+        drop_tx: mpsc::UnboundedSender<DropEvent>,
+        headers_map: HashMap<String, String>,
+        base_span_exporter: S,
+        base_log_exporter: L,
+    ) -> Result<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)>
+    where
+        S: SdkSpanExporter + 'static,
+        L: SdkLogExporter + 'static,
+    {
+        use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithHttpConfig};
+
+        let timeout = Duration::from_millis(config.timeout_ms);
+        let http_signal_endpoint =
+            |path: &str| format!("{}{}", config.endpoint.trim_end_matches('/'), path);
+
         let span_exporter = ResilientHttpSpanExporter::new(base_span_exporter, drop_tx.clone());
-
-        // Use BatchSpanProcessor for traces (required by spec)
-        // Note: with_max_queue_size is not available in this version of OTel SDK
-        // The default queue size is used instead
         let batch_span_processor = BatchSpanProcessor::builder(span_exporter).build();
-
         let tracer_provider = SdkTracerProvider::builder()
             .with_span_processor(batch_span_processor)
             .with_resource(resource.clone())
             .build();
 
-        // Build metric exporter with http config
-        // Note: In OpenTelemetry SDK 0.31, metric exporters use async PushMetricExporter trait
-        // The PeriodicReader handles retries internally, so we use the exporter directly
         let metric_exporter = MetricExporter::builder()
             .with_http()
             .with_endpoint(http_signal_endpoint("/v1/metrics"))
             .with_timeout(timeout)
             .with_headers(headers_map.clone())
             .build()?;
-
-        // Use PeriodicReader for metrics with 10s export interval (required by spec)
         let metric_reader = PeriodicReader::builder(metric_exporter)
             .with_interval(Duration::from_secs(config.metrics_interval_secs))
             .build();
-
         let meter_provider = SdkMeterProvider::builder()
             .with_reader(metric_reader)
             .with_resource(resource.clone())
             .build();
 
-        // Build log exporter, then wrap for resilience
-        let base_log_exporter = LogExporter::builder()
-            .with_http()
-            .with_endpoint(http_signal_endpoint("/v1/logs"))
-            .with_timeout(timeout)
-            .with_headers(headers_map)
-            .build()?;
         let log_exporter = ResilientHttpLogExporter::new(base_log_exporter, drop_tx);
-
-        // Use BatchLogProcessor for logs (required by spec)
-        // Note: with_max_queue_size is not available in this version of OTel SDK
-        // The default queue size is used instead
         let batch_log_processor = BatchLogProcessor::builder(log_exporter).build();
-
         let logger_provider = SdkLoggerProvider::builder()
             .with_log_processor(batch_log_processor)
             .with_resource(resource.clone())
             .build();
 
         Ok((tracer_provider, meter_provider, logger_provider))
+    }
+
+    fn build_http_headers(config: &OtlpSinkConfig) -> Result<HashMap<String, String>> {
+        resolve_headers(&config.headers).map(|headers| headers.into_iter().collect())
     }
 
     /// Dispatch a telemetry event to the appropriate signal.
