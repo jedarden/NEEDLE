@@ -1037,7 +1037,7 @@ mod tests {
         };
 
         // Temporarily override /usr/local/cargo/bin/bead for testing
-        let original_path = std::env::var("PATH").unwrap_or_default();
+        let _original_path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", "");
 
         // This test requires mocking /usr/local/cargo/bin/bead
@@ -1791,6 +1791,7 @@ path: /path/to/./bf
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_bead_cli_config_with_method_style_update() {
         // Test updating config fields (simulating method-style updates)
         let mut config = BeadCliConfig::default();
