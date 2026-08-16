@@ -1848,6 +1848,251 @@ test foo ... ok"#;
         let result = parse_abort_count(line);
         assert_eq!(result, Some(42));
     }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // ChildBeadProposal tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn child_bead_proposal_new_valid() {
+        let proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        );
+        assert!(proposal.is_ok());
+        let proposal = proposal.unwrap();
+        assert_eq!(proposal.phase_title, "Phase 1: Core");
+        assert_eq!(proposal.description, "Implement core functionality");
+        assert_eq!(proposal.dependencies.len(), 1);
+        assert_eq!(proposal.priority, 2);
+        assert!(proposal.labels.is_empty());
+    }
+
+    #[test]
+    fn child_bead_proposal_new_empty_title() {
+        let proposal = ChildBeadProposal::new(
+            "".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        );
+        assert!(proposal.is_err());
+        assert_eq!(proposal.unwrap_err(), "phase_title cannot be empty");
+    }
+
+    #[test]
+    fn child_bead_proposal_new_whitespace_title() {
+        let proposal = ChildBeadProposal::new(
+            "   ".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        );
+        assert!(proposal.is_err());
+        assert_eq!(proposal.unwrap_err(), "phase_title cannot be empty");
+    }
+
+    #[test]
+    fn child_bead_proposal_new_empty_description() {
+        let proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        );
+        assert!(proposal.is_err());
+        assert_eq!(proposal.unwrap_err(), "description cannot be empty");
+    }
+
+    #[test]
+    fn child_bead_proposal_new_empty_dependencies() {
+        let proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "Implement core functionality".to_string(),
+            vec![],
+            2,
+        );
+        assert!(proposal.is_err());
+        assert_eq!(
+            proposal.unwrap_err(),
+            "dependencies must contain at least one parent bead ID"
+        );
+    }
+
+    #[test]
+    fn child_bead_proposal_new_invalid_priority() {
+        let proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            5,
+        );
+        assert!(proposal.is_err());
+        assert_eq!(proposal.unwrap_err(), "priority must be between 0 and 4");
+    }
+
+    #[test]
+    fn child_bead_proposal_with_labels() {
+        let proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        )
+        .unwrap()
+        .with_labels(vec!["phase-1".to_string(), "core".to_string()]);
+
+        assert_eq!(proposal.labels.len(), 2);
+        assert_eq!(proposal.labels[0], "phase-1");
+        assert_eq!(proposal.labels[1], "core");
+    }
+
+    #[test]
+    fn child_bead_proposal_validate_success() {
+        let proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        )
+        .unwrap();
+
+        assert!(proposal.validate().is_ok());
+    }
+
+    #[test]
+    fn child_bead_proposal_validate_empty_title() {
+        let mut proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        )
+        .unwrap();
+        proposal.phase_title = "".to_string();
+
+        assert!(proposal.validate().is_err());
+        assert_eq!(proposal.validate().unwrap_err(), "phase_title cannot be empty");
+    }
+
+    #[test]
+    fn child_bead_proposal_validate_empty_description() {
+        let mut proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        )
+        .unwrap();
+        proposal.description = "".to_string();
+
+        assert!(proposal.validate().is_err());
+        assert_eq!(proposal.validate().unwrap_err(), "description cannot be empty");
+    }
+
+    #[test]
+    fn child_bead_proposal_validate_empty_dependencies() {
+        let mut proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        )
+        .unwrap();
+        proposal.dependencies = vec![];
+
+        assert!(proposal.validate().is_err());
+        assert_eq!(
+            proposal.validate().unwrap_err(),
+            "dependencies must contain at least one parent bead ID"
+        );
+    }
+
+    #[test]
+    fn child_bead_proposal_validate_invalid_priority() {
+        let mut proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        )
+        .unwrap();
+        proposal.priority = 10;
+
+        assert!(proposal.validate().is_err());
+        assert_eq!(proposal.validate().unwrap_err(), "priority must be between 0 and 4");
+    }
+
+    #[test]
+    fn child_bead_proposal_multiple_dependencies() {
+        let proposal = ChildBeadProposal::new(
+            "Phase 2: Integration".to_string(),
+            "Integrate with external systems".to_string(),
+            vec![
+                BeadId::from("needle-phase1"),
+                BeadId::from("needle-dep1"),
+                BeadId::from("needle-dep2"),
+            ],
+            1,
+        )
+        .unwrap();
+
+        assert_eq!(proposal.dependencies.len(), 3);
+        assert_eq!(proposal.priority, 1);
+    }
+
+    #[test]
+    fn child_bead_proposal_serde_roundtrip() {
+        let proposal = ChildBeadProposal::new(
+            "Phase 1: Core".to_string(),
+            "Implement core functionality".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        )
+        .unwrap()
+        .with_labels(vec!["phase-1".to_string()]);
+
+        let json = serde_json::to_string(&proposal).unwrap();
+        let deserialized: ChildBeadProposal = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.phase_title, proposal.phase_title);
+        assert_eq!(deserialized.description, proposal.description);
+        assert_eq!(deserialized.dependencies, proposal.dependencies);
+        assert_eq!(deserialized.priority, proposal.priority);
+        assert_eq!(deserialized.labels, proposal.labels);
+    }
+
+    #[test]
+    fn child_bead_proposal_priority_boundary_values() {
+        // Test priority 0 (highest priority)
+        let p0 = ChildBeadProposal::new(
+            "Phase 1".to_string(),
+            "Description".to_string(),
+            vec![BeadId::from("needle-parent")],
+            0,
+        );
+        assert!(p0.is_ok());
+
+        // Test priority 4 (lowest priority)
+        let p4 = ChildBeadProposal::new(
+            "Phase 1".to_string(),
+            "Description".to_string(),
+            vec![BeadId::from("needle-parent")],
+            4,
+        );
+        assert!(p4.is_ok());
+
+        // Test priority 5 (invalid)
+        let p5 = ChildBeadProposal::new(
+            "Phase 1".to_string(),
+            "Description".to_string(),
+            vec![BeadId::from("needle-parent")],
+            5,
+        );
+        assert!(p5.is_err());
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1959,6 +2204,109 @@ impl fmt::Display for ExhaustionDiagnosis {
             ExhaustionDiagnosis::AllClaimed => write!(f, "all_claimed"),
             ExhaustionDiagnosis::Invisible => write!(f, "invisible"),
         }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ChildBeadProposal
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A proposal for a child bead to be created during timeout decomposition.
+///
+/// This structure captures all the information needed to propose a new child bead
+/// when a parent bead times out and needs to be decomposed into smaller phases.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChildBeadProposal {
+    /// Title of the phase (e.g., "Phase 1: Core Implementation").
+    pub phase_title: String,
+    /// Detailed description of what this phase accomplishes.
+    pub description: String,
+    /// Parent bead IDs that this child depends on.
+    pub dependencies: Vec<BeadId>,
+    /// Priority level (lower number = higher priority).
+    pub priority: Priority,
+    /// Labels to apply to the child bead.
+    #[serde(default)]
+    pub labels: Vec<String>,
+}
+
+impl ChildBeadProposal {
+    /// Create a new child bead proposal with validation.
+    ///
+    /// # Arguments
+    ///
+    /// * `phase_title` - Title of the phase
+    /// * `description` - Detailed description of the phase
+    /// * `dependencies` - Parent bead IDs this child depends on
+    /// * `priority` - Priority level (0-4)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(ChildBeadProposal)` if validation passes
+    /// * `Err(String)` if validation fails
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::types::{ChildBeadProposal, BeadId, Priority};
+    ///
+    /// let proposal = ChildBeadProposal::new(
+    ///     "Phase 1: Core".to_string(),
+    ///     "Implement core functionality".to_string(),
+    ///     vec![BeadId::from("needle-parent")],
+    ///     2,
+    /// ).unwrap();
+    /// ```
+    pub fn new(
+        phase_title: String,
+        description: String,
+        dependencies: Vec<BeadId>,
+        priority: Priority,
+    ) -> Result<Self, String> {
+        // Validate required fields
+        if phase_title.trim().is_empty() {
+            return Err("phase_title cannot be empty".to_string());
+        }
+        if description.trim().is_empty() {
+            return Err("description cannot be empty".to_string());
+        }
+        if dependencies.is_empty() {
+            return Err("dependencies must contain at least one parent bead ID".to_string());
+        }
+        if priority > 4 {
+            return Err("priority must be between 0 and 4".to_string());
+        }
+
+        Ok(ChildBeadProposal {
+            phase_title,
+            description,
+            dependencies,
+            priority,
+            labels: Vec::new(),
+        })
+    }
+
+    /// Add labels to the proposal.
+    pub fn with_labels(mut self, labels: Vec<String>) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    /// Validate that all required fields are present and well-formed.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.phase_title.trim().is_empty() {
+            return Err("phase_title cannot be empty".to_string());
+        }
+        if self.description.trim().is_empty() {
+            return Err("description cannot be empty".to_string());
+        }
+        if self.dependencies.is_empty() {
+            return Err("dependencies must contain at least one parent bead ID".to_string());
+        }
+        if self.priority > 4 {
+            return Err("priority must be between 0 and 4".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -3538,6 +3886,186 @@ impl DecompositionSafety {
         match self {
             DecompositionSafety::Safe { confidence, .. } => *confidence,
             DecompositionSafety::Unsafe { .. } => 0.0,
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Timeout Analysis Result Types
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Result of analyzing a timeout event for Mitosis decomposition.
+///
+/// Captures timeout-specific failure data including duration, retry history,
+/// and contextual evidence used to determine whether the timeout represents
+/// productive long-running work or an infrastructure failure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct TimeoutAnalysisResult {
+    /// Duration of the timeout in seconds.
+    pub timeout_duration_secs: u64,
+
+    /// Number of retries this bead has undergone.
+    pub retry_count: u32,
+
+    /// Contextual information about what was being done when the timeout occurred.
+    pub timeout_context: TimeoutContext,
+
+    /// Whether there was evidence of productive work before the timeout.
+    pub has_activity_evidence: bool,
+
+    /// Git state analysis results (if available).
+    #[serde(default)]
+    pub git_state: Option<GitStateAnalysis>,
+}
+
+/// Contextual information about what was being done when the timeout occurred.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeoutContext {
+    /// Agent was actively working on code compilation.
+    Compilation {
+        /// Which compilation stage (e.g., "debug", "release", "test").
+        stage: String,
+    },
+
+    /// Agent was running tests.
+    TestExecution {
+        /// Number of tests being run.
+        test_count: Option<usize>,
+        /// Whether any tests were passing before timeout.
+        tests_passing: bool,
+    },
+
+    /// Agent was analyzing code or reading documentation.
+    Analysis {
+        /// Files being examined.
+        files_examined: Vec<String>,
+        /// Whether the agent was making progress through files.
+        making_progress: bool,
+    },
+
+    /// Agent was performing build or deployment operations.
+    BuildDeployment {
+        /// Description of the operation (e.g., "docker build", "kubectl apply").
+        operation: String,
+    },
+
+    /// Agent was executing a long-running command or process.
+    LongRunningProcess {
+        /// The command being executed.
+        command: String,
+        /// Expected duration if known.
+        expected_duration_secs: Option<u64>,
+    },
+
+    /// Unknown context - insufficient evidence to determine activity.
+    Unknown,
+}
+
+/// Analysis of git state at timeout time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct GitStateAnalysis {
+    /// Whether there were uncommitted changes.
+    pub has_uncommitted_changes: bool,
+
+    /// Number of files modified.
+    pub modified_file_count: usize,
+
+    /// Whether changes suggest productive work (vs. speculative or test edits).
+    pub suggests_productive_work: bool,
+
+    /// Branch name (if available).
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+impl TimeoutAnalysisResult {
+    /// Create a new timeout analysis result.
+    pub fn new(
+        timeout_duration_secs: u64,
+        retry_count: u32,
+        timeout_context: TimeoutContext,
+    ) -> Self {
+        Self {
+            timeout_duration_secs,
+            retry_count,
+            timeout_context,
+            has_activity_evidence: false,
+            git_state: None,
+        }
+    }
+
+    /// Add activity evidence to the analysis.
+    pub fn with_activity_evidence(mut self, has_evidence: bool) -> Self {
+        self.has_activity_evidence = has_evidence;
+        self
+    }
+
+    /// Add git state analysis to the result.
+    pub fn with_git_state(mut self, git_state: GitStateAnalysis) -> Self {
+        self.git_state = Some(git_state);
+        self
+    }
+
+    /// Returns true if the analysis suggests productive work was in progress.
+    pub fn suggests_productive_work(&self) -> bool {
+        self.has_activity_evidence
+            || match &self.timeout_context {
+                TimeoutContext::Compilation { .. } => true,
+                TimeoutContext::TestExecution {
+                    tests_passing: true, ..
+                } => true,
+                TimeoutContext::Analysis {
+                    making_progress: true, ..
+                } => true,
+                TimeoutContext::BuildDeployment { .. } => true,
+                TimeoutContext::LongRunningProcess { .. } => true,
+                _ => false,
+            }
+    }
+
+    /// Returns a human-readable summary of the timeout context.
+    pub fn context_summary(&self) -> String {
+        match &self.timeout_context {
+            TimeoutContext::Compilation { stage } => {
+                format!("compilation ({})", stage)
+            }
+            TimeoutContext::TestExecution {
+                test_count,
+                tests_passing,
+            } => {
+                format!(
+                    "test execution ({} tests, {})",
+                    test_count.map_or("unknown".to_string(), |n| n.to_string()),
+                    if *tests_passing { "passing" } else { "failing" }
+                )
+            }
+            TimeoutContext::Analysis {
+                files_examined,
+                making_progress,
+            } => {
+                format!(
+                    "analysis ({} files, {})",
+                    files_examined.len(),
+                    if *making_progress { "progressing" } else { "stalled" }
+                )
+            }
+            TimeoutContext::BuildDeployment { operation } => {
+                format!("build/deployment ({})", operation)
+            }
+            TimeoutContext::LongRunningProcess {
+                command,
+                expected_duration_secs,
+            } => {
+                format!(
+                    "long-running process ({}, expected: {}s)",
+                    command,
+                    expected_duration_secs.map_or("unknown".to_string(), |d| d.to_string())
+                )
+            }
+            TimeoutContext::Unknown => "unknown context".to_string(),
         }
     }
 }
