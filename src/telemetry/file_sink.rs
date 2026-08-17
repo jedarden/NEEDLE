@@ -442,8 +442,39 @@ impl Sink for FileSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
+
+    struct HomeGuard {
+        previous: Option<OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(path: &Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self { previous }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => std::env::set_var("HOME", previous),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    fn home_lock() -> std::sync::MutexGuard<'static, ()> {
+        static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        HOME_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("HOME test lock should not be poisoned")
+    }
 
     fn create_test_event(worker_id: &str) -> TelemetryEvent {
         TelemetryEvent {
@@ -462,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_file_sink_basic_write() {
+    fn test_file_sink_writes_jsonl_with_required_fields() {
         let temp_dir = TempDir::new().unwrap();
         let log_dir = temp_dir.path();
 
@@ -481,10 +512,34 @@ mod tests {
         let current_path = sink.path();
         assert!(current_path.exists());
 
-        // Verify content
+        // Each event is one newline-delimited JSON object.
         let content = fs::read_to_string(&current_path).unwrap();
-        assert!(content.contains("test.event"));
-        assert!(content.contains("test-worker"));
+        assert!(content.ends_with('\n'));
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 1);
+
+        let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        for field in [
+            "timestamp",
+            "event_type",
+            "worker_id",
+            "session_id",
+            "sequence",
+            "data",
+        ] {
+            assert!(
+                value.get(field).is_some(),
+                "missing required field: {field}"
+            );
+        }
+
+        let parsed: TelemetryEvent = serde_json::from_value(value).unwrap();
+        assert_eq!(parsed.timestamp, event.timestamp);
+        assert_eq!(parsed.event_type, "test.event");
+        assert_eq!(parsed.worker_id, "test-worker");
+        assert_eq!(parsed.session_id, "test1234");
+        assert_eq!(parsed.sequence, 1);
+        assert_eq!(parsed.data, serde_json::json!({ "test": "data" }));
     }
 
     #[test]
@@ -731,14 +786,19 @@ mod tests {
     }
 
     #[test]
-    fn test_file_sink_default_max_size() {
+    fn test_file_sink_new_uses_isolated_home_log_dir() {
         let temp_dir = TempDir::new().unwrap();
-        let _log_dir = temp_dir.path();
+        let _home_lock = home_lock();
+        let _home = HomeGuard::set(temp_dir.path());
 
-        // Test default constructor
         let sink = FileSink::new("test-worker", "sess003").unwrap();
 
-        // Should use default max size (100 MB)
+        assert_eq!(
+            sink.log_dir(),
+            temp_dir.path().join(".needle").join("logs").as_path()
+        );
+        assert!(sink.log_dir().is_dir());
+        assert!(sink.path().is_file());
         assert_eq!(sink.max_file_size, DEFAULT_MAX_FILE_SIZE_BYTES);
     }
 }
