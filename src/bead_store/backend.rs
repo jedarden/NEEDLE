@@ -35,6 +35,22 @@ const REQUIRED_OPERATIONS: &[&str] = &[
     "doctor_check",
     "doctor_repair",
     "import",
+    "ref_add",
+    "ref_remove",
+    "ref_list",
+    "ref_find",
+    "data_set",
+    "data_get",
+    "data_list",
+    "data_remove",
+    "query",
+    "changes",
+    "why",
+    "compare",
+    "recurrence_add",
+    "recurrence_remove",
+    "recurrence_list",
+    "policy_validate",
 ];
 
 /// Parse shape expected from one CLI operation.
@@ -342,6 +358,40 @@ fn common_operations() -> HashMap<String, BeadOperationSpec> {
         ("doctor_check", operation(&[], None, None)),
         ("doctor_repair", operation(&[], None, None)),
         ("import", operation(&[], None, None)),
+        ("ref_add", operation(&[], None, None)),
+        ("ref_remove", operation(&[], None, None)),
+        ("ref_list", operation(&[], None, None)),
+        (
+            "ref_find",
+            operation(&[], None, Some(ParseShape::JsonLines)),
+        ),
+        ("data_set", operation(&[], None, None)),
+        (
+            "data_get",
+            operation(&[], None, Some(ParseShape::JsonObject)),
+        ),
+        (
+            "data_list",
+            operation(&[], None, Some(ParseShape::JsonLines)),
+        ),
+        ("data_remove", operation(&[], None, None)),
+        ("query", operation(&[], None, Some(ParseShape::JsonLines))),
+        ("changes", operation(&[], None, Some(ParseShape::JsonLines))),
+        ("why", operation(&[], None, Some(ParseShape::JsonObject))),
+        (
+            "compare",
+            operation(&[], None, Some(ParseShape::JsonObject)),
+        ),
+        ("recurrence_add", operation(&[], None, None)),
+        ("recurrence_remove", operation(&[], None, None)),
+        (
+            "recurrence_list",
+            operation(&[], None, Some(ParseShape::JsonLines)),
+        ),
+        (
+            "policy_validate",
+            operation(&[], None, Some(ParseShape::JsonObject)),
+        ),
     ]
     .into_iter()
     .map(|(name, spec)| (name.to_string(), spec))
@@ -460,6 +510,144 @@ fn builtin_bead_rs() -> BeadBackend {
     operations.insert(
         "import".into(),
         operation(&["sync", "import-only"], Some("input_plus_mode"), None),
+    );
+    operations.insert(
+        "ref_add".into(),
+        operation(
+            &[
+                "ref",
+                "add",
+                "{id}",
+                "--namespace",
+                "{namespace}",
+                "--key",
+                "{key}",
+                "--value",
+                "{value}",
+            ],
+            None,
+            None,
+        ),
+    );
+    operations.insert(
+        "ref_remove".into(),
+        operation(
+            &[
+                "ref",
+                "remove",
+                "{id}",
+                "--namespace",
+                "{namespace}",
+                "--key",
+                "{key}",
+            ],
+            None,
+            None,
+        ),
+    );
+    operations.insert(
+        "ref_list".into(),
+        operation(&["ref", "list", "{id}"], None, None),
+    );
+    operations.insert(
+        "ref_find".into(),
+        operation(
+            &[
+                "ref",
+                "find",
+                "--namespace",
+                "{namespace}",
+                "--value",
+                "{value}",
+            ],
+            None,
+            Some(ParseShape::JsonLines),
+        ),
+    );
+    operations.insert(
+        "data_set".into(),
+        operation(
+            &[
+                "data", "set", "{id}", "--key", "{key}", "--value", "{value}",
+            ],
+            None,
+            None,
+        ),
+    );
+    operations.insert(
+        "data_get".into(),
+        operation(
+            &["data", "get", "{id}", "--key", "{key}"],
+            None,
+            Some(ParseShape::JsonObject),
+        ),
+    );
+    operations.insert(
+        "data_list".into(),
+        operation(&["data", "list", "{id}"], None, Some(ParseShape::JsonLines)),
+    );
+    operations.insert(
+        "data_remove".into(),
+        operation(&["data", "remove", "{id}", "--key", "{key}"], None, None),
+    );
+    operations.insert(
+        "query".into(),
+        operation(
+            &["query", "{query}", "--json"],
+            None,
+            Some(ParseShape::JsonLines),
+        ),
+    );
+    operations.insert(
+        "changes".into(),
+        operation(
+            &["changes", "--since", "{since}", "--json"],
+            None,
+            Some(ParseShape::JsonLines),
+        ),
+    );
+    operations.insert(
+        "why".into(),
+        operation(&["why", "{id}"], None, Some(ParseShape::JsonObject)),
+    );
+    operations.insert(
+        "compare".into(),
+        operation(
+            &["compare", "{id}", "--profile", "{profile}"],
+            None,
+            Some(ParseShape::JsonObject),
+        ),
+    );
+    operations.insert(
+        "recurrence_add".into(),
+        operation(
+            &[
+                "recurrence",
+                "add",
+                "--template",
+                "{template}",
+                "--schedule",
+                "{schedule}",
+            ],
+            None,
+            None,
+        ),
+    );
+    operations.insert(
+        "recurrence_remove".into(),
+        operation(&["recurrence", "remove", "{id}"], None, None),
+    );
+    operations.insert(
+        "recurrence_list".into(),
+        operation(
+            &["recurrence", "list", "--json"],
+            None,
+            Some(ParseShape::JsonLines),
+        ),
+    );
+    operations.insert(
+        "policy_validate".into(),
+        operation(&["policy", "validate"], None, Some(ParseShape::JsonObject)),
     );
 
     BeadBackend {

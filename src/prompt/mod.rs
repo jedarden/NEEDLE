@@ -268,6 +268,152 @@ warrant a fix, propose a bead with:
 Do not propose beads that duplicate any existing open beads listed above.
 If no significant issues are found, respond with: NO_ISSUES";
 
+/// Built-in resolve template for post-Pluck outcome analysis.
+///
+/// This template is used AFTER a Pluck operation completes to analyze the outcome
+/// and determine the appropriate next action. The resolver MUST NOT implement
+/// changes or mutate beads — it only analyzes and decides.
+const DEFAULT_RESOLVE_TEMPLATE: &str = "\
+## Resolve: Analyze Pluck Outcome
+
+Analyze the completed Pluck operation and determine what should happen next.
+**CRITICAL: This is an analysis-only role. You MUST NOT implement changes, commit code,
+or mutate beads. Your ONLY job is to decide what happens next.**
+
+### Bead Context
+
+**Title:** {bead_title}
+**Bead ID:** {bead_id}
+**Description:**
+{bead_body}
+
+### Operation Outcome
+
+**Exit Code:** {exit_code}
+**Exit Status:** {exit_status}
+**Duration:** {duration}
+**Was Interrupted:** {was_interrupted}
+
+### Agent Output
+
+**Stdout:**
+{stdout}
+
+**Stderr:**
+{stderr}
+
+### Your Task
+
+Analyze the operation outcome and choose ONE of these decisions:
+
+1. **Complete** - Task succeeded, bead should be closed
+2. **Retry** - Temporary failure, release for immediate retry
+3. **Blocked** - External dependency, cannot proceed without human input
+4. **Split** - Task decomposes into multiple independent subtasks
+
+### Decision Criteria
+
+**Choose Complete if:**
+- Exit code 0 and work was accomplished (commits, tests passed, etc.)
+- Evidence exists that the task is done (git log shows commits, artifacts built)
+- No outstanding work remains
+
+**Choose Retry if:**
+- Transient failure (network timeout, rate limit, temporary resource unavailable)
+- Exit code non-zero but fixable with same or different approach
+- No human intervention needed
+- Work is retryable without risk
+
+**Choose Blocked if:**
+- Human decision required (API key approval, design choice, credentials)
+- External dependency unavailable (service down, third-party API issue)
+- Cannot proceed without external action
+- Agent cannot reasonably proceed autonomously
+
+**Choose Split if:**
+- Bead describes multiple independent subtasks
+- Each subtask can be completed separately and closed independently
+- Splitting would parallelize work or reduce complexity
+- Parent can become an umbrella tracking progress
+
+### Required Response Format
+
+You MUST respond with valid JSON matching this exact structure:
+
+{{\
+  \"decision\": {{\
+    \"complete\": {{\
+      \"evidence\": \"What proves success (commits, tests, artifacts)\",\
+      \"summary\": \"One-line summary of what was accomplished\"\
+    }}\
+  }}\
+}}
+
+OR
+
+{{\
+  \"decision\": {{\
+    \"retry\": {{\
+      \"reason\": \"Why the attempt failed (error message, diagnostic)\",\
+      \"strategy\": \"same\" | \"increase_timeout\" | \"different_approach\" | \"backoff\"\
+    }}\
+  }}\
+}}
+
+OR
+
+{{\
+  \"decision\": {{\
+    \"blocked\": {{\
+      \"blocker\": \"What external resource is blocking progress\",\
+      \"required_action\": \"What action is needed from a human\",\
+      \"severity\": \"low\" | \"medium\" | \"high\"\
+    }}\
+  }}\
+}}
+
+OR
+
+{{\
+  \"decision\": {{\
+    \"split\": {{\
+      \"children\": [\
+        {{\
+          \"title\": \"Short task title\",\
+          \"body\": \"Task description and acceptance criteria\",\
+          \"priority\": 1\
+        }}\
+      ],\
+      \"rationale\": \"Why this decomposition is appropriate\"\
+    }}\
+  }}\
+}}
+
+### Response Rules
+
+- Respond with ONLY valid JSON (no markdown fencing, no explanation)
+- All string fields must be non-empty
+- children array must have 1-10 items for split decisions
+- priority must be 1-4 (lower is higher priority)
+- strategy must be one of: same, increase_timeout, different_approach, backoff
+- severity must be one of: low, medium, high
+- Invalid responses will be rejected and fallback to safe retry
+
+### Prohibitions
+
+**You MUST NOT:**
+- Implement any changes to code
+- Run build commands, tests, or git operations
+- Create, modify, or delete beads
+- Commit or push anything
+- Make any side effects whatsoever
+
+**You MUST:**
+- Analyze the outcome objectively
+- Choose exactly one decision type
+- Provide complete, accurate information in decision fields
+- Respond with valid JSON only";
+
 /// Built-in split template for auto-splitting beads with too many consecutive failures.
 ///
 /// This template instructs the agent to decompose a problematic bead into
@@ -386,6 +532,14 @@ fn extra_vars_for_template(name: &str) -> Option<&'static [&'static str]> {
         "weave" => Some(&["{doc_files}", "{existing_beads}"]),
         "unravel" => Some(&["{human_bead_context}"]),
         "pulse" => Some(&["{scan_results}", "{existing_beads}"]),
+        "resolve" => Some(&[
+            "{exit_code}",
+            "{duration}",
+            "{stdout}",
+            "{stderr}",
+            "{exit_status}",
+            "{was_interrupted}",
+        ]),
         _ => None,
     }
 }
@@ -421,6 +575,7 @@ const KNOWN_TEMPLATE_NAMES: &[&str] = &[
     "weave",
     "unravel",
     "pulse",
+    "resolve",
 ];
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -495,6 +650,7 @@ impl PromptBuilder {
         templates.insert("weave".to_string(), DEFAULT_WEAVE_TEMPLATE.to_string());
         templates.insert("unravel".to_string(), DEFAULT_UNRAVEL_TEMPLATE.to_string());
         templates.insert("pulse".to_string(), DEFAULT_PULSE_TEMPLATE.to_string());
+        templates.insert("resolve".to_string(), DEFAULT_RESOLVE_TEMPLATE.to_string());
 
         // Apply user overrides (partial: only specified templates are replaced).
         for (name, body) in &config.templates {
@@ -876,6 +1032,51 @@ impl PromptBuilder {
                 ("{timeout_duration}", timeout.timeout_duration),
                 ("{elapsed_percent}", timeout.elapsed_percent),
                 ("{activity_evidence}", timeout.activity_evidence),
+            ],
+        )
+    }
+
+    /// Build a resolve (post-Pluck analysis) prompt.
+    ///
+    /// This template analyzes the outcome of a Pluck operation and determines
+    /// the appropriate next action (complete, retry, blocked, or split).
+    ///
+    /// # Arguments
+    ///
+    /// * `bead` — The bead that was worked on
+    /// * `workspace` — Workspace path
+    /// * `worker_id` — Worker identifier
+    /// * `exit_code` — Exit code from the Pluck operation
+    /// * `duration` — Human-readable duration of the operation (e.g., "5m 30s")
+    /// * `stdout` — Standard output from the operation (truncated if long)
+    /// * `stderr` — Standard error from the operation (truncated if long)
+    /// * `exit_status` — String representation of exit status ("success" or "failure")
+    /// * `was_interrupted` — Whether the operation was interrupted ("true" or "false")
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_resolve(
+        &self,
+        bead: &Bead,
+        workspace: &Path,
+        worker_id: &str,
+        exit_code: i32,
+        duration: &str,
+        stdout: &str,
+        stderr: &str,
+        exit_status: &str,
+        was_interrupted: &str,
+    ) -> Result<BuiltPrompt> {
+        self.build_with_vars(
+            bead,
+            workspace,
+            worker_id,
+            "resolve",
+            &[
+                ("{exit_code}", &exit_code.to_string()),
+                ("{duration}", duration),
+                ("{stdout}", stdout),
+                ("{stderr}", stderr),
+                ("{exit_status}", exit_status),
+                ("{was_interrupted}", was_interrupted),
             ],
         )
     }

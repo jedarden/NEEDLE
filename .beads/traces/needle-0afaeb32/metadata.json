@@ -1,17 +1,21 @@
 {
   "bead_id": "needle-0afaeb32",
-  "agent": "claude-code-glm-4.7",
+  "agent": "claude-code-glm-5",
   "provider": "anthropic",
-  "model": "glm-4.7",
-  "exit_code": 0,
-  "outcome": "success",
-  "duration_ms": 442907,
+  "model": "glm-5.3",
+  "exit_code": 124,
+  "outcome": "timeout",
+  "duration_ms": 600014,
   "input_tokens": null,
   "output_tokens": null,
   "cost_usd": null,
-  "captured_at": "2026-08-17T06:00:05.561011355Z",
+  "captured_at": "2026-08-17T20:21:04.250407895Z",
   "trace_format": "claude_json",
   "pruned": false,
   "template_version": null,
-  "timeout_reason": null
+  "timeout_reason": {
+    "hard": {
+      "timeout_secs": 600
+    }
+  }
 }

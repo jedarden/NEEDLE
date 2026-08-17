@@ -50,6 +50,7 @@ pub mod process_guard;
 pub mod prompt;
 pub mod rate_limit;
 pub mod registry;
+pub mod resolve;
 pub mod routing;
 pub mod sanitize;
 pub mod skill;

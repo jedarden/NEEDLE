@@ -131,7 +131,10 @@ impl ResolveDecision {
                 severity.validate()?;
                 Ok(())
             }
-            ResolveDecision::Split { children, rationale } => {
+            ResolveDecision::Split {
+                children,
+                rationale,
+            } => {
                 if children.is_empty() {
                     bail!("Split decision must have at least one child");
                 }
@@ -262,10 +265,19 @@ impl ProposedChild {
             bail!("Child {} ({}) has empty body", idx, self.title);
         }
         if !(1..=4).contains(&self.priority) {
-            bail!("Child {} ({}) has invalid priority {}, must be 1-4", idx, self.title, self.priority);
+            bail!(
+                "Child {} ({}) has invalid priority {}, must be 1-4",
+                idx,
+                self.title,
+                self.priority
+            );
         }
         if self.title.len() > 200 {
-            bail!("Child {} title too long ({} chars, max 200)", idx, self.title.len());
+            bail!(
+                "Child {} title too long ({} chars, max 200)",
+                idx,
+                self.title.len()
+            );
         }
         Ok(())
     }
@@ -298,7 +310,9 @@ impl ResolveResponse {
             .with_context(|| "failed to parse resolve response as JSON")?;
 
         // Then validate the decision structure
-        response.decision.validate()
+        response
+            .decision
+            .validate()
             .with_context(|| "parsed decision failed validation")?;
 
         Ok(response)
@@ -322,11 +336,10 @@ impl ResolveResponse {
         }
 
         // Must contain one of the decision type markers
-        let has_decision_marker =
-            json.contains("\"complete\"") ||
-            json.contains("\"retry\"") ||
-            json.contains("\"blocked\"") ||
-            json.contains("\"split\"");
+        let has_decision_marker = json.contains("\"complete\"")
+            || json.contains("\"retry\"")
+            || json.contains("\"blocked\"")
+            || json.contains("\"split\"");
 
         has_decision_marker
     }
@@ -527,23 +540,28 @@ impl Resolver {
     fn build_prompt(&self, context: &ResolveContext<'_>) -> Result<String> {
         let worker_id = "resolver"; // Resolver doesn't have a worker ID
 
-        let exit_status = if context.exit_code == 0 { "success" } else { "failure" };
-        let was_interrupted = if context.was_interrupted { "true" } else { "false" };
+        let exit_status = if context.exit_code == 0 {
+            "success"
+        } else {
+            "failure"
+        };
+        let was_interrupted = if context.was_interrupted {
+            "true"
+        } else {
+            "false"
+        };
 
-        // Build the prompt with resolve-specific variables
-        let built = self.prompt_builder.build_with_vars(
+        // Build the prompt with resolve-specific variables using the dedicated method
+        let built = self.prompt_builder.build_resolve(
             context.bead,
             &context.bead.workspace,
             worker_id,
-            "resolve",
-            &[
-                ("{exit_code}", &context.exit_code.to_string()),
-                ("{duration}", &context.formatted_duration()),
-                ("{stdout}", &context.truncated_stdout()),
-                ("{stderr}", &context.truncated_stderr()),
-                ("{exit_status}", exit_status),
-                ("{was_interrupted}", was_interrupted),
-            ],
+            context.exit_code,
+            &context.formatted_duration(),
+            &context.truncated_stdout(),
+            &context.truncated_stderr(),
+            exit_status,
+            was_interrupted,
         )?;
 
         Ok(built.content)
@@ -558,7 +576,10 @@ impl Resolver {
     /// - Decision validation fails
     fn fallback_decision(&self, reason: &str) -> ResolveDecision {
         ResolveDecision::Retry {
-            reason: format!("Resolver error: {}. Safe fallback: retry with same approach.", reason),
+            reason: format!(
+                "Resolver error: {}. Safe fallback: retry with same approach.",
+                reason
+            ),
             strategy: RetryStrategy::Same,
         }
     }
@@ -594,7 +615,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{BeadStatus, Priority};
+    use crate::types::BeadStatus;
     use chrono::Utc;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -668,26 +689,42 @@ mod tests {
 
     #[test]
     fn resolve_decision_as_str_returns_correct_strings() {
-        assert_eq!(ResolveDecision::Complete {
-            evidence: "x".to_string(),
-            summary: "y".to_string(),
-        }.as_str(), "complete");
+        assert_eq!(
+            ResolveDecision::Complete {
+                evidence: "x".to_string(),
+                summary: "y".to_string(),
+            }
+            .as_str(),
+            "complete"
+        );
 
-        assert_eq!(ResolveDecision::Retry {
-            reason: "x".to_string(),
-            strategy: RetryStrategy::Same,
-        }.as_str(), "retry");
+        assert_eq!(
+            ResolveDecision::Retry {
+                reason: "x".to_string(),
+                strategy: RetryStrategy::Same,
+            }
+            .as_str(),
+            "retry"
+        );
 
-        assert_eq!(ResolveDecision::Blocked {
-            blocker: "x".to_string(),
-            required_action: "y".to_string(),
-            severity: BlockSeverity::Medium,
-        }.as_str(), "blocked");
+        assert_eq!(
+            ResolveDecision::Blocked {
+                blocker: "x".to_string(),
+                required_action: "y".to_string(),
+                severity: BlockSeverity::Medium,
+            }
+            .as_str(),
+            "blocked"
+        );
 
-        assert_eq!(ResolveDecision::Split {
-            children: vec![],
-            rationale: "x".to_string(),
-        }.as_str(), "split");
+        assert_eq!(
+            ResolveDecision::Split {
+                children: vec![],
+                rationale: "x".to_string(),
+            }
+            .as_str(),
+            "split"
+        );
     }
 
     #[test]
@@ -845,7 +882,10 @@ mod tests {
     fn resolve_response_parse_and_validate() {
         let json = r#"{"decision":{"complete":{"evidence":"Commit abc123","summary":"Done"}}}"#;
         let response = ResolveResponse::parse_and_validate(json).unwrap();
-        assert!(matches!(response.decision, ResolveDecision::Complete { .. }));
+        assert!(matches!(
+            response.decision,
+            ResolveDecision::Complete { .. }
+        ));
 
         let invalid_json = "not json";
         assert!(ResolveResponse::parse_and_validate(invalid_json).is_err());
@@ -869,7 +909,10 @@ mod tests {
     fn retry_strategy_as_str() {
         assert_eq!(RetryStrategy::Same.as_str(), "same");
         assert_eq!(RetryStrategy::IncreaseTimeout.as_str(), "increase_timeout");
-        assert_eq!(RetryStrategy::DifferentApproach.as_str(), "different_approach");
+        assert_eq!(
+            RetryStrategy::DifferentApproach.as_str(),
+            "different_approach"
+        );
         assert_eq!(RetryStrategy::Backoff.as_str(), "backoff");
     }
 
@@ -920,9 +963,10 @@ mod tests {
         assert!(context.truncated_stderr().len() <= 2000);
     }
 
-    #[test]
-    fn resolver_returns_fallback_on_prompt_build_failure() {
-        let prompt_builder = crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+    #[tokio::test]
+    async fn resolver_returns_fallback_on_prompt_build_failure() {
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder);
 
         // Create a context that will fail to build a prompt (invalid bead)
@@ -960,21 +1004,28 @@ mod tests {
 
     #[test]
     fn resolver_timeout_is_configurable() {
-        let prompt_builder = crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
-        let resolver = Resolver::new(prompt_builder)
-            .with_timeout(Duration::from_secs(300));
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+        let resolver = Resolver::new(prompt_builder).with_timeout(Duration::from_secs(300));
 
         assert_eq!(resolver.timeout.as_secs(), 300);
     }
 
     #[test]
     fn fallback_decision_has_safe_retry_strategy() {
-        let prompt_builder = crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder);
 
         let fallback = resolver.fallback_decision("test_reason");
 
-        assert!(matches!(fallback, ResolveDecision::Retry { strategy: RetryStrategy::Same, .. }));
+        assert!(matches!(
+            fallback,
+            ResolveDecision::Retry {
+                strategy: RetryStrategy::Same,
+                ..
+            }
+        ));
         if let ResolveDecision::Retry { reason, strategy } = fallback {
             assert!(reason.contains("Resolver error: test_reason"));
             assert_eq!(strategy, RetryStrategy::Same);
@@ -983,7 +1034,8 @@ mod tests {
 
     #[test]
     fn verify_binary_identity_stub_always_succeeds() {
-        let prompt_builder = crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder);
 
         let decision = ResolveDecision::Complete {
@@ -1004,9 +1056,10 @@ mod tests {
         assert!(error.to_string().contains("not supported"));
     }
 
-    #[test]
-    fn resolver_calls_verification_after_resolution() {
-        let prompt_builder = crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+    #[tokio::test]
+    async fn resolver_calls_verification_after_resolution() {
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder);
 
         let bead = test_bead();

@@ -47,7 +47,7 @@ git add "$BEAD_DIR/$CURRENT_ROOT" "$BEAD_DIR/$PREVIOUS_ROOT"
 TRACKED_OBJECTS=$(git ls-files "$BEAD_DIR/objects/")
 DELETED_PATHS=$(jq -r '.deleted_paths[]' "$CURRENT_JSON" "$PREVIOUS_JSON" 2>/dev/null | grep 'objects/gen-' || true)
 
-# Remove tracked superseded objects
+# Remove tracked superseded objects (from git and disk)
 for object in $TRACKED_OBJECTS; do
     basename=$(basename "$object")
     # Check if this object is in the deleted paths
@@ -56,8 +56,24 @@ for object in $TRACKED_OBJECTS; do
         if [[ "$basename" != $(basename "$CURRENT_ROOT") ]] && \
            [[ "$basename" != $(basename "$PREVIOUS_ROOT") ]]; then
             echo "Removing superseded object: $object"
-            git rm --cached "$object" 2>/dev/null || true
+            git rm "$object" 2>/dev/null || true
         fi
+    fi
+done
+
+# Also delete untracked superseded objects from disk to prevent accumulation
+for deleted_path in $DELETED_PATHS; do
+    object_path="$BEAD_DIR/$deleted_path"
+    basename=$(basename "$deleted_path")
+    # Skip if it's one of the active roots
+    if [[ "$basename" == $(basename "$CURRENT_ROOT") ]] || \
+       [[ "$basename" == $(basename "$PREVIOUS_ROOT") ]]; then
+        continue
+    fi
+    # Delete from disk if exists
+    if [[ -f "$object_path" ]]; then
+        echo "Deleting untracked superseded object from disk: $deleted_path"
+        rm "$object_path"
     fi
 done
 
