@@ -5892,7 +5892,6 @@ mod config_tests {
         assert_eq!(result, PathBuf::from("/path/~"));
         std::env::remove_var("HOME");
     }
-
     // ── Workspace config tests ──
 
     #[test]
