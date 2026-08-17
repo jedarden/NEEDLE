@@ -98,9 +98,7 @@ pub fn check_for_update() -> Result<UpdateCheck> {
 ///
 /// Returns information about the latest release compared to the current version.
 /// Emits telemetry events for the check attempt and outcome.
-pub fn check_for_update_with_telemetry(
-    telemetry: Option<&Telemetry>,
-) -> Result<UpdateCheck> {
+pub fn check_for_update_with_telemetry(telemetry: Option<&Telemetry>) -> Result<UpdateCheck> {
     let source = "manual";
 
     // Emit upgrade check started event
@@ -179,11 +177,17 @@ fn check_for_update_internal() -> Result<UpdateCheck> {
 fn classify_upgrade_error(error: &anyhow::Error) -> String {
     let error_msg = error.to_string().to_lowercase();
 
-    if error_msg.contains("network") || error_msg.contains("connection") || error_msg.contains("dns") {
+    if error_msg.contains("network")
+        || error_msg.contains("connection")
+        || error_msg.contains("dns")
+    {
         "network".to_string()
     } else if error_msg.contains("parse") || error_msg.contains("json") {
         "parse".to_string()
-    } else if error_msg.contains("github") || error_msg.contains("api") || error_msg.contains("status") {
+    } else if error_msg.contains("github")
+        || error_msg.contains("api")
+        || error_msg.contains("status")
+    {
         "api".to_string()
     } else {
         "unknown".to_string()
@@ -227,17 +231,24 @@ pub fn download_to_testing_channel_with_telemetry(
         Ok(check_result) => {
             if let Some(telemetry) = telemetry {
                 // Get version info from the result
-                let (current_version, latest_version, update_available, has_notes) = match check_result {
-                    DownloadToTestingResult::Downloaded { version, .. } => {
-                        (CURRENT_VERSION.to_string(), version.clone(), true, false)
-                    }
-                    DownloadToTestingResult::Skipped { .. } => {
-                        (CURRENT_VERSION.to_string(), CURRENT_VERSION.to_string(), false, false)
-                    }
-                    DownloadToTestingResult::NoUpdateAvailable => {
-                        (CURRENT_VERSION.to_string(), CURRENT_VERSION.to_string(), false, false)
-                    }
-                };
+                let (current_version, latest_version, update_available, has_notes) =
+                    match check_result {
+                        DownloadToTestingResult::Downloaded { version, .. } => {
+                            (CURRENT_VERSION.to_string(), version.clone(), true, false)
+                        }
+                        DownloadToTestingResult::Skipped { .. } => (
+                            CURRENT_VERSION.to_string(),
+                            CURRENT_VERSION.to_string(),
+                            false,
+                            false,
+                        ),
+                        DownloadToTestingResult::NoUpdateAvailable => (
+                            CURRENT_VERSION.to_string(),
+                            CURRENT_VERSION.to_string(),
+                            false,
+                            false,
+                        ),
+                    };
 
                 let _ = telemetry.emit(EventKind::UpgradeCheckCompleted {
                     source: source.to_string(),
