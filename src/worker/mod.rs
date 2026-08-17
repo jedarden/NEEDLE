@@ -2228,6 +2228,12 @@ impl Worker {
                 "agent.execution",
                 needle.bead.id = %bead.id,
             );
+            // Hoisted out of the async block below: qualified_id() is a method
+            // call, so using it inside the coroutine would borrow all of *self and
+            // collide with the mutable use of self.exec_started_at (E0500). A field
+            // access like self.worker_name is a disjoint capture and does not, but
+            // worker_name is the WRONG actor -- the claim is made with qualified_id().
+            let qualified_actor = self.qualified_id();
             let (result, exec_tokens) = async {
                 // Snapshot workspace HEAD + the bead's notes before the agent
                 // runs, so the shipped-work gate has a baseline to judge the
@@ -2258,7 +2264,7 @@ impl Worker {
                 // released, we abort the dispatch.
                 let is_valid = self
                     .claimer
-                    .verify_claim_at_dispatch(&bead.id, &self.qualified_id())
+                    .verify_claim_at_dispatch(&bead.id, &qualified_actor)
                     .await
                     .with_context(|| {
                         format!(
@@ -2288,7 +2294,7 @@ impl Worker {
                     // Emit telemetry for the failed verification
                     let _ = self.telemetry.emit(EventKind::ClaimVerifyFailed {
                         bead_id: bead.id.clone(),
-                        expected_actor: self.qualified_id(),
+                        expected_actor: qualified_actor.clone(),
                         actual_status: "unknown".to_string(),
                         actual_assignee: "(not verified)".to_string(),
                     });
@@ -2296,7 +2302,7 @@ impl Worker {
                     bail!(
                         "dispatch-time claim verification failed for bead {}: bead is not assigned to worker {}",
                         bead.id,
-                        self.qualified_id()
+                        qualified_actor
                     );
                 }
 
