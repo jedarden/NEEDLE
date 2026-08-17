@@ -305,7 +305,10 @@ mod tests {
             }
 
             // Provide minimal stub implementations for required trait methods
-            async fn ready(&self, _filters: &crate::bead_store::Filters) -> crate::types::Result<Vec<Bead>> {
+            async fn ready(
+                &self,
+                _filters: &crate::bead_store::Filters,
+            ) -> crate::types::Result<Vec<Bead>> {
                 Ok(vec![])
             }
 
@@ -313,13 +316,20 @@ mod tests {
                 Ok(vec![])
             }
 
-            async fn claim(&self, _id: &BeadId, _actor: &str) -> crate::types::Result<crate::types::ClaimResult> {
+            async fn claim(
+                &self,
+                _id: &BeadId,
+                _actor: &str,
+            ) -> crate::types::Result<crate::types::ClaimResult> {
                 Ok(crate::types::ClaimResult::NotClaimable {
                     reason: "mock".to_string(),
                 })
             }
 
-            async fn claim_auto(&self, _actor: &str) -> crate::types::Result<crate::types::ClaimResult> {
+            async fn claim_auto(
+                &self,
+                _actor: &str,
+            ) -> crate::types::Result<crate::types::ClaimResult> {
                 Ok(crate::types::ClaimResult::NotClaimable {
                     reason: "mock".to_string(),
                 })
@@ -357,15 +367,28 @@ mod tests {
                 Ok(())
             }
 
-            async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> crate::types::Result<BeadId> {
+            async fn create_bead(
+                &self,
+                _title: &str,
+                _body: &str,
+                _labels: &[&str],
+            ) -> crate::types::Result<BeadId> {
                 Ok(BeadId::from("bf-new".to_string()))
             }
 
-            async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> crate::types::Result<()> {
+            async fn add_dependency(
+                &self,
+                _blocker_id: &BeadId,
+                _blocked_id: &BeadId,
+            ) -> crate::types::Result<()> {
                 Ok(())
             }
 
-            async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> crate::types::Result<()> {
+            async fn remove_dependency(
+                &self,
+                _blocked_id: &BeadId,
+                _blocker_id: &BeadId,
+            ) -> crate::types::Result<()> {
                 Ok(())
             }
 

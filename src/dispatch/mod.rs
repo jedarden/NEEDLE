@@ -4257,268 +4257,258 @@ output_transform: "needle-transform-custom"
     }
 }
 
-    // ── Hard timeout tests ──
+// ── Hard timeout tests ──
 
-    #[tokio::test]
-    async fn hard_timeout_kills_active_agent() {
-        // Test that hard deadline kills the process even when agent is actively producing output.
-        // This is the key differentiator from idle timeout - hard timeout is absolute and
-        // cannot be reset by activity.
-        let adapter = test_adapter(
-            "hard-timeout-active",
-            // Echo continuously with very short sleep to generate activity
-            "while true; do echo 'active output'; sleep 0.05; done",
-        );
-        let mut adapters = HashMap::new();
+#[tokio::test]
+async fn hard_timeout_kills_active_agent() {
+    // Test that hard deadline kills the process even when agent is actively producing output.
+    // This is the key differentiator from idle timeout - hard timeout is absolute and
+    // cannot be reset by activity.
+    let adapter = test_adapter(
+        "hard-timeout-active",
+        // Echo continuously with very short sleep to generate activity
+        "while true; do echo 'active output'; sleep 0.05; done",
+    );
+    let mut adapters = HashMap::new();
 
-        // Configure hard timeout only (no idle timeout)
-        let mut adapter_with_hard = adapter.clone();
-        adapter_with_hard.timeout_secs = 0; // Disable legacy timeout
-        adapter_with_hard.idle_timeout_secs = 0; // No idle timeout
-        adapter_with_hard.hard_timeout_secs = 1; // 1 second hard deadline
+    // Configure hard timeout only (no idle timeout)
+    let mut adapter_with_hard = adapter.clone();
+    adapter_with_hard.timeout_secs = 0; // Disable legacy timeout
+    adapter_with_hard.idle_timeout_secs = 0; // No idle timeout
+    adapter_with_hard.hard_timeout_secs = 1; // 1 second hard deadline
 
-        adapters.insert("hard-timeout-active".to_string(), adapter_with_hard);
-        let dispatcher = test_dispatcher(adapters);
-        let adapter_ref = dispatcher.adapter("hard-timeout-active").unwrap().clone();
+    adapters.insert("hard-timeout-active".to_string(), adapter_with_hard);
+    let dispatcher = test_dispatcher(adapters);
+    let adapter_ref = dispatcher.adapter("hard-timeout-active").unwrap().clone();
 
-        let start = Instant::now();
-        let result = dispatcher
-            .dispatch(
-                &BeadId::from("nd-hard-timeout-active"),
-                &test_prompt("test"),
-                &adapter_ref,
-                Path::new("/tmp"),
-            )
-            .await
-            .unwrap();
-        let wall = start.elapsed();
+    let start = Instant::now();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-hard-timeout-active"),
+            &test_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+    let wall = start.elapsed();
 
-        // Should be killed by hard timeout
-        assert_eq!(result.exit_code, 124, "hard timeout should yield exit 124");
+    // Should be killed by hard timeout
+    assert_eq!(result.exit_code, 124, "hard timeout should yield exit 124");
 
-        // Should have a Hard timeout reason
-        assert!(
-            matches!(result.timeout_reason, Some(TimeoutReason::Hard { .. })),
-            "expected Hard timeout reason, got {:?}",
-            result.timeout_reason
-        );
+    // Should have a Hard timeout reason
+    assert!(
+        matches!(result.timeout_reason, Some(TimeoutReason::Hard { .. })),
+        "expected Hard timeout reason, got {:?}",
+        result.timeout_reason
+    );
 
-        // Should have been killed after ~1 second (the hard deadline)
-        assert!(
-            wall < Duration::from_secs(3),
-            "should have been killed by hard deadline after ~1s, took {:?}",
-            wall
-        );
-        assert!(
-            wall >= Duration::from_millis(900),
-            "should have waited at least ~1s for hard deadline"
-        );
+    // Should have been killed after ~1 second (the hard deadline)
+    assert!(
+        wall < Duration::from_secs(3),
+        "should have been killed by hard deadline after ~1s, took {:?}",
+        wall
+    );
+    assert!(
+        wall >= Duration::from_millis(900),
+        "should have waited at least ~1s for hard deadline"
+    );
 
-        // Should have captured output before being killed (proving activity was happening)
-        assert!(result.stdout.contains("active output"));
-    }
+    // Should have captured output before being killed (proving activity was happening)
+    assert!(result.stdout.contains("active output"));
+}
 
-    #[tokio::test]
-    async fn hard_timeout_kills_entire_process_group_active() {
-        // Test that hard timeout kills the entire process group, even when agent is active.
-        let pid_file =
-            std::env::temp_dir().join(format!("needle-hard-pg-{}.pid", std::process::id()));
-        let pid_file_str = pid_file.display().to_string();
+#[tokio::test]
+async fn hard_timeout_kills_entire_process_group_active() {
+    // Test that hard timeout kills the entire process group, even when agent is active.
+    let pid_file = std::env::temp_dir().join(format!("needle-hard-pg-{}.pid", std::process::id()));
+    let pid_file_str = pid_file.display().to_string();
 
-        let cmd = format!(
-            "sleep 1000 & echo $! > {pid_file_str}; while true; do echo 'active'; sleep 0.05; done"
-        );
+    let cmd = format!(
+        "sleep 1000 & echo $! > {pid_file_str}; while true; do echo 'active'; sleep 0.05; done"
+    );
 
-        let adapter = test_adapter("hard-pgkill", &cmd);
-        let mut adapters = HashMap::new();
+    let adapter = test_adapter("hard-pgkill", &cmd);
+    let mut adapters = HashMap::new();
 
-        let mut adapter_with_hard = adapter.clone();
-        adapter_with_hard.timeout_secs = 0;
-        adapter_with_hard.idle_timeout_secs = 0;
-        adapter_with_hard.hard_timeout_secs = 2;
+    let mut adapter_with_hard = adapter.clone();
+    adapter_with_hard.timeout_secs = 0;
+    adapter_with_hard.idle_timeout_secs = 0;
+    adapter_with_hard.hard_timeout_secs = 2;
 
-        adapters.insert("hard-pgkill".to_string(), adapter_with_hard);
-        let dispatcher = test_dispatcher(adapters);
-        let adapter_ref = dispatcher.adapter("hard-pgkill").unwrap().clone();
+    adapters.insert("hard-pgkill".to_string(), adapter_with_hard);
+    let dispatcher = test_dispatcher(adapters);
+    let adapter_ref = dispatcher.adapter("hard-pgkill").unwrap().clone();
 
-        let result = dispatcher
-            .dispatch(
-                &BeadId::from("nd-hard-pgkill"),
-                &test_prompt("test"),
-                &adapter_ref,
-                Path::new("/tmp"),
-            )
-            .await
-            .unwrap();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-hard-pgkill"),
+            &test_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
 
-        assert_eq!(result.exit_code, 124);
-        assert!(
-            matches!(result.timeout_reason, Some(TimeoutReason::Hard { .. }))
-        );
+    assert_eq!(result.exit_code, 124);
+    assert!(matches!(
+        result.timeout_reason,
+        Some(TimeoutReason::Hard { .. })
+    ));
 
-        let pid_str = std::fs::read_to_string(&pid_file)
-            .expect("grandchild PID file should have been written");
-        let grandchild_pid: libc::pid_t = pid_str
-            .trim()
-            .parse()
-            .expect("PID file should contain a valid integer PID");
+    let pid_str =
+        std::fs::read_to_string(&pid_file).expect("grandchild PID file should have been written");
+    let grandchild_pid: libc::pid_t = pid_str
+        .trim()
+        .parse()
+        .expect("PID file should contain a valid integer PID");
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let dead = loop {
-            let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
-            if !alive {
-                break true;
-            }
-            if std::time::Instant::now() >= deadline {
-                break false;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        };
-        assert!(dead);
-
-        let _ = std::fs::remove_file(&pid_file);
-    }
-
-    #[tokio::test]
-    async fn hard_timeout_shorter_than_idle_timeout() {
-        // Integration test: hard timeout fires before idle timeout even when agent is active.
-        let adapter = test_adapter(
-            "hard-before-idle",
-            "while true; do echo 'continuous activity'; sleep 0.1; done",
-        );
-        let mut adapters = HashMap::new();
-
-        let mut adapter_with_both = adapter.clone();
-        adapter_with_both.timeout_secs = 0;
-        adapter_with_both.idle_timeout_secs = 5;
-        adapter_with_both.hard_timeout_secs = 1;
-
-        adapters.insert("hard-before-idle".to_string(), adapter_with_both);
-        let dispatcher = test_dispatcher(adapters);
-        let adapter_ref = dispatcher.adapter("hard-before-idle").unwrap().clone();
-
-        let start = Instant::now();
-        let result = dispatcher
-            .dispatch(
-                &BeadId::from("nd-hard-before-idle"),
-                &test_prompt("test"),
-                &adapter_ref,
-                Path::new("/tmp"),
-            )
-            .await
-            .unwrap();
-        let wall = start.elapsed();
-
-        assert_eq!(result.exit_code, 124);
-
-        match &result.timeout_reason {
-            Some(TimeoutReason::Hard { timeout_secs }) => {
-                assert_eq!(*timeout_secs, 1);
-            }
-            other => panic!(
-                "expected Hard timeout reason, got {:?}",
-                other
-            ),
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let dead = loop {
+        let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+        if !alive {
+            break true;
         }
-
-        assert!(
-            wall < Duration::from_secs(3)
-        );
-        assert!(result.stdout.contains("continuous activity"));
-    }
-
-    #[tokio::test]
-    async fn idle_timeout_resets_on_activity_hard_does_not() {
-        // Unit test: idle deadline resets, hard deadline does not.
-        let adapter = test_adapter(
-            "idle-resets-hard-does-not",
-            "for i in $(seq 1 10); do echo \"output $i\"; sleep 0.5; done",
-        );
-        let mut adapters = HashMap::new();
-
-        let mut adapter_with_both = adapter.clone();
-        adapter_with_both.timeout_secs = 0;
-        adapter_with_both.idle_timeout_secs = 1;
-        adapter_with_both.hard_timeout_secs = 2;
-
-        adapters.insert("idle-resets-hard-does-not".to_string(), adapter_with_both);
-        let dispatcher = test_dispatcher(adapters);
-        let adapter_ref = dispatcher.adapter("idle-resets-hard-does-not").unwrap().clone();
-
-        let start = Instant::now();
-        let result = dispatcher
-            .dispatch(
-                &BeadId::from("nd-idle-resets-hard-does-not"),
-                &test_prompt("test"),
-                &adapter_ref,
-                Path::new("/tmp"),
-            )
-            .await
-            .unwrap();
-        let wall = start.elapsed();
-
-        assert_eq!(result.exit_code, 124);
-
-        match &result.timeout_reason {
-            Some(TimeoutReason::Hard { timeout_secs }) => {
-                assert_eq!(*timeout_secs, 2);
-            }
-            other => panic!(
-                "expected Hard timeout reason, got {:?}",
-                other
-            ),
+        if std::time::Instant::now() >= deadline {
+            break false;
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(dead);
 
-        assert!(
-            wall >= Duration::from_millis(1900) && wall < Duration::from_secs(4)
-        );
-        assert!(result.stdout.contains("output"));
+    let _ = std::fs::remove_file(&pid_file);
+}
+
+#[tokio::test]
+async fn hard_timeout_shorter_than_idle_timeout() {
+    // Integration test: hard timeout fires before idle timeout even when agent is active.
+    let adapter = test_adapter(
+        "hard-before-idle",
+        "while true; do echo 'continuous activity'; sleep 0.1; done",
+    );
+    let mut adapters = HashMap::new();
+
+    let mut adapter_with_both = adapter.clone();
+    adapter_with_both.timeout_secs = 0;
+    adapter_with_both.idle_timeout_secs = 5;
+    adapter_with_both.hard_timeout_secs = 1;
+
+    adapters.insert("hard-before-idle".to_string(), adapter_with_both);
+    let dispatcher = test_dispatcher(adapters);
+    let adapter_ref = dispatcher.adapter("hard-before-idle").unwrap().clone();
+
+    let start = Instant::now();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-hard-before-idle"),
+            &test_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+    let wall = start.elapsed();
+
+    assert_eq!(result.exit_code, 124);
+
+    match &result.timeout_reason {
+        Some(TimeoutReason::Hard { timeout_secs }) => {
+            assert_eq!(*timeout_secs, 1);
+        }
+        other => panic!("expected Hard timeout reason, got {:?}", other),
     }
 
-    #[tokio::test]
-    async fn hard_timeout_reason_serialization() {
-        use crate::dispatch::TimeoutReason;
+    assert!(wall < Duration::from_secs(3));
+    assert!(result.stdout.contains("continuous activity"));
+}
 
-        let reason = TimeoutReason::Hard {
-            timeout_secs: 120,
-        };
+#[tokio::test]
+async fn idle_timeout_resets_on_activity_hard_does_not() {
+    // Unit test: idle deadline resets, hard deadline does not.
+    let adapter = test_adapter(
+        "idle-resets-hard-does-not",
+        "for i in $(seq 1 10); do echo \"output $i\"; sleep 0.5; done",
+    );
+    let mut adapters = HashMap::new();
 
-        let json = serde_json::to_string(&reason).expect("serialization failed");
-        assert!(json.contains("\"hard\""));
-        assert!(json.contains("120"));
+    let mut adapter_with_both = adapter.clone();
+    adapter_with_both.timeout_secs = 0;
+    adapter_with_both.idle_timeout_secs = 1;
+    adapter_with_both.hard_timeout_secs = 2;
 
-        let deserialized: TimeoutReason =
-            serde_json::from_str(&json).expect("deserialization failed");
-        assert!(matches!(
-            deserialized,
-            TimeoutReason::Hard { timeout_secs: 120 }
-        ));
+    adapters.insert("idle-resets-hard-does-not".to_string(), adapter_with_both);
+    let dispatcher = test_dispatcher(adapters);
+    let adapter_ref = dispatcher
+        .adapter("idle-resets-hard-does-not")
+        .unwrap()
+        .clone();
+
+    let start = Instant::now();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-idle-resets-hard-does-not"),
+            &test_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+    let wall = start.elapsed();
+
+    assert_eq!(result.exit_code, 124);
+
+    match &result.timeout_reason {
+        Some(TimeoutReason::Hard { timeout_secs }) => {
+            assert_eq!(*timeout_secs, 2);
+        }
+        other => panic!("expected Hard timeout reason, got {:?}", other),
     }
 
-    #[tokio::test]
-    async fn hard_timeout_disabled_when_zero() {
-        let adapter = test_adapter("hard-disabled", "sleep 0.5");
-        let mut adapters = HashMap::new();
+    assert!(wall >= Duration::from_millis(1900) && wall < Duration::from_secs(4));
+    assert!(result.stdout.contains("output"));
+}
 
-        let mut adapter_idle_only = adapter.clone();
-        adapter_idle_only.timeout_secs = 0;
-        adapter_idle_only.idle_timeout_secs = 10;
-        adapter_idle_only.hard_timeout_secs = 0;
+#[tokio::test]
+async fn hard_timeout_reason_serialization() {
+    use crate::dispatch::TimeoutReason;
 
-        adapters.insert("hard-disabled".to_string(), adapter_idle_only);
-        let dispatcher = test_dispatcher(adapters);
-        let adapter_ref = dispatcher.adapter("hard-disabled").unwrap().clone();
+    let reason = TimeoutReason::Hard { timeout_secs: 120 };
 
-        let result = dispatcher
-            .dispatch(
-                &BeadId::from("nd-hard-disabled"),
-                &test_prompt("test"),
-                &adapter_ref,
-                Path::new("/tmp"),
-            )
-            .await
-            .unwrap();
+    let json = serde_json::to_string(&reason).expect("serialization failed");
+    assert!(json.contains("\"hard\""));
+    assert!(json.contains("120"));
 
-        assert_eq!(result.exit_code, 0);
-        assert!(result.timeout_reason.is_none());
-    }
+    let deserialized: TimeoutReason = serde_json::from_str(&json).expect("deserialization failed");
+    assert!(matches!(
+        deserialized,
+        TimeoutReason::Hard { timeout_secs: 120 }
+    ));
+}
+
+#[tokio::test]
+async fn hard_timeout_disabled_when_zero() {
+    let adapter = test_adapter("hard-disabled", "sleep 0.5");
+    let mut adapters = HashMap::new();
+
+    let mut adapter_idle_only = adapter.clone();
+    adapter_idle_only.timeout_secs = 0;
+    adapter_idle_only.idle_timeout_secs = 10;
+    adapter_idle_only.hard_timeout_secs = 0;
+
+    adapters.insert("hard-disabled".to_string(), adapter_idle_only);
+    let dispatcher = test_dispatcher(adapters);
+    let adapter_ref = dispatcher.adapter("hard-disabled").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-hard-disabled"),
+            &test_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert!(result.timeout_reason.is_none());
+}
