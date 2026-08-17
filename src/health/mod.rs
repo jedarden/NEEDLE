@@ -2752,6 +2752,95 @@ mod tests {
         });
     }
 
+    /// Test that cleanup_heartbeat_file logs debug when file doesn't exist.
+    ///
+    /// This test verifies the acceptance criteria from needle-068b926f:
+    /// - Cleanup doesn't panic when file doesn't exist
+    /// - Debug message is logged with tracing::debug! for idempotent cleanup
+    /// - Function returns Ok(()) when file doesn't exist
+    ///
+    /// The test captures tracing logs and verifies that the expected
+    /// debug message is emitted when cleanup succeeds on a missing file.
+    #[test]
+    fn cleanup_heartbeat_file_logs_debug_when_missing() {
+        use std::io::Write;
+        use std::sync::Mutex;
+
+        // Set up a log capture mechanism
+        #[derive(Clone, Default)]
+        struct CapturedLogs(std::sync::Arc<Mutex<Vec<u8>>>);
+
+        struct CapturedLogWriter(std::sync::Arc<Mutex<Vec<u8>>>);
+
+        impl Write for CapturedLogWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+            type Writer = CapturedLogWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                CapturedLogWriter(self.0.clone())
+            }
+        }
+
+        let captured = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+
+        // Run the test within the tracing subscriber context
+        tracing::subscriber::with_default(subscriber, || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("nonexistent-heartbeat.json");
+
+            // Verify file doesn't exist
+            assert!(!path.exists(), "file should not exist before cleanup");
+
+            // Attempt to cleanup - this should succeed with debug logging
+            let result = cleanup_heartbeat_file(&path);
+
+            // Verify the function returns Ok (doesn't panic)
+            assert!(
+                result.is_ok(),
+                "cleanup should return Ok(()) when file doesn't exist"
+            );
+
+            // Verify the file still doesn't exist
+            assert!(!path.exists(), "file should still not exist after cleanup");
+
+            // Verify the debug message was logged
+            let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            assert!(
+                logs.contains("heartbeat file does not exist, skipping cleanup"),
+                "debug message should be logged when file doesn't exist. Got logs: {}",
+                logs
+            );
+
+            // Verify the log contains the path
+            assert!(
+                logs.contains(&path.display().to_string()),
+                "log should contain the file path"
+            );
+
+            // Verify the log is at DEBUG level (JSON format uses "level":"DEBUG")
+            assert!(
+                logs.contains("DEBUG"),
+                "log should be at DEBUG level, got: {}",
+                logs
+            );
+        });
+    }
+
     /// Test that cleanup_heartbeat_file handles symlinks correctly.
     ///
     /// This test verifies that cleanup_heartbeat_file can remove a symlink
