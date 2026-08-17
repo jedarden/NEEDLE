@@ -5631,8 +5631,7 @@ async fn tilde_expansion_multiple_tildes_in_same_value() {
     let tilde_middle = "path/~/other";
     let expanded = expand_tilde(tilde_middle);
     assert_eq!(
-        expanded,
-        tilde_middle,
+        expanded, tilde_middle,
         "tilde in middle of path should not expand"
     );
     println!("  Test 3: path/~/other -> {} (unchanged)", expanded);
@@ -5641,8 +5640,7 @@ async fn tilde_expansion_multiple_tildes_in_same_value() {
     let tilde_middle_absolute = "/absolute/~/path";
     let expanded = expand_tilde(tilde_middle_absolute);
     assert_eq!(
-        expanded,
-        tilde_middle_absolute,
+        expanded, tilde_middle_absolute,
         "tilde in middle of absolute path should not expand"
     );
     println!("  Test 4: /absolute/~/path -> {} (unchanged)", expanded);
@@ -5684,21 +5682,25 @@ async fn tilde_expansion_position_start_vs_middle_end() {
     let tilde_in_middle = "config/~backup/settings.yml";
     let expanded = expand_tilde(tilde_in_middle);
     assert_eq!(
-        expanded,
-        tilde_in_middle,
+        expanded, tilde_in_middle,
         "tilde in middle of relative path should not expand"
     );
-    println!("  Test 2 (MIDDLE): config/~backup/settings.yml -> {} (unchanged)", expanded);
+    println!(
+        "  Test 2 (MIDDLE): config/~backup/settings.yml -> {} (unchanged)",
+        expanded
+    );
 
     // Test 3: Tilde in MIDDLE of absolute path - should NOT expand
     let tilde_in_middle_absolute = "/etc/needle/~config/settings.yml";
     let expanded = expand_tilde(tilde_in_middle_absolute);
     assert_eq!(
-        expanded,
-        tilde_in_middle_absolute,
+        expanded, tilde_in_middle_absolute,
         "tilde in middle of absolute path should not expand"
     );
-    println!("  Test 3 (MIDDLE): /etc/needle/~config/settings.yml -> {} (unchanged)", expanded);
+    println!(
+        "  Test 3 (MIDDLE): /etc/needle/~config/settings.yml -> {} (unchanged)",
+        expanded
+    );
 
     // Test 4: Tilde at END - only START tilde should expand
     let tilde_at_end = "~/workspaces/~";
@@ -5720,15 +5722,17 @@ async fn tilde_expansion_position_start_vs_middle_end() {
         expected.to_str().unwrap(),
         "tilde as path component should be literal, only start tilde expands"
     );
-    println!("  Test 5 (COMPONENT): ~/dev/~old-project/config -> {}", expanded);
+    println!(
+        "  Test 5 (COMPONENT): ~/dev/~old-project/config -> {}",
+        expanded
+    );
 
     // Test 6: Bare tilde - should expand to home directory
     let bare_tilde = "~";
     let expanded = expand_tilde(bare_tilde);
     let expected = isolated_home.to_str().unwrap();
     assert_eq!(
-        expanded,
-        expected,
+        expanded, expected,
         "bare tilde should expand to home directory"
     );
     println!("  Test 6 (BARE): ~ -> {}", expanded);
@@ -5737,11 +5741,13 @@ async fn tilde_expansion_position_start_vs_middle_end() {
     let tilde_after_sep = "workspaces/~config";
     let expanded = expand_tilde(tilde_after_sep);
     assert_eq!(
-        expanded,
-        tilde_after_sep,
+        expanded, tilde_after_sep,
         "tilde after path separator should not expand"
     );
-    println!("  Test 7 (AFTER_SEP): workspaces/~config -> {} (unchanged)", expanded);
+    println!(
+        "  Test 7 (AFTER_SEP): workspaces/~config -> {} (unchanged)",
+        expanded
+    );
 
     // Test 8: Multiple trailing tildes - only START tilde expands
     let multiple_trailing = "~/path/~~";

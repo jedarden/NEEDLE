@@ -11,8 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use needle::bead_store::{
-    BeadBackend, BeadBackendCapabilities, BeadBackendErrorMarkers, BeadOperationSpec,
-    ParseShape,
+    BeadBackend, BeadBackendCapabilities, BeadBackendErrorMarkers, BeadOperationSpec, ParseShape,
 };
 
 #[test]
@@ -346,7 +345,11 @@ fn create_minimal_backend_with_valid_placeholders() -> BeadBackend {
     operations.insert(
         "list_all".to_string(),
         BeadOperationSpec {
-            argv: vec!["list".to_string(), "--limit".to_string(), "{limit}".to_string()],
+            argv: vec![
+                "list".to_string(),
+                "--limit".to_string(),
+                "{limit}".to_string(),
+            ],
             strategy: None,
             parse: Some(ParseShape::JsonLines),
             timeout_secs: None,
@@ -381,7 +384,11 @@ fn create_minimal_backend_with_valid_placeholders() -> BeadBackend {
     operations.insert(
         "claim_auto".to_string(),
         BeadOperationSpec {
-            argv: vec!["claim".to_string(), "--assignee".to_string(), "{actor}".to_string()],
+            argv: vec![
+                "claim".to_string(),
+                "--assignee".to_string(),
+                "{actor}".to_string(),
+            ],
             strategy: None,
             parse: Some(ParseShape::JsonObject),
             timeout_secs: None,
