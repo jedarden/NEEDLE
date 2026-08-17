@@ -1016,6 +1016,161 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_bead_cli_explicit_path_relative_format() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let bead_bin = tmp_dir.path().join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_bin);
+
+        // Change to temp directory and use relative path
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp_dir.path()).unwrap();
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("./bead")),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        // Path should be exactly what was passed (not canonicalized)
+        assert_eq!(path, PathBuf::from("./bead"));
+        // Relative path should exist from the current working directory
+        assert!(path.exists());
+
+        std::env::set_current_dir(original_dir).unwrap();
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_explicit_path_absolute_format() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let bf_bin = tmp_dir.path().join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_bin);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bf,
+            path: Some(bf_bin.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bf);
+        assert_eq!(path, bf_bin);
+        assert!(path.is_absolute());
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_explicit_path_symlink_to_executable() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let real_bead = tmp_dir.path().join("real-bead");
+        std::fs::write(&real_bead, "#!/bin/sh\necho test").unwrap();
+        make_executable(&real_bead);
+
+        // Create a symlink to the real executable
+        let symlink_bead = tmp_dir.path().join("bead-link");
+        std::os::unix::fs::symlink(&real_bead, &symlink_bead).unwrap();
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(symlink_bead.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, symlink_bead);
+        assert!(path.exists());
+        assert!(symlink_bead.exists());
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_explicit_path_bf_backend_returns_bf() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let custom_bf = tmp_dir.path().join("my-bf-wrapper");
+        std::fs::write(&custom_bf, "#!/bin/sh\necho test").unwrap();
+        make_executable(&custom_bf);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bf,
+            path: Some(custom_bf.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bf);
+        assert_eq!(path, custom_bf);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_explicit_path_bead_backend_returns_bead() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let custom_bead = tmp_dir.path().join("my-bead-wrapper");
+        std::fs::write(&custom_bead, "#!/bin/sh\necho test").unwrap();
+        make_executable(&custom_bead);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(custom_bead.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, custom_bead);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_explicit_path_br_backend_returns_bead() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let custom_br = tmp_dir.path().join("my-br-wrapper");
+        std::fs::write(&custom_br, "#!/bin/sh\necho test").unwrap();
+        make_executable(&custom_br);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Br,
+            path: Some(custom_br.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        // Br backend should map to Backend::Bead
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, custom_br);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_explicit_path_auto_detects_backend_from_path() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let bf_binary = tmp_dir.path().join("bf");
+        std::fs::write(&bf_binary, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_binary);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: Some(bf_binary.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        // Auto backend with explicit path should detect from filename
+        assert_eq!(backend, Backend::Bf);
+        assert_eq!(path, bf_binary);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_detects_bead_backend_from_non_bf_filename() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let custom_binary = tmp_dir.path().join("custom-bead-cli");
+        std::fs::write(&custom_binary, "#!/bin/sh\necho test").unwrap();
+        make_executable(&custom_binary);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: Some(custom_binary.clone()),
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        // Auto backend should detect non-bf names as Bead
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, custom_binary);
+    }
+
+    #[test]
     fn test_resolve_bead_cli_auto_precedence_bead_first() {
         let (_lock, _env) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
