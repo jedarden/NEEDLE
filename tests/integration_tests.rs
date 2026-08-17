@@ -2114,7 +2114,7 @@ async fn adapter_validation_fails_before_routing_initialization() {
 
     // Configure routing (this should not bypass adapter validation)
     config.agent.routing = Some(needle::config::RoutingConfig {
-        default: nonexistent_adapter.to_string(),
+        default_adapter: nonexistent_adapter.to_string(),
         rules: vec![],
     });
 
