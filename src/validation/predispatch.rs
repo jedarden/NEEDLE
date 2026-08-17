@@ -255,4 +255,152 @@ mod tests {
             .expect("failed to remove snapshot file during clear test");
         assert!(load_at(root.path(), ws.path(), &bead).await.is_none());
     }
+
+    #[tokio::test]
+    async fn read_notes_consults_store_not_subprocess() {
+        use crate::types::Bead;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        // Create a mock bead ID and expected notes
+        let bead_id: BeadId = "bf-test".into();
+        let expected_notes = "Investigated the issue, found a bug in the parser".to_string();
+
+        // Track whether show() was called and with which ID
+        let show_called = Arc::new(RwLock::new(false));
+        let show_called_id = Arc::new(RwLock::new(None::<BeadId>));
+        let show_called_clone = Arc::clone(&show_called);
+        let show_called_id_clone = Arc::clone(&show_called_id);
+
+        // Create a mock BeadStore that records the call and returns a fixed bead
+        struct MockBeadStore {
+            show_called: Arc<RwLock<bool>>,
+            show_called_id: Arc<RwLock<Option<BeadId>>>,
+            notes: String,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::bead_store::BeadStore for MockBeadStore {
+            async fn show(&self, id: &BeadId) -> crate::types::Result<Bead> {
+                // Record that show() was called with this ID
+                *self.show_called.write().await = true;
+                *self.show_called_id.write().await = Some(id.clone());
+
+                // Return a bead with the expected notes
+                Ok(Bead {
+                    id: id.clone(),
+                    title: "Test bead".to_string(),
+                    body: Some(self.notes.clone()),
+                    priority: 2,
+                    status: crate::types::BeadStatus::Open,
+                    assignee: None,
+                    labels: vec![],
+                    workspace: std::path::PathBuf::from("/tmp/test"),
+                    dependencies: vec![],
+                    dependents: vec![],
+                    comments: vec![],
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })
+            }
+
+            // Provide minimal stub implementations for required trait methods
+            async fn ready(&self, _filters: &crate::bead_store::Filters) -> crate::types::Result<Vec<Bead>> {
+                Ok(vec![])
+            }
+
+            async fn list_all(&self) -> crate::types::Result<Vec<Bead>> {
+                Ok(vec![])
+            }
+
+            async fn claim(&self, _id: &BeadId, _actor: &str) -> crate::types::Result<crate::types::ClaimResult> {
+                Ok(crate::types::ClaimResult::NotClaimable {
+                    reason: "mock".to_string(),
+                })
+            }
+
+            async fn claim_auto(&self, _actor: &str) -> crate::types::Result<crate::types::ClaimResult> {
+                Ok(crate::types::ClaimResult::NotClaimable {
+                    reason: "mock".to_string(),
+                })
+            }
+
+            async fn release(&self, _id: &BeadId) -> crate::types::Result<()> {
+                Ok(())
+            }
+
+            async fn block(&self, _id: &BeadId) -> crate::types::Result<()> {
+                Ok(())
+            }
+
+            async fn clear_assignee(&self, _id: &BeadId) -> crate::types::Result<()> {
+                Ok(())
+            }
+
+            async fn flush(&self) -> crate::types::Result<()> {
+                Ok(())
+            }
+
+            async fn reopen(&self, _id: &BeadId) -> crate::types::Result<()> {
+                Ok(())
+            }
+
+            async fn labels(&self, _id: &BeadId) -> crate::types::Result<Vec<String>> {
+                Ok(vec![])
+            }
+
+            async fn add_label(&self, _id: &BeadId, _label: &str) -> crate::types::Result<()> {
+                Ok(())
+            }
+
+            async fn remove_label(&self, _id: &BeadId, _label: &str) -> crate::types::Result<()> {
+                Ok(())
+            }
+
+            async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> crate::types::Result<BeadId> {
+                Ok(BeadId::from("bf-new".to_string()))
+            }
+
+            async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> crate::types::Result<()> {
+                Ok(())
+            }
+
+            async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> crate::types::Result<()> {
+                Ok(())
+            }
+
+            async fn doctor_repair(&self) -> crate::types::Result<crate::bead_store::RepairReport> {
+                Ok(crate::bead_store::RepairReport::default())
+            }
+
+            async fn doctor_check(&self) -> crate::types::Result<crate::bead_store::RepairReport> {
+                Ok(crate::bead_store::RepairReport::default())
+            }
+
+            async fn full_rebuild(&self) -> crate::types::Result<()> {
+                Ok(())
+            }
+
+            fn has_valid_store(&self) -> bool {
+                true
+            }
+        }
+
+        // Create the mock store
+        let mock_store = MockBeadStore {
+            show_called: show_called_clone,
+            show_called_id: show_called_id_clone,
+            notes: expected_notes.clone(),
+        };
+
+        // Call read_notes via the public interface
+        let result = current_notes(&mock_store, &bead_id).await;
+
+        // Verify the result
+        assert_eq!(result, Some(expected_notes));
+
+        // Verify that store.show() was called with the correct bead_id
+        assert_eq!(*show_called.read().await, true);
+        assert_eq!(*show_called_id.read().await, Some(bead_id));
+    }
 }
