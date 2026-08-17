@@ -1,0 +1,11 @@
+# Checkpoint pointer files (these must be tracked)
+# These files are committed to git and form the verification chain
+
+# Superseded generation objects
+# Objects listed in deleted_paths of current.json/previous.json are superseded
+# and should not be tracked. The active roots are added selectively via
+# scripts/commit-checkpoint.sh
+
+# NOTE: We do NOT use gen-*.jsonl here because that would ignore the active
+# roots we need to track. Instead, superseded objects are simply never added
+# to git in the first place.
