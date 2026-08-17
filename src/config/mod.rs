@@ -4777,8 +4777,8 @@ impl std::fmt::Display for ConfigError {
 
 /// Validate a dot-notation key path string.
 ///
-/// This is a stub that accepts any key path for now. Full validation logic
-/// will be added in a follow-up task.
+/// Parses the key path into segments and validates each segment against
+/// the actual field names in the Config struct hierarchy.
 ///
 /// # Arguments
 ///
@@ -4786,23 +4786,434 @@ impl std::fmt::Display for ConfigError {
 ///
 /// # Returns
 ///
-/// * `Ok(())` - The key path is valid (currently always returns Ok for any input)
-/// * `Err(ConfigError)` - The key path is invalid (to be implemented)
+/// * `Ok(())` - The key path is valid
+/// * `Err(ConfigError)` - The key path is invalid with a descriptive message
 ///
 /// # Examples
 ///
 /// ```
 /// use needle::config::validate_key_path;
 ///
-/// // Currently accepts any key path
+/// // Valid top-level fields
+/// assert!(validate_key_path("agent").is_ok());
+/// assert!(validate_key_path("worker").is_ok());
+///
+/// // Valid nested fields
 /// assert!(validate_key_path("agent.default").is_ok());
 /// assert!(validate_key_path("worker.max_workers").is_ok());
-/// assert!(validate_key_path("strands.explore.enabled").is_ok());
+/// assert!(validate_key_path("worker.cpu_load_warn").is_ok());
+///
+/// // Invalid paths
+/// assert!(validate_key_path("unknown_field").is_err());
+/// assert!(validate_key_path("worker.unknown_field").is_err());
 /// ```
 pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
-    // Stub implementation: accepts any key path
-    // Full validation logic will be added in a subsequent task
-    let _ = key_path;
+    // Empty path is invalid
+    if key_path.is_empty() {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: "key path cannot be empty".to_string(),
+        });
+    }
+
+    // Split into segments
+    let segments: Vec<&str> = key_path.split('.').collect();
+
+    // Empty segments (e.g., ".." or ".foo") are invalid
+    if segments.iter().any(|s| s.is_empty()) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: "key path contains empty segment (consecutive dots or leading/trailing dot)".to_string(),
+        });
+    }
+
+    // Validate root segment against Config top-level fields
+    let root = segments[0];
+    let valid_top_level = [
+        "agent", "worker", "workspace", "bead_cli", "strands",
+        "telemetry", "prompt", "health", "limits", "pricing",
+        "budget", "verification", "gates", "self_modification",
+        "fabric", "supervisor", "outcome", "tsnet", "validation",
+    ];
+
+    if !valid_top_level.contains(&root) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown top-level field '{}'. Valid fields are: {}",
+                root,
+                valid_top_level.join(", ")
+            ),
+        });
+    }
+
+    // If only one segment, we're done
+    if segments.len() == 1 {
+        return Ok(());
+    }
+
+    // Validate nested segments based on the parent config type
+    let second = segments[1];
+    match root {
+        "worker" => validate_worker_field(second, key_path),
+        "agent" => validate_agent_field(second, key_path),
+        "workspace" => validate_workspace_field(second, key_path),
+        "health" => validate_health_field(second, key_path),
+        "strands" => validate_strands_field(second, &segments[2..], key_path),
+        "telemetry" => validate_telemetry_field(second, &segments[2..], key_path),
+        "prompt" => validate_prompt_field(second, key_path),
+        _ => {
+            // For other top-level configs, accept any nested field for now
+            // This can be extended later with specific validation
+            Ok(())
+        }
+    }
+}
+
+/// Validate WorkerConfig field names.
+fn validate_worker_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = [
+        "max_workers",
+        "launch_stagger_seconds",
+        "idle_timeout",
+        "idle_action",
+        "max_claim_retries",
+        "claim_race_lost_skip",
+        "identifier_scheme",
+        "cpu_load_warn",
+        "enforce_shipped_work",
+        "memory_free_warn_mb",
+        "adaptive_stagger_max_wait_secs",
+        "adaptive_stagger_check_interval_secs",
+        "building_timeout",
+        "idle_backoff_min",
+        "idle_backoff_max",
+        "short_retry_backoff",
+        "worker_binary_path",
+    ];
+
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown worker field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validate AgentConfig field names.
+fn validate_agent_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["default", "args", "timeout", "adapters_dir", "routing"];
+
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown agent field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validate WorkspaceConfig field names.
+fn validate_workspace_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["default", "home", "labels"];
+
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown workspace field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validate HealthConfig field names.
+fn validate_health_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = [
+        "heartbeat_interval_secs",
+        "heartbeat_ttl_secs",
+    ];
+
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown health field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+/// Validate StrandsConfig field names with deeper nesting support.
+fn validate_strands_field(field: &str, remaining: &[&str], key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = [
+        "mitosis",
+        "explore",
+        "weave",
+        "unravel",
+        "pulse",
+        "reflect",
+        "learning",
+        "splice",
+        "resolve",
+    ];
+
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown strands field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+
+    // Validate deeper nesting for known strand configs
+    if !remaining.is_empty() {
+        let third = remaining[0];
+        match field {
+            "mitosis" => validate_mitosis_field(third, key_path),
+            "explore" => validate_explore_field(third, key_path),
+            "weave" => validate_weave_field(third, key_path),
+            "pulse" => validate_pulse_field(third, &remaining[1..], key_path),
+            "learning" => validate_learning_field(third, key_path),
+            "splice" => validate_splice_field(third, key_path),
+            "resolve" => validate_resolve_field(third, key_path),
+            _ => Ok(()), // Accept deeper nesting for other strands
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate MitosisConfig field names.
+fn validate_mitosis_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["timeout_triggered"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown mitosis field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate ExploreConfig field names.
+fn validate_explore_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["workspace_root", "workspaces"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown explore field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate WeaveConfig field names.
+fn validate_weave_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["exclude_workspaces", "max_stale_days"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown weave field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate PulseConfig field names with array index support.
+fn validate_pulse_field(field: &str, remaining: &[&str], key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["scanners"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown pulse field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+
+    // Handle array indexing: scanners[0].command
+    if !remaining.is_empty() && remaining[0].starts_with('[') {
+        // Accept array access patterns - this is valid for array fields
+        return Ok(());
+    }
+
+    Ok(())
+}
+
+/// Validate LearningConfig field names.
+fn validate_learning_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["global_learnings_file", "enabled"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown learning field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate SpliceConfig field names.
+fn validate_splice_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["report_workspace", "max_report_age_secs"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown splice field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate ResolveConfig field names.
+fn validate_resolve_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["conflict", "max_resolution_attempts"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown resolve field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate TelemetryConfig field names with deeper nesting support.
+fn validate_telemetry_field(field: &str, remaining: &[&str], key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["file_sink", "stdout_sink", "otlp"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown telemetry field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+
+    // Validate deeper nesting for sink configs
+    if !remaining.is_empty() {
+        let third = remaining[0];
+        match field {
+            "file_sink" => validate_file_sink_field(third, key_path),
+            "stdout_sink" => validate_stdout_sink_field(third, key_path),
+            "otlp" => validate_otlp_field(third, key_path),
+            _ => Ok(()),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate FileSinkConfig field names.
+fn validate_file_sink_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["log_dir", "rotation", "truncation"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown file_sink field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate StdoutSinkConfig field names.
+fn validate_stdout_sink_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["enabled", "truncation"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown stdout_sink field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate OtlpSignalsConfig field names.
+fn validate_otlp_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["endpoint", "protocol", "signals"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown otlp field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validate PromptConfig field names.
+fn validate_prompt_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["context_files", "instructions", "templates"];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown prompt field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -9474,6 +9885,468 @@ resource_attributes:
             config.resource_attributes.len(),
             2,
             "should have two resource attributes"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Key path validation tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn valid_top_level_fields_pass() {
+        let valid_fields = [
+            "agent",
+            "worker",
+            "workspace",
+            "bead_cli",
+            "strands",
+            "telemetry",
+            "prompt",
+            "health",
+            "limits",
+            "pricing",
+            "budget",
+            "verification",
+            "gates",
+            "self_modification",
+            "fabric",
+            "supervisor",
+            "outcome",
+            "tsnet",
+            "validation",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "top-level field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_top_level_field_fails() {
+        let result = validate_key_path("unknown_field");
+        assert!(result.is_err(), "unknown top-level field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "unknown_field");
+        assert!(err.message.contains("unknown top-level field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn empty_key_path_fails() {
+        let result = validate_key_path("");
+        assert!(result.is_err(), "empty key path should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "");
+        assert!(err.message.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn consecutive_dots_fail() {
+        let result = validate_key_path("worker..max_workers");
+        assert!(result.is_err(), "consecutive dots should fail");
+
+        let err = result.unwrap_err();
+        assert!(err.message.contains("empty segment"));
+    }
+
+    #[test]
+    fn leading_dot_fails() {
+        let result = validate_key_path(".worker");
+        assert!(result.is_err(), "leading dot should fail");
+
+        let err = result.unwrap_err();
+        assert!(err.message.contains("empty segment"));
+    }
+
+    #[test]
+    fn trailing_dot_fails() {
+        let result = validate_key_path("worker.");
+        assert!(result.is_err(), "trailing dot should fail");
+
+        let err = result.unwrap_err();
+        assert!(err.message.contains("empty segment"));
+    }
+
+    #[test]
+    fn valid_worker_fields_pass() {
+        let valid_fields = [
+            "worker.max_workers",
+            "worker.launch_stagger_seconds",
+            "worker.idle_timeout",
+            "worker.idle_action",
+            "worker.max_claim_retries",
+            "worker.claim_race_lost_skip",
+            "worker.identifier_scheme",
+            "worker.cpu_load_warn",
+            "worker.enforce_shipped_work",
+            "worker.memory_free_warn_mb",
+            "worker.adaptive_stagger_max_wait_secs",
+            "worker.adaptive_stagger_check_interval_secs",
+            "worker.building_timeout",
+            "worker.idle_backoff_min",
+            "worker.idle_backoff_max",
+            "worker.short_retry_backoff",
+            "worker.worker_binary_path",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "worker field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_worker_field_fails() {
+        let result = validate_key_path("worker.unknown_field");
+        assert!(result.is_err(), "unknown worker field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "worker.unknown_field");
+        assert!(err.message.contains("unknown worker field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn valid_agent_fields_pass() {
+        let valid_fields = [
+            "agent.default",
+            "agent.args",
+            "agent.timeout",
+            "agent.adapters_dir",
+            "agent.routing",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "agent field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_agent_field_fails() {
+        let result = validate_key_path("agent.unknown_field");
+        assert!(result.is_err(), "unknown agent field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "agent.unknown_field");
+        assert!(err.message.contains("unknown agent field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn valid_workspace_fields_pass() {
+        let valid_fields = [
+            "workspace.default",
+            "workspace.home",
+            "workspace.labels",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "workspace field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_workspace_field_fails() {
+        let result = validate_key_path("workspace.unknown_field");
+        assert!(result.is_err(), "unknown workspace field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "workspace.unknown_field");
+        assert!(err.message.contains("unknown workspace field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn valid_health_fields_pass() {
+        let valid_fields = [
+            "health.heartbeat_interval_secs",
+            "health.heartbeat_ttl_secs",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "health field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_health_field_fails() {
+        let result = validate_key_path("health.unknown_field");
+        assert!(result.is_err(), "unknown health field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "health.unknown_field");
+        assert!(err.message.contains("unknown health field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn valid_strands_fields_pass() {
+        let valid_fields = [
+            "strands.mitosis",
+            "strands.explore",
+            "strands.weave",
+            "strands.unravel",
+            "strands.pulse",
+            "strands.reflect",
+            "strands.learning",
+            "strands.splice",
+            "strands.resolve",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "strands field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_strands_field_fails() {
+        let result = validate_key_path("strands.unknown_field");
+        assert!(result.is_err(), "unknown strands field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "strands.unknown_field");
+        assert!(err.message.contains("unknown strands field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn valid_nested_strands_fields_pass() {
+        let valid_fields = [
+            "strands.mitosis.timeout_triggered",
+            "strands.explore.workspace_root",
+            "strands.explore.workspaces",
+            "strands.weave.exclude_workspaces",
+            "strands.weave.max_stale_days",
+            "strands.learning.global_learnings_file",
+            "strands.learning.enabled",
+            "strands.splice.report_workspace",
+            "strands.splice.max_report_age_secs",
+            "strands.resolve.conflict",
+            "strands.resolve.max_resolution_attempts",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "nested strands field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_nested_strands_field_fails() {
+        let result = validate_key_path("strands.explore.unknown_field");
+        assert!(result.is_err(), "unknown explore field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "strands.explore.unknown_field");
+        assert!(err.message.contains("unknown explore field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn valid_telemetry_fields_pass() {
+        let valid_fields = [
+            "telemetry.file_sink",
+            "telemetry.stdout_sink",
+            "telemetry.otlp",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "telemetry field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_telemetry_field_fails() {
+        let result = validate_key_path("telemetry.unknown_field");
+        assert!(result.is_err(), "unknown telemetry field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "telemetry.unknown_field");
+        assert!(err.message.contains("unknown telemetry field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn valid_nested_telemetry_fields_pass() {
+        let valid_fields = [
+            "telemetry.file_sink.log_dir",
+            "telemetry.file_sink.rotation",
+            "telemetry.file_sink.truncation",
+            "telemetry.stdout_sink.enabled",
+            "telemetry.stdout_sink.truncation",
+            "telemetry.otlp.endpoint",
+            "telemetry.otlp.protocol",
+            "telemetry.otlp.signals",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "nested telemetry field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_nested_telemetry_field_fails() {
+        let result = validate_key_path("telemetry.file_sink.unknown_field");
+        assert!(result.is_err(), "unknown file_sink field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "telemetry.file_sink.unknown_field");
+        assert!(err.message.contains("unknown file_sink field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn valid_prompt_fields_pass() {
+        let valid_fields = [
+            "prompt.context_files",
+            "prompt.instructions",
+            "prompt.templates",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "prompt field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_prompt_field_fails() {
+        let result = validate_key_path("prompt.unknown_field");
+        assert!(result.is_err(), "unknown prompt field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "prompt.unknown_field");
+        assert!(err.message.contains("unknown prompt field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn error_messages_are_clear() {
+        let test_cases = vec![
+            (
+                "unknown_field",
+                "unknown top-level field 'unknown_field'",
+            ),
+            (
+                "worker.unknown_field",
+                "unknown worker field 'unknown_field'",
+            ),
+            (
+                "agent.unknown_field",
+                "unknown agent field 'unknown_field'",
+            ),
+            (
+                "strands.unknown_field",
+                "unknown strands field 'unknown_field'",
+            ),
+            (
+                "telemetry.unknown_field",
+                "unknown telemetry field 'unknown_field'",
+            ),
+        ];
+
+        for (key_path, expected_message_fragment) in test_cases {
+            let result = validate_key_path(key_path);
+            assert!(
+                result.is_err(),
+                "key_path '{}' should fail validation",
+                key_path
+            );
+
+            let err = result.unwrap_err();
+            assert!(
+                err.message.contains(expected_message_fragment),
+                "error for '{}' should contain '{}', got: '{}'",
+                key_path,
+                expected_message_fragment,
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn error_messages_list_valid_alternatives() {
+        let result = validate_key_path("worker.unknown_field");
+        let err = result.unwrap_err();
+
+        assert!(
+            err.message.contains("max_workers"),
+            "error should list valid alternatives"
+        );
+        assert!(
+            err.message.contains("cpu_load_warn"),
+            "error should list valid alternatives"
+        );
+    }
+
+    #[test]
+    fn acceptance_criteria_examples() {
+        // Test examples from the bead acceptance criteria
+        assert!(
+            validate_key_path("worker.max_workers").is_ok(),
+            "worker.max_workers should validate successfully"
+        );
+
+        assert!(
+            validate_key_path("worker").is_ok(),
+            "worker should validate successfully"
+        );
+
+        let result = validate_key_path("unknown_field");
+        assert!(
+            result.is_err(),
+            "unknown_field should return InvalidKeyPath error"
+        );
+
+        let result = validate_key_path("worker.unknown_field");
+        assert!(
+            result.is_err(),
+            "worker.unknown_field should return InvalidKeyPath error"
+        );
+
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("unknown worker field"),
+            "error should have clear message about unknown worker field"
         );
     }
 }
