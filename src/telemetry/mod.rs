@@ -843,6 +843,7 @@ impl EventKind {
             EventKind::WorkerLaunchDeferred { .. } => "worker.launch.deferred",
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
             EventKind::StrandSkipped { .. } => "strand.skipped",
+            EventKind::ResolveEvaluated { .. } => "strand.resolve.evaluated",
             EventKind::BeadStoreError { .. } => "bead_store.error",
             EventKind::QueueEmpty => "worker.queue_empty",
             EventKind::PluckStarvationDetected { .. } => "strand.pluck.starvation_detected",
@@ -852,6 +853,7 @@ impl EventKind {
             EventKind::ClaimRaceLostSkipped { .. } => "bead.claim.race_lost_skipped",
             EventKind::ClaimFailed { .. } => "bead.claim.failed",
             EventKind::ClaimErrorThreshold { .. } => "bead.claim.error_threshold",
+            EventKind::ClaimVerifyFailed { .. } => "bead.claim.verify_failed",
             EventKind::BeadReleased { .. } => "bead.released",
             EventKind::BeadReleaseFailed { .. } => "bead.release.failed",
             EventKind::BeadCompleted { .. } => "bead.completed",
@@ -976,6 +978,7 @@ impl EventKind {
             | EventKind::ClaimRaceLost { bead_id }
             | EventKind::ClaimFailed { bead_id, .. }
             | EventKind::ClaimErrorThreshold { bead_id, .. }
+            | EventKind::ClaimVerifyFailed { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
             | EventKind::BeadReleaseFailed { bead_id, .. }
             | EventKind::BeadCompleted { bead_id, .. }
@@ -1209,6 +1212,17 @@ impl EventKind {
             } => {
                 serde_json::json!({ "strand_name": strand_name, "reason": reason })
             }
+            EventKind::ResolveEvaluated {
+                bead_id,
+                decision,
+                evidence,
+                duration_ms,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "decision": decision,
+                "evidence": evidence,
+                "duration_ms": duration_ms,
+            }),
             EventKind::BeadStoreError {
                 strand_name,
                 operation,
@@ -2180,6 +2194,17 @@ impl EventKind {
                 "consecutive_errors": consecutive_errors,
                 "last_error": last_error,
             }),
+            EventKind::ClaimVerifyFailed {
+                bead_id,
+                expected_actor,
+                actual_status,
+                actual_assignee,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "expected_actor": expected_actor,
+                "actual_status": actual_status,
+                "actual_assignee": actual_assignee,
+            }),
             EventKind::MendStaleAssigneeCleared { bead_id, assignee } => serde_json::json!({
                 "bead_id": bead_id,
                 "assignee": assignee,
@@ -2255,8 +2280,7 @@ impl EventKind {
             }
             | EventKind::CargoTestCompleted { duration_ms, .. }
             | EventKind::ExploreScanSummary { duration_ms, .. }
-            | EventKind::TransformCompleted { duration_ms, .. }
-            | EventKind::ResolveEvaluated { duration_ms, .. } => Some(*duration_ms),
+            | EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
             EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
@@ -2325,6 +2349,9 @@ impl EventKind {
             | EventKind::UpgradeDetected { .. }
             | EventKind::UpgradeCompleted { .. }
             | EventKind::RollbackCompleted { .. }
+            | EventKind::UpgradeCheckStarted { .. }
+            | EventKind::UpgradeCheckCompleted { .. }
+            | EventKind::UpgradeCheckFailed { .. }
             | EventKind::MendTraceCleanup { .. }
             | EventKind::MendLearningCleanup { .. }
             | EventKind::CanaryStarted { .. }
@@ -2379,6 +2406,7 @@ impl EventKind {
             | EventKind::WorkerFoundButExcluded { .. }
             | EventKind::EventDrivenWakeup { .. }
             | EventKind::ClaimErrorThreshold { .. }
+            | EventKind::ClaimVerifyFailed { .. }
             | EventKind::MendStaleAssigneeCleared { .. }
             | EventKind::MendAssigneeClearFailed { .. }
             | EventKind::WorkerLaunchDeferred { .. }
