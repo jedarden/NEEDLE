@@ -1898,8 +1898,9 @@ mod tests {
         monitor1.update_beads_processed(100);
         monitor2.update_beads_processed(200);
 
-        // Wait for emitter to write.
-        std::thread::sleep(Duration::from_millis(1500));
+        // Wait for emitter to write (uses tokio::time::sleep for async framework consistency,
+        // but emitter threads use std::thread::sleep so this still requires wall-clock time).
+        tokio::time::sleep(Duration::from_millis(1500)).await;
 
         let content1_updated = std::fs::read_to_string(&path1).unwrap();
         let data1_updated: HeartbeatData = serde_json::from_str(&content1_updated).unwrap();
@@ -1940,8 +1941,9 @@ mod tests {
             Some(remote_workspace.as_path()),
         );
 
-        // Wait for the emitter to write a new heartbeat
-        std::thread::sleep(Duration::from_millis(1500));
+        // Wait for the emitter to write a new heartbeat (uses tokio::time::sleep for
+        // consistency with async framework, but emitter thread uses std::thread::sleep).
+        tokio::time::sleep(Duration::from_millis(1500)).await;
 
         let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
         let data: HeartbeatData = serde_json::from_str(&content).unwrap();
@@ -1985,6 +1987,11 @@ mod tests {
         );
 
         let path = monitor.heartbeat_path();
+
+        // Ensure heartbeat directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
 
         // ACCEPTANCE CRITERION 1: Worker creates heartbeat file on startup
         // Write initial heartbeat manually (simulating emitter behavior)
