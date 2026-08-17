@@ -474,16 +474,32 @@ pub(crate) mod test_env {
     /// The single process-wide lock guarding `HOME`/`PATH` in tests.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Restores `HOME` and `PATH` to their captured values when dropped.
+    /// Variables guarded by [`isolate_env`].
+    ///
+    /// Concurrent `set_var` corrupts the process environment for every
+    /// thread — including `Command` spawns reading `PATH`, which is how an
+    /// unrelated test's `git` invocation dies with `NotFound` while some
+    /// other test mutates an env var (observed in CI: needle-ci-wbgtb,
+    /// commit_hook::concurrent_inject_never_cross_tags). Any test mutating
+    /// one of these must hold the lock for its whole body.
+    const GUARDED_VARS: [&str; 5] = [
+        "HOME",
+        "PATH",
+        "NEEDLE_HOME",
+        "NEEDLE_EVENTS",
+        "NEEDLE_HEARTBEATS",
+    ];
+
+    /// Restores every guarded variable to its captured value when dropped.
     pub(crate) struct EnvGuard {
-        home: Option<OsString>,
-        path: Option<OsString>,
+        saved: Vec<(&'static str, Option<OsString>)>,
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            restore("HOME", self.home.take());
-            restore("PATH", self.path.take());
+            for (key, value) in self.saved.drain(..) {
+                restore(key, value);
+            }
         }
     }
 
@@ -532,8 +548,10 @@ pub(crate) mod test_env {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let guard = EnvGuard {
-            home: std::env::var_os("HOME"),
-            path: std::env::var_os("PATH"),
+            saved: GUARDED_VARS
+                .iter()
+                .map(|&key| (key, std::env::var_os(key)))
+                .collect(),
         };
         (lock, guard)
     }

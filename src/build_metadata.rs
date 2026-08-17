@@ -328,6 +328,9 @@ mod tests {
 
     #[test]
     fn test_from_stable_binary_no_file() {
+        // Env mutation must hold the crate-wide env lock (see util::test_env):
+        // an unsynchronized set_var races every concurrent test and spawn.
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // Create a temporary directory to use as needle home
         let temp_dir = tempfile::tempdir().unwrap();
         let needle_home = temp_dir.path();
@@ -349,6 +352,8 @@ mod tests {
 
     #[test]
     fn test_from_stable_binary_with_file() {
+        // Env mutation must hold the crate-wide env lock (see util::test_env).
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // Create a temporary directory to use as needle home
         let temp_dir = tempfile::tempdir().unwrap();
         let needle_home = temp_dir.path();

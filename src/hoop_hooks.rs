@@ -254,8 +254,9 @@ mod tests {
 
     #[test]
     fn events_path_defaults_to_workspace_beads_dir() {
-        // SAFETY: single-threaded test, no other test in this module touches
-        // NEEDLE_EVENTS concurrently.
+        // Env mutation races the whole process, not just this module — hold
+        // the crate-wide env lock (util::test_env).
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         unsafe {
             std::env::remove_var("NEEDLE_EVENTS");
         }
@@ -265,8 +266,8 @@ mod tests {
 
     #[test]
     fn emit_needle_event_appends_expected_line() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         let dir = TempDir::new().unwrap();
-        // SAFETY: single-threaded test.
         unsafe {
             std::env::set_var(
                 "NEEDLE_EVENTS",
@@ -309,6 +310,7 @@ mod tests {
 
     #[test]
     fn emit_needle_event_is_best_effort_on_unwritable_path() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         // Parent is a file, not a directory — create_dir_all/open must fail,
         // and the function must not panic.
         let dir = TempDir::new().unwrap();
@@ -331,6 +333,7 @@ mod tests {
 
     #[test]
     fn emit_needle_heartbeat_appends_three_states() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         let dir = TempDir::new().unwrap();
         unsafe {
             std::env::set_var(
