@@ -2114,8 +2114,9 @@ async fn adapter_validation_fails_before_routing_initialization() {
 
     // Configure routing (this should not bypass adapter validation)
     config.agent.routing = Some(needle::config::RoutingConfig {
-        default_adapter: nonexistent_adapter.to_string(),
+        default_adapter: Some(nonexistent_adapter.to_string()),
         rules: vec![],
+        strict: false,
     });
 
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
