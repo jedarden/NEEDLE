@@ -14,6 +14,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::bead_store::spawn_with_etxtbsy_retry_child;
+use crate::telemetry::{EventKind, Telemetry};
 
 /// Current version of the needle binary.
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -90,6 +91,57 @@ pub enum DownloadToTestingResult {
 ///
 /// Returns information about the latest release compared to the current version.
 pub fn check_for_update() -> Result<UpdateCheck> {
+    check_for_update_with_telemetry(None)
+}
+
+/// Check GitHub for the latest release with telemetry.
+///
+/// Returns information about the latest release compared to the current version.
+/// Emits telemetry events for the check attempt and outcome.
+pub fn check_for_update_with_telemetry(
+    telemetry: Option<&Telemetry>,
+) -> Result<UpdateCheck> {
+    let source = "manual";
+
+    // Emit upgrade check started event
+    if let Some(telemetry) = telemetry {
+        let _ = telemetry.emit(EventKind::UpgradeCheckStarted {
+            source: source.to_string(),
+        });
+    }
+
+    let result = check_for_update_internal();
+
+    // Emit outcome event
+    match &result {
+        Ok(check) => {
+            if let Some(telemetry) = telemetry {
+                let _ = telemetry.emit(EventKind::UpgradeCheckCompleted {
+                    source: source.to_string(),
+                    current_version: check.current_version.clone(),
+                    latest_version: check.latest_version.clone(),
+                    update_available: check.update_available,
+                    has_release_notes: check.release_notes.is_some(),
+                });
+            }
+        }
+        Err(error) => {
+            if let Some(telemetry) = telemetry {
+                let error_type = classify_upgrade_error(error);
+                let _ = telemetry.emit(EventKind::UpgradeCheckFailed {
+                    source: source.to_string(),
+                    error_message: error.to_string(),
+                    error_type,
+                });
+            }
+        }
+    }
+
+    result
+}
+
+/// Internal implementation of update check without telemetry.
+fn check_for_update_internal() -> Result<UpdateCheck> {
     let response = ureq::agent()
         .get(&latest_release_url())
         .set("User-Agent", &format!("needle/{CURRENT_VERSION}"))
@@ -123,6 +175,21 @@ pub fn check_for_update() -> Result<UpdateCheck> {
     })
 }
 
+/// Classify an upgrade error into a category for telemetry.
+fn classify_upgrade_error(error: &anyhow::Error) -> String {
+    let error_msg = error.to_string().to_lowercase();
+
+    if error_msg.contains("network") || error_msg.contains("connection") || error_msg.contains("dns") {
+        "network".to_string()
+    } else if error_msg.contains("parse") || error_msg.contains("json") {
+        "parse".to_string()
+    } else if error_msg.contains("github") || error_msg.contains("api") || error_msg.contains("status") {
+        "api".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
 /// Download a newer GitHub release to the testing channel.
 ///
 /// This function downloads the latest release to `needle_home/bin/needle-testing`
@@ -137,7 +204,68 @@ pub fn check_for_update() -> Result<UpdateCheck> {
 /// - `Ok(NoUpdateAvailable)` if already at latest version
 /// - `Err` if download failed
 pub fn download_to_testing_channel() -> Result<DownloadToTestingResult> {
-    let check = check_for_update()?;
+    download_to_testing_channel_with_telemetry(None)
+}
+
+/// Download a newer GitHub release to the testing channel with telemetry.
+pub fn download_to_testing_channel_with_telemetry(
+    telemetry: Option<&Telemetry>,
+) -> Result<DownloadToTestingResult> {
+    let source = "download_to_testing";
+
+    // Emit upgrade check started event
+    if let Some(telemetry) = telemetry {
+        let _ = telemetry.emit(EventKind::UpgradeCheckStarted {
+            source: source.to_string(),
+        });
+    }
+
+    let result = download_to_testing_channel_internal();
+
+    // Emit outcome event
+    match &result {
+        Ok(check_result) => {
+            if let Some(telemetry) = telemetry {
+                // Get version info from the result
+                let (current_version, latest_version, update_available, has_notes) = match check_result {
+                    DownloadToTestingResult::Downloaded { version, .. } => {
+                        (CURRENT_VERSION.to_string(), version.clone(), true, false)
+                    }
+                    DownloadToTestingResult::Skipped { .. } => {
+                        (CURRENT_VERSION.to_string(), CURRENT_VERSION.to_string(), false, false)
+                    }
+                    DownloadToTestingResult::NoUpdateAvailable => {
+                        (CURRENT_VERSION.to_string(), CURRENT_VERSION.to_string(), false, false)
+                    }
+                };
+
+                let _ = telemetry.emit(EventKind::UpgradeCheckCompleted {
+                    source: source.to_string(),
+                    current_version,
+                    latest_version,
+                    update_available,
+                    has_release_notes: has_notes,
+                });
+            }
+        }
+        Err(error) => {
+            if let Some(telemetry) = telemetry {
+                let error_type = classify_upgrade_error(error);
+                let _ = telemetry.emit(EventKind::UpgradeCheckFailed {
+                    source: source.to_string(),
+                    error_message: error.to_string(),
+                    error_type,
+                });
+            }
+        }
+    }
+
+    result
+}
+
+/// Internal implementation of download to testing channel.
+fn download_to_testing_channel_internal() -> Result<DownloadToTestingResult> {
+    let check = check_for_update_internal()?;
 
     if !check.update_available {
         return Ok(DownloadToTestingResult::NoUpdateAvailable);

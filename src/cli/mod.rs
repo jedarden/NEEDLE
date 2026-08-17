@@ -2720,7 +2720,9 @@ fn cmd_status(
             // Check for updates with timeout - best-effort, non-fatal
             let update_check = std::thread::spawn(|| {
                 std::panic::catch_unwind(|| {
-                    upgrade::check_for_update()
+                    // Create telemetry emitter for this background check
+                    let tel = Telemetry::new("background-update".to_string());
+                    upgrade::check_for_update_with_telemetry(Some(&tel))
                         .map_err(|e| {
                             tracing::debug!("update check failed (non-fatal): {}", e);
                             e
@@ -5095,8 +5097,16 @@ fn cmd_canary(show_status: bool) -> Result<()> {
 
 /// `needle upgrade` — check for and install updates.
 fn cmd_upgrade(check_only: bool) -> Result<()> {
+    // Set up telemetry for upgrade operations
+    let config = ConfigLoader::load_global()?;
+    let tel = crate::telemetry::Telemetry::from_config("upgrade".to_string(), &config.telemetry)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "upgrade telemetry init failed, continuing without telemetry");
+            crate::telemetry::Telemetry::new("upgrade".to_string())
+        });
+
     if check_only {
-        let check = crate::upgrade::check_for_update()?;
+        let check = crate::upgrade::check_for_update_with_telemetry(Some(&tel))?;
         if check.update_available {
             println!(
                 "Update available: {} → {}",
@@ -5111,6 +5121,7 @@ fn cmd_upgrade(check_only: bool) -> Result<()> {
         return Ok(());
     }
 
+    // For full upgrade, perform_upgrade will handle its own telemetry
     crate::upgrade::perform_upgrade()?;
     Ok(())
 }
