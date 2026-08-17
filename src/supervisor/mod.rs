@@ -1219,6 +1219,110 @@ pub async fn run_supervisor(workspace_opt: Option<PathBuf>) -> Result<()> {
     supervisor.run().await
 }
 
+// ─── Supervisor Presence Detection ─────────────────────────────────────────────────
+
+/// Detect whether a supervisor is present based on heartbeat and socket checks.
+///
+/// This function checks for supervisor presence by examining:
+/// 1. The heartbeat file - if it exists and is recent, a supervisor is active
+/// 2. The control socket (if configured) - if it exists, a supervisor is likely active
+///
+/// A supervisor is considered present if:
+/// - The heartbeat file exists AND was modified within the last 30 seconds, OR
+/// - The socket path exists (if configured)
+///
+/// # Arguments
+///
+/// * `heartbeat_path` - Path to the supervisor's heartbeat file
+/// * `socket_path` - Optional path to the supervisor's control socket
+///
+/// # Returns
+///
+/// * `Ok(true)` if supervisor presence is detected
+/// * `Ok(false)` if no supervisor is detected
+/// * `Err(e)` if detection fails due to filesystem errors
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::supervisor::detect_supervisor_presence;
+/// use std::path::Path;
+///
+/// let heartbeat_path = Path::new("/tmp/supervisor-heartbeat.json");
+/// let socket_path = Some(Path::new("/tmp/supervisor.sock"));
+///
+/// if detect_supervisor_presence(heartbeat_path, socket_path).unwrap_or(false) {
+///     println!("Supervisor detected - running in supervised mode");
+/// } else {
+///     println!("No supervisor detected - running standalone");
+/// }
+/// ```
+pub fn detect_supervisor_presence(
+    heartbeat_path: &Path,
+    socket_path: Option<&Path>,
+) -> Result<bool> {
+    // Check heartbeat file first
+    if heartbeat_exists_and_is_recent(heartbeat_path)? {
+        return Ok(true);
+    }
+
+    // Fall back to socket check if configured
+    if let Some(socket) = socket_path {
+        return Ok(socket_exists(socket));
+    }
+
+    Ok(false)
+}
+
+/// Check if the heartbeat file exists and was modified recently.
+///
+/// A heartbeat is considered "recent" if it was modified within the last 30 seconds.
+/// This threshold accounts for supervisor heartbeat intervals and clock skew.
+///
+/// # Arguments
+///
+/// * `path` - Path to the heartbeat file
+///
+/// # Returns
+///
+/// * `Ok(true)` if the file exists and was modified within 30 seconds
+/// * `Ok(false)` if the file doesn't exist or is stale
+/// * `Err(e)` if filesystem access fails
+fn heartbeat_exists_and_is_recent(path: &Path) -> Result<bool> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+
+    let modified = metadata.modified()?;
+    let now = SystemTime::now();
+    let elapsed = now.duration_since(UNIX_EPOCH).unwrap().as_secs()
+        - modified.duration_since(UNIX_EPOCH).unwrap().as_secs();
+
+    // Heartbeat is recent if modified within 30 seconds
+    Ok(elapsed <= 30)
+}
+
+/// Check if a socket file exists.
+///
+/// Unix domain sockets appear as files in the filesystem. This function checks
+/// for the socket's existence without attempting to connect.
+///
+/// # Arguments
+///
+/// * `path` - Path to the socket file
+///
+/// # Returns
+///
+/// * `true` if the socket file exists
+/// * `false` otherwise
+fn socket_exists(path: &Path) -> bool {
+    path.exists()
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2139,5 +2243,164 @@ poll_interval_secs = 12
         // This cannot be easily tested in isolation since current_exe() rarely fails.
         // The supervisor uses resolve_worker_binary_with_source instead, which
         // falls back to PathLookup when current_exe() fails.
+    }
+
+    // ─── Supervisor Presence Detection Tests ─────────────────────────────────────
+
+    #[test]
+    fn detect_returns_false_when_no_heartbeat_or_socket() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let heartbeat_path = dir.path().join("heartbeat.json");
+        let socket_path: Option<&Path> = None;
+
+        let result = detect_supervisor_presence(&heartbeat_path, socket_path).unwrap();
+
+        assert!(
+            !result,
+            "Should return false when no heartbeat or socket exists"
+        );
+    }
+
+    #[test]
+    fn detect_returns_true_when_recent_heartbeat_exists() {
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let heartbeat_path = dir.path().join("heartbeat.json");
+
+        // Create a fresh heartbeat file
+        let mut file = File::create(&heartbeat_path).unwrap();
+        file.write_all(b"{\"timestamp\": \"2026-08-17T12:00:00Z\"}")
+            .unwrap();
+
+        let result = detect_supervisor_presence(&heartbeat_path, None).unwrap();
+
+        assert!(result, "Should return true when recent heartbeat exists");
+    }
+
+    #[test]
+    fn detect_returns_false_when_stale_heartbeat_exists() {
+        use filetime::FileTime;
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let heartbeat_path = dir.path().join("heartbeat.json");
+
+        // Create an old heartbeat file (more than 30 seconds ago)
+        let mut file = File::create(&heartbeat_path).unwrap();
+        file.write_all(b"{\"timestamp\": \"2026-08-17T11:00:00Z\"}")
+            .unwrap();
+        file.sync_all().unwrap();
+
+        // Set mtime to 100 seconds after epoch (old timestamp, makes file stale)
+        filetime::set_file_mtime(&heartbeat_path, FileTime::from_unix_time(100, 0)).unwrap();
+
+        let result = detect_supervisor_presence(&heartbeat_path, None).unwrap();
+
+        assert!(
+            !result,
+            "Should return false when heartbeat is older than 30 seconds"
+        );
+    }
+
+    #[test]
+    fn detect_returns_true_when_socket_exists() {
+        use std::fs::File;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let heartbeat_path = dir.path().join("heartbeat.json");
+        let socket_path = dir.path().join("supervisor.sock");
+
+        // Create a dummy socket file
+        File::create(&socket_path).unwrap();
+
+        let result =
+            detect_supervisor_presence(&heartbeat_path, Some(socket_path.as_path())).unwrap();
+
+        assert!(result, "Should return true when socket exists");
+    }
+
+    #[test]
+    fn heartbeat_returns_false_when_missing() {
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let heartbeat_path = dir.path().join("nonexistent.json");
+
+        let result = heartbeat_exists_and_is_recent(&heartbeat_path).unwrap();
+
+        assert!(
+            !result,
+            "Should return false when heartbeat file doesn't exist"
+        );
+    }
+
+    #[test]
+    fn heartbeat_returns_true_when_recent() {
+        use std::fs::File;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let heartbeat_path = dir.path().join("recent.json");
+
+        // Create a fresh file
+        File::create(&heartbeat_path).unwrap();
+
+        let result = heartbeat_exists_and_is_recent(&heartbeat_path).unwrap();
+
+        assert!(result, "Should return true for recently created file");
+    }
+
+    #[test]
+    fn heartbeat_returns_false_when_stale() {
+        use filetime::FileTime;
+        use std::fs::File;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let heartbeat_path = dir.path().join("stale.json");
+
+        // Create a file
+        File::create(&heartbeat_path).unwrap();
+
+        // Set mtime to 100 seconds after epoch (old timestamp)
+        filetime::set_file_mtime(&heartbeat_path, FileTime::from_unix_time(100, 0)).unwrap();
+
+        let result = heartbeat_exists_and_is_recent(&heartbeat_path).unwrap();
+
+        assert!(!result, "Should return false for file with old mtime");
+    }
+
+    #[test]
+    fn socket_returns_true_when_exists() {
+        use std::fs::File;
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        let socket_path = dir.path().join("socket.sock");
+
+        File::create(&socket_path).unwrap();
+
+        assert!(
+            socket_exists(&socket_path),
+            "Should return true when socket file exists"
+        );
+    }
+
+    #[test]
+    fn socket_returns_false_when_missing() {
+        let socket_path = Path::new("/tmp/nonexistent-socket-12345.sock");
+
+        assert!(
+            !socket_exists(socket_path),
+            "Should return false when socket doesn't exist"
+        );
     }
 }
