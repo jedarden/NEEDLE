@@ -1256,13 +1256,12 @@ fn outcome_classify_covers_all_exit_code_ranges() {
     ];
 
     for code in test_codes {
-        // CI VERIFICATION TRIGGER: Trigger fresh workflow to capture logs
         // Should not panic.
         let outcome = Outcome::classify(code, false);
         // Verify specific mappings.
         match code {
             0 => assert_eq!(outcome, Outcome::Success),
-            1 => assert_eq!(outcome, Outcome::Success), // TEMPORARY BREAK FOR CI VERIFICATION - needle-318c33ba
+            1 => assert_eq!(outcome, Outcome::Failure),
             124 => assert_eq!(outcome, Outcome::Timeout),
             127 => assert_eq!(outcome, Outcome::AgentNotFound),
             c if c > 128 => assert_eq!(outcome, Outcome::Crash(c)),
