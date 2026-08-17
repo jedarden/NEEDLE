@@ -53,6 +53,20 @@ pub async fn cleanup_orphaned_in_progress(
     telemetry: &Telemetry,
     qualified_id: &str,
 ) -> Result<u32> {
+    cleanup_in_progress(store, registry, telemetry, qualified_id, None).await
+}
+
+/// Scan all in-progress beads in a store and release any whose assignee is
+/// orphaned or whose claim is older than `claim_ttl`. Claim age is independent
+/// of worker liveness so a worker name that is reused by a relaunch cannot pin
+/// a bead forever.
+async fn cleanup_in_progress(
+    store: &dyn BeadStore,
+    registry: &Registry,
+    telemetry: &Telemetry,
+    qualified_id: &str,
+    claim_ttl: Option<Duration>,
+) -> Result<u32> {
     let all_beads = store.list_all().await?;
 
     // Registry::list() does blocking file I/O and PID checks.
@@ -71,6 +85,7 @@ pub async fn cleanup_orphaned_in_progress(
         .collect();
 
     let mut released = 0u32;
+    let now = Utc::now();
 
     for bead in &all_beads {
         if bead.status != BeadStatus::InProgress {
@@ -82,32 +97,46 @@ pub async fn cleanup_orphaned_in_progress(
             _ => continue,
         };
 
-        // Skip if the assignee matches our own qualified identity (we're running).
-        if assignee == qualified_id {
+        let claim_age = now.signed_duration_since(bead.updated_at).to_std().ok();
+        let stale_by_age =
+            claim_ttl.is_some_and(|ttl| claim_age.map(|age| age >= ttl).unwrap_or(false));
+
+        // Claim age is an independent release condition. A live worker may
+        // still hold an abandoned claim, especially when --count 1 relaunches
+        // under the same worker name indefinitely.
+        if !stale_by_age && assignee == qualified_id {
             continue;
         }
 
-        // Skip if the assignee matches a registered, alive worker.
-        // Workers register with fully-qualified IDs ({adapter}-{worker_id}),
-        // so this comparison prevents collisions when workers from different
-        // adapter pools share a NATO name.
-        if live_worker_ids.contains(assignee.as_str()) {
+        // Skip if the assignee matches a registered, alive worker unless the
+        // claim has exceeded its age limit. Workers register with fully-qualified
+        // IDs ({adapter}-{worker_id}), so this comparison prevents collisions
+        // when workers from different adapter pools share a NATO name.
+        if !stale_by_age && live_worker_ids.contains(assignee.as_str()) {
             continue;
         }
 
-        // Orphaned: assignee is not a live registered worker. Release it.
+        let reason = if stale_by_age {
+            let age_secs = claim_age.map_or(0, |age| age.as_secs());
+            format!("stale claim: age {age_secs}s exceeds configured claim TTL")
+        } else {
+            format!("orphaned: assignee {assignee} has no live worker")
+        };
+
         tracing::info!(
             bead_id = %bead.id,
             assignee = %assignee,
+            age_secs = claim_age.map_or(0, |age| age.as_secs()),
+            stale_by_age,
             workspace = %bead.workspace.display(),
-            "releasing orphaned in-progress bead (assignee has no live worker)"
+            "releasing stale in-progress bead"
         );
 
         match store.release(&bead.id).await {
             Ok(()) => {
                 let _ = telemetry.emit(EventKind::BeadReleased {
                     bead_id: bead.id.clone(),
-                    reason: format!("orphaned: assignee {} has no live worker", assignee),
+                    reason,
                 });
                 let _ = telemetry.emit(EventKind::StuckReleased {
                     bead_id: bead.id.clone(),
@@ -302,11 +331,12 @@ impl MendStrand {
         store: &dyn BeadStore,
         summary: &mut MendSummary,
     ) -> Result<()> {
-        let released = super::mend::cleanup_orphaned_in_progress(
+        let released = cleanup_in_progress(
             store,
             &self.registry,
             &self.telemetry,
             &self.qualified_id,
+            Some(Duration::from_secs(self.config.stuck_threshold_secs)),
         )
         .await?;
         summary.beads_released += released;
@@ -1866,6 +1896,12 @@ mod tests {
         }
     }
 
+    fn make_recent_in_progress_bead(id: &str, assignee: &str) -> Bead {
+        let mut bead = make_in_progress_bead(id, assignee);
+        bead.updated_at = Utc::now();
+        bead
+    }
+
     fn make_open_bead_with_assignee(id: &str, assignee: &str) -> Bead {
         let dt = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
         Bead {
@@ -1990,7 +2026,7 @@ mod tests {
         let reg_dir = tempfile::tempdir().unwrap();
 
         // An in-progress bead assigned to a worker that is registered and alive.
-        let bead = make_in_progress_bead("nd-active", "alive-worker");
+        let bead = make_recent_in_progress_bead("nd-active", "alive-worker");
 
         // Register the worker with our own PID (which is alive).
         let registry = Registry::new(reg_dir.path());
@@ -2036,13 +2072,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_in_progress_bead_released_even_when_worker_is_alive() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // The worker is alive, but the claim is far older than Mend's configured
+        // claim TTL. This is the failure mode that liveness-only cleanup misses.
+        let bead = make_in_progress_bead("nd-stale-live", "alive-worker");
+
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "alive-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 1,
+            })
+            .unwrap();
+
+        let (store, release_count, _) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig {
+                stuck_threshold_secs: 60,
+                ..MendConfig::default()
+            },
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after reclaiming stale live claim, got: {result:?}"
+        );
+        assert_eq!(release_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
     async fn in_progress_bead_own_worker_not_released() {
         let hb_dir = tempfile::tempdir().unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
 
         // An in-progress bead assigned to ourselves (using qualified_id).
-        let bead = make_in_progress_bead("nd-mine", "claude-test-worker");
+        let bead = make_recent_in_progress_bead("nd-mine", "claude-test-worker");
 
         let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
