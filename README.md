@@ -18,7 +18,7 @@ NEEDLE is a universal wrapper for headless coding CLI agents. It processes a sha
 
 ```bash
 # Install the latest release (prebuilt binary, Linux x86_64/aarch64)
-curl -fsSL https://raw.githubusercontent.com/jedarden/NEEDLE/main/install.sh | bash
+curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
 
 # Or build from source (needs Rust 1.75+, see rust-toolchain.toml)
 cargo install --git https://github.com/jedarden/NEEDLE
