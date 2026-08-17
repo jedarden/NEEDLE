@@ -287,6 +287,7 @@ impl Claimer {
                     tracing::Span::current().record("needle.claim.result", "succeeded");
                     // Clear error counter on successful claim
                     self.clear_claim_errors(bead_id);
+                    self.telemetry.set_workspace(bead.workspace.clone());
                     self.telemetry.emit(EventKind::ClaimSuccess {
                         bead_id: bead_id.clone(),
                         priority: candidate.priority as i32,
@@ -506,6 +507,7 @@ impl Claimer {
                 }
                 tracing::Span::current().record("needle.bead.id", bead.id.as_ref());
                 tracing::Span::current().record("needle.claim.result", "succeeded");
+                self.telemetry.set_workspace(bead.workspace.clone());
                 self.telemetry.emit(EventKind::ClaimSuccess {
                     bead_id: bead.id.clone(),
                     priority: bead.priority as i32,
@@ -592,6 +594,7 @@ pub async fn acquire_flock(lock_path: &Path) -> Result<std::fs::File> {
 mod tests {
     use super::*;
     use crate::bead_store::{BeadStore, Filters, RepairReport};
+    use crate::telemetry::test_utils::MemorySink;
     use crate::telemetry::Telemetry;
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
     use async_trait::async_trait;
@@ -778,6 +781,56 @@ mod tests {
             10, // short backoff for tests
             Telemetry::new("test-worker".to_string()),
         )
+    }
+
+    #[tokio::test]
+    async fn successful_claims_update_workspace_for_the_same_telemetry_session() {
+        let first = make_bead("needle-workspace-first", "/tmp/needle-workspace-first");
+        let second = make_bead("needle-workspace-second", "/tmp/needle-workspace-second");
+        let store = Arc::new(MockBeadStore::new(vec![first.clone(), second.clone()]));
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry.clone());
+
+        claimer
+            .claim_next(
+                std::slice::from_ref(&first),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
+        claimer
+            .claim_next(
+                std::slice::from_ref(&second),
+                "worker-1",
+                &HashSet::new(),
+                "test-strand",
+            )
+            .await
+            .unwrap();
+
+        drop(claimer);
+        drop(telemetry);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let successes: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.event_type == "bead.claim.succeeded")
+            .cloned()
+            .collect();
+        assert_eq!(successes.len(), 2);
+        assert_eq!(
+            successes[0].workspace.as_deref(),
+            Some(first.workspace.as_path())
+        );
+        assert_eq!(
+            successes[1].workspace.as_deref(),
+            Some(second.workspace.as_path())
+        );
     }
 
     #[tokio::test]
