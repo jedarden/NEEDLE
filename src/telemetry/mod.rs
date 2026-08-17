@@ -3454,8 +3454,15 @@ impl Telemetry {
     fn make_event(&self, kind: &EventKind) -> TelemetryEvent {
         let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
         let (trace_id, span_id) = current_trace_ids();
+        let timestamp = Utc::now();
+        tracing::debug!(
+            event_type = %kind.event_type(),
+            seq,
+            timestamp = %timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            "captured timestamp for telemetry event"
+        );
         TelemetryEvent {
-            timestamp: Utc::now(),
+            timestamp,
             event_type: kind.event_type().to_string(),
             worker_id: self.worker_id.clone(),
             session_id: self.session_id.clone(),
