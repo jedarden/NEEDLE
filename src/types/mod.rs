@@ -86,6 +86,26 @@ pub type WorkerId = String;
 pub type Priority = u8;
 
 // ──────────────────────────────────────────────────────────────────────────────
+// HardDeadline type alias
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Hard deadline - absolute wall-clock timeout from process start (in seconds).
+///
+/// A hard deadline is a **non-resettable, absolute timeout** that starts counting
+/// from the moment the agent process is spawned. Unlike idle timeout (which is
+/// reset on any stdout/stderr activity), the hard deadline is a strict upper
+/// bound on total execution time regardless of process activity.
+///
+/// **Key characteristics:**
+/// - **Absolute**: Measured from process spawn time, not last activity
+/// - **Non-resettable**: Cannot be extended or reset by any process behavior
+/// - **Strict**: Process termination occurs immediately when deadline is reached
+/// - **Independent**: Operates separately from idle timeout detection
+///
+/// Represented as `u64` seconds. A value of `0` means no deadline is enforced.
+pub type HardDeadline = u64;
+
+// ──────────────────────────────────────────────────────────────────────────────
 // BeadStatus
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -441,6 +461,243 @@ impl fmt::Display for DecompositionMode {
             } => write!(f, "timeout ({}s)", timeout_seconds),
             DecompositionMode::OrdinaryFailure => write!(f, "ordinary_failure"),
         }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// DecompositionDecision
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Decision whether to decompose a bead into child beads or refuse decomposition.
+///
+/// This enum represents the outcome of evaluating whether a bead should be split
+/// into smaller child beads via timeout-driven decomposition. The decision is
+/// based on clear thresholds and bead characteristics.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecompositionDecision {
+    /// Split the bead into the proposed child beads.
+    ///
+    /// This variant contains the proposed child beads that should be created
+    /// to complete the original work in smaller, manageable phases.
+    Split {
+        /// Proposed child beads to create.
+        with_proposals: Vec<ChildBeadProposal>,
+    },
+    /// Refuse to decompose the bead.
+    ///
+    /// This variant is returned when the bead does not meet the criteria for
+    /// decomposition. The refusal reason explains why splitting was not appropriate.
+    Refuse {
+        /// Human-readable reason for refusal.
+        reason: String,
+    },
+}
+
+impl DecompositionDecision {
+    /// Returns true if this decision is to split.
+    pub fn is_split(&self) -> bool {
+        matches!(self, DecompositionDecision::Split { .. })
+    }
+
+    /// Returns true if this decision is to refuse decomposition.
+    pub fn is_refuse(&self) -> bool {
+        matches!(self, DecompositionDecision::Refuse { .. })
+    }
+
+    /// Returns the proposals if this is a Split decision, None otherwise.
+    pub fn proposals(&self) -> Option<&Vec<ChildBeadProposal>> {
+        match self {
+            DecompositionDecision::Split { with_proposals } => Some(with_proposals),
+            DecompositionDecision::Refuse { .. } => None,
+        }
+    }
+
+    /// Returns the refusal reason if this is a Refuse decision, None otherwise.
+    pub fn refusal_reason(&self) -> Option<&String> {
+        match self {
+            DecompositionDecision::Refuse { reason } => Some(reason),
+            DecompositionDecision::Split { .. } => None,
+        }
+    }
+}
+
+impl fmt::Display for DecompositionDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DecompositionDecision::Split { with_proposals } => {
+                write!(f, "split into {} child beads", with_proposals.len())
+            }
+            DecompositionDecision::Refuse { reason } => {
+                write!(f, "refuse: {}", reason)
+            }
+        }
+    }
+}
+
+/// Configuration for decomposition decision thresholds.
+#[derive(Debug, Clone)]
+pub struct DecompositionThresholds {
+    /// Minimum timeout (in seconds) required to consider splitting.
+    /// Beads that timed out quickly are likely genuine errors, not size issues.
+    pub min_timeout_seconds: u64,
+    /// Minimum number of retries required to consider splitting.
+    /// Beads should be given multiple chances before decomposition.
+    pub min_retry_count: u32,
+    /// Minimum bead body length (in characters) to consider splitting.
+    /// Beads shorter than this are considered "too small" to split meaningfully.
+    pub min_bead_size: usize,
+    /// Labels that indicate a bead is already a child bead.
+    /// Such beads should not be split further to avoid deep nesting.
+    pub child_labels: Vec<String>,
+}
+
+impl Default for DecompositionThresholds {
+    fn default() -> Self {
+        DecompositionThresholds {
+            min_timeout_seconds: 300,  // 5 minutes
+            min_retry_count: 2,        // Must retry at least twice
+            min_bead_size: 200,         // At least 200 characters
+            child_labels: vec![
+                "mitosis-child".to_string(),
+                "decomposition-child".to_string(),
+            ],
+        }
+    }
+}
+
+/// Evaluate whether a bead should be decomposed into child beads.
+///
+/// This function implements the decision tree for timeout-driven decomposition.
+/// It evaluates bead characteristics against configured thresholds to determine
+/// whether splitting is appropriate.
+///
+/// # Arguments
+///
+/// * `bead` - The bead to evaluate
+/// * `timeout_seconds` - The timeout duration that was exceeded
+/// * `retry_count` - Number of consecutive retries for this bead
+/// * `thresholds` - Configuration thresholds (uses defaults if None)
+///
+/// # Returns
+///
+/// * `DecompositionDecision::Split` - If criteria are met (proposals must be added by caller)
+/// * `DecompositionDecision::Refuse` - If criteria are not met
+///
+/// # Decision Logic
+///
+/// **Split if ALL of these conditions are met:**
+/// - timeout_seconds >= thresholds.min_timeout_seconds
+/// - retry_count >= thresholds.min_retry_count
+/// - bead body length >= thresholds.min_bead_size
+/// - bead has no assignee (not actively being worked)
+/// - bead has no child labels (not already a decomposed child)
+///
+/// **Refuse if ANY of these conditions are met:**
+/// - Bead body is too small (< min_bead_size)
+/// - Bead has an active assignee
+/// - Bead is already a child (has child labels)
+/// - Timeout is too short (< min_timeout_seconds)
+/// - Not enough retries (< min_retry_count)
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::types::{Bead, BeadId, BeadStatus, decompose_bead_decision};
+/// use std::path::PathBuf;
+/// use chrono::{DateTime, Utc};
+///
+/// let bead = Bead {
+///     id: BeadId::from("needle-test"),
+///     title: "Test bead".to_string(),
+///     body: Some("This is a substantial bead body that exceeds 200 characters...".to_string()),
+///     priority: 2,
+///     status: BeadStatus::Open,
+///     assignee: None,
+///     labels: vec![],
+///     workspace: PathBuf::from("/tmp/test"),
+///     dependencies: vec![],
+///     dependents: vec![],
+///     comments: vec![],
+///     created_at: DateTime::from_timestamp(0, 0).unwrap(),
+///     updated_at: DateTime::from_timestamp(0, 0).unwrap(),
+/// };
+///
+/// let decision = decompose_bead_decision(&bead, 600, 3, None);
+/// assert!(decision.is_split());
+/// ```
+pub fn decompose_bead_decision(
+    bead: &Bead,
+    timeout_seconds: u64,
+    retry_count: u32,
+    thresholds: Option<DecompositionThresholds>,
+) -> DecompositionDecision {
+    let thresholds = thresholds.unwrap_or_default();
+
+    // Check if bead is already a child (has child labels)
+    let is_child_bead = bead
+        .labels
+        .iter()
+        .any(|label| thresholds.child_labels.contains(label));
+
+    if is_child_bead {
+        return DecompositionDecision::Refuse {
+            reason: format!(
+                "bead is already a child bead (has labels: {:?})",
+                bead
+                    .labels
+                    .iter()
+                    .filter(|l| thresholds.child_labels.contains(l))
+                    .collect::<Vec<_>>()
+            ),
+        };
+    }
+
+    // Check if bead has an active assignee
+    if let Some(assignee) = &bead.assignee {
+        return DecompositionDecision::Refuse {
+            reason: format!(
+                "bead has active assignee: {}",
+                assignee
+            ),
+        };
+    }
+
+    // Check bead body size
+    let body_size = bead.body.as_ref().map(|b| b.len()).unwrap_or(0);
+    if body_size < thresholds.min_bead_size {
+        return DecompositionDecision::Refuse {
+            reason: format!(
+                "bead body too small ({} chars < {} minimum)",
+                body_size, thresholds.min_bead_size
+            ),
+        };
+    }
+
+    // Check timeout threshold
+    if timeout_seconds < thresholds.min_timeout_seconds {
+        return DecompositionDecision::Refuse {
+            reason: format!(
+                "timeout too short ({}s < {}s minimum)",
+                timeout_seconds, thresholds.min_timeout_seconds
+            ),
+        };
+    }
+
+    // Check retry count threshold
+    if retry_count < thresholds.min_retry_count {
+        return DecompositionDecision::Refuse {
+            reason: format!(
+                "insufficient retries ({} < {} minimum)",
+                retry_count, thresholds.min_retry_count
+            ),
+        };
+    }
+
+    // All criteria met - approve for splitting
+    // The caller must add actual proposals via Split::with_proposals
+    DecompositionDecision::Split {
+        with_proposals: Vec::new(), // Empty - caller will populate
     }
 }
 
@@ -2474,6 +2731,313 @@ test foo ... ok"#;
         let _ = format!("{}", timeout);
         let _ = format!("{}", ordinary);
     }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // DecompositionDecision tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn decomposition_decision_split_is_split() {
+        let decision = DecompositionDecision::Split {
+            with_proposals: vec![],
+        };
+        assert!(decision.is_split());
+        assert!(!decision.is_refuse());
+    }
+
+    #[test]
+    fn decomposition_decision_refuse_is_refuse() {
+        let decision = DecompositionDecision::Refuse {
+            reason: "test refusal".to_string(),
+        };
+        assert!(!decision.is_split());
+        assert!(decision.is_refuse());
+    }
+
+    #[test]
+    fn decomposition_decision_proposals_split() {
+        let proposals = vec![ChildBeadProposal::new(
+            "Phase 1".to_string(),
+            "Description".to_string(),
+            vec![BeadId::from("needle-parent")],
+            2,
+        )
+        .unwrap()];
+        let decision = DecompositionDecision::Split {
+            with_proposals: proposals.clone(),
+        };
+        assert_eq!(decision.proposals(), Some(&proposals));
+    }
+
+    #[test]
+    fn decomposition_decision_proposals_refuse() {
+        let decision = DecompositionDecision::Refuse {
+            reason: "test".to_string(),
+        };
+        assert_eq!(decision.proposals(), None);
+    }
+
+    #[test]
+    fn decomposition_decision_refusal_reason_refuse() {
+        let reason = "bead is too small".to_string();
+        let decision = DecompositionDecision::Refuse {
+            reason: reason.clone(),
+        };
+        assert_eq!(decision.refusal_reason(), Some(&reason));
+    }
+
+    #[test]
+    fn decomposition_decision_refusal_reason_split() {
+        let decision = DecompositionDecision::Split {
+            with_proposals: vec![],
+        };
+        assert_eq!(decision.refusal_reason(), None);
+    }
+
+    #[test]
+    fn decomposition_decision_display_split() {
+        let decision = DecompositionDecision::Split {
+            with_proposals: vec![
+                ChildBeadProposal::new(
+                    "Phase 1".to_string(),
+                    "Description 1".to_string(),
+                    vec![BeadId::from("needle-parent")],
+                    2,
+                )
+                .unwrap(),
+                ChildBeadProposal::new(
+                    "Phase 2".to_string(),
+                    "Description 2".to_string(),
+                    vec![BeadId::from("needle-parent")],
+                    2,
+                )
+                .unwrap(),
+            ],
+        };
+        assert_eq!(decision.to_string(), "split into 2 child beads");
+    }
+
+    #[test]
+    fn decomposition_decision_display_refuse() {
+        let decision = DecompositionDecision::Refuse {
+            reason: "bead is too small".to_string(),
+        };
+        assert_eq!(decision.to_string(), "refuse: bead is too small");
+    }
+
+    #[test]
+    fn decomposition_thresholds_default() {
+        let thresholds = DecompositionThresholds::default();
+        assert_eq!(thresholds.min_timeout_seconds, 300);
+        assert_eq!(thresholds.min_retry_count, 2);
+        assert_eq!(thresholds.min_bead_size, 200);
+        assert_eq!(thresholds.child_labels.len(), 2);
+        assert!(thresholds.child_labels.contains(&"mitosis-child".to_string()));
+        assert!(thresholds
+            .child_labels
+            .contains(&"decomposition-child".to_string()));
+    }
+
+    fn make_test_bead(
+        body: &str,
+        assignee: Option<&str>,
+        labels: Vec<&str>,
+    ) -> Bead {
+        Bead {
+            id: BeadId::from("needle-test"),
+            title: "Test bead".to_string(),
+            body: Some(body.to_string()),
+            priority: 2,
+            status: BeadStatus::Open,
+            assignee: assignee.map(|s| s.to_string()),
+            labels: labels.into_iter().map(|s| s.to_string()).collect(),
+            workspace: std::path::PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            dependents: vec![],
+            comments: vec![],
+            created_at: DateTime::from_timestamp(0, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(0, 0).unwrap(),
+        }
+    }
+
+    #[test]
+    fn decompose_bead_decision_all_criteria_met() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            None,
+            vec![],
+        );
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_split());
+    }
+
+    #[test]
+    fn decompose_bead_decision_refuse_too_small() {
+        let bead = make_test_bead("Tiny bead body", None, vec![]);
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("too small"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_refuse_has_assignee() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            Some("worker-01"),
+            vec![],
+        );
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("active assignee"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_refuse_child_bead() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            None,
+            vec!["mitosis-child"],
+        );
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision.refusal_reason().unwrap().contains("already a child"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_refuse_timeout_too_short() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            None,
+            vec![],
+        );
+        let decision = decompose_bead_decision(&bead, 60, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("timeout too short"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_refuse_insufficient_retries() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            None,
+            vec![],
+        );
+        let decision = decompose_bead_decision(&bead, 600, 1, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("insufficient retries"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_custom_thresholds() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            None,
+            vec![],
+        );
+
+        // Custom thresholds: higher timeout requirement
+        let custom_thresholds = DecompositionThresholds {
+            min_timeout_seconds: 900,
+            min_retry_count: 2,
+            min_bead_size: 200,
+            child_labels: vec!["mitosis-child".to_string()],
+        };
+
+        let decision = decompose_bead_decision(&bead, 600, 3, Some(custom_thresholds));
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("timeout too short"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_boundary_values() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            None,
+            vec![],
+        );
+
+        // Exactly at thresholds should split
+        let decision = decompose_bead_decision(&bead, 300, 2, None);
+        assert!(decision.is_split());
+
+        // Just below timeout threshold should refuse
+        let decision = decompose_bead_decision(&bead, 299, 2, None);
+        assert!(decision.is_refuse());
+
+        // Just below retry threshold should refuse
+        let decision = decompose_bead_decision(&bead, 300, 1, None);
+        assert!(decision.is_refuse());
+    }
+
+    #[test]
+    fn decompose_bead_decision_empty_body() {
+        let bead = make_test_bead("", None, vec![]);
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("too small"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_none_body() {
+        let mut bead = make_test_bead("test", None, vec![]);
+        bead.body = None;
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("too small"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_multiple_child_labels() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            None,
+            vec!["other-label", "decomposition-child", "another-label"],
+        );
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision.refusal_reason().unwrap().contains("already a child"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_custom_child_labels() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            None,
+            vec!["custom-child-label"],
+        );
+
+        let custom_thresholds = DecompositionThresholds {
+            min_timeout_seconds: 300,
+            min_retry_count: 2,
+            min_bead_size: 200,
+            child_labels: vec!["custom-child-label".to_string()],
+        };
+
+        let decision = decompose_bead_decision(&bead, 600, 3, Some(custom_thresholds));
+        assert!(decision.is_refuse());
+        assert!(decision.refusal_reason().unwrap().contains("already a child"));
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2596,7 +3160,7 @@ impl fmt::Display for ExhaustionDiagnosis {
 ///
 /// This structure captures all the information needed to propose a new child bead
 /// when a parent bead times out and needs to be decomposed into smaller phases.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildBeadProposal {
     /// Title of the phase (e.g., "Phase 1: Core Implementation").
     pub phase_title: String,

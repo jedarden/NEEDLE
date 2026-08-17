@@ -142,6 +142,47 @@ use needle::types::{
 };
 use needle::worker::Worker;
 
+// ─── Test isolation infrastructure ───────────────────────────────────────────────
+
+/// Guard that restores HOME to its original value when dropped.
+///
+/// This prevents tests from writing to the live fleet's state directory
+/// (`~/.needle/state/heartbeats/`). Each test gets its own temporary HOME
+/// so heartbeats and other state files don't contaminate the real environment.
+struct HomeGuard {
+    _temp_dir: tempfile::TempDir,
+    original_home: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    /// Isolates the test's HOME directory to a temp directory.
+    ///
+    /// Returns a guard that restores the original HOME value when dropped.
+    /// Use this in any test that creates a HealthMonitor or Worker, as both
+    /// may call `dirs_or_home()` which reads HOME directly.
+    fn isolate() -> Self {
+        let original_home = std::env::var_os("HOME");
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir for test HOME");
+        let temp_path = temp_dir.path().to_path_buf();
+
+        std::env::set_var("HOME", &temp_path);
+
+        HomeGuard {
+            _temp_dir: temp_dir,
+            original_home,
+        }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        match &self.original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
 // ─── Shared test infrastructure ──────────────────────────────────────────────
 
 fn configured_forge_store(workspace: PathBuf) -> needle::bead_store::CliBeadStore {
@@ -437,19 +478,26 @@ fn test_adapter(name: &str, template: &str, timeout_secs: u64) -> AgentAdapter {
     }
 }
 
-/// ISOLATION REQUIRED: In-process Worker tests must pin Explore strand's scan root.
+/// ISOLATION REQUIRED: In-process Worker tests must isolate HOME and pin Explore strand's scan root.
 ///
-/// This applies to tests that build a Worker in-process via this helper. Subprocess tests
-/// use `cmd.env("HOME", ...)` instead; this clause covers the in-process shape where
-/// HOME isolation does not apply (no subprocess is ever spawned).
+/// **CRITICAL:** Callers MUST create a `HomeGuard::isolate()` guard before calling this function.
 ///
-/// Without explicit pinning, `ExploreConfig::default()` resolves `workspace_root` to the
-/// real home directory via `default_workspace_root()` → `dirs_or_home("")`, causing tests
-/// to scan and mutate production bead stores.
+/// This applies to tests that build a Worker in-process via this helper. The guard ensures:
+/// 1. Heartbeats write to the test's temp HOME, not the live fleet's `~/.needle/state/heartbeats/`
+/// 2. `Config::default()` uses the isolated HOME via `dirs_or_home()`
+/// 3. The Explore strand doesn't scan real user directories
 ///
-/// 2026-08-05 incident: An in-process Worker test without Explore isolation let an
-/// orphaned `integration_tests` binary mutate 2302 beads to `in_progress` under assignee
+/// Without the guard:
+/// - `dirs_or_home()` in `Config::default()` resolves to the real user home
+/// - Heartbeats write to `~/.needle/state/heartbeats/` (live fleet state)
+/// - Explore scans every directory under real `$HOME` containing `.beads/`
+///
+/// 2026-08-05 incident: An in-process Worker test without HOME isolation let an orphaned
+/// `integration_tests` binary mutate 2302 beads to `in_progress` under assignee
 /// `echo-test-test-worker` and truncate `.beads/issues.jsonl` to 0 bytes (recovered from git).
+///
+/// 2026-08-06 incident: The lib suite wrote `claude-test-worker.json` into the live
+/// fleet's heartbeat directory (`~/.needle/state/heartbeats/`), contaminating shared state.
 ///
 /// See CLAUDE.md Test Isolation Policy for full details.
 fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
@@ -475,26 +523,26 @@ fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
     config
 }
 
-/// Returns `(Worker, TempDir)` — the TempDir must be kept alive for the test duration.
+/// Returns `(Worker, HomeGuard)` — the HomeGuard must be kept alive for the test duration.
 ///
-/// ISOLATION REQUIRED: In-process Worker tests must pin Explore strand's scan root.
+/// ISOLATION REQUIRED: In-process Worker tests must isolate HOME and pin Explore strand.
 ///
-/// This helper builds a Worker in-process via `test_config()`, which isolates the
-/// Explore strand. Tests that use this helper must keep the returned TempDir alive
-/// for the entire test duration — the Worker reads from that directory and dropping
-/// the TempDir while the Worker is active is undefined behavior.
+/// This helper builds a Worker in-process via `test_config()`, which requires HOME to be
+/// isolated before calling. The returned HomeGuard must be kept alive for the entire
+/// test duration — dropping it early restores the original HOME, breaking isolation.
 ///
-/// See `test_config()` for full isolation documentation, including the 2026-08-05
-/// contamination incident where lack of Explore isolation caused 2302 real beads
-/// to be mutated under the fixture worker identity.
+/// See `test_config()` for full isolation documentation, including the 2026-08-05 and
+/// 2026-08-06 contamination incidents where lack of HOME/Explore isolation caused beads
+/// to be mutated and heartbeats to write to the live fleet's state directory.
 fn make_worker_with_adapter(
     store: Arc<dyn BeadStore>,
     adapter_name: &str,
     template: &str,
     timeout_secs: u64,
-) -> (Worker, tempfile::TempDir) {
-    let home_dir = tempfile::tempdir().expect("failed to create temp dir for test workspace home");
-    let config = test_config(adapter_name, home_dir.path());
+) -> (Worker, HomeGuard) {
+    // Isolate HOME before calling test_config() - required for proper isolation
+    let home_guard = HomeGuard::isolate();
+    let config = test_config(adapter_name, home_guard._temp_dir.path());
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
     let adapter = test_adapter(adapter_name, template, timeout_secs);
@@ -506,7 +554,7 @@ fn make_worker_with_adapter(
         10,
     ));
 
-    (worker, home_dir)
+    (worker, home_guard)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -522,7 +570,7 @@ async fn end_to_end_single_bead_success() {
     let bead = make_bead("needle-e2e-001", 1);
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
 
-    let (mut worker, _home_dir) =
+    let (mut worker, _home_guard) =
         make_worker_with_adapter(store.clone(), "echo-test", "echo 'agent completed'", 10);
 
     let result = worker.run().await.unwrap();
@@ -709,8 +757,8 @@ async fn outcome_path_interrupted_via_shutdown_flag() {
     let bead = make_bead("needle-out-interrupt", 1);
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
 
-    let _home_dir = tempfile::tempdir().unwrap();
-    let config = test_config("slow-agent", _home_dir.path());
+    let _home_guard = HomeGuard::isolate();
+    let config = test_config("slow-agent", _home_guard._temp_dir.path());
     let mut worker = Worker::new(config, "test-worker".to_string(), store.clone());
 
     // Use a slow adapter so we have time to set shutdown.
@@ -742,8 +790,8 @@ async fn outcome_path_interrupted_via_shutdown_flag() {
 async fn exhaustion_empty_workspace() {
     // Empty store → Pluck returns NoWork → Knot fires → EXHAUSTED → Exit.
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
-    let _home_dir = tempfile::tempdir().unwrap();
-    let config = test_config("echo-test", _home_dir.path());
+    let _home_guard = HomeGuard::isolate();
+    let config = test_config("echo-test", _home_guard._temp_dir.path());
     let session_id = needle::telemetry::generate_session_id();
     let _ = needle::cli::init_tracing_subscriber("test-worker".to_string(), session_id, &config);
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
@@ -790,16 +838,16 @@ async fn exhaustion_empty_workspace() {
 #[tokio::test]
 async fn exhaustion_with_idle_action_exit() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
-    let _home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::isolate();
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Exit;
     config.agent.default = "echo-test".to_string();
     config.agent.routing = None; // Disable routing in tests - use adapter directly
     config.self_modification.hot_reload = false;
     config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
-    config.workspace.home = _home_dir.path().to_path_buf();
+    config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
     // Confine Explore strand to test's tempdir to prevent scanning real user directories
-    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
+    config.strands.explore.workspace_root = _home_guard._temp_dir.path().to_path_buf();
     config.strands.explore.workspaces = Vec::new();
 
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
@@ -999,30 +1047,31 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         bead_released: AtomicU32::new(0),
     });
 
-    let _home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::isolate();
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Wait; // Wait for delayed bead
     config.worker.idle_timeout = 1; // 1 second for fast test
     config.agent.default = "echo-test".to_string();
     config.agent.routing = None; // Disable routing in tests - use adapter directly
-    config.workspace.home = _home_dir.path().to_path_buf();
+    config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
     config.self_modification.hot_reload = false;
     config.workspace.default = std::path::PathBuf::from("/tmp");
-    // ISOLATION REQUIRED: In-process Worker tests must pin Explore strand's scan root.
+    // ISOLATION REQUIRED: In-process Worker tests must isolate HOME and pin Explore strand.
     //
-    // This test builds a Worker in-process with custom config. The Explore strand
-    // MUST be isolated to prevent scanning real user directories.
-    //
-    // Without explicit pinning, ExploreConfig::default() resolves workspace_root to the real
-    // home directory via default_workspace_root() → dirs_or_home(""), causing tests to scan
-    // and mutate production bead stores.
+    // This test builds a Worker in-process with custom config. The HomeGuard ensures:
+    // 1. Heartbeats write to test's temp HOME, not live fleet's ~/.needle/state/heartbeats/
+    // 2. Config::default() uses isolated HOME via dirs_or_home()
+    // 3. Explore strand doesn't scan real user directories
     //
     // 2026-08-05 incident: test_config() isolated workspace.default/home but not strands.explore,
     // letting an orphaned integration_tests binary mutate 2302 beads to in_progress under
     // assignee echo-test-test-worker and truncate .beads/issues.jsonl to 0 bytes (recovered from git).
     //
+    // 2026-08-06 incident: The lib suite wrote claude-test-worker.json into the live
+    // fleet's heartbeat directory, contaminating shared state.
+    //
     // See CLAUDE.md Test Isolation Policy for full details.
-    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
+    config.strands.explore.workspace_root = _home_guard._temp_dir.path().to_path_buf();
     config.strands.explore.workspaces = Vec::new();
 
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
@@ -1056,8 +1105,8 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
 #[tokio::test]
 async fn shutdown_during_selecting_exits_cleanly() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
-    let _home_dir = tempfile::tempdir().unwrap();
-    let config = test_config("echo-test", _home_dir.path());
+    let _home_guard = HomeGuard::isolate();
+    let config = test_config("echo-test", _home_guard._temp_dir.path());
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
     let adapter = test_adapter("echo-test", "echo done", 10);
@@ -1081,8 +1130,8 @@ async fn shutdown_flag_preempts_execution() {
     // Even with beads available, shutdown should cause clean exit.
     let bead = make_bead("needle-shutdown", 1);
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::new(vec![bead]));
-    let _home_dir = tempfile::tempdir().unwrap();
-    let config = test_config("echo-test", _home_dir.path());
+    let _home_guard = HomeGuard::isolate();
+    let config = test_config("echo-test", _home_guard._temp_dir.path());
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
     let adapter = test_adapter("echo-test", "echo done", 10);
@@ -1308,12 +1357,12 @@ fn outcome_classify_covers_all_exit_code_ranges() {
 #[tokio::test]
 async fn worker_boot_rejects_invalid_config() {
     let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
-    let _home_dir = tempfile::tempdir().unwrap();
+    let _home_guard = HomeGuard::isolate();
     let mut config = Config::default();
     config.agent.default = String::new(); // Invalid: empty agent name
-    config.workspace.home = _home_dir.path().to_path_buf();
+    config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
     // Confine Explore strand to test's tempdir to prevent scanning real user directories
-    config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
+    config.strands.explore.workspace_root = _home_guard._temp_dir.path().to_path_buf();
     config.strands.explore.workspaces = Vec::new();
 
     let mut worker = Worker::new(config, "test-worker".to_string(), store);
@@ -5537,6 +5586,175 @@ prompt:
         "  Tilde path ~/.config/needle/context2.md -> {}",
         context2.display()
     );
+}
+
+/// Test tilde expansion with multiple tildes in same value.
+///
+/// This test validates that only the FIRST tilde (at position 0) is expanded,
+/// and subsequent tildes are treated as literal path components.
+///
+/// Test cases:
+/// - `~/path/~subdir` - First tilde expands, second tilde is literal
+/// - `~/~/nested` - Both tildes at start, only first expands
+/// - `path/~/other` - Tilde in middle should NOT expand
+/// - `/absolute/~/path` - Tilde in middle of absolute path should NOT expand
+#[tokio::test]
+async fn tilde_expansion_multiple_tildes_in_same_value() {
+    use needle::util::expand_tilde;
+
+    let _home_guard = HomeGuard::isolate();
+    let isolated_home = _home_guard._temp_dir.path();
+
+    // Test 1: First tilde expands, second tilde is literal
+    let path_with_second_tilde = "~/bin/~subdir";
+    let expanded = expand_tilde(path_with_second_tilde);
+    let expected = isolated_home.join("bin/~subdir");
+    assert_eq!(
+        expanded,
+        expected.to_str().unwrap(),
+        "only first tilde should expand, second tilde should be literal"
+    );
+    println!("  Test 1: ~/bin/~subdir -> {}", expanded);
+
+    // Test 2: Double tilde at start - only first expands
+    let double_tilde_start = "~/~/nested";
+    let expanded = expand_tilde(double_tilde_start);
+    let expected = isolated_home.join("~/nested");
+    assert_eq!(
+        expanded,
+        expected.to_str().unwrap(),
+        "first tilde expands, second tilde prefix is literal"
+    );
+    println!("  Test 2: ~/~/nested -> {}", expanded);
+
+    // Test 3: Tilde in middle of relative path - should NOT expand
+    let tilde_middle = "path/~/other";
+    let expanded = expand_tilde(tilde_middle);
+    assert_eq!(
+        expanded,
+        tilde_middle,
+        "tilde in middle of path should not expand"
+    );
+    println!("  Test 3: path/~/other -> {} (unchanged)", expanded);
+
+    // Test 4: Tilde in middle of absolute path - should NOT expand
+    let tilde_middle_absolute = "/absolute/~/path";
+    let expanded = expand_tilde(tilde_middle_absolute);
+    assert_eq!(
+        expanded,
+        tilde_middle_absolute,
+        "tilde in middle of absolute path should not expand"
+    );
+    println!("  Test 4: /absolute/~/path -> {} (unchanged)", expanded);
+
+    println!("✓ Multiple tildes in same value test passed");
+}
+
+/// Test tilde expansion at different positions (start vs middle/end).
+///
+/// This test validates that tilde expansion ONLY occurs at the START of a path,
+/// not in the middle or at the end. Only paths beginning with ~ or ~/ should expand.
+///
+/// Test cases:
+/// - `~/start` - Tilde at START: should expand
+/// - `path/~middle` - Tilde in MIDDLE: should NOT expand
+/// - `/absolute/~middle` - Tilde in middle of absolute: should NOT expand
+/// - `~/end/~` - Tilde at end: only START tilde expands
+/// - `~/path/~` - Tilde at end of path component: only START tilde expands
+/// - `~` - Bare tilde: should expand to home directory
+#[tokio::test]
+async fn tilde_expansion_position_start_vs_middle_end() {
+    use needle::util::expand_tilde;
+
+    let _home_guard = HomeGuard::isolate();
+    let isolated_home = _home_guard._temp_dir.path();
+
+    // Test 1: Tilde at START - should expand
+    let tilde_at_start = "~/bin/needle";
+    let expanded = expand_tilde(tilde_at_start);
+    let expected = isolated_home.join("bin/needle");
+    assert_eq!(
+        expanded,
+        expected.to_str().unwrap(),
+        "tilde at start should expand"
+    );
+    println!("  Test 1 (START): ~/bin/needle -> {}", expanded);
+
+    // Test 2: Tilde in MIDDLE of relative path - should NOT expand
+    let tilde_in_middle = "config/~backup/settings.yml";
+    let expanded = expand_tilde(tilde_in_middle);
+    assert_eq!(
+        expanded,
+        tilde_in_middle,
+        "tilde in middle of relative path should not expand"
+    );
+    println!("  Test 2 (MIDDLE): config/~backup/settings.yml -> {} (unchanged)", expanded);
+
+    // Test 3: Tilde in MIDDLE of absolute path - should NOT expand
+    let tilde_in_middle_absolute = "/etc/needle/~config/settings.yml";
+    let expanded = expand_tilde(tilde_in_middle_absolute);
+    assert_eq!(
+        expanded,
+        tilde_in_middle_absolute,
+        "tilde in middle of absolute path should not expand"
+    );
+    println!("  Test 3 (MIDDLE): /etc/needle/~config/settings.yml -> {} (unchanged)", expanded);
+
+    // Test 4: Tilde at END - only START tilde should expand
+    let tilde_at_end = "~/workspaces/~";
+    let expanded = expand_tilde(tilde_at_end);
+    let expected = isolated_home.join("workspaces/~");
+    assert_eq!(
+        expanded,
+        expected.to_str().unwrap(),
+        "tilde at end of path should be literal, only start tilde expands"
+    );
+    println!("  Test 4 (END): ~/workspaces/~ -> {}", expanded);
+
+    // Test 5: Tilde as directory component in middle - only START tilde expands
+    let tilde_as_component = "~/dev/~old-project/config";
+    let expanded = expand_tilde(tilde_as_component);
+    let expected = isolated_home.join("dev/~old-project/config");
+    assert_eq!(
+        expanded,
+        expected.to_str().unwrap(),
+        "tilde as path component should be literal, only start tilde expands"
+    );
+    println!("  Test 5 (COMPONENT): ~/dev/~old-project/config -> {}", expanded);
+
+    // Test 6: Bare tilde - should expand to home directory
+    let bare_tilde = "~";
+    let expanded = expand_tilde(bare_tilde);
+    let expected = isolated_home.to_str().unwrap();
+    assert_eq!(
+        expanded,
+        expected,
+        "bare tilde should expand to home directory"
+    );
+    println!("  Test 6 (BARE): ~ -> {}", expanded);
+
+    // Test 7: Tilde preceded by path separator - should NOT expand
+    let tilde_after_sep = "workspaces/~config";
+    let expanded = expand_tilde(tilde_after_sep);
+    assert_eq!(
+        expanded,
+        tilde_after_sep,
+        "tilde after path separator should not expand"
+    );
+    println!("  Test 7 (AFTER_SEP): workspaces/~config -> {} (unchanged)", expanded);
+
+    // Test 8: Multiple trailing tildes - only START tilde expands
+    let multiple_trailing = "~/path/~~";
+    let expanded = expand_tilde(multiple_trailing);
+    let expected = isolated_home.join("path/~~");
+    assert_eq!(
+        expanded,
+        expected.to_str().unwrap(),
+        "multiple trailing tildes should be literal, only start tilde expands"
+    );
+    println!("  Test 8 (TRAILING): ~/path/~~ -> {}", expanded);
+
+    println!("✓ Tilde expansion position test passed");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

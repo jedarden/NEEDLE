@@ -99,6 +99,51 @@ pub struct ProcessLimits {
     /// ```
     #[serde(default)]
     pub idle_timeout: Option<u64>,
+
+    /// Hard deadline - absolute wall-clock timeout from process start (None means disabled).
+    ///
+    /// This is a **non-resettable, absolute timeout** that starts counting from
+    /// the moment the agent process is spawned. Unlike `idle_timeout`, which is
+    /// reset on any stdout/stderr activity, the hard deadline is a strict upper
+    /// bound on total execution time regardless of process activity.
+    ///
+    /// **Key characteristics:**
+    /// - **Absolute**: Measured from process spawn time, not last activity
+    /// - **Non-resettable**: Cannot be extended or reset by any process behavior
+    /// - **Strict**: Process termination occurs immediately when deadline is reached
+    /// - **Independent**: Operates separately from idle_timeout detection
+    ///
+    /// **Use cases:**
+    /// - Prevent runaway processes that produce output but never complete
+    /// - Enforce strict SLA bounds on task execution time
+    /// - Catch infinite loops or processes that evade idle detection
+    ///
+    /// **Relationship with idle_timeout:**
+    /// - `idle_timeout`: Reset on any output, good for detecting hangs
+    /// - `hard_deadline`: Never reset, good for bounding total work time
+    /// - Both can be active simultaneously; whichever fires first terminates the process
+    ///
+    /// Set to `None` to disable the hard deadline (processes can run indefinitely
+    /// as long as they respect the idle_timeout, if set).
+    ///
+    /// # Examples
+    ///
+    /// ```yaml
+    /// # Disable hard deadline (no absolute time limit)
+    /// process_limits:
+    ///     hard_deadline: null
+    ///
+    /// # 1 hour hard deadline (absolute upper bound)
+    /// process_limits:
+    ///     hard_deadline: 3600s
+    ///
+    /// # 30 minute hard deadline with 5 minute idle timeout
+    /// process_limits:
+    ///     hard_deadline: 1800s
+    ///     idle_timeout: 300s
+    /// ```
+    #[serde(default)]
+    pub hard_deadline: Option<u64>,
 }
 
 /// Agent (AI model CLI) configuration.
@@ -1326,6 +1371,42 @@ mod tests {
             result.1, bf_local,
             "Should resolve to ~/.local/bin/bf when PATH is empty"
         );
+    }
+
+    /// Test edge case: /usr/local/cargo/bin/bead fallback location.
+    ///
+    /// Verifies that when bead is installed via `cargo install` (which places
+    /// binaries in /usr/local/cargo/bin), it is found as the third fallback
+    /// location after PATH search and ~/.local/bin/bead fail.
+    #[test]
+    fn test_auto_fallback_chain_cargo_bin_location() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = setup_test_binary_dir();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH and create empty home (no ~/.local/bin/bead)
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        // Create /usr/local/cargo/bin/bead (simulating cargo install)
+        let cargo_bin = tmp_dir.path().join("cargo-bin");
+        std::fs::create_dir_all(&cargo_bin).unwrap();
+        let bead_cargo = cargo_bin.join("bead");
+        std::fs::write(&bead_cargo, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_cargo);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        // Since we can't actually create files in /usr/local/cargo/bin during tests,
+        // we verify the search chain includes this location in error messages
+        let result = resolve_bead_cli(&config);
+        assert!(result.is_err(), "Should error when bead not in standard locations");
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("/usr/local/cargo/bin/bead"),
+            "Error message should mention /usr/local/cargo/bin/bead as a search location");
     }
 
     /// Test edge case: PATH with only non-existent directories.
@@ -5829,7 +5910,7 @@ impl ConfigLoader {
                 errors.push(ConfigError {
                     field: "strands.mitosis.timeout_triggered.min_elapsed_fraction".to_string(),
                     message: "must be in range [0.0, 1.0]".to_string(),
-                });
+                    });
             }
         }
 

@@ -130,6 +130,7 @@ fn test_resource(config: &OtlpSinkConfig) -> Resource {
         config,
         Some("test-agent"),
         Some("test-model"),
+        None,
         Some("/private/path/transport-workspace"),
     )
     .expect("test resource should build")

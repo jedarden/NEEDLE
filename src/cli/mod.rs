@@ -847,17 +847,17 @@ fn worker_log_writer(
 /// `agent.default` names an adapter, so load the same built-ins and user
 /// adapters that `Dispatcher` will use to obtain the actual model identifier.
 fn worker_telemetry_identity(config: &Config) -> telemetry::TelemetryIdentity {
-    let model = dispatch::load_adapters(&config.agent.adapters_dir, &dispatch::builtin_adapters())
+    let default_adapter = dispatch::load_adapters(&config.agent.adapters_dir, &dispatch::builtin_adapters())
         .ok()
-        .and_then(|adapters| {
-            adapters
-                .get(&config.agent.default)
-                .and_then(|adapter| adapter.model.clone())
-        });
+        .and_then(|adapters| adapters.get(&config.agent.default).cloned());
+
+    let model = default_adapter.as_ref().and_then(|adapter| adapter.model.clone());
+    let provider = default_adapter.as_ref().and_then(|adapter| adapter.provider.clone());
 
     telemetry::TelemetryIdentity {
         agent: Some(config.agent.default.clone()),
         model,
+        provider,
         workspace: Some(config.workspace.default.clone()),
     }
 }
@@ -903,6 +903,7 @@ pub fn init_tracing_subscriber(
         otlp_config,
         identity.agent.as_deref(),
         identity.model.as_deref(),
+        identity.provider.as_deref(),
         identity.workspace.as_deref().and_then(Path::to_str),
     )
     .context("failed to build OTel resource")?;
@@ -5339,6 +5340,7 @@ mod tests {
             &config.telemetry.otlp_sink,
             identity.agent.as_deref(),
             identity.model.as_deref(),
+            identity.provider.as_deref(),
             identity.workspace.as_deref().and_then(Path::to_str),
         )
         .expect("worker identity should produce an OTLP resource");

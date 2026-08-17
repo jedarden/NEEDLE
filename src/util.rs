@@ -376,7 +376,6 @@ pub fn parse_backend_name_from_version(
     binary_path: &std::path::Path,
     version_args: &[&str],
 ) -> Result<String> {
-    use std::io::Read;
     use std::process::{Command, Stdio};
     use std::thread;
 
@@ -1178,7 +1177,6 @@ mod tests {
 
     #[test]
     fn test_parse_backend_name_from_bf_version() {
-        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -1235,7 +1233,7 @@ echo "bead 0.1.3 (commit 85f36ac)"
         let _fake_binary = tmp_dir.path().join("fake-binary");
 
         // Test with various output formats
-        let test_outputs = vec![
+        let test_outputs = [
             "backend-name 1.0.0",
             "my-backend 2.3.4-beta",
             "tool 0.1.0+build.sha1",

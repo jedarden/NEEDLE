@@ -508,8 +508,9 @@ impl OtlpSink {
     /// The `file_sink` parameter is used to emit shutdown timeout events
     /// when the flush takes longer than 5 seconds.
     ///
-    /// The `agent`, `model`, and `workspace` parameters are optional resource
+    /// The `agent`, `model`, `provider`, and `workspace` parameters are optional resource
     /// attributes for OpenTelemetry semantic conventions.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         worker_id: String,
         session_id: String,
@@ -517,11 +518,12 @@ impl OtlpSink {
         file_sink: Option<Box<dyn crate::telemetry::Sink>>,
         agent: Option<&str>,
         model: Option<&str>,
+        provider: Option<&str>,
         workspace: Option<&str>,
     ) -> Result<Self> {
         // Build resource attributes from config + computed attributes
         let resource =
-            Self::build_resource(&worker_id, &session_id, config, agent, model, workspace)?;
+            Self::build_resource(&worker_id, &session_id, config, agent, model, provider, workspace)?;
 
         // Create drop sequence atomic and monitor channel
         let next_drop_sequence = Arc::new(AtomicU64::new(0));
@@ -754,6 +756,7 @@ impl OtlpSink {
         config: &OtlpSinkConfig,
         agent: Option<&str>,
         model: Option<&str>,
+        provider: Option<&str>,
         workspace: Option<&str>,
     ) -> Result<Resource> {
         // Reserved keys that cannot be overridden via config
@@ -784,6 +787,10 @@ impl OtlpSink {
         if let Some(model_value) = model {
             builder =
                 builder.with_attributes([KeyValue::new("needle.model", model_value.to_string())]);
+        }
+        if let Some(provider_value) = provider {
+            builder =
+                builder.with_attributes([KeyValue::new("needle.model.provider", provider_value.to_string())]);
         }
         if let Some(workspace_value) = workspace {
             builder = builder.with_attributes([KeyValue::new(
@@ -1368,7 +1375,7 @@ impl OtlpSink {
             attrs.push(("duration_ms", AnyValue::from(duration_ms as i64)));
         }
 
-        // Add needle.agent and needle.model from dispatch context when available.
+        // Add needle.agent, needle.model, and needle.model.provider from dispatch context when available.
         // These per-record attributes reflect the actual adapter/model dispatched,
         // which can differ from the configured default due to routing rules.
         // Per ADR-016 §2: record value wins over Resource value.
@@ -1377,6 +1384,9 @@ impl OtlpSink {
         }
         if let Some(model) = event.data.get("model").and_then(|v| v.as_str()) {
             attrs.push(("needle.model", model.to_string().into()));
+        }
+        if let Some(provider) = event.data.get("provider").and_then(|v| v.as_str()) {
+            attrs.push(("needle.model.provider", provider.to_string().into()));
         }
 
         log_record.add_attributes(attrs);
@@ -1649,7 +1659,7 @@ pub fn create_tracing_layer(
 
     // Build resource attributes from config + computed attributes
     let resource =
-        OtlpSink::build_resource(&worker_id, &session_id, config, agent, model, workspace)?;
+        OtlpSink::build_resource(&worker_id, &session_id, config, agent, model, None, workspace)?;
 
     // Create drop channel for the tracing layer
     // Dumps will be logged at WARN level rather than emitted as events
@@ -1904,6 +1914,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("build_resource should succeed");
 
@@ -1934,6 +1945,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("build_resource should succeed");
 
@@ -1961,6 +1973,7 @@ mod tests {
             &config,
             Some("claude-anthropic-sonnet"),
             Some("claude-sonnet-4-6"),
+            None,
             Some("/test/workspace"),
         )
         .expect("build_resource should succeed");
@@ -2065,7 +2078,7 @@ mod tests {
         config.resource_attributes = vec!["deployment.environment=production".to_string()];
 
         let resource =
-            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None)
+            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None, None)
                 .expect("build_resource should succeed");
 
         let env_attr = resource
@@ -2095,7 +2108,7 @@ mod tests {
             .push("service.instance.id=malicious-id".to_string());
 
         let result =
-            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None);
+            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None, None);
 
         assert!(
             result.is_err(),
@@ -2116,7 +2129,7 @@ mod tests {
             .push("service.name=not-needle".to_string());
 
         let result =
-            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None);
+            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None, None);
 
         assert!(
             result.is_err(),
