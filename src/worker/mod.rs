@@ -1298,6 +1298,14 @@ impl Worker {
         match claim {
             Ok(ClaimResult::Claimed(bead)) => {
                 tracing::info!(bead_id = %bead.id, "atomically claimed bead via claim_auto");
+                let workspace = if is_workspace_unset(&bead.workspace) {
+                    self.current_workspace.clone()
+                } else {
+                    bead.workspace.clone()
+                };
+                if !is_workspace_unset(&workspace) {
+                    self.telemetry.set_workspace(workspace);
+                }
                 crate::hoop_hooks::emit_needle_event(
                     &self.current_workspace,
                     &self.worker_name,
@@ -1674,6 +1682,14 @@ impl Worker {
                             bead.workspace = pre_claim.workspace.clone();
                         }
                     }
+                }
+                let workspace = if is_workspace_unset(&bead.workspace) {
+                    self.current_workspace.clone()
+                } else {
+                    bead.workspace.clone()
+                };
+                if !is_workspace_unset(&workspace) {
+                    self.telemetry.set_workspace(workspace);
                 }
                 self.current_bead = Some(bead);
                 // Start effort tracking for this cycle.

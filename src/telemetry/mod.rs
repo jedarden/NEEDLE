@@ -620,6 +620,35 @@ pub enum EventKind {
         restored_hash: String,
     },
 
+    // ── Upgrade checks ──
+    /// Emitted when an upgrade check begins
+    UpgradeCheckStarted {
+        /// Source of the check (e.g., "cli", "worker", "download_to_testing")
+        source: String,
+    },
+    /// Emitted when an upgrade check completes successfully
+    UpgradeCheckCompleted {
+        /// Source of the check
+        source: String,
+        /// Current version
+        current_version: String,
+        /// Latest available version
+        latest_version: String,
+        /// Whether an update is available
+        update_available: bool,
+        /// Whether release notes were included
+        has_release_notes: bool,
+    },
+    /// Emitted when an upgrade check fails
+    UpgradeCheckFailed {
+        /// Source of the check
+        source: String,
+        /// Error message describing what went wrong
+        error_message: String,
+        /// Error type/category (e.g., "network", "parse", "api")
+        error_type: String,
+    },
+
     // ── Canary testing ──
     CanaryStarted {
         suite: String,
@@ -892,6 +921,9 @@ impl EventKind {
             EventKind::UpgradeDetected { .. } => "worker.upgrade.detected",
             EventKind::UpgradeCompleted { .. } => "worker.upgrade.completed",
             EventKind::RollbackCompleted { .. } => "rollback.completed",
+            EventKind::UpgradeCheckStarted { .. } => "upgrade_check.started",
+            EventKind::UpgradeCheckCompleted { .. } => "upgrade_check.completed",
+            EventKind::UpgradeCheckFailed { .. } => "upgrade_check.failed",
             EventKind::CanaryStarted { .. } => "canary.started",
             EventKind::CanarySuiteCompleted { .. } => "canary.suite_completed",
             EventKind::CanaryPromoted { .. } => "canary.promoted",
@@ -1633,6 +1665,35 @@ impl EventKind {
                 serde_json::json!({
                     "rolled_back_hash": rolled_back_hash,
                     "restored_hash": restored_hash,
+                })
+            }
+            EventKind::UpgradeCheckStarted { source } => {
+                serde_json::json!({ "source": source })
+            }
+            EventKind::UpgradeCheckCompleted {
+                source,
+                current_version,
+                latest_version,
+                update_available,
+                has_release_notes,
+            } => {
+                serde_json::json!({
+                    "source": source,
+                    "current_version": current_version,
+                    "latest_version": latest_version,
+                    "update_available": update_available,
+                    "has_release_notes": has_release_notes,
+                })
+            }
+            EventKind::UpgradeCheckFailed {
+                source,
+                error_message,
+                error_type,
+            } => {
+                serde_json::json!({
+                    "source": source,
+                    "error_message": error_message,
+                    "error_type": error_type,
                 })
             }
             EventKind::OutputTransformSpawned {
@@ -2850,6 +2911,8 @@ pub struct Telemetry {
     worker_id: WorkerId,
     session_id: String,
     sequence: Arc<AtomicU64>,
+    /// Workspace of the most recently claimed bead, shared by all telemetry handles.
+    current_workspace: Arc<std::sync::RwLock<Option<PathBuf>>>,
     /// Wrapped in Arc<Mutex<Option<...>>> so that `shutdown()` can drop the
     /// sender explicitly (closing the channel) even while clones still exist.
     sender: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<WriterMessage>>>>,
@@ -2927,6 +2990,10 @@ impl OtlpShutdown {
 }
 
 impl Telemetry {
+    fn new_workspace_cell() -> Arc<std::sync::RwLock<Option<PathBuf>>> {
+        Arc::new(std::sync::RwLock::new(None))
+    }
+
     /// Create a telemetry emitter that writes to a `FileSink`.
     ///
     /// Does not spawn any async tasks. Call [`start()`](Self::start) from
@@ -2973,6 +3040,7 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
+            current_workspace: Self::new_workspace_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3028,6 +3096,7 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
+            current_workspace: Self::new_workspace_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3090,6 +3159,7 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
+            current_workspace: Self::new_workspace_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3215,6 +3285,7 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
+            current_workspace: Self::new_workspace_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3249,6 +3320,7 @@ impl Telemetry {
                 worker_id,
                 session_id,
                 sequence,
+                current_workspace: Self::new_workspace_cell(),
                 sender: Arc::new(std::sync::Mutex::new(Some(sender))),
                 pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
                 writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3269,6 +3341,7 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
+            current_workspace: Self::new_workspace_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3298,6 +3371,7 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
+            current_workspace: Self::new_workspace_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(None)),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3305,25 +3379,56 @@ impl Telemetry {
         }
     }
 
-    /// Emit an event. Non-blocking — returns immediately.
+    /// Update the workspace attached to subsequently emitted events.
     ///
-    /// Returns `Err` only if the channel is disconnected (background task died).
-    pub fn emit(&self, kind: EventKind) -> Result<()> {
+    /// The path is kept internally so local sinks and query filters can retain
+    /// their existing behavior. The OTLP sink reduces it to a basename before
+    /// adding the browser-visible log attribute.
+    pub fn set_workspace(&self, workspace: impl Into<PathBuf>) {
+        let workspace = workspace.into();
+        match self.current_workspace.write() {
+            Ok(mut current) => *current = Some(workspace),
+            Err(poisoned) => {
+                tracing::warn!("telemetry workspace lock poisoned; recovering current workspace");
+                *poisoned.into_inner() = Some(workspace);
+            }
+        }
+    }
+
+    fn workspace_snapshot(&self) -> Option<PathBuf> {
+        match self.current_workspace.read() {
+            Ok(current) => current.clone(),
+            Err(poisoned) => {
+                tracing::warn!("telemetry workspace lock poisoned; recovering workspace snapshot");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    fn make_event(&self, kind: &EventKind) -> TelemetryEvent {
         let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
         let (trace_id, span_id) = current_trace_ids();
-        let event = TelemetryEvent {
+        TelemetryEvent {
             timestamp: Utc::now(),
             event_type: kind.event_type().to_string(),
             worker_id: self.worker_id.clone(),
             session_id: self.session_id.clone(),
             sequence: seq,
             bead_id: kind.bead_id(),
-            workspace: None,
+            workspace: self.workspace_snapshot(),
             duration_ms: kind.duration_ms(),
             data: kind.to_data(),
             trace_id,
             span_id,
-        };
+        }
+    }
+
+    /// Emit an event. Non-blocking — returns immediately.
+    ///
+    /// Returns `Err` only if the channel is disconnected (background task died).
+    pub fn emit(&self, kind: EventKind) -> Result<()> {
+        let event = self.make_event(&kind);
+        let seq = event.sequence;
         tracing::debug!(event_type = %event.event_type, seq, "telemetry event");
         // Use try_lock() to avoid blocking indefinitely if the telemetry writer
         // is stuck holding the lock. If the lock is contended, we log and return
@@ -3354,21 +3459,8 @@ impl Telemetry {
     /// Use this in timeout recovery paths where blocking on emit() would
     /// prevent the worker from recovering.
     pub fn emit_try_lock(&self, kind: EventKind) -> Result<()> {
-        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
-        let (trace_id, span_id) = current_trace_ids();
-        let event = TelemetryEvent {
-            timestamp: Utc::now(),
-            event_type: kind.event_type().to_string(),
-            worker_id: self.worker_id.clone(),
-            session_id: self.session_id.clone(),
-            sequence: seq,
-            bead_id: kind.bead_id(),
-            workspace: None,
-            duration_ms: kind.duration_ms(),
-            data: kind.to_data(),
-            trace_id,
-            span_id,
-        };
+        let event = self.make_event(&kind);
+        let seq = event.sequence;
         // Use try_lock() to avoid blocking indefinitely if the telemetry writer
         // is stuck holding the lock. If the lock is contended, we log and return
         // Ok(()) to allow the worker to continue.
@@ -3472,21 +3564,7 @@ impl Telemetry {
     /// Returns `Err` if the pending writer is not available (already started)
     /// or if writing to the file fails.
     pub fn emit_sync(&self, kind: EventKind) -> Result<()> {
-        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
-        let (trace_id, span_id) = current_trace_ids();
-        let event = TelemetryEvent {
-            timestamp: Utc::now(),
-            event_type: kind.event_type().to_string(),
-            worker_id: self.worker_id.clone(),
-            session_id: self.session_id.clone(),
-            sequence: seq,
-            bead_id: kind.bead_id(),
-            workspace: None,
-            duration_ms: kind.duration_ms(),
-            data: kind.to_data(),
-            trace_id,
-            span_id,
-        };
+        let event = self.make_event(&kind);
 
         // Take the pending writer temporarily to write directly to sinks.
         let pending_guard = self.pending_writer.lock().unwrap();
@@ -3536,6 +3614,7 @@ impl Telemetry {
             worker_id,
             session_id,
             sequence,
+            current_workspace: Self::new_workspace_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -4680,6 +4759,47 @@ mod tests {
         assert_eq!(collected[1].event_type, "bead.claim.attempted");
         assert_eq!(collected[1].sequence, 1);
         assert_eq!(collected[1].bead_id, Some(BeadId::from("nd-test")));
+    }
+
+    #[tokio::test]
+    async fn emitted_events_follow_workspace_changes_within_one_session() {
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+
+        telemetry.set_workspace("/home/coding/commitgraph");
+        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.set_workspace("/home/coding/SEAM");
+        telemetry.emit_try_lock(EventKind::QueueEmpty).unwrap();
+
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let collected = events.lock().unwrap();
+        assert_eq!(collected.len(), 2);
+        assert_eq!(
+            collected[0].workspace.as_deref(),
+            Some(std::path::Path::new("/home/coding/commitgraph"))
+        );
+        assert_eq!(
+            collected[1].workspace.as_deref(),
+            Some(std::path::Path::new("/home/coding/SEAM"))
+        );
+    }
+
+    #[test]
+    fn emit_sync_uses_current_workspace() {
+        let (sink, events) = MemorySink::new();
+        let telemetry =
+            Telemetry::with_boxed_sinks("test-worker".to_string(), vec![Box::new(sink)]);
+
+        telemetry.set_workspace("/tmp/private/repo");
+        telemetry.emit_sync(EventKind::QueueEmpty).unwrap();
+
+        let collected = events.lock().unwrap();
+        assert_eq!(
+            collected[0].workspace.as_deref(),
+            Some(std::path::Path::new("/tmp/private/repo"))
+        );
     }
 
     #[tokio::test]
