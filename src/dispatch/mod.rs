@@ -76,6 +76,115 @@ pub struct ExecutionResult {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Hard deadline timer
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Hard deadline timer: a non-resettable absolute timeout.
+///
+/// Created once at process spawn with `Instant::now() + duration`, never modified.
+/// Unlike idle timeout (which resets on activity), the hard deadline is a strict
+/// upper bound on total execution time regardless of process behavior.
+///
+/// # Key characteristics
+/// - **Absolute**: Deadline is computed once at creation from current time
+/// - **Non-resettable**: No methods to extend or modify the deadline after creation
+/// - **Strict**: Process must terminate when deadline expires
+/// - **Independent**: Operates separately from idle timeout detection
+#[derive(Debug)]
+pub struct HardDeadlineTimer {
+    /// Absolute deadline computed at creation time.
+    /// `None` when hard timeout is disabled (duration = 0).
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl HardDeadlineTimer {
+    /// Create a new hard deadline timer with the given duration.
+    ///
+    /// # Arguments
+    /// * `timeout_duration` - Duration from now until deadline (0 = disabled)
+    ///
+    /// # Returns
+    /// A new timer with absolute deadline set to `now + duration`, or `None` if duration is 0.
+    pub fn new(timeout_duration: Duration) -> Self {
+        let deadline = if timeout_duration.is_zero() {
+            None
+        } else {
+            Some(tokio::time::Instant::now() + timeout_duration)
+        };
+        Self { deadline }
+    }
+
+    /// Check whether the hard deadline has expired.
+    ///
+    /// # Returns
+    /// * `Some(true)` - deadline is set and has expired
+    /// * `Some(false)` - deadline is set but has not yet expired
+    /// * `None` - no deadline is set (hard timeout disabled)
+    pub fn is_expired(&self) -> Option<bool> {
+        self.deadline
+            .map(|deadline| tokio::time::Instant::now() >= deadline)
+    }
+
+    /// Check if a hard deadline is active (non-zero duration was configured).
+    ///
+    /// # Returns
+    /// `true` if a deadline is set, `false` if hard timeout is disabled.
+    pub fn is_enabled(&self) -> bool {
+        self.deadline.is_some()
+    }
+
+    /// Get the absolute deadline, if set.
+    ///
+    /// # Returns
+    /// `Some(deadline)` if hard timeout is enabled, `None` otherwise.
+    pub fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.deadline
+    }
+
+    /// Get the remaining time until the deadline expires.
+    ///
+    /// # Returns
+    /// * `Some(duration)` - Time remaining until deadline (may be zero or negative if expired)
+    /// * `None` - No deadline is set
+    pub fn remaining(&self) -> Option<Duration> {
+        self.deadline.map(|deadline| {
+            let now = tokio::time::Instant::now();
+            if deadline > now {
+                deadline - now
+            } else {
+                Duration::ZERO
+            }
+        })
+    }
+
+    /// Wait until the deadline expires.
+    ///
+    /// This method returns immediately if:
+    /// - No deadline is set (hard timeout disabled)
+    /// - Deadline has already expired
+    ///
+    /// Otherwise, it sleeps until the absolute deadline is reached.
+    ///
+    /// # Cancellation
+    /// This is a cancellable async operation. Dropping the future will cancel the wait.
+    pub async fn wait_until_expired(&self) {
+        if let Some(deadline) = self.deadline {
+            tokio::time::sleep_until(deadline).await;
+        }
+    }
+}
+
+impl Clone for HardDeadlineTimer {
+    /// Clone creates a new timer referencing the same absolute deadline.
+    ///
+    /// This is safe because the deadline is an absolute point in time computed
+    /// at original creation. Both timers reference the same deadline moment.
+    fn clone(&self) -> Self {
+        Self { deadline: self.deadline }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Process observation state
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -950,6 +1059,7 @@ impl Dispatcher {
         // Emit completion telemetry regardless of success/failure.
         let agent_name = adapter.name.clone();
         let agent_model = adapter.model.clone();
+        let agent_provider = adapter.provider.clone();
         match &result {
             Ok(exec) => {
                 tracing::Span::current().record("needle.agent.pid", exec.pid);
@@ -979,6 +1089,7 @@ impl Dispatcher {
                     duration_ms: exec.elapsed.as_millis() as u64,
                     agent: agent_name,
                     model: agent_model,
+                    provider: agent_provider,
                 });
 
                 // Emit structured timeout event if applicable.
@@ -1000,6 +1111,7 @@ impl Dispatcher {
                     duration_ms: 0,
                     agent: agent_name,
                     model: agent_model,
+                    provider: agent_provider,
                 });
             }
         }
@@ -4704,3 +4816,123 @@ async fn hard_timeout_disabled_when_zero() {
     assert_eq!(result.exit_code, 0);
     assert!(result.timeout_reason.is_none());
 }
+
+// ── HardDeadlineTimer tests ──
+
+#[test]
+fn hard_deadline_timer_disabled_with_zero_duration() {
+    let timer = HardDeadlineTimer::new(Duration::ZERO);
+    assert!(!timer.is_enabled());
+    assert!(timer.deadline().is_none());
+    assert!(timer.is_expired().is_none());
+    assert!(timer.remaining().is_none());
+}
+
+#[test]
+fn hard_deadline_timer_enabled_with_nonzero_duration() {
+    let timer = HardDeadlineTimer::new(Duration::from_secs(10));
+    assert!(timer.is_enabled());
+    assert!(timer.deadline().is_some());
+}
+
+#[test]
+fn hard_deadline_timer_deadline_is_absolute() {
+    let start = tokio::time::Instant::now();
+    let timer = HardDeadlineTimer::new(Duration::from_millis(100));
+
+    let deadline = timer.deadline().expect("deadline should be set");
+
+    // Deadline should be approximately start + 100ms
+    let elapsed = deadline.duration_since(start);
+    assert!(elapsed >= Duration::from_millis(99));
+    assert!(elapsed <= Duration::from_millis(150));
+}
+
+#[test]
+fn hard_deadline_timer_not_expired_initially() {
+    let timer = HardDeadlineTimer::new(Duration::from_secs(10));
+    assert_eq!(timer.is_expired(), Some(false));
+}
+
+#[test]
+fn hard_deadline_timer_remaining_positive_initially() {
+    let timer = HardDeadlineTimer::new(Duration::from_secs(10));
+    let remaining = timer.remaining().expect("should have remaining time");
+
+    // Should be close to 10 seconds
+    assert!(remaining >= Duration::from_secs(9));
+    assert!(remaining <= Duration::from_secs(10));
+}
+
+#[test]
+fn hard_deadline_timer_clone_shares_deadline() {
+    let timer1 = HardDeadlineTimer::new(Duration::from_secs(5));
+    let timer2 = timer1.clone();
+
+    assert_eq!(timer1.deadline(), timer2.deadline());
+
+    if let (Some(d1), Some(d2)) = (timer1.deadline(), timer2.deadline()) {
+        // Both should reference the same absolute deadline
+        assert_eq!(d1, d2);
+    }
+}
+
+#[tokio::test]
+async fn hard_deadline_timer_wait_returns_immediately_when_disabled() {
+    let timer = HardDeadlineTimer::new(Duration::ZERO);
+
+    // Should return immediately since no deadline is set
+    let start = tokio::time::Instant::now();
+    timer.wait_until_expired().await;
+    let elapsed = start.elapsed();
+
+    assert!(elapsed < Duration::from_millis(10));
+}
+
+#[tokio::test]
+async fn hard_deadline_timer_waits_until_deadline() {
+    let duration = Duration::from_millis(100);
+    let timer = HardDeadlineTimer::new(duration);
+
+    let start = tokio::time::Instant::now();
+    timer.wait_until_expired().await;
+    let elapsed = start.elapsed();
+
+    // Should have waited approximately 100ms
+    assert!(elapsed >= Duration::from_millis(90));
+    assert!(elapsed < Duration::from_millis(200));
+}
+
+#[tokio::test]
+async fn hard_deadline_timer_remaining_decreases_over_time() {
+    let timer = HardDeadlineTimer::new(Duration::from_millis(100));
+
+    let remaining1 = timer.remaining().expect("should have remaining time");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let remaining2 = timer.remaining().expect("should have remaining time");
+
+    // remaining2 should be less than remaining1
+    assert!(remaining2 < remaining1);
+}
+
+#[tokio::test]
+async fn hard_deadline_timer_expires_after_duration() {
+    let duration = Duration::from_millis(100);
+    let timer = HardDeadlineTimer::new(duration);
+
+    // Initially not expired
+    assert_eq!(timer.is_expired(), Some(false));
+
+    // Wait until deadline
+    timer.wait_until_expired().await;
+
+    // Now expired
+    assert_eq!(timer.is_expired(), Some(true));
+
+    // Remaining should be zero
+    let remaining = timer.remaining().expect("should have remaining time");
+    assert!(remaining <= Duration::from_millis(10));
+}
+
+
