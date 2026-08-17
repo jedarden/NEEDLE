@@ -1141,7 +1141,7 @@ impl Worker {
             );
             eprintln!();
             eprintln!("Underlying error: {e}");
-            bail!("adapter '{adapter_name}' not found — startup aborted");
+            bail!("adapter '{adapter_name}' preflight failed — startup aborted: {e}");
         }
         self.telemetry.emit(EventKind::InitStepCompleted {
             step: "adapter_preflight".to_string(),
@@ -3869,11 +3869,38 @@ impl Worker {
             })?;
         }
 
+        // A routed adapter must come from an operator-provided YAML file.
+        // Dispatcher also keeps built-in adapters available for the ordinary
+        // (non-routed) default path, so checking only its adapter map here
+        // would silently turn a missing routed file into a built-in fallback.
+        if matched_rule != "default" {
+            let expected_yaml = self
+                .config
+                .agent
+                .adapters_dir
+                .join(format!("{chosen_adapter_name}.yaml"));
+            let expected_yml = self
+                .config
+                .agent
+                .adapters_dir
+                .join(format!("{chosen_adapter_name}.yml"));
+            if !expected_yaml.is_file() && !expected_yml.is_file() {
+                bail!(
+                    "routed adapter '{}' is missing its YAML configuration: model '{}' matched pattern '{}', but no adapter YAML was found at '{}' (also checked '{}')",
+                    chosen_adapter_name,
+                    default_adapter.model.as_deref().unwrap_or("unknown"),
+                    matched_rule,
+                    expected_yaml.display(),
+                    expected_yml.display()
+                );
+            }
+        }
+
         // Resolve the chosen adapter.
         let adapter = self.dispatcher.adapter(&chosen_adapter_name)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!(
-                "routed adapter '{}' not found — routing matched model '{}' with rule '{}', but the adapter does not exist",
+                "routed adapter '{}' could not be loaded — routing matched model '{}' with pattern '{}', but the adapter YAML could not be loaded",
                 chosen_adapter_name,
                 default_adapter.model.as_deref().unwrap_or("unknown"),
                 matched_rule
@@ -4417,6 +4444,38 @@ mod tests {
         // request to `claude-print` — an adapter that is not built in.
         let adapter = result.expect("built-in adapter should resolve");
         assert_eq!(adapter.name, "claude-sonnet");
+    }
+
+    #[tokio::test]
+    async fn resolve_adapter_fails_when_routed_yaml_is_missing() {
+        use crate::config::{RoutingConfig, RoutingRule};
+
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut config = valid_test_config();
+        config.agent.routing = Some(RoutingConfig {
+            rules: vec![RoutingRule {
+                match_model: "claude-sonnet-4-6".to_string(),
+                // This is intentionally the name of a built-in adapter. A
+                // routed selection must not use it when its YAML is absent.
+                adapter: "claude-sonnet".to_string(),
+            }],
+            default_adapter: None,
+            strict: false,
+        });
+        let expected_yaml = config.agent.adapters_dir.join("claude-sonnet.yaml");
+        let worker = Worker::new(config, "test-routing-missing-yaml".to_string(), store);
+
+        let error = worker
+            .resolve_adapter()
+            .expect_err("missing routed adapter YAML must fail resolution")
+            .to_string();
+
+        assert!(error.contains("claude-sonnet-4-6"), "error: {error}");
+        assert!(error.contains("matched pattern"), "error: {error}");
+        assert!(
+            error.contains(expected_yaml.to_string_lossy().as_ref()),
+            "error: {error}"
+        );
     }
 
     #[tokio::test]
