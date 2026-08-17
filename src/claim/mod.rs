@@ -461,6 +461,56 @@ impl Claimer {
         }
     }
 
+    /// Verify that a bead is still assigned to the expected worker at dispatch time.
+    ///
+    /// This prevents double-dispatch by checking the live bead store immediately
+    /// before agent execution. If another worker has reassigned the bead or the
+    /// bead has been released, the dispatch should be aborted.
+    ///
+    /// Returns:
+    /// - `Ok(true)`: bead is still in_progress and assigned to expected actor
+    /// - `Ok(false)`: bead is not assigned to expected actor (dispatch should abort)
+    /// - `Err(e)`: store error
+    pub async fn verify_claim_at_dispatch(
+        &self,
+        bead_id: &BeadId,
+        expected_actor: &str,
+    ) -> Result<bool> {
+        match self.store.show(bead_id).await {
+            Ok(bead) => {
+                let is_valid = bead.status == BeadStatus::InProgress
+                    && bead.assignee.as_deref() == Some(expected_actor);
+                if !is_valid {
+                    tracing::warn!(
+                        bead_id = %bead_id,
+                        expected_actor = %expected_actor,
+                        actual_status = ?bead.status,
+                        actual_assignee = ?bead.assignee,
+                        "dispatch-time claim verification failed"
+                    );
+                    self.telemetry.emit(EventKind::ClaimVerifyFailed {
+                        bead_id: bead_id.clone(),
+                        expected_actor: expected_actor.to_string(),
+                        actual_status: format!("{:?}", bead.status),
+                        actual_assignee: bead
+                            .assignee
+                            .clone()
+                            .unwrap_or_else(|| "(none)".to_string()),
+                    })?;
+                }
+                Ok(is_valid)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    bead_id = %bead_id,
+                    error = %e,
+                    "dispatch-time claim verification encountered store error"
+                );
+                Err(e)
+            }
+        }
+    }
+
     /// Atomically claim the next available bead using server-side selection.
     ///
     /// This is the preferred method for multi-worker scenarios. It calls

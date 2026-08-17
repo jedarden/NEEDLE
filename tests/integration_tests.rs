@@ -4532,7 +4532,10 @@ agent:
     config_expanded.expand_tildes();
 
     assert!(
-        config_expanded.agent.adapters_dir.starts_with(&isolated_home),
+        config_expanded
+            .agent
+            .adapters_dir
+            .starts_with(&isolated_home),
         "agent.adapters_dir should be expanded to isolated home, got: {}",
         config_expanded.agent.adapters_dir.display()
     );
@@ -4640,7 +4643,11 @@ bead_cli:
     config_expanded.expand_tildes();
 
     assert!(
-        config_expanded.bead_cli.path.unwrap().starts_with(&isolated_home),
+        config_expanded
+            .bead_cli
+            .path
+            .unwrap()
+            .starts_with(&isolated_home),
         "bead_cli.path should be expanded to isolated home, got: {}",
         config_expanded.bead_cli.path.unwrap().display()
     );
@@ -4765,7 +4772,11 @@ strands:
     config_expanded.expand_tildes();
 
     assert!(
-        config_expanded.strands.explore.workspace_root.starts_with(&isolated_home),
+        config_expanded
+            .strands
+            .explore
+            .workspace_root
+            .starts_with(&isolated_home),
         "strands.explore.workspace_root should be expanded to isolated home, got: {}",
         config_expanded.strands.explore.workspace_root.display()
     );
@@ -4967,14 +4978,8 @@ strands:
 
     println!("✓ Explore workspaces tilde expansion test passed");
     println!("  Isolated home: {}", isolated_home.display());
-    println!(
-        "  Tilde path ~/dev/workspace1 -> {}",
-        workspace1.display()
-    );
-    println!(
-        "  Tilde path ~/dev/workspace2 -> {}",
-        workspace2.display()
-    );
+    println!("  Tilde path ~/dev/workspace1 -> {}", workspace1.display());
+    println!("  Tilde path ~/dev/workspace2 -> {}", workspace2.display());
 }
 
 /// Test tilde expansion in strands.learning.global_learnings_file configuration.
@@ -5029,9 +5034,17 @@ strands:
     config_expanded.expand_tildes();
 
     assert!(
-        config_expanded.strands.learning.global_learnings_file.starts_with(&isolated_home),
+        config_expanded
+            .strands
+            .learning
+            .global_learnings_file
+            .starts_with(&isolated_home),
         "global_learnings_file should be expanded to isolated home, got: {}",
-        config_expanded.strands.learning.global_learnings_file.display()
+        config_expanded
+            .strands
+            .learning
+            .global_learnings_file
+            .display()
     );
 
     assert_eq!(
@@ -5052,7 +5065,10 @@ strands:
     config_absolute_expanded.expand_tildes();
 
     assert_eq!(
-        config_absolute_expanded.strands.learning.global_learnings_file,
+        config_absolute_expanded
+            .strands
+            .learning
+            .global_learnings_file,
         std::path::PathBuf::from("/absolute/path/to/learnings.md"),
         "absolute paths should pass through unchanged"
     );
@@ -5070,7 +5086,10 @@ strands:
     config_relative_expanded.expand_tildes();
 
     assert_eq!(
-        config_relative_expanded.strands.learning.global_learnings_file,
+        config_relative_expanded
+            .strands
+            .learning
+            .global_learnings_file,
         std::path::PathBuf::from("relative/path/to/learnings.md"),
         "relative paths should pass through unchanged"
     );
@@ -5149,7 +5168,13 @@ telemetry:
             .unwrap()
             .starts_with(&isolated_home),
         "log_dir should be expanded to isolated home, got: {}",
-        config_expanded.telemetry.file_sink.log_dir.as_ref().unwrap().display()
+        config_expanded
+            .telemetry
+            .file_sink
+            .log_dir
+            .as_ref()
+            .unwrap()
+            .display()
     );
 
     assert_eq!(
@@ -5171,7 +5196,11 @@ telemetry:
     config_absolute_expanded.expand_tildes();
 
     assert_eq!(
-        config_absolute_expanded.telemetry.file_sink.log_dir.unwrap(),
+        config_absolute_expanded
+            .telemetry
+            .file_sink
+            .log_dir
+            .unwrap(),
         std::path::PathBuf::from("/var/log/needle"),
         "absolute paths should pass through unchanged"
     );
@@ -5189,7 +5218,11 @@ telemetry:
     config_relative_expanded.expand_tildes();
 
     assert_eq!(
-        config_relative_expanded.telemetry.file_sink.log_dir.unwrap(),
+        config_relative_expanded
+            .telemetry
+            .file_sink
+            .log_dir
+            .unwrap(),
         std::path::PathBuf::from("./logs/needle"),
         "relative paths should pass through unchanged"
     );
@@ -5282,7 +5315,12 @@ supervisor:
             .unwrap()
             .starts_with(&isolated_home),
         "heartbeat_path should be expanded to isolated home, got: {}",
-        config_expanded.supervisor.heartbeat_path.as_ref().unwrap().display()
+        config_expanded
+            .supervisor
+            .heartbeat_path
+            .as_ref()
+            .unwrap()
+            .display()
     );
 
     assert_eq!(

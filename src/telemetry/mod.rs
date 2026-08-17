@@ -176,6 +176,12 @@ pub enum EventKind {
         strand_name: String,
         reason: String,
     },
+    ResolveEvaluated {
+        bead_id: BeadId,
+        decision: String,
+        evidence: String,
+        duration_ms: u64,
+    },
     BeadStoreError {
         strand_name: String,
         operation: String,
@@ -217,6 +223,12 @@ pub enum EventKind {
         bead_id: BeadId,
         consecutive_errors: u32,
         last_error: String,
+    },
+    ClaimVerifyFailed {
+        bead_id: BeadId,
+        expected_actor: String,
+        actual_status: String,
+        actual_assignee: String,
     },
 
     // ── Bead lifecycle ──
@@ -977,6 +989,7 @@ impl EventKind {
             | EventKind::OutcomeClassified { bead_id, .. }
             | EventKind::OutcomeHandled { bead_id, .. }
             | EventKind::WorkerHandlingTimeout { bead_id, .. }
+            | EventKind::ResolveEvaluated { bead_id, .. }
             | EventKind::StuckDetected { bead_id, .. }
             | EventKind::StuckReleased { bead_id, .. }
             | EventKind::MendDependencyCleaned { bead_id, .. }
@@ -1095,6 +1108,9 @@ impl EventKind {
             EventKind::SpawnPathModifiedInPlace { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
             EventKind::Log { bead_id, .. } => bead_id.clone(),
+            EventKind::UpgradeCheckStarted { .. } => None,
+            EventKind::UpgradeCheckCompleted { .. } => None,
+            EventKind::UpgradeCheckFailed { .. } => None,
         }
     }
 
@@ -2231,6 +2247,7 @@ impl EventKind {
             EventKind::DispatchCompleted { duration_ms, .. }
             | EventKind::BeadCompleted { duration_ms, .. }
             | EventKind::StrandEvaluated { duration_ms, .. }
+            | EventKind::ResolveEvaluated { duration_ms, .. }
             | EventKind::InitStepCompleted { duration_ms, .. }
             | EventKind::EffortRecorded {
                 elapsed_ms: duration_ms,
@@ -2238,7 +2255,8 @@ impl EventKind {
             }
             | EventKind::CargoTestCompleted { duration_ms, .. }
             | EventKind::ExploreScanSummary { duration_ms, .. }
-            | EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
+            | EventKind::TransformCompleted { duration_ms, .. }
+            | EventKind::ResolveEvaluated { duration_ms, .. } => Some(*duration_ms),
             EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
