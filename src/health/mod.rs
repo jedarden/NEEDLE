@@ -4443,4 +4443,136 @@ mod tests {
         let is_alive = monitor.check_worker_alive(qualified_id).unwrap();
         assert!(is_alive, "worker should be found using qualified ID format");
     }
+
+    /// Integration test for worker liveness detection.
+    ///
+    /// This test validates the acceptance criteria:
+    /// 1. Launch a worker with health monitor
+    /// 2. Verify worker is detected as alive via heartbeat freshness
+    /// 3. Kill the worker and verify it's detected as dead/stale
+    /// 4. Uses proper test isolation (temp HOME, heartbeat dir)
+    #[tokio::test]
+    async fn worker_liveness_detection_integration() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+
+        let mut config = test_config(&hb_dir);
+        config.health.heartbeat_interval_secs = 1;
+        config.health.heartbeat_ttl_secs = 3;
+
+        // ACCEPTANCE CRITERION 1: Launch worker with health monitor
+        let mut monitor = HealthMonitor::new(
+            config.clone(),
+            "liveness-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        let qualified_id = monitor.qualified_id().to_string();
+        let heartbeat_path = monitor.heartbeat_path();
+
+        // Start the emitter
+        monitor.start_emitter().unwrap();
+
+        // Verify initial heartbeat file was created
+        assert!(
+            heartbeat_path.exists(),
+            "heartbeat file must exist after starting worker"
+        );
+
+        // ACCEPTANCE CRITERION 2: Verify worker is detected as alive via heartbeat freshness
+        // The heartbeat should be fresh immediately after starting
+        let is_alive = monitor.check_worker_alive(&qualified_id).unwrap();
+        assert!(
+            is_alive,
+            "worker should be detected as alive immediately after starting"
+        );
+
+        // Verify the heartbeat via verify_heartbeat method as well
+        let verify_result = monitor.verify_heartbeat().unwrap();
+        assert!(
+            verify_result,
+            "verify_heartbeat should return true for fresh heartbeat"
+        );
+
+        // Wait for one heartbeat refresh interval to ensure freshness detection works
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        // Worker should still be detected as alive after one interval
+        let is_alive_after_interval = monitor.check_worker_alive(&qualified_id).unwrap();
+        assert!(
+            is_alive_after_interval,
+            "worker should still be detected as alive after heartbeat refresh"
+        );
+
+        // ACCEPTANCE CRITERION 3: Kill worker and verify it's detected as dead/stale
+        // Stop the emitter (simulating worker death)
+        monitor.stop();
+
+        // Verify heartbeat file was removed on stop
+        assert!(
+            !heartbeat_path.exists(),
+            "heartbeat file should be removed after worker stops"
+        );
+
+        // Worker should now be detected as dead (no heartbeat file)
+        let is_dead = monitor.check_worker_alive(&qualified_id).unwrap();
+        assert!(
+            !is_dead,
+            "worker should be detected as dead after stopping"
+        );
+
+        // Test stale detection scenario: simulate a dead worker with stale heartbeat file
+        // Create a stale heartbeat file manually
+        let stale_heartbeat = HeartbeatData {
+            worker_id: "liveness-test".to_string(),
+            qualified_id: qualified_id.clone(),
+            pid: std::process::id(),
+            state: WorkerState::Executing,
+            current_bead: Some(BeadId::from("stale-test")),
+            workspace: dir.path().to_path_buf(),
+            last_heartbeat: Utc::now() - chrono::Duration::seconds(10), // 10 seconds ago (older than 3s TTL)
+            started_at: Utc::now() - chrono::Duration::seconds(100),
+            beads_processed: 0,
+            session: "liveness-test".to_string(),
+            is_idle: false,
+            current_task: Some("stale-test".to_string()),
+            model: "claude-code-glm-5".to_string(),
+            heartbeat_file: None,
+        };
+
+        std::fs::write(
+            &heartbeat_path,
+            serde_json::to_string(&stale_heartbeat).unwrap(),
+        )
+        .unwrap();
+
+        // Worker should be detected as dead due to stale heartbeat
+        let is_stale = monitor.check_worker_alive(&qualified_id).unwrap();
+        assert!(
+            !is_stale,
+            "worker should be detected as dead with stale heartbeat file"
+        );
+
+        // Verify the heartbeat is actually considered stale via verify_heartbeat
+        let verify_stale = monitor.verify_heartbeat().unwrap();
+        assert!(
+            !verify_stale,
+            "verify_heartbeat should return false for stale heartbeat"
+        );
+
+        // Verify via is_stale function
+        let heartbeats = HealthMonitor::read_all_heartbeats(&hb_dir).unwrap();
+        assert_eq!(heartbeats.len(), 1, "should have one heartbeat file");
+        let hb = &heartbeats[0];
+        let is_stale_check = HealthMonitor::is_stale(hb, Duration::from_secs(3));
+        assert!(
+            is_stale_check,
+            "is_stale should return true for heartbeat older than TTL"
+        );
+
+        // Clean up
+        std::fs::remove_file(&heartbeat_path).unwrap();
+    }
 }
