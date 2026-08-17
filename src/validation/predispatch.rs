@@ -122,7 +122,7 @@ pub async fn current_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<St
 
 /// Read notes through the already-resolved workspace backend.
 async fn read_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<String> {
-    store.notes(bead_id).await.ok().flatten()
+    store.show(bead_id).await.ok().and_then(|bead| bead.body)
 }
 
 async fn run(workspace: &Path, bin: &str, args: &[&str]) -> Option<String> {
