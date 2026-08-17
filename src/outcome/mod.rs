@@ -493,6 +493,76 @@ impl OutcomeHandler {
                 events.push(EventKind::BeadOrphaned {
                     bead_id: bead.id.clone(),
                 });
+
+                // Use verify_shipped_work to decide close-vs-release.
+                // If the agent shipped work, close the bead. Otherwise, release
+                // and increment failure count so repeat offenders quarantine.
+                if self.config.worker.enforce_shipped_work {
+                    match verify_shipped_work(&current, &bead.workspace, store).await {
+                        Ok(crate::validation::GateResult::Pass) => {
+                            tracing::info!(
+                                bead_id = %bead.id,
+                                "shipped work detected — closing orphaned bead"
+                            );
+                            // Close the bead to finish what the agent started.
+                            let _ = tokio::time::timeout(
+                                std::time::Duration::from_secs(30),
+                                store
+                                    .close(&bead.id, "shipped work detected (agent did not close)"),
+                            )
+                            .await;
+                            // Clear the predispatch snapshot since work is complete.
+                            crate::validation::predispatch::clear(&bead.workspace, &bead.id).await;
+                            events.push(EventKind::BeadCompleted {
+                                bead_id: bead.id.clone(),
+                                duration_ms: 0,
+                            });
+                        }
+                        Ok(crate::validation::GateResult::Fail(reason)) => {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                reason = %reason,
+                                "no shipped work detected — releasing orphaned bead with failure increment"
+                            );
+                            // Release and increment failure count to apply quarantine.
+                            let mut release_events = self.release_bead(store, bead).await?;
+                            events.append(&mut release_events);
+                            let release_succeeded = events
+                                .iter()
+                                .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+                            if release_succeeded {
+                                let _ = self.increment_failure_count(store, bead).await;
+                            }
+                            return Ok((BeadAction::Released, events));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                error = %e,
+                                "shipped-work check errored — releasing orphaned bead with failure increment"
+                            );
+                            // On error, release and increment failure count.
+                            let mut release_events = self.release_bead(store, bead).await?;
+                            events.append(&mut release_events);
+                            let release_succeeded = events
+                                .iter()
+                                .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+                            if release_succeeded {
+                                let _ = self.increment_failure_count(store, bead).await;
+                            }
+                            return Ok((BeadAction::Released, events));
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "enforce_shipped_work disabled — releasing orphaned bead"
+                    );
+                    // If enforce_shipped_work is disabled, just release without closing.
+                    let mut release_events = self.release_bead(store, bead).await?;
+                    events.append(&mut release_events);
+                    return Ok((BeadAction::Released, events));
+                }
             }
             Ok(None) => {
                 // Timeout - emit telemetry and continue.
@@ -1295,6 +1365,10 @@ mod tests {
         }
     }
 
+    fn test_store(status: BeadStatus) -> MockBeadStore {
+        MockBeadStore::new(status)
+    }
+
     #[async_trait]
     impl BeadStore for MockBeadStore {
         async fn list_all(&self) -> Result<Vec<Bead>> {
@@ -1470,7 +1544,7 @@ mod tests {
     #[tokio::test]
     async fn handle_success_bead_closed_by_agent() {
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::Done);
+        let store = test_store(BeadStatus::Done);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1489,9 +1563,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_success_bead_still_open_emits_orphaned() {
+    async fn handle_success_bead_still_open_releases_to_prevent_leak() {
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1500,22 +1574,33 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Success);
-        assert_eq!(result.bead_action, BeadAction::None);
+        assert_eq!(
+            result.bead_action,
+            BeadAction::Released,
+            "bead still open after success must be released to enforce postcondition"
+        );
         let actions = store.actions();
         assert!(
             actions.iter().any(|a| matches!(a, StoreAction::Show(_))),
             "success should check bead status"
         );
-        assert!(result
-            .telemetry_events
-            .iter()
-            .any(|e| matches!(e, EventKind::BeadOrphaned { .. })));
+        assert!(
+            result
+                .telemetry_events
+                .iter()
+                .any(|e| matches!(e, EventKind::BeadOrphaned { .. })),
+            "orphan event should be emitted even though bead is released"
+        );
+        assert!(
+            actions.iter().any(|a| matches!(a, StoreAction::Release(_))),
+            "bead must be released when still open after success"
+        );
     }
 
     #[tokio::test]
     async fn handle_failure_releases_and_increments_count() {
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1545,12 +1630,14 @@ mod tests {
     #[tokio::test]
     async fn handle_failure_increments_existing_count() {
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::InProgress)
-            .with_labels(vec!["failure-count:2".to_string()]);
+        let store = Arc::new(
+            MockBeadStore::new(BeadStatus::InProgress)
+                .with_labels(vec!["failure-count:2".to_string()]),
+        );
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
-            .handle(&store, &bead, &test_output(1), false)
+            .handle(store.as_ref(), &bead, &test_output(1), false)
             .await
             .unwrap();
 
@@ -1685,7 +1772,7 @@ mod tests {
     #[tokio::test]
     async fn handle_timeout_releases_and_adds_deferred() {
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1714,7 +1801,7 @@ mod tests {
     #[tokio::test]
     async fn handle_crash_releases_and_creates_alert_bead() {
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1743,7 +1830,7 @@ mod tests {
     #[tokio::test]
     async fn handle_crash_negative_exit_code() {
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1758,7 +1845,7 @@ mod tests {
     #[tokio::test]
     async fn handle_agent_not_found_releases() {
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1781,7 +1868,7 @@ mod tests {
     #[tokio::test]
     async fn handle_interrupted_releases() {
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1804,7 +1891,7 @@ mod tests {
     #[tokio::test]
     async fn handle_failure_emits_telemetry_events() {
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1846,7 +1933,7 @@ mod tests {
     async fn handle_success_no_verification_default_behavior() {
         // No verification configured → normal success flow (unchanged behavior).
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::Done);
+        let store = test_store(BeadStatus::Done);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1862,7 +1949,7 @@ mod tests {
     async fn handle_success_verification_passes_accepts_closure() {
         // Verification passes → bead closure accepted.
         let handler = test_handler_with_verification(vec!["true".to_string()]);
-        let store = MockBeadStore::new(BeadStatus::Done);
+        let store = test_store(BeadStatus::Done);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1882,7 +1969,7 @@ mod tests {
     async fn handle_success_verification_fails_releases_bead() {
         // Verification fails → bead released.
         let handler = test_handler_with_verification(vec!["false".to_string()]);
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1912,7 +1999,7 @@ mod tests {
     async fn handle_success_verification_fails_reopens_closed_bead() {
         // Agent closed the bead, but verification fails → reopen then release.
         let handler = test_handler_with_verification(vec!["false".to_string()]);
-        let store = MockBeadStore::new(BeadStatus::Done);
+        let store = test_store(BeadStatus::Done);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -1940,7 +2027,7 @@ mod tests {
     #[tokio::test]
     async fn handle_success_verification_fails_increments_failure_count() {
         let handler = test_handler_with_verification(vec!["false".to_string()]);
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let _result = handler
@@ -1965,7 +2052,7 @@ mod tests {
             "false".to_string(),
             "echo should-not-run".to_string(),
         ]);
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
@@ -2065,13 +2152,13 @@ mod tests {
         }
 
         let handler = test_handler();
-        let store = SlowFlushStore {
+        let store = Arc::new(SlowFlushStore {
             inner: MockBeadStore::new(BeadStatus::InProgress),
-        };
+        });
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
-            .handle(&store, &bead, &test_output(1), false)
+            .handle(store.as_ref(), &bead, &test_output(1), false)
             .await
             .unwrap();
 
@@ -2173,13 +2260,13 @@ mod tests {
         }
 
         let handler = test_handler();
-        let store = SlowReleaseStore {
+        let store = Arc::new(SlowReleaseStore {
             inner: MockBeadStore::new(BeadStatus::InProgress),
-        };
+        });
         let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
-            .handle(&store, &bead, &test_output(1), false)
+            .handle(store.as_ref(), &bead, &test_output(1), false)
             .await
             .unwrap();
 
@@ -2199,7 +2286,7 @@ mod tests {
     async fn handle_with_cancellation_respects_cancelled_flag() {
         // Test that handle_with_cancellation returns early when cancelled.
         let handler = test_handler();
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
         let cancelled = Arc::new(AtomicBool::new(true));
@@ -2344,15 +2431,15 @@ mod tests {
             ..Config::default()
         };
         let handler = test_handler_with_config(config);
-        let store = SlowShowStore {
+        let store = Arc::new(SlowShowStore {
             inner: MockBeadStore::new(BeadStatus::Done),
-        };
+        });
         let bead = test_bead(BeadStatus::InProgress);
         let cancelled = Arc::new(AtomicBool::new(false));
 
         let start = std::time::Instant::now();
         let result = handler
-            .handle_with_cancellation(&store, &bead, &test_output(0), false, cancelled)
+            .handle_with_cancellation(store.as_ref(), &bead, &test_output(0), false, cancelled)
             .await
             .unwrap();
         let elapsed = start.elapsed();
@@ -2395,7 +2482,7 @@ mod tests {
             ..Config::default()
         };
         let handler = test_handler_with_config(config);
-        let store = MockBeadStore::new(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
         let cancelled = Arc::new(AtomicBool::new(false));
 
@@ -2423,6 +2510,51 @@ mod tests {
         assert!(
             !marker_path.exists(),
             "gate command was not actually killed — it ran to completion in the background"
+        );
+    }
+
+    // ── Regression tests for needle-3386daef: dispatch postcondition ──
+
+    #[tokio::test]
+    async fn regression_2026_08_17_orphan_loop_bead_released_not_leaked() {
+        // Regression test for the 2026-08-17 loop where needle-55ec0193 was worked
+        // THREE times and leaked every time. Each worker exited with success but the
+        // bead remained in_progress, allowing re-claim in the same second as the
+        // success. This test verifies that an agent exiting 0 without closing the
+        // bead now releases it back to open, preventing the leak.
+        let handler = test_handler();
+        let store = test_store(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        // Simulate agent exiting 0 without closing the bead
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        // Postcondition: bead must be released, not left in_progress
+        assert_eq!(
+            result.bead_action,
+            BeadAction::Released,
+            "agent exit 0 without closure must release bead to prevent claim leak"
+        );
+
+        // Verify the release was actually performed
+        let actions = store.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
+            "bead must be released to open/unassigned state"
+        );
+
+        // Verify BeadOrphaned event was emitted for observability
+        assert!(
+            result
+                .telemetry_events
+                .iter()
+                .any(|e| matches!(e, EventKind::BeadOrphaned { .. })),
+            "orphan event must be emitted even though bead is released"
         );
     }
 }
