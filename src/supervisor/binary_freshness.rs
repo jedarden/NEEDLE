@@ -237,9 +237,13 @@ mod tests {
         fs::write(&binary_path, b"v1").expect("failed to write initial binary");
 
         let mut checker = BinaryFreshnessChecker::new(binary_path.clone(), 1);
+        // Wall-clock poll() is rate-limited by check_interval, so two calls in
+        // the same second return None on the second — drive the interval with
+        // poll_at (the deterministic API) like checker_respects_minimum_interval.
+        let now = Instant::now();
 
         // First check should record hash
-        let result = checker.poll().expect("first check failed");
+        let result = checker.poll_at(now).expect("first check failed");
         assert!(result.is_some());
 
         match result.unwrap() {
@@ -252,8 +256,10 @@ mod tests {
         // Update binary
         fs::write(&binary_path, b"v2").expect("failed to update binary");
 
-        // Second check should detect change
-        let result = checker.poll().expect("second check failed");
+        // Second check (past the interval) should detect change
+        let result = checker
+            .poll_at(now + Duration::from_secs(2))
+            .expect("second check failed");
         assert!(result.is_some());
 
         match result.unwrap() {
