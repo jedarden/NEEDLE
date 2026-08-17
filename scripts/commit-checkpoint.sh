@@ -1,77 +1,76 @@
 #!/usr/bin/env bash
-# Commit checkpoint with all required object files
-# This script ensures that every checkpoint commit includes the active root
-# objects referenced by current.json and previous.json, while excluding
-# superseded objects listed in deleted_paths.
+# Commit checkpoint with active root objects
+#
+# This script ensures that every commit of .beads/checkpoint/ includes the objects
+# referenced by current.json and previous.json active_root fields, atomically with
+# the pointer files themselves.
+#
+# Usage: scripts/commit-checkpoint.sh [commit-message]
+#
 
 set -euo pipefail
 
-CHECKPOINT_DIR=".beads/checkpoint"
-CURRENT_JSON="$CHECKPOINT_DIR/current.json"
-PREVIOUS_JSON="$CHECKPOINT_DIR/previous.json"
+cd "$(git rev-parse --show-toplevel)"
 
-# Extract active root paths from the pointers
-extract_active_root() {
-    local json_file="$1"
-    if [[ -f "$json_file" ]]; then
-        jq -r '.active_root.path // empty' "$json_file"
-    fi
-}
+BEAD_DIR=".beads/checkpoint"
+CURRENT_JSON="$BEAD_DIR/current.json"
+PREVIOUS_JSON="$BEAD_DIR/previous.json"
 
-# Get the active root objects
-CURRENT_ROOT=$(extract_active_root "$CURRENT_JSON")
-PREVIOUS_ROOT=$(extract_active_root "$PREVIOUS_JSON")
+# Flush checkpoint to ensure we have the latest state
+echo "Flushing checkpoint..."
+bead sync flush-only > /dev/null
 
-echo "Checkpoint commit script"
-echo "========================"
+# Extract active root paths
+CURRENT_ROOT=$(jq -r '.active_root.path' "$CURRENT_JSON")
+PREVIOUS_ROOT=$(jq -r '.active_root.path' "$PREVIOUS_JSON")
 
-if [[ -n "$CURRENT_ROOT" ]]; then
-    echo "Current active root: $CURRENT_ROOT"
-else
-    echo "Warning: Could not extract current root from $CURRENT_JSON"
-fi
-
-if [[ -n "$PREVIOUS_ROOT" ]]; then
-    echo "Previous active root: $PREVIOUS_ROOT"
-else
-    echo "Warning: Could not extract previous root from $PREVIOUS_JSON"
-fi
-
-# Always commit the three pointer files
-POINTER_FILES=(
-    "$CHECKPOINT_DIR/current.json"
-    "$CHECKPOINT_DIR/previous.json"
-    "$CHECKPOINT_DIR/forensic.jsonl"
-)
-
-# Add active root objects if they exist and are not already in git
-ACTIVE_ROOTS=()
-for root in "$CURRENT_ROOT" "$PREVIOUS_ROOT"; do
-    if [[ -n "$root" && -f "$CHECKPOINT_DIR/$root" ]]; then
-        ACTIVE_ROOTS+=("$CHECKPOINT_DIR/$root")
-        echo "Will include active root: $root"
-    elif [[ -n "$root" ]]; then
-        echo "Warning: Active root $root does not exist, skipping"
-    fi
-done
-
-# Check if there's anything to commit
-if [[ ${#ACTIVE_ROOTS[@]} -eq 0 ]] && ! git diff --quiet "${POINTER_FILES[@]}"; then
-    echo "Error: Pointer files modified but no active root objects found"
-    echo "This would create a broken checkpoint state"
+# Verify they exist
+if [[ ! -f "$BEAD_DIR/$CURRENT_ROOT" ]]; then
+    echo "Error: Current root not found: $BEAD_DIR/$CURRENT_ROOT" >&2
     exit 1
 fi
 
-# Stage the files
-echo ""
-echo "Staging files..."
-for file in "${POINTER_FILES[@]}" "${ACTIVE_ROOTS[@]}"; do
-    if [[ -f "$file" ]]; then
-        echo "  + $file"
-        git add "$file"
+if [[ ! -f "$BEAD_DIR/$PREVIOUS_ROOT" ]]; then
+    echo "Error: Previous root not found: $BEAD_DIR/$PREVIOUS_ROOT" >&2
+    exit 1
+fi
+
+echo "Current root: $CURRENT_ROOT"
+echo "Previous root: $PREVIOUS_ROOT"
+
+# Stage the pointer files and their referenced objects
+git add "$CURRENT_JSON" "$PREVIOUS_JSON" "$BEAD_DIR/forensic.jsonl"
+git add "$BEAD_DIR/$CURRENT_ROOT" "$BEAD_DIR/$PREVIOUS_ROOT"
+
+# Check for superseded objects that are tracked but should be removed
+# These are objects listed in deleted_paths that are still in git
+TRACKED_OBJECTS=$(git ls-files "$BEAD_DIR/objects/")
+DELETED_PATHS=$(jq -r '.deleted_paths[]' "$CURRENT_JSON" "$PREVIOUS_JSON" 2>/dev/null | grep 'objects/gen-' || true)
+
+# Remove tracked superseded objects
+for object in $TRACKED_OBJECTS; do
+    basename=$(basename "$object")
+    # Check if this object is in the deleted paths
+    if echo "$DELETED_PATHS" | grep -q "$basename"; then
+        # Also make sure it's not one of the active roots
+        if [[ "$basename" != $(basename "$CURRENT_ROOT") ]] && \
+           [[ "$basename" != $(basename "$PREVIOUS_ROOT") ]]; then
+            echo "Removing superseded object: $object"
+            git rm --cached "$object" 2>/dev/null || true
+        fi
     fi
 done
 
-echo ""
-echo "Files staged. Please commit with:"
-echo "  git commit -m 'chore: checkpoint flush'"
+# Commit if changes were made
+if git diff --cached --quiet; then
+    echo "No checkpoint changes to commit"
+    exit 0
+fi
+
+COMMIT_MESSAGE="${1:-chore: checkpoint commit with active root objects}"
+
+git commit -m "$COMMIT_MESSAGE"
+
+echo "✓ Checkpoint committed successfully"
+echo "  Current: $CURRENT_ROOT"
+echo "  Previous: $PREVIOUS_ROOT"

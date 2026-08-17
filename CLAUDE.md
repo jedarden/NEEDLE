@@ -153,3 +153,18 @@ bf close BEAD_ID --reason "Summary of what was done"
 
 Note `--reason`, not `--body`: `--body` is not a valid flag and the close will
 fail.
+
+## Checkpoint Commits
+
+When committing checkpoint changes (anything under `.beads/checkpoint/`), you
+MUST commit the active root objects referenced by `current.json` and
+`previous.json` alongside the pointer files. Use the provided script:
+
+```bash
+./scripts/commit-checkpoint.sh "chore: checkpoint commit with active root objects"
+```
+
+This ensures a fresh clone can verify checkpoint integrity. Never manually run
+`git add .beads/checkpoint/` — it will either miss the active roots (broken
+verification) or accumulate superseded objects (bloat). See
+`docs/checkpoint-tracking.md` for details.
