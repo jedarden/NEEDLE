@@ -522,8 +522,15 @@ impl OtlpSink {
         workspace: Option<&str>,
     ) -> Result<Self> {
         // Build resource attributes from config + computed attributes
-        let resource =
-            Self::build_resource(&worker_id, &session_id, config, agent, model, provider, workspace)?;
+        let resource = Self::build_resource(
+            &worker_id,
+            &session_id,
+            config,
+            agent,
+            model,
+            provider,
+            workspace,
+        )?;
 
         // Create drop sequence atomic and monitor channel
         let next_drop_sequence = Arc::new(AtomicU64::new(0));
@@ -789,8 +796,10 @@ impl OtlpSink {
                 builder.with_attributes([KeyValue::new("needle.model", model_value.to_string())]);
         }
         if let Some(provider_value) = provider {
-            builder =
-                builder.with_attributes([KeyValue::new("needle.model.provider", provider_value.to_string())]);
+            builder = builder.with_attributes([KeyValue::new(
+                "needle.model.provider",
+                provider_value.to_string(),
+            )]);
         }
         if let Some(workspace_value) = workspace {
             builder = builder.with_attributes([KeyValue::new(
@@ -1658,8 +1667,15 @@ pub fn create_tracing_layer(
     }
 
     // Build resource attributes from config + computed attributes
-    let resource =
-        OtlpSink::build_resource(&worker_id, &session_id, config, agent, model, None, workspace)?;
+    let resource = OtlpSink::build_resource(
+        &worker_id,
+        &session_id,
+        config,
+        agent,
+        model,
+        None,
+        workspace,
+    )?;
 
     // Create drop channel for the tracing layer
     // Dumps will be logged at WARN level rather than emitted as events
@@ -2077,9 +2093,16 @@ mod tests {
         let mut config = make_test_config();
         config.resource_attributes = vec!["deployment.environment=production".to_string()];
 
-        let resource =
-            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None, None)
-                .expect("build_resource should succeed");
+        let resource = OtlpSink::build_resource(
+            "test-worker",
+            "test-session",
+            &config,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("build_resource should succeed");
 
         let env_attr = resource
             .iter()
@@ -2107,8 +2130,15 @@ mod tests {
             .resource_attributes
             .push("service.instance.id=malicious-id".to_string());
 
-        let result =
-            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None, None);
+        let result = OtlpSink::build_resource(
+            "test-worker",
+            "test-session",
+            &config,
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert!(
             result.is_err(),
@@ -2128,8 +2158,15 @@ mod tests {
             .resource_attributes
             .push("service.name=not-needle".to_string());
 
-        let result =
-            OtlpSink::build_resource("test-worker", "test-session", &config, None, None, None, None);
+        let result = OtlpSink::build_resource(
+            "test-worker",
+            "test-session",
+            &config,
+            None,
+            None,
+            None,
+            None,
+        );
 
         assert!(
             result.is_err(),

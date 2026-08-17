@@ -847,12 +847,17 @@ fn worker_log_writer(
 /// `agent.default` names an adapter, so load the same built-ins and user
 /// adapters that `Dispatcher` will use to obtain the actual model identifier.
 fn worker_telemetry_identity(config: &Config) -> telemetry::TelemetryIdentity {
-    let default_adapter = dispatch::load_adapters(&config.agent.adapters_dir, &dispatch::builtin_adapters())
-        .ok()
-        .and_then(|adapters| adapters.get(&config.agent.default).cloned());
+    let default_adapter =
+        dispatch::load_adapters(&config.agent.adapters_dir, &dispatch::builtin_adapters())
+            .ok()
+            .and_then(|adapters| adapters.get(&config.agent.default).cloned());
 
-    let model = default_adapter.as_ref().and_then(|adapter| adapter.model.clone());
-    let provider = default_adapter.as_ref().and_then(|adapter| adapter.provider.clone());
+    let model = default_adapter
+        .as_ref()
+        .and_then(|adapter| adapter.model.clone());
+    let provider = default_adapter
+        .as_ref()
+        .and_then(|adapter| adapter.provider.clone());
 
     telemetry::TelemetryIdentity {
         agent: Some(config.agent.default.clone()),

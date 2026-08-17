@@ -225,7 +225,10 @@ fn test_render_with_label_placeholder() {
         .render_operation("label_add", &values)
         .expect("rendering should succeed");
 
-    assert_eq!(result, vec!["label", "add", "bf-label-test", "--label", "bug"]);
+    assert_eq!(
+        result,
+        vec!["label", "add", "bf-label-test", "--label", "bug"]
+    );
 }
 
 #[test]

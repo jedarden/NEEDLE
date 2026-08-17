@@ -1403,10 +1403,15 @@ mod tests {
         // Since we can't actually create files in /usr/local/cargo/bin during tests,
         // we verify the search chain includes this location in error messages
         let result = resolve_bead_cli(&config);
-        assert!(result.is_err(), "Should error when bead not in standard locations");
+        assert!(
+            result.is_err(),
+            "Should error when bead not in standard locations"
+        );
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("/usr/local/cargo/bin/bead"),
-            "Error message should mention /usr/local/cargo/bin/bead as a search location");
+        assert!(
+            err.contains("/usr/local/cargo/bin/bead"),
+            "Error message should mention /usr/local/cargo/bin/bead as a search location"
+        );
     }
 
     /// Test edge case: PATH with only non-existent directories.
@@ -4904,17 +4909,33 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
     if segments.iter().any(|s| s.is_empty()) {
         return Err(ConfigError {
             field: key_path.to_string(),
-            message: "key path contains empty segment (consecutive dots or leading/trailing dot)".to_string(),
+            message: "key path contains empty segment (consecutive dots or leading/trailing dot)"
+                .to_string(),
         });
     }
 
     // Validate root segment against Config top-level fields
     let root = segments[0];
     let valid_top_level = [
-        "agent", "worker", "workspace", "bead_cli", "strands",
-        "telemetry", "prompt", "health", "limits", "pricing",
-        "budget", "verification", "gates", "self_modification",
-        "fabric", "supervisor", "outcome", "tsnet", "validation",
+        "agent",
+        "worker",
+        "workspace",
+        "bead_cli",
+        "strands",
+        "telemetry",
+        "prompt",
+        "health",
+        "limits",
+        "pricing",
+        "budget",
+        "verification",
+        "gates",
+        "self_modification",
+        "fabric",
+        "supervisor",
+        "outcome",
+        "tsnet",
+        "validation",
     ];
 
     if !valid_top_level.contains(&root) {
@@ -5025,10 +5046,7 @@ fn validate_workspace_field(field: &str, key_path: &str) -> Result<(), ConfigErr
 
 /// Validate HealthConfig field names.
 fn validate_health_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
-    let valid_fields = [
-        "heartbeat_interval_secs",
-        "heartbeat_ttl_secs",
-    ];
+    let valid_fields = ["heartbeat_interval_secs", "heartbeat_ttl_secs"];
 
     if !valid_fields.contains(&field) {
         return Err(ConfigError {
@@ -5045,16 +5063,13 @@ fn validate_health_field(field: &str, key_path: &str) -> Result<(), ConfigError>
 }
 
 /// Validate StrandsConfig field names with deeper nesting support.
-fn validate_strands_field(field: &str, remaining: &[&str], key_path: &str) -> Result<(), ConfigError> {
+fn validate_strands_field(
+    field: &str,
+    remaining: &[&str],
+    key_path: &str,
+) -> Result<(), ConfigError> {
     let valid_fields = [
-        "mitosis",
-        "explore",
-        "weave",
-        "unravel",
-        "pulse",
-        "reflect",
-        "learning",
-        "splice",
+        "mitosis", "explore", "weave", "unravel", "pulse", "reflect", "learning", "splice",
         "resolve",
     ];
 
@@ -5136,7 +5151,11 @@ fn validate_weave_field(field: &str, key_path: &str) -> Result<(), ConfigError> 
 }
 
 /// Validate PulseConfig field names with array index support.
-fn validate_pulse_field(field: &str, remaining: &[&str], key_path: &str) -> Result<(), ConfigError> {
+fn validate_pulse_field(
+    field: &str,
+    remaining: &[&str],
+    key_path: &str,
+) -> Result<(), ConfigError> {
     let valid_fields = ["scanners"];
     if !valid_fields.contains(&field) {
         return Err(ConfigError {
@@ -5207,7 +5226,11 @@ fn validate_resolve_field(field: &str, key_path: &str) -> Result<(), ConfigError
 }
 
 /// Validate TelemetryConfig field names with deeper nesting support.
-fn validate_telemetry_field(field: &str, remaining: &[&str], key_path: &str) -> Result<(), ConfigError> {
+fn validate_telemetry_field(
+    field: &str,
+    remaining: &[&str],
+    key_path: &str,
+) -> Result<(), ConfigError> {
     let valid_fields = ["file_sink", "stdout_sink", "otlp"];
     if !valid_fields.contains(&field) {
         return Err(ConfigError {
@@ -5910,7 +5933,7 @@ impl ConfigLoader {
                 errors.push(ConfigError {
                     field: "strands.mitosis.timeout_triggered.min_elapsed_fraction".to_string(),
                     message: "must be in range [0.0, 1.0]".to_string(),
-                    });
+                });
             }
         }
 
@@ -10128,11 +10151,7 @@ resource_attributes:
 
     #[test]
     fn valid_workspace_fields_pass() {
-        let valid_fields = [
-            "workspace.default",
-            "workspace.home",
-            "workspace.labels",
-        ];
+        let valid_fields = ["workspace.default", "workspace.home", "workspace.labels"];
 
         for field in valid_fields {
             assert!(
@@ -10343,18 +10362,12 @@ resource_attributes:
     #[test]
     fn error_messages_are_clear() {
         let test_cases = vec![
-            (
-                "unknown_field",
-                "unknown top-level field 'unknown_field'",
-            ),
+            ("unknown_field", "unknown top-level field 'unknown_field'"),
             (
                 "worker.unknown_field",
                 "unknown worker field 'unknown_field'",
             ),
-            (
-                "agent.unknown_field",
-                "unknown agent field 'unknown_field'",
-            ),
+            ("agent.unknown_field", "unknown agent field 'unknown_field'"),
             (
                 "strands.unknown_field",
                 "unknown strands field 'unknown_field'",

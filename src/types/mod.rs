@@ -555,9 +555,9 @@ pub struct DecompositionThresholds {
 impl Default for DecompositionThresholds {
     fn default() -> Self {
         DecompositionThresholds {
-            min_timeout_seconds: 300,  // 5 minutes
-            min_retry_count: 2,        // Must retry at least twice
-            min_bead_size: 200,         // At least 200 characters
+            min_timeout_seconds: 300, // 5 minutes
+            min_retry_count: 2,       // Must retry at least twice
+            min_bead_size: 200,       // At least 200 characters
             child_labels: vec![
                 "mitosis-child".to_string(),
                 "decomposition-child".to_string(),
@@ -644,8 +644,7 @@ pub fn decompose_bead_decision(
         return DecompositionDecision::Refuse {
             reason: format!(
                 "bead is already a child bead (has labels: {:?})",
-                bead
-                    .labels
+                bead.labels
                     .iter()
                     .filter(|l| thresholds.child_labels.contains(l))
                     .collect::<Vec<_>>()
@@ -656,10 +655,7 @@ pub fn decompose_bead_decision(
     // Check if bead has an active assignee
     if let Some(assignee) = &bead.assignee {
         return DecompositionDecision::Refuse {
-            reason: format!(
-                "bead has active assignee: {}",
-                assignee
-            ),
+            reason: format!("bead has active assignee: {}", assignee),
         };
     }
 
@@ -2832,17 +2828,15 @@ test foo ... ok"#;
         assert_eq!(thresholds.min_retry_count, 2);
         assert_eq!(thresholds.min_bead_size, 200);
         assert_eq!(thresholds.child_labels.len(), 2);
-        assert!(thresholds.child_labels.contains(&"mitosis-child".to_string()));
+        assert!(thresholds
+            .child_labels
+            .contains(&"mitosis-child".to_string()));
         assert!(thresholds
             .child_labels
             .contains(&"decomposition-child".to_string()));
     }
 
-    fn make_test_bead(
-        body: &str,
-        assignee: Option<&str>,
-        labels: Vec<&str>,
-    ) -> Bead {
+    fn make_test_bead(body: &str, assignee: Option<&str>, labels: Vec<&str>) -> Bead {
         Bead {
             id: BeadId::from("needle-test"),
             title: "Test bead".to_string(),
@@ -2863,7 +2857,9 @@ test foo ... ok"#;
     #[test]
     fn decompose_bead_decision_all_criteria_met() {
         let bead = make_test_bead(
-            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
             None,
             vec![],
         );
@@ -2876,16 +2872,15 @@ test foo ... ok"#;
         let bead = make_test_bead("Tiny bead body", None, vec![]);
         let decision = decompose_bead_decision(&bead, 600, 3, None);
         assert!(decision.is_refuse());
-        assert!(decision
-            .refusal_reason()
-            .unwrap()
-            .contains("too small"));
+        assert!(decision.refusal_reason().unwrap().contains("too small"));
     }
 
     #[test]
     fn decompose_bead_decision_refuse_has_assignee() {
         let bead = make_test_bead(
-            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
             Some("worker-01"),
             vec![],
         );
@@ -2900,19 +2895,26 @@ test foo ... ok"#;
     #[test]
     fn decompose_bead_decision_refuse_child_bead() {
         let bead = make_test_bead(
-            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
             None,
             vec!["mitosis-child"],
         );
         let decision = decompose_bead_decision(&bead, 600, 3, None);
         assert!(decision.is_refuse());
-        assert!(decision.refusal_reason().unwrap().contains("already a child"));
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("already a child"));
     }
 
     #[test]
     fn decompose_bead_decision_refuse_timeout_too_short() {
         let bead = make_test_bead(
-            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
             None,
             vec![],
         );
@@ -2927,7 +2929,9 @@ test foo ... ok"#;
     #[test]
     fn decompose_bead_decision_refuse_insufficient_retries() {
         let bead = make_test_bead(
-            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
             None,
             vec![],
         );
@@ -2942,7 +2946,9 @@ test foo ... ok"#;
     #[test]
     fn decompose_bead_decision_custom_thresholds() {
         let bead = make_test_bead(
-            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
             None,
             vec![],
         );
@@ -2966,7 +2972,9 @@ test foo ... ok"#;
     #[test]
     fn decompose_bead_decision_boundary_values() {
         let bead = make_test_bead(
-            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
             None,
             vec![],
         );
@@ -2989,10 +2997,7 @@ test foo ... ok"#;
         let bead = make_test_bead("", None, vec![]);
         let decision = decompose_bead_decision(&bead, 600, 3, None);
         assert!(decision.is_refuse());
-        assert!(decision
-            .refusal_reason()
-            .unwrap()
-            .contains("too small"));
+        assert!(decision.refusal_reason().unwrap().contains("too small"));
     }
 
     #[test]
@@ -3001,28 +3006,32 @@ test foo ... ok"#;
         bead.body = None;
         let decision = decompose_bead_decision(&bead, 600, 3, None);
         assert!(decision.is_refuse());
-        assert!(decision
-            .refusal_reason()
-            .unwrap()
-            .contains("too small"));
+        assert!(decision.refusal_reason().unwrap().contains("too small"));
     }
 
     #[test]
     fn decompose_bead_decision_multiple_child_labels() {
         let bead = make_test_bead(
-            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
             None,
             vec!["other-label", "decomposition-child", "another-label"],
         );
         let decision = decompose_bead_decision(&bead, 600, 3, None);
         assert!(decision.is_refuse());
-        assert!(decision.refusal_reason().unwrap().contains("already a child"));
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("already a child"));
     }
 
     #[test]
     fn decompose_bead_decision_custom_child_labels() {
         let bead = make_test_bead(
-            "This is a substantial bead body that exceeds 200 characters. ".repeat(4).as_str(),
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
             None,
             vec!["custom-child-label"],
         );
@@ -3036,7 +3045,10 @@ test foo ... ok"#;
 
         let decision = decompose_bead_decision(&bead, 600, 3, Some(custom_thresholds));
         assert!(decision.is_refuse());
-        assert!(decision.refusal_reason().unwrap().contains("already a child"));
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("already a child"));
     }
 }
 

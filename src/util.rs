@@ -381,10 +381,7 @@ pub fn parse_backend_name_from_version(
 
     // Check if binary exists
     if !binary_path.exists() {
-        anyhow::bail!(
-            "binary not found at {}",
-            binary_path.display()
-        );
+        anyhow::bail!("binary not found at {}", binary_path.display());
     }
 
     // ETXTBSY retry logic: retry with backoff when the kernel reports "Text file busy"
@@ -418,15 +415,12 @@ pub fn parse_backend_name_from_version(
                 let trimmed_output = stdout.trim();
 
                 // Extract backend name (first word)
-                let backend_name = trimmed_output
-                    .split_whitespace()
-                    .next()
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "binary {} produced empty or unparseable version output",
-                            binary_path.display()
-                        )
-                    })?;
+                let backend_name = trimmed_output.split_whitespace().next().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "binary {} produced empty or unparseable version output",
+                        binary_path.display()
+                    )
+                })?;
 
                 return Ok(backend_name.to_string());
             }
@@ -434,25 +428,28 @@ pub fn parse_backend_name_from_version(
                 last_err = Some(e);
                 thread::sleep(std::time::Duration::from_millis(backoff_ms));
             }
-            Err(e) => return Err(e).with_context(|| {
-                format!(
-                    "failed to execute binary {} with version args {:?}",
-                    binary_path.display(),
-                    version_args
-                )
-            }),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "failed to execute binary {} with version args {:?}",
+                        binary_path.display(),
+                        version_args
+                    )
+                })
+            }
         }
     }
 
     // All retries exhausted
-    Err(last_err.expect("loop always sets last_err before exhausting max_attempts"))
-        .with_context(|| {
+    Err(last_err.expect("loop always sets last_err before exhausting max_attempts")).with_context(
+        || {
             format!(
                 "failed to execute binary {} after {} attempts (ETXTBSY)",
                 binary_path.display(),
                 max_attempts
             )
-        })
+        },
+    )
 }
 
 /// Crate-wide test-only environment isolation.
@@ -1296,7 +1293,10 @@ exit 1
 
         let result = parse_backend_name_from_version(&failing_binary, &["--version"]);
 
-        assert!(result.is_err(), "should fail when binary exits with non-zero code");
+        assert!(
+            result.is_err(),
+            "should fail when binary exits with non-zero code"
+        );
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("exited with code"));
     }
@@ -1323,7 +1323,10 @@ exit 1
 
         let result = parse_backend_name_from_version(&empty_binary, &["--version"]);
 
-        assert!(result.is_err(), "should fail when binary produces empty output");
+        assert!(
+            result.is_err(),
+            "should fail when binary produces empty output"
+        );
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("empty") || error_msg.contains("unparseable"));
     }
@@ -1350,7 +1353,10 @@ echo "   \t\n"
 
         let result = parse_backend_name_from_version(&whitespace_binary, &["--version"]);
 
-        assert!(result.is_err(), "should fail when binary produces only whitespace");
+        assert!(
+            result.is_err(),
+            "should fail when binary produces only whitespace"
+        );
     }
 
     #[test]
