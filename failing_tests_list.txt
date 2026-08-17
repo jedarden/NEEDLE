@@ -1,11 +1,55 @@
-config::config_tests::supervisor_config_from_env_expands_tilde
-config::config_tests::test_config_expand_tildes_missing_home
-config::config_tests::worker_binary_path_tilde_is_expanded
-dispatch::tests::activity_detection_with_mixed_stdout_stderr
-dispatch::tests::idle_timeout_fires_when_no_activity
-mitosis::timeout_context::tests::git_dirty_paths_filters_untracked
-telemetry::file_sink::tests::test_file_sink_append_mode
-telemetry::file_sink::tests::test_file_sink_daily_rotation
-telemetry::file_sink::tests::test_file_sink_permissions
-telemetry::tests::boot_event_written_to_file_on_telemetry_creation
-telemetry::tests::file_sink_writes_jsonl
+# NEEDLE Compilation Errors - Block All Tests
+Generated: 2026-08-17
+
+Note: The code does not compile, so no tests can run. These are compilation errors,
+not runtime test failures, but they block the entire test suite.
+
+## Summary: 41 compilation errors across 5 categories
+
+### 1. Syntax Errors in Match Arms (2 errors)
+File: src/dispatch/mod.rs
+- Line 4418: `panic!(` macro call uses semicolon instead of comma
+  Expected: `panic!("...", other)`
+  Actual: `panic!("...", other);`
+
+- Line 4466: Same syntax error as above
+
+### 2. Test Helper Function Visibility (14 errors)
+File: src/dispatch/mod.rs
+Test helper functions defined in `tests` module are inaccessible from other test contexts:
+- `test_adapter` (called at lines: 4267, 4332, 4385, 4433, 4500)
+- `test_dispatcher` (called at lines: 4281, 4341, 4397, 4445, 4509)
+- `test_prompt` (called at lines: 4288, 4347, 4404, 4515)
+
+Error: "function `crate::dispatch::tests::<fn_name>` exists but is inaccessible"
+
+### 3. Type Mismatches - BeadStore Arc vs Trait Object (2 errors)
+File: src/outcome/mod.rs
+- Line 444: `verify_shipped_work` expects `&Arc<dyn BeadStore>` but receives `&dyn BeadStore`
+- Line 501: Same type mismatch as above
+
+### 4. Missing Method on BeadStore Trait (1 error)
+File: src/outcome/mod.rs
+- Line 511: Method `close` not found on `&dyn BeadStore`
+  Note: The trait does not define a `close` method
+
+### 5. Incorrect Dereference (2 errors)
+File: src/dispatch/mod.rs
+- Line 4416: Attempting to dereference `u64` value: `*timeout_secs`
+  Should be: `timeout_secs` (no dereference needed)
+
+- Line 4464: Same incorrect dereference as above
+
+### 6. Missing Result Type in types Module (20 errors)
+File: src/validation/predispatch.rs
+Multiple uses of `crate::types::Result<T>` but this type alias doesn't exist:
+- Lines: 284, 308, 312, 316, 322, 328, 332, 336, 340, 344, 348, 352, 356, 360, 364, 368, 372, 376, 380
+
+All methods in the mock `FakeBeadStore` struct return `crate::types::Result<T>` but this type is not defined.
+The fix should use `std::result::Result<T, anyhow::Error>` or define the type alias.
+
+## Total Count: 41 compilation errors
+
+## Impact
+- Zero tests can run until compilation succeeds
+- These are not test logic failures but build failures that must be fixed first
