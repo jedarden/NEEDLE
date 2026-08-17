@@ -648,6 +648,145 @@ fn detect_backend_from_path(path: &Path) -> Result<Backend> {
     }
 }
 
+/// Detect bead CLI backend by checking workspace config then probing PATH.
+///
+/// This function implements a two-stage detection strategy:
+/// 1. First, check `.needle.yaml` for an explicit `bead_cli.backend` setting
+/// 2. If not set or set to `auto`, probe PATH for available CLIs in order:
+///    - bead (bead-rs)
+///    - bf (bead-forge)
+///    - br (deprecated alias for bead-rs, legacy support only)
+///
+/// # Arguments
+///
+/// * `workspace_root` - Path to the workspace root directory (where `.needle.yaml` may exist)
+///
+/// # Returns
+///
+/// Returns `Ok((Backend, PathBuf))` with the detected backend type and CLI path.
+/// Returns `Err` if no CLI is found or the config is invalid.
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle_config::detect_bead_backend;
+///
+/// let (backend, path) = detect_bead_backend(Path::new("/home/user/my-project"))?;
+/// println!("Detected backend: {} at {}", backend, path.display());
+/// ```
+pub fn detect_bead_backend(workspace_root: &Path) -> Result<(Backend, PathBuf)> {
+    let needle_yaml = workspace_root.join(".needle.yaml");
+
+    // Stage 1: Check config for explicit backend setting
+    let configured_backend = if needle_yaml.exists() {
+        let text = std::fs::read_to_string(&needle_yaml)
+            .with_context(|| format!("failed to read {}", needle_yaml.display()))?;
+
+        // Parse YAML to extract bead_cli.backend if present
+        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&text) {
+            if let Some(bead_cli) = value.get("bead_cli") {
+                if let Some(backend_str) = bead_cli.get("backend").and_then(|v| v.as_str()) {
+                    match backend_str {
+                        "bead-rs" | "bead" => Some(BeadBackend::Bead),
+                        "bead-forge" | "bf" => Some(BeadBackend::Bf),
+                        "br" => Some(BeadBackend::Br),
+                        "auto" => Some(BeadBackend::Auto),
+                        other => bail!("unknown bead_cli.backend value: '{}'", other),
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Stage 2: Probe PATH based on configured or default backend
+    let backend = configured_backend.unwrap_or(BeadBackend::Auto);
+
+    let home = std::env::var("HOME").unwrap_or_default();
+
+    match backend {
+        BeadBackend::Bf => {
+            // Explicit bf: PATH → ~/.local/bin/bf
+            let path = find_on_path("bf")
+                .or_else(|_| {
+                    let candidate = PathBuf::from(format!("{home}/.local/bin/bf"));
+                    if is_executable(&candidate) {
+                        Ok(candidate)
+                    } else {
+                        Err(anyhow!("bf not found"))
+                    }
+                })
+                .context("bf CLI not found (checked PATH, ~/.local/bin/bf)")?;
+            Ok((Backend::Bf, path))
+        }
+        BeadBackend::Br | BeadBackend::Bead => {
+            // Explicit bead/br: PATH → ~/.local/bin/bead → /usr/local/cargo/bin/bead
+            let path = find_on_path("bead")
+                .or_else(|_| {
+                    let candidate = PathBuf::from(format!("{home}/.local/bin/bead"));
+                    if is_executable(&candidate) {
+                        Ok(candidate)
+                    } else {
+                        Err(anyhow!("bead not found"))
+                    }
+                })
+                .or_else(|_| {
+                    let candidate = PathBuf::from("/usr/local/cargo/bin/bead");
+                    if is_executable(&candidate) {
+                        Ok(candidate)
+                    } else {
+                        Err(anyhow!("bead not found"))
+                    }
+                })
+                .context(
+                    "bead CLI not found (checked PATH, ~/.local/bin/bead, /usr/local/cargo/bin/bead)",
+                )?;
+            Ok((Backend::Bead, path))
+        }
+        BeadBackend::Auto => {
+            // Per ADR-013: auto detection prefers bead, then bf, then br
+            // Try bead first
+            if let Ok(path) = find_on_path("bead") {
+                return Ok((Backend::Bead, path));
+            }
+            let bead_local = PathBuf::from(format!("{home}/.local/bin/bead"));
+            if is_executable(&bead_local) {
+                return Ok((Backend::Bead, bead_local));
+            }
+            let bead_cargo = PathBuf::from("/usr/local/cargo/bin/bead");
+            if is_executable(&bead_cargo) {
+                return Ok((Backend::Bead, bead_cargo));
+            }
+
+            // Then bf
+            if let Ok(path) = find_on_path("bf") {
+                return Ok((Backend::Bf, path));
+            }
+            let bf_local = PathBuf::from(format!("{home}/.local/bin/bf"));
+            if is_executable(&bf_local) {
+                return Ok((Backend::Bf, bf_local));
+            }
+
+            // Finally br (deprecated, legacy support)
+            if let Ok(path) = find_on_path("br") {
+                return Ok((Backend::Bead, path));
+            }
+
+            // Nothing found
+            bail!(
+                "no bead CLI found (tried: bead on PATH, {home}/.local/bin/bead, /usr/local/cargo/bin/bead, bf on PATH, {home}/.local/bin/bf, br on PATH)"
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2375,6 +2514,285 @@ path: /path with spaces/to/bead
             config.path,
             Some(PathBuf::from("/path with spaces/to/bead"))
         );
+    }
+
+    // ─── detect_bead_backend tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_detect_bead_backend_config_set_to_bead() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Create executable bead in temp directory
+        let bead_bin = ws_root.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &bead_bin,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        // Set PATH to include our temp directory
+        std::env::set_var("PATH", ws_root);
+        std::env::set_var("HOME", ws_root);
+
+        // Create .needle.yaml with explicit bead backend
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: bead-rs\n").unwrap();
+
+        let (backend, path) = detect_bead_backend(ws_root).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
+    }
+
+    #[test]
+    fn test_detect_bead_backend_config_set_to_bf() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Create executable bf in temp directory
+        let bf_bin = ws_root.join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&bf_bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        std::env::set_var("PATH", ws_root);
+        std::env::set_var("HOME", ws_root);
+
+        // Create .needle.yaml with explicit bf backend
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: bead-forge\n").unwrap();
+
+        let (backend, path) = detect_bead_backend(ws_root).unwrap();
+        assert_eq!(backend, Backend::Bf);
+        assert_eq!(path, bf_bin);
+    }
+
+    #[test]
+    fn test_detect_bead_backend_config_set_to_auto_detects_bead() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Create executable bead in temp directory
+        let bead_bin = ws_root.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &bead_bin,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        std::env::set_var("PATH", ws_root);
+        std::env::set_var("HOME", ws_root);
+
+        // Create .needle.yaml with auto backend
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: auto\n").unwrap();
+
+        let (backend, path) = detect_bead_backend(ws_root).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
+    }
+
+    #[test]
+    fn test_detect_bead_backend_auto_falls_back_to_bf_when_bead_missing() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Create executable bf only (no bead)
+        let bf_bin = ws_root.join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&bf_bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        std::env::set_var("PATH", ws_root);
+        std::env::set_var("HOME", ws_root);
+
+        // Create .needle.yaml with auto backend
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: auto\n").unwrap();
+
+        let (backend, path) = detect_bead_backend(ws_root).unwrap();
+        assert_eq!(backend, Backend::Bf);
+        assert_eq!(path, bf_bin);
+    }
+
+    #[test]
+    fn test_detect_bead_backend_auto_falls_back_to_br() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Create executable br only (deprecated, legacy support)
+        let br_bin = ws_root.join("br");
+        std::fs::write(&br_bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&br_bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        std::env::set_var("PATH", ws_root);
+        std::env::set_var("HOME", ws_root);
+
+        // Create .needle.yaml with auto backend
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: auto\n").unwrap();
+
+        let (backend, path) = detect_bead_backend(ws_root).unwrap();
+        assert_eq!(backend, Backend::Bead); // br maps to Bead backend
+        assert_eq!(path, br_bin);
+    }
+
+    #[test]
+    fn test_detect_bead_backend_no_config_detects_bead() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Create executable bead in temp directory
+        let bead_bin = ws_root.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &bead_bin,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        std::env::set_var("PATH", ws_root);
+        std::env::set_var("HOME", ws_root);
+
+        // No .needle.yaml file - should auto-detect
+        let (backend, path) = detect_bead_backend(ws_root).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
+    }
+
+    #[test]
+    fn test_detect_bead_backend_none_available_returns_error() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Empty PATH, no binaries anywhere
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", ws_root);
+
+        // Create .needle.yaml with auto backend
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: auto\n").unwrap();
+
+        let result = detect_bead_backend(ws_root);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("no bead CLI") || err_msg.contains("not found"));
+    }
+
+    #[test]
+    fn test_detect_bead_backend_config_invalid_backend_value() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", ws_root);
+
+        // Create .needle.yaml with invalid backend value
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: invalid_backend\n").unwrap();
+
+        let result = detect_bead_backend(ws_root);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("unknown bead_cli.backend"));
+    }
+
+    #[test]
+    fn test_detect_bead_backend_config_uses_bead_alias() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Create executable bead in temp directory
+        let bead_bin = ws_root.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &bead_bin,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        std::env::set_var("PATH", ws_root);
+        std::env::set_var("HOME", ws_root);
+
+        // Create .needle.yaml using "bead" alias (not "bead-rs")
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: bead\n").unwrap();
+
+        let (backend, path) = detect_bead_backend(ws_root).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
+    }
+
+    #[test]
+    fn test_detect_bead_backend_config_uses_bf_alias() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Create executable bf in temp directory
+        let bf_bin = ws_root.join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&bf_bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        std::env::set_var("PATH", ws_root);
+        std::env::set_var("HOME", ws_root);
+
+        // Create .needle.yaml using "bf" alias (not "bead-forge")
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: bf\n").unwrap();
+
+        let (backend, path) = detect_bead_backend(ws_root).unwrap();
+        assert_eq!(backend, Backend::Bf);
+        assert_eq!(path, bf_bin);
+    }
+
+    #[test]
+    fn test_detect_bead_backend_config_br_backend() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Create executable bead in temp directory (br is deprecated, uses bead binary)
+        let bead_bin = ws_root.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(
+            &bead_bin,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        std::env::set_var("PATH", ws_root);
+        std::env::set_var("HOME", ws_root);
+
+        // Create .needle.yaml using "br" backend (deprecated, maps to Bead backend)
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: br\n").unwrap();
+
+        let (backend, path) = detect_bead_backend(ws_root).unwrap();
+        assert_eq!(backend, Backend::Bead); // br maps to Bead backend
+        assert_eq!(path, bead_bin); // but uses bead binary
     }
 
     #[test]
