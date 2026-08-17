@@ -76,6 +76,81 @@ pub struct ExecutionResult {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Process observation state
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// State tracking for a running agent process observation.
+///
+/// Tracks deadline state for idle timeout detection. Reset logic will be added
+/// in a follow-up task.
+#[derive(Debug, Clone)]
+pub struct ProcessObservation {
+    /// Idle deadline: when the process will be terminated if no activity occurs.
+    ///
+    /// `None` when idle timeout is disabled. `Some(deadline)` when idle timeout
+    /// is active. This is the state field only — reset logic will be added later.
+    pub idle_deadline: Option<tokio::time::Instant>,
+}
+
+impl ProcessObservation {
+    /// Create a new process observation with no active idle deadline.
+    ///
+    /// The idle deadline starts as `None` and will be set when idle timeout
+    /// is enabled for the adapter.
+    pub fn new() -> Self {
+        Self {
+            idle_deadline: None,
+        }
+    }
+
+    /// Create a new process observation with an active idle deadline.
+    ///
+    /// # Arguments
+    /// * `timeout_duration` - The idle timeout duration from the adapter config
+    ///
+    /// # Returns
+    /// A new observation with the idle deadline set to `now + timeout_duration`.
+    pub fn with_idle_deadline(timeout_duration: Duration) -> Self {
+        Self {
+            idle_deadline: Some(tokio::time::Instant::now() + timeout_duration),
+        }
+    }
+
+    /// Check whether the idle deadline has expired.
+    ///
+    /// # Returns
+    /// * `Some(true)` - idle deadline is set and has expired
+    /// * `Some(false)` - idle deadline is set but has not yet expired
+    /// * `None` - no idle deadline is set (idle timeout disabled)
+    pub fn is_idle_expired(&self) -> Option<bool> {
+        self.idle_deadline
+            .map(|deadline| tokio::time::Instant::now() >= deadline)
+    }
+
+    /// Check if an idle deadline is currently active.
+    ///
+    /// # Returns
+    /// `true` if an idle deadline is set, `false` otherwise.
+    pub fn has_idle_deadline(&self) -> bool {
+        self.idle_deadline.is_some()
+    }
+
+    /// Get the current idle deadline, if set.
+    ///
+    /// # Returns
+    /// `Some(deadline)` if idle timeout is enabled, `None` otherwise.
+    pub fn idle_deadline(&self) -> Option<tokio::time::Instant> {
+        self.idle_deadline
+    }
+}
+
+impl Default for ProcessObservation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Token extraction
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -2107,6 +2182,45 @@ pub fn print_test_result(result: &AgentTestResult) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+fn test_adapter(name: &str, template: &str) -> AgentAdapter {
+    AgentAdapter {
+        name: name.to_string(),
+        description: None,
+        agent_cli: "test".to_string(),
+        version_command: None,
+        input_method: InputMethod::Stdin,
+        invoke_template: template.to_string(),
+        environment: HashMap::new(),
+        timeout_secs: 10,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
+        provider: None,
+        model: None,
+        token_extraction: TokenExtraction::None,
+        output_transform: None,
+        harness: None,
+        harness_version: None,
+    }
+}
+
+#[cfg(test)]
+fn test_prompt(content: &str) -> BuiltPrompt {
+    BuiltPrompt {
+        content: content.to_string(),
+        hash: "testhash".to_string(),
+        token_estimate: content.len() as u64 / 4,
+        template_name: "pluck".to_string(),
+        template_version: "pluck-default".to_string(),
+    }
+}
+
+#[cfg(test)]
+fn test_dispatcher(adapters: HashMap<String, AgentAdapter>) -> Dispatcher {
+    let telemetry = Telemetry::new("test-worker".to_string());
+    Dispatcher::with_adapters(adapters, telemetry, 3600)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2449,6 +2563,82 @@ output_transform: "needle-transform-custom"
         assert!(err_msg.contains("cannot be used together"));
         assert!(err_msg.contains("Use either timeout_secs alone"));
         assert!(err_msg.contains("idle_timeout_secs + hard_timeout_secs"));
+    }
+
+    // ── ProcessObservation state tracking ──
+
+    #[test]
+    fn process_observation_new_has_no_deadline() {
+        let obs = ProcessObservation::new();
+        assert!(!obs.has_idle_deadline());
+        assert!(obs.idle_deadline().is_none());
+        assert_eq!(obs.is_idle_expired(), None);
+    }
+
+    #[test]
+    fn process_observation_default_has_no_deadline() {
+        let obs = ProcessObservation::default();
+        assert!(!obs.has_idle_deadline());
+        assert!(obs.idle_deadline().is_none());
+        assert_eq!(obs.is_idle_expired(), None);
+    }
+
+    #[test]
+    fn process_observation_with_idle_deadline_sets_deadline() {
+        let timeout = Duration::from_secs(60);
+        let obs = ProcessObservation::with_idle_deadline(timeout);
+        assert!(obs.has_idle_deadline());
+        assert!(obs.idle_deadline().is_some());
+    }
+
+    #[test]
+    fn process_observation_idle_deadline_is_future() {
+        let timeout = Duration::from_secs(60);
+        let obs = ProcessObservation::with_idle_deadline(timeout);
+
+        // A newly created deadline should not be expired
+        assert_eq!(obs.is_idle_expired(), Some(false));
+    }
+
+    #[test]
+    fn process_observation_zero_timeout_deadline_expired_immediately() {
+        let timeout = Duration::ZERO;
+        let obs = ProcessObservation::with_idle_deadline(timeout);
+
+        // Zero timeout means deadline is already in the past
+        assert_eq!(obs.is_idle_expired(), Some(true));
+    }
+
+    #[test]
+    fn process_observation_idle_deadline_returns_value() {
+        let timeout = Duration::from_secs(60);
+        let obs = ProcessObservation::with_idle_deadline(timeout);
+
+        let deadline = obs.idle_deadline();
+        assert!(deadline.is_some());
+
+        // Deadline should be approximately now + 60 seconds
+        let expected = tokio::time::Instant::now() + timeout;
+        let actual = deadline.unwrap();
+
+        // Allow 1 second tolerance for test execution time
+        let diff = if actual > expected {
+            actual - expected
+        } else {
+            expected - actual
+        };
+        assert!(diff < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn process_observation_clone_preserves_deadline() {
+        let timeout = Duration::from_secs(30);
+        let obs1 = ProcessObservation::with_idle_deadline(timeout);
+        let obs2 = obs1.clone();
+
+        // Both should have the same deadline state
+        assert_eq!(obs1.has_idle_deadline(), obs2.has_idle_deadline());
+        assert_eq!(obs1.is_idle_expired(), obs2.is_idle_expired());
     }
 
     // ── Built-in adapters ──
