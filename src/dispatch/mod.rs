@@ -1522,12 +1522,12 @@ impl Dispatcher {
                 KilledNoDrain,
             }
 
-            // Extract PID before moving t_child into ProcessGuard
+            // Keep the guard alive across the timeout so the killed child can
+            // still be reaped in the timeout/error path.
             let t_pid = t_child.id();
+            let mut t_guard = ProcessGuard::new(t_child);
             let outcome =
-                match tokio::time::timeout(TRANSFORM_EXIT_GRACE, ProcessGuard::new(t_child).wait())
-                    .await
-                {
+                match tokio::time::timeout(TRANSFORM_EXIT_GRACE, t_guard.wait_borrowed()).await {
                     Ok(Ok(status)) => TransformOutcome::NaturalExit(status),
                     Ok(Err(_)) | Err(_) => {
                         // wait() itself errored, or T2 elapsed with no exit. Kill the
@@ -1542,7 +1542,9 @@ impl Dispatcher {
                                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
                             }
                         }
-                        // ProcessGuard already owns t_child - it will clean up on drop
+                        // Reap the killed transform before allowing its log
+                        // writer to finish and before returning from dispatch.
+                        let _ = t_guard.wait().await;
                         if feeder_drained {
                             TransformOutcome::KilledAfterDrain
                         } else {
