@@ -128,12 +128,13 @@ telemetry:
   hooks: []
   otlp_sink:
     enabled: true
-    endpoint: http://localhost:4317
-    protocol: grpc
+    endpoint: http://needle-otel-ex44-apexalgo-iad-ts.ardenone.com:4318
+    protocol: http
     timeout_secs: 10
     compression: gzip
     tls: none
-    headers: []
+    headers:
+      - "Authorization: env:NEEDLE_OTLP_AUTHORIZATION"
     resource_attributes: []
     metrics_interval_secs: 10
     service_namespace: needle-fleet
@@ -179,8 +180,8 @@ self_modification:
   canary_timeout: 300
   hot_reload: true
 fabric:
-  enabled: false
-  endpoint: ''
+  enabled: true
+  endpoint: http://localhost:3000/api/events
   timeout: 2
   batching: false
 supervisor:
