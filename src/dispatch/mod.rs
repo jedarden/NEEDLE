@@ -2215,6 +2215,16 @@ fn run_probe(agent_cli: &str) -> Result<ProbeResult> {
             .status()
         {
             Ok(status) => {
+                if attempt > 0 {
+                    tracing::debug!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_ATTEMPTS,
+                        agent_cli = %agent_cli,
+                        function = "run_probe",
+                        "ETXTBSY retry succeeded after {} attempts",
+                        attempt + 1
+                    );
+                }
                 return Ok(ProbeResult {
                     exit_code: status.code().unwrap_or(-1),
                     elapsed_ms: start.elapsed().as_millis() as u64,
@@ -2223,6 +2233,17 @@ fn run_probe(agent_cli: &str) -> Result<ProbeResult> {
             Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < MAX_ATTEMPTS => {
                 // ETXTBSY (errno 26): transient "text file busy" - retry with backoff
                 last_err = Some(e);
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = MAX_ATTEMPTS,
+                    backoff_ms = BACKOFF_MS,
+                    agent_cli = %agent_cli,
+                    function = "run_probe",
+                    "ETXTBSY error detected (attempt {}/{}), retrying in {}ms",
+                    attempt + 1,
+                    MAX_ATTEMPTS,
+                    BACKOFF_MS
+                );
                 std::thread::sleep(std::time::Duration::from_millis(BACKOFF_MS));
             }
             Err(e) => {

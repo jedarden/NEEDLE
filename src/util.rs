@@ -4,6 +4,7 @@ use std::env;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use tracing::{debug, warn};
 
 /// Safely retrieve the HOME environment variable.
 ///
@@ -399,6 +400,17 @@ pub fn parse_backend_name_from_version(
 
         match result {
             Ok(output) => {
+                if attempt > 0 {
+                    debug!(
+                        attempt = attempt + 1,
+                        max_attempts = max_attempts,
+                        binary = %binary_path.display(),
+                        function = "parse_backend_name_from_version",
+                        "ETXTBSY retry succeeded after {} attempts",
+                        attempt + 1
+                    );
+                }
+
                 // Check exit status
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -426,6 +438,17 @@ pub fn parse_backend_name_from_version(
             }
             Err(e) if e.raw_os_error() == Some(ETXTBSY_ERRNO) && attempt + 1 < max_attempts => {
                 last_err = Some(e);
+                warn!(
+                    attempt = attempt + 1,
+                    max_attempts = max_attempts,
+                    backoff_ms = backoff_ms,
+                    binary = %binary_path.display(),
+                    function = "parse_backend_name_from_version",
+                    "ETXTBSY error detected (attempt {}/{}), retrying in {}ms",
+                    attempt + 1,
+                    max_attempts,
+                    backoff_ms
+                );
                 thread::sleep(std::time::Duration::from_millis(backoff_ms));
             }
             Err(e) => {
