@@ -2437,10 +2437,19 @@ fabric:
 
 /// `needle version` — print version info.
 fn cmd_version() {
-    let version = env!("CARGO_PKG_VERSION");
+    let metadata = crate::build_metadata::BuildMetadata::current();
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
-    println!("needle {version} (rust, {os} {arch})");
+
+    // Display full metadata if available
+    if metadata.commit_sha != "unknown" && metadata.build_timestamp != "unknown" {
+        println!("needle {} (rust, {} {})", metadata.version, os, arch);
+        println!("  commit: {}", metadata.commit_sha);
+        println!("  built: {}", metadata.build_timestamp);
+    } else {
+        // Fallback to basic version display
+        println!("needle {} (rust, {} {})", metadata.version, os, arch);
+    }
 }
 
 /// `needle test-agent <name>` — validate an agent adapter.

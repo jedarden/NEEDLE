@@ -4,6 +4,7 @@
 
 pub mod agent_event;
 pub mod bead_store;
+pub mod build_metadata;
 pub mod canary;
 pub mod cargo_test;
 pub mod checkpoint_utils;

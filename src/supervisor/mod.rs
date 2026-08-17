@@ -10,6 +10,10 @@
 //!
 //! Depends on: `bead_store`, `config`, `registry`, `telemetry`.
 
+pub mod binary_freshness;
+
+pub use binary_freshness::{BinaryFreshnessChecker, FreshnessCheck};
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -269,6 +273,12 @@ pub struct Supervisor {
     shutdown: Arc<AtomicBool>,
     /// Periodic GitHub release checker.
     upgrade_poller: UpgradePoller,
+    /// Binary freshness checker for detecting new worker builds.
+    binary_freshness: Option<BinaryFreshnessChecker>,
+    /// Whether we're currently draining workers for rotation.
+    draining_workers: Arc<AtomicBool>,
+    /// Path to the current worker binary being used.
+    current_worker_binary: PathBuf,
 }
 
 /// Source of the resolved worker binary path.
@@ -421,6 +431,16 @@ impl Supervisor {
         let upgrade_poller =
             UpgradePoller::new(config.auto_upgrade_check, config.update_check_interval_secs);
 
+        // Initialize binary freshness checker if using needle-stable
+        let binary_freshness = if worker_binary.ends_with("needle-stable") {
+            Some(BinaryFreshnessChecker::new(
+                worker_binary.clone(),
+                config.poll_interval_secs,
+            ))
+        } else {
+            None
+        };
+
         Ok(Supervisor {
             config,
             needle_config,
@@ -429,6 +449,9 @@ impl Supervisor {
             telemetry,
             shutdown: Arc::new(AtomicBool::new(false)),
             upgrade_poller,
+            binary_freshness,
+            draining_workers: Arc::new(AtomicBool::new(false)),
+            current_worker_binary: worker_binary,
         })
     }
 
@@ -605,6 +628,58 @@ impl Supervisor {
         // Check independently of queue depth and worker capacity so a full or
         // idle fleet still notices an available release.
         self.upgrade_poller.poll(&self.telemetry);
+
+        // Check for binary freshness and rotate workers if needed
+        if let Some(checker) = &mut self.binary_freshness {
+            if let Ok(Some(check_result)) = checker.poll() {
+                match check_result {
+                    FreshnessCheck::NewBinary {
+                        binary_path,
+                        old_hash,
+                        new_hash,
+                    } => {
+                        tracing::info!(
+                            old_binary = %self.current_worker_binary.display(),
+                            new_binary = %binary_path.display(),
+                            old_hash = %old_hash[..8],
+                            new_hash = %new_hash[..8],
+                            "new binary detected, initiating worker rotation"
+                        );
+
+                        // Emit binary rotation detected event
+                        let _ = self
+                            .telemetry
+                            .emit(EventKind::SupervisorBinaryRotationDetected {
+                                old_binary: self.current_worker_binary.display().to_string(),
+                                new_binary: binary_path.display().to_string(),
+                                old_hash,
+                                new_hash,
+                            });
+
+                        // Drain existing workers and relaunch with new binary
+                        let _ = self.rotate_workers(&binary_path).await;
+
+                        // Update current worker binary path
+                        self.current_worker_binary = binary_path;
+                    }
+                    FreshnessCheck::BinaryMissing { binary_path } => {
+                        tracing::warn!(
+                            binary = %binary_path.display(),
+                            "monitored binary missing, skipping rotation check"
+                        );
+                    }
+                    FreshnessCheck::CheckFailed { error, .. } => {
+                        tracing::warn!(
+                            error = %error,
+                            "binary freshness check failed"
+                        );
+                    }
+                    FreshnessCheck::Unchanged { .. } => {
+                        // No change, continue normal operation
+                    }
+                }
+            }
+        }
 
         // Get active workers
         let active_workers = self.registry.list().unwrap_or_default();
@@ -815,6 +890,221 @@ impl Supervisor {
         })?;
 
         tracing::info!(worker_id = %worker_id, "worker spawned successfully");
+        Ok(())
+    }
+
+    /// Rotate workers onto a new binary by draining existing workers and relaunching.
+    ///
+    /// This method gracefully shuts down all active workers and then launches new
+    /// workers with the updated binary path. The drain process sends SIGTERM to each
+    /// worker and waits for them to exit cleanly before proceeding.
+    ///
+    /// # Arguments
+    /// * `new_binary_path` - Path to the new worker binary
+    ///
+    /// # Returns
+    /// * `Ok(())` - Rotation completed successfully
+    /// * `Err(anyhow::Error)` - Rotation failed
+    async fn rotate_workers(&self, new_binary_path: &Path) -> Result<()> {
+        const DRAIN_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
+        // Prevent concurrent rotation attempts
+        if self
+            .draining_workers
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Relaxed)
+            .is_err()
+        {
+            tracing::warn!("worker rotation already in progress, skipping");
+            return Ok(());
+        }
+
+        let drain_start = Instant::now();
+
+        // Get current workers
+        let active_workers = self.registry.list().unwrap_or_default();
+        let workers_count = active_workers.len() as u32;
+
+        if workers_count == 0 {
+            tracing::info!("no active workers to drain, rotation complete");
+            self.draining_workers.store(false, Ordering::SeqCst);
+            return Ok(());
+        }
+
+        tracing::info!(
+            workers_count,
+            timeout_secs = DRAIN_TIMEOUT_SECS,
+            "starting worker drain for binary rotation"
+        );
+
+        // Emit drain started event
+        let _ = self
+            .telemetry
+            .emit(EventKind::SupervisorWorkerDrainStarted {
+                active_workers: workers_count,
+                drain_timeout_secs: DRAIN_TIMEOUT_SECS,
+            });
+
+        // Send SIGTERM to all workers for graceful shutdown
+        #[cfg(unix)]
+        {
+            use libc::{kill, SIGTERM};
+            for worker in &active_workers {
+                tracing::debug!(
+                    worker_id = %worker.id,
+                    pid = worker.pid,
+                    "sending SIGTERM to worker"
+                );
+
+                // Send SIGTERM to the worker process group
+                unsafe {
+                    // SIGTERM 15 allows graceful shutdown
+                    if kill(worker.pid as i32, SIGTERM) != 0 {
+                        tracing::warn!(
+                            worker_id = %worker.id,
+                            pid = worker.pid,
+                            "failed to send SIGTERM to worker"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            tracing::warn!("worker drain not supported on this platform");
+            self.draining_workers.store(false, Ordering::SeqCst);
+            return Ok(());
+        }
+
+        // Wait for workers to exit
+        let mut elapsed = 0;
+        while elapsed < DRAIN_TIMEOUT_SECS {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            elapsed += 5;
+
+            let remaining = self
+                .registry
+                .list()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|w| is_pid_alive(w.pid))
+                .count();
+
+            if remaining == 0 {
+                tracing::info!("all workers drained successfully");
+                break;
+            }
+
+            tracing::debug!(
+                remaining,
+                elapsed_secs = elapsed,
+                "waiting for workers to drain"
+            );
+        }
+
+        // Clean up any remaining workers from registry
+        for worker in &active_workers {
+            let _ = self.registry.deregister(&worker.id);
+        }
+
+        let drain_duration = drain_start.elapsed().as_secs();
+
+        // Emit drain completed event
+        let _ = self
+            .telemetry
+            .emit(EventKind::SupervisorWorkerDrainCompleted {
+                workers_drained: workers_count,
+                duration_secs: drain_duration,
+            });
+
+        tracing::info!(
+            workers_drained = workers_count,
+            duration_secs = drain_duration,
+            "worker drain completed, relaunching with new binary"
+        );
+
+        // Relaunch workers with the new binary
+        // We'll spawn the same number of workers that were just drained
+        let agent_name = self
+            .config
+            .agent
+            .as_ref()
+            .unwrap_or(&self.needle_config.agent.default)
+            .clone();
+
+        tracing::info!(
+            workers_count,
+            new_binary = %new_binary_path.display(),
+            "launching workers with new binary"
+        );
+
+        for i in 0..workers_count {
+            let worker_id = self.generate_worker_id()?;
+            let _ready_count = 0; // No ready count needed for rotation spawns
+
+            tracing::info!(
+                worker_id = %worker_id,
+                binary = %new_binary_path.display(),
+                "spawning worker with new binary ({}/{})",
+                i + 1,
+                workers_count
+            );
+
+            // Spawn worker with the new binary path
+            let _child = crate::bead_store::spawn_with_etxtbsy_retry_sync_exponential_child(
+                || {
+                    let mut cmd = std::process::Command::new(new_binary_path);
+                    cmd.arg("run")
+                        .arg("--workspace")
+                        .arg(&self.config.workspace)
+                        .arg("--agent")
+                        .arg(&agent_name)
+                        .arg("--identifier")
+                        .arg(&worker_id)
+                        .arg("--count")
+                        .arg("1");
+
+                    if let Some(timeout) = self.config.agent_timeout {
+                        cmd.arg("--timeout").arg(timeout.to_string());
+                    }
+
+                    cmd.stdin(std::process::Stdio::null())
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
+
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        cmd.process_group(0);
+
+                        unsafe {
+                            cmd.pre_exec(|| {
+                                libc::setsid();
+                                Ok(())
+                            });
+                        }
+                    }
+
+                    cmd.spawn()
+                },
+                10,
+                20,
+            )?;
+
+            tracing::debug!(worker_id = %worker_id, "worker launched successfully");
+        }
+
+        // Emit worker relaunched event
+        let _ = self.telemetry.emit(EventKind::SupervisorWorkerRelaunched {
+            workers_count,
+            new_binary: new_binary_path.display().to_string(),
+        });
+
+        tracing::info!(workers_count, "worker rotation completed successfully");
+
+        // Clear the draining flag
+        self.draining_workers.store(false, Ordering::SeqCst);
+
         Ok(())
     }
 

@@ -982,6 +982,18 @@ impl Worker {
                     // If check_hot_reload() detected a new binary and successfully
                     // re-execed, we won't reach here (the process is replaced).
                     // On re-exec failure, we continue normally.
+
+                    // After hot-reload check, perform the periodic freshness check.
+                    // This runs at the configured interval (worker.freshness_check_interval_secs)
+                    // and logs warnings when a stale binary is detected, but does NOT exit.
+                    // The distinction: hot-reload exits cleanly when new binary is available;
+                    // freshness checking warns but continues processing.
+                    if let Err(e) = self.check_freshness().await {
+                        tracing::warn!(
+                            error = %e,
+                            "freshness check failed, continuing with current binary"
+                        );
+                    }
                 }
                 WorkerState::Exhausted => {
                     let next = self.handle_exhausted().await?;
@@ -3272,6 +3284,91 @@ impl Worker {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "hot-reload check failed, continuing");
+                Ok(())
+            }
+        }
+    }
+
+    /// Check whether the running binary is stale compared to the latest needle-stable.
+    ///
+    /// This check runs between dispatch cycles (never mid-claim) at the interval
+    /// configured by `worker.freshness_check_interval_secs`. When a stale binary
+    /// is detected, it logs a warning but does NOT exit — the worker continues
+    /// processing with the stale binary. This is distinct from `check_hot_reload()`,
+    /// which exits cleanly when a new binary is detected to allow supervisor relaunch.
+    ///
+    /// Returns `Ok(())` if the check ran (or was skipped due to interval), `Err` if
+    /// the check itself failed (non-fatal, continues with current binary).
+    async fn check_freshness(&mut self) -> Result<()> {
+        let interval_secs = self.config.worker.freshness_check_interval_secs;
+
+        // If interval is 0, freshness checking is disabled
+        if interval_secs == 0 {
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        let interval = Duration::from_secs(interval_secs);
+
+        // Check if enough time has passed since the last check
+        if let Some(last_check) = self.last_freshness_check {
+            if now.duration_since(last_check) < interval {
+                // Not enough time has passed, skip this check
+                return Ok(());
+            }
+        }
+
+        // Update the last check time
+        self.last_freshness_check = Some(now);
+
+        let needle_home = &self.config.workspace.home;
+        match upgrade::check_hot_reload(needle_home) {
+            Ok(HotReloadCheck::NewBinaryDetected {
+                old_hash,
+                new_hash,
+                stable_path: _,
+            }) => {
+                // Only warn if we haven't already warned about this stale binary
+                if !self.stale_binary_warned {
+                    tracing::warn!(
+                        old_hash = %&old_hash[..12],
+                        new_hash = %&new_hash[..12],
+                        "running binary is STALE compared to needle-stable on disk — \
+                         consider restarting this worker to pick up the latest binary. \
+                         This check runs every {} seconds (configured by worker.freshness_check_interval_secs). \
+                         Set to 0 to disable freshness checking.",
+                        interval_secs
+                    );
+                    self.stale_binary_warned = true;
+                }
+                Ok(())
+            }
+            Ok(HotReloadCheck::CurrentBinaryDeleted {
+                stable_hash,
+                stable_path: _,
+            }) => {
+                // Current binary has been deleted/unlinked — this is unusual but not fatal
+                // for freshness checking (hot-reload will handle the actual exit)
+                if !self.stale_binary_warned {
+                    tracing::warn!(
+                        stable_hash = %&stable_hash[..12],
+                        "current binary has been deleted/unlink — hot-reload will handle the exit"
+                    );
+                    self.stale_binary_warned = true;
+                }
+                Ok(())
+            }
+            Ok(HotReloadCheck::NoChange) => {
+                // Binary is fresh — reset the warned flag so we warn again if it becomes stale later
+                self.stale_binary_warned = false;
+                Ok(())
+            }
+            Ok(HotReloadCheck::Skipped { reason }) => {
+                tracing::debug!(reason = %reason, "freshness check skipped");
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "freshness check failed, continuing");
                 Ok(())
             }
         }

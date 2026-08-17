@@ -280,6 +280,15 @@ pub struct WorkerConfig {
     #[serde(default = "WorkerConfig::default_short_retry_backoff")]
     pub short_retry_backoff: u64,
 
+    /// Interval (seconds) between binary freshness checks.
+    ///
+    /// The worker periodically checks if the running binary is stale compared
+    /// to the latest `needle-stable` on disk. This check runs between dispatch
+    /// cycles, never mid-claim, ensuring no bead is left in_progress.
+    /// Set to 0 to disable freshness checking.
+    #[serde(default = "WorkerConfig::default_freshness_check_interval_secs")]
+    pub freshness_check_interval_secs: u64,
+
     /// Explicit path to the worker binary `needle supervise` spawns.
     ///
     /// When `None` (the default), the supervisor resolves
@@ -314,6 +323,7 @@ impl Default for WorkerConfig {
             idle_backoff_min: Self::default_idle_backoff_min(),
             idle_backoff_max: Self::default_idle_backoff_max(),
             short_retry_backoff: Self::default_short_retry_backoff(),
+            freshness_check_interval_secs: Self::default_freshness_check_interval_secs(),
             worker_binary_path: None,
         }
     }
@@ -361,6 +371,9 @@ impl WorkerConfig {
     }
     fn default_adaptive_stagger_check_interval_secs() -> u64 {
         5
+    }
+    fn default_freshness_check_interval_secs() -> u64 {
+        300 // 5 minutes default
     }
 }
 
