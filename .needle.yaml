@@ -154,8 +154,20 @@ pricing: {}
 budget:
   warn_usd: 0.0
   stop_usd: 0.0
-verification:
-  outcome_timeout_seconds: 300  # Raised from default 50s to accommodate worktree build
+# NOTE: do not reintroduce a `verification:` mapping here. The workspace-level
+# `verification` key is the LEGACY alias for `gates:` and must be a SEQUENCE of
+# shell commands (WorkspaceOverrides.verification: Option<Vec<String>>, see
+# src/config/mod.rs). A mapping makes this entire file fail to parse with
+# "verification: invalid type: map, expected a sequence", which silently blocks
+# EVERY new worker launch on this workspace — already-running workers keep going,
+# so the breakage is invisible until you try to scale or restart the fleet.
+# It shipped that way in 0bf3111 (2026-08-16 10:47) and capped NEEDLE at two
+# workers for ~18h.
+#
+# `outcome_timeout_seconds` is NOT workspace-overridable; it lives on the global
+# ValidationConfig in ~/.needle/config.yaml under `validation:`, where it has
+# been set to 300. The `gates:` block below already expresses this workspace's
+# verification via the supported pluggable system.
 gates:
   - type: command
     commands:
