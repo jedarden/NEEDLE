@@ -128,6 +128,11 @@ proptest = "1"
 filetime = "0.2"
 criterion = "0.5"
 
+[[test]]
+name = "integration_spawn"
+path = "tests/integration_spawn.rs"
+harness = true
+
 [[bench]]
 name = "sanitize"
 harness = false
