@@ -138,6 +138,12 @@ impl CliBeadStore {
         }
     }
 
+    /// Check if a specific quirk is declared by the backend, regardless of version.
+    /// Returns true if the quirk exists in the backend's quirks list.
+    fn has_quirk(&self, quirk_name: &str) -> bool {
+        self.backend.quirks.iter().any(|q| q.name == quirk_name)
+    }
+
     pub async fn run_operation(
         &self,
         name: &str,
@@ -306,7 +312,11 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
-        let values = HashMap::from([("limit", "999999".to_string())]);
+        let values = if self.has_quirk("limit_zero_returns_empty_set") {
+            HashMap::from([("limit", "999999".to_string())])
+        } else {
+            HashMap::new()
+        };
         let stdout = self.run_operation("ready", &values).await?;
         let mut beads = self.parse_beads("ready", &stdout)?;
         if let Some(assignee) = &filters.assignee {
@@ -323,7 +333,11 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn list_all(&self) -> Result<Vec<Bead>> {
-        let values = HashMap::from([("limit", "999999".to_string())]);
+        let values = if self.has_quirk("limit_zero_returns_empty_set") {
+            HashMap::from([("limit", "999999".to_string())])
+        } else {
+            HashMap::new()
+        };
         let stdout = self.run_operation("list_all", &values).await?;
         self.parse_beads("list_all", &stdout)
     }
@@ -1135,5 +1149,59 @@ mod tests {
             "original database"
         );
         assert!(!beads.join("beads.db.needle-rebuild-backup").exists());
+    }
+
+    #[test]
+    fn cli_store_conditional_limit_workaround() {
+        use crate::bead_store::backend::builtin_bead_backends;
+
+        // Test with bead-forge (HAS the quirk)
+        let bead_forge = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-forge")
+            .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_binary = temp_dir.path().join("fake-bf");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bf 0.4.1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_binary).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_binary, perms).unwrap();
+        }
+
+        let store_with_quirk = CliBeadStore::new(
+            bead_forge,
+            fake_binary.clone(),
+            temp_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // bead-forge has the quirk, so has_quirk should return true
+        assert!(store_with_quirk.has_quirk("limit_zero_returns_empty_set"));
+
+        // Test with bead-rs (does NOT have the quirk)
+        let bead_rs = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+
+        let store_without_quirk = CliBeadStore::new(
+            bead_rs,
+            fake_binary,
+            temp_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // bead-rs does not have the quirk, so has_quirk should return false
+        assert!(!store_without_quirk.has_quirk("limit_zero_returns_empty_set"));
     }
 }

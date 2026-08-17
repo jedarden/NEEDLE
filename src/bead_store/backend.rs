@@ -516,6 +516,15 @@ fn builtin_bead_forge() -> BeadBackend {
         "sync conflict".to_string(),
     ];
 
+    // Quirks: version-specific workarounds for known bugs
+    backend.quirks = vec![
+        BeadBackendQuirk {
+            name: "limit_zero_returns_empty_set".to_string(),
+            version_requirement: Some("<= 0.2.0".to_string()),
+            description: "bead-forge 0.2.0 has a bug where `--limit 0` returns an empty set instead of all beads. The workaround is to use `--limit 999999` instead.".to_string(),
+        },
+    ];
+
     let operations = &mut backend.operations;
     operations.insert(
         "ready".into(),
@@ -602,5 +611,39 @@ mod tests {
             "SYNC_CONFLICT detected",
             &bead_forge.error_markers.sync_conflict
         ));
+    }
+
+    #[test]
+    fn builtins_declare_quirks_for_known_bugs() {
+        let bead_rs = builtin_bead_rs();
+        let bead_forge = builtin_bead_forge();
+
+        // bead-rs should NOT have the limit_zero_returns_empty_set quirk
+        assert!(!bead_rs
+            .quirks
+            .iter()
+            .any(|q| q.name == "limit_zero_returns_empty_set"));
+
+        // bead-forge MUST have the limit_zero_returns_empty_set quirk
+        let limit_quirk = bead_forge
+            .quirks
+            .iter()
+            .find(|q| q.name == "limit_zero_returns_empty_set")
+            .expect("bead-forge must declare limit_zero_returns_empty_set quirk");
+
+        assert_eq!(
+            limit_quirk.version_requirement,
+            Some("<= 0.2.0".to_string())
+        );
+        assert!(limit_quirk.description.contains("0.2.0"));
+        assert!(limit_quirk.description.contains("--limit 0"));
+        assert!(limit_quirk.description.contains("999999"));
+    }
+
+    #[test]
+    fn backend_without_quirks_has_empty_quirks_list() {
+        // A backend without quirks should have an empty list (not None)
+        let backend = builtin_bead_rs();
+        assert!(backend.quirks.is_empty());
     }
 }
