@@ -469,7 +469,7 @@ impl CanaryRunner {
                         "--workspace",
                         &self.canary_workspace.display().to_string(),
                         "--agent",
-                        "echo",  // Use explicit hermetic adapter, not global default
+                        "echo", // Use explicit hermetic adapter, not global default
                         "--identifier",
                         &format!("canary-{bead_id}"),
                         "--count",
@@ -1715,11 +1715,7 @@ mod tests {
         )
         .unwrap();
 
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            workspace.to_path_buf(),
-            300,
-        );
+        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
 
         let result = runner.validate_bead_backend_binding();
         assert!(result.is_err());
@@ -1748,11 +1744,7 @@ mod tests {
         )
         .unwrap();
 
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            workspace.to_path_buf(),
-            300,
-        );
+        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
 
         let result = runner.validate_bead_backend_binding();
         assert!(result.is_err());
@@ -1788,11 +1780,7 @@ mod tests {
             std::fs::set_permissions(&bead_path, perms).unwrap();
         }
 
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            workspace.to_path_buf(),
-            300,
-        );
+        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
 
         // Should succeed when bead backend is explicitly set and binary exists
         let result = runner.validate_bead_backend_binding();
@@ -1833,11 +1821,7 @@ mod tests {
             std::fs::set_permissions(&bf_path, perms).unwrap();
         }
 
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            workspace.to_path_buf(),
-            300,
-        );
+        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
 
         // Should succeed when bead-forge backend is explicitly set
         let result = runner.validate_bead_backend_binding();

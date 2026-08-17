@@ -2152,7 +2152,10 @@ test foo ... ok"#;
         proposal.phase_title = "".to_string();
 
         assert!(proposal.validate().is_err());
-        assert_eq!(proposal.validate().unwrap_err(), "phase_title cannot be empty");
+        assert_eq!(
+            proposal.validate().unwrap_err(),
+            "phase_title cannot be empty"
+        );
     }
 
     #[test]
@@ -2167,7 +2170,10 @@ test foo ... ok"#;
         proposal.description = "".to_string();
 
         assert!(proposal.validate().is_err());
-        assert_eq!(proposal.validate().unwrap_err(), "description cannot be empty");
+        assert_eq!(
+            proposal.validate().unwrap_err(),
+            "description cannot be empty"
+        );
     }
 
     #[test]
@@ -2200,7 +2206,10 @@ test foo ... ok"#;
         proposal.priority = 10;
 
         assert!(proposal.validate().is_err());
-        assert_eq!(proposal.validate().unwrap_err(), "priority must be between 0 and 4");
+        assert_eq!(
+            proposal.validate().unwrap_err(),
+            "priority must be between 0 and 4"
+        );
     }
 
     #[test]
@@ -3860,10 +3869,7 @@ fn timeout_refusal_reason_atomic() {
     };
 
     assert_eq!(reason.as_str(), "atomic");
-    assert_eq!(
-        reason.explanation(),
-        "Full test suite cannot be decomposed"
-    );
+    assert_eq!(reason.explanation(), "Full test suite cannot be decomposed");
     assert_eq!(
         reason.to_string(),
         "atomic: Full test suite cannot be decomposed"
@@ -3992,7 +3998,10 @@ fn timeout_phase_proposal_serialization() {
     assert_eq!(parsed.title, phase.title);
     assert_eq!(parsed.description, phase.description);
     assert_eq!(parsed.is_completed, phase.is_completed);
-    assert_eq!(parsed.estimated_duration_secs, phase.estimated_duration_secs);
+    assert_eq!(
+        parsed.estimated_duration_secs,
+        phase.estimated_duration_secs
+    );
 }
 
 #[test]
@@ -4130,12 +4139,16 @@ impl DecompositionProposal {
     /// Returns true if the proposal indicates the bead should be split.
     pub fn is_splittable(&self) -> bool {
         match self {
-            DecompositionProposal::Timeout { phases, refusal_reason, .. } => {
-                refusal_reason.is_none() && !phases.is_empty()
-            }
-            DecompositionProposal::Ordinary { tasks, refusal_reason, .. } => {
-                refusal_reason.is_none() && !tasks.is_empty()
-            }
+            DecompositionProposal::Timeout {
+                phases,
+                refusal_reason,
+                ..
+            } => refusal_reason.is_none() && !phases.is_empty(),
+            DecompositionProposal::Ordinary {
+                tasks,
+                refusal_reason,
+                ..
+            } => refusal_reason.is_none() && !tasks.is_empty(),
         }
     }
 
@@ -4387,10 +4400,12 @@ impl TimeoutAnalysisResult {
             || match &self.timeout_context {
                 TimeoutContext::Compilation { .. } => true,
                 TimeoutContext::TestExecution {
-                    tests_passing: true, ..
+                    tests_passing: true,
+                    ..
                 } => true,
                 TimeoutContext::Analysis {
-                    making_progress: true, ..
+                    making_progress: true,
+                    ..
                 } => true,
                 TimeoutContext::BuildDeployment { .. } => true,
                 TimeoutContext::LongRunningProcess { .. } => true,
@@ -4421,7 +4436,11 @@ impl TimeoutAnalysisResult {
                 format!(
                     "analysis ({} files, {})",
                     files_examined.len(),
-                    if *making_progress { "progressing" } else { "stalled" }
+                    if *making_progress {
+                        "progressing"
+                    } else {
+                        "stalled"
+                    }
                 )
             }
             TimeoutContext::BuildDeployment { operation } => {
@@ -4438,6 +4457,129 @@ impl TimeoutAnalysisResult {
                 )
             }
             TimeoutContext::Unknown => "unknown context".to_string(),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Resolve Decision Types
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Decision from the Resolve strand about bead disposition.
+///
+/// The Resolve strand analyzes beads after Pluck selection to determine
+/// whether they should proceed immediately, be deferred, or be decomposed.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolveDecision {
+    /// Bead is ready for immediate dispatch and implementation.
+    Complete,
+    /// Bead cannot proceed right now but may succeed later (transient condition).
+    Retry,
+    /// Bead has an unmet dependency that blocks all progress.
+    Blocked,
+    /// Bead is too large/complex and should be split into smaller child beads.
+    Split,
+}
+
+impl fmt::Display for ResolveDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResolveDecision::Complete => write!(f, "complete"),
+            ResolveDecision::Retry => write!(f, "retry"),
+            ResolveDecision::Blocked => write!(f, "blocked"),
+            ResolveDecision::Split => write!(f, "split"),
+        }
+    }
+}
+
+/// Structured outcome from Resolve decision analysis.
+///
+/// Each variant carries evidence supporting the decision and any
+/// decision-specific fields required for downstream handling.
+#[non_exhaustive]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolveOutcome {
+    /// Bead cleared for immediate dispatch.
+    Complete {
+        /// Evidence supporting the complete decision.
+        evidence: String,
+    },
+    /// Bead should be retried after a delay (transient condition).
+    Retry {
+        /// Evidence supporting the retry decision.
+        evidence: String,
+        /// Seconds to wait before retry (default: 600).
+        retry_after_seconds: u64,
+    },
+    /// Bead is blocked by an unmet dependency.
+    Blocked {
+        /// Evidence supporting the blocked decision.
+        evidence: String,
+        /// ID of the blocking bead.
+        blocker_id: BeadId,
+    },
+    /// Bead should be split into smaller child beads.
+    Split {
+        /// Evidence supporting the split decision.
+        evidence: String,
+        /// Explanation of why splitting is needed.
+        split_reason: Option<String>,
+    },
+}
+
+impl ResolveOutcome {
+    /// Returns the evidence string for this outcome.
+    pub fn evidence(&self) -> &str {
+        match self {
+            ResolveOutcome::Complete { evidence } => evidence,
+            ResolveOutcome::Retry { evidence, .. } => evidence,
+            ResolveOutcome::Blocked { evidence, .. } => evidence,
+            ResolveOutcome::Split { evidence, .. } => evidence,
+        }
+    }
+
+    /// Returns the decision variant corresponding to this outcome.
+    pub fn decision(&self) -> ResolveDecision {
+        match self {
+            ResolveOutcome::Complete { .. } => ResolveDecision::Complete,
+            ResolveOutcome::Retry { .. } => ResolveDecision::Retry,
+            ResolveOutcome::Blocked { .. } => ResolveDecision::Blocked,
+            ResolveOutcome::Split { .. } => ResolveDecision::Split,
+        }
+    }
+}
+
+impl fmt::Display for ResolveOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ResolveOutcome::Complete { evidence } => {
+                write!(f, "complete: {}", evidence)
+            }
+            ResolveOutcome::Retry {
+                evidence,
+                retry_after_seconds,
+            } => {
+                write!(f, "retry after {}s: {}", retry_after_seconds, evidence)
+            }
+            ResolveOutcome::Blocked {
+                evidence,
+                blocker_id,
+            } => {
+                write!(f, "blocked by {}: {}", blocker_id, evidence)
+            }
+            ResolveOutcome::Split {
+                evidence,
+                split_reason,
+            } => {
+                if let Some(reason) = split_reason {
+                    write!(f, "split ({}): {}", reason, evidence)
+                } else {
+                    write!(f, "split: {}", evidence)
+                }
+            }
         }
     }
 }

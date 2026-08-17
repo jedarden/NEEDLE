@@ -2727,7 +2727,7 @@ fn cmd_status(
                         })
                         .ok()
                 })
-                    .unwrap_or(None)
+                .unwrap_or(None)
             });
 
             // Wait with 3s timeout using join_timeout simulation
@@ -2746,8 +2746,10 @@ fn cmd_status(
 
             if let Some(check) = update_result {
                 if check.update_available {
-                    println!("  ⚠️  Update available: running {}, latest is {} — run `needle upgrade`",
-                        check.current_version, check.latest_version);
+                    println!(
+                        "  ⚠️  Update available: running {}, latest is {} — run `needle upgrade`",
+                        check.current_version, check.latest_version
+                    );
                     println!();
                 }
             }

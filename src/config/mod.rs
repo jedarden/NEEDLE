@@ -1010,20 +1010,33 @@ mod tests {
         };
 
         let result = resolve_bead_cli(&config);
-        assert!(result.is_err(), "Auto backend should error when no CLI found");
+        assert!(
+            result.is_err(),
+            "Auto backend should error when no CLI found"
+        );
 
         let err = result.unwrap_err().to_string();
         // Verify error message is descriptive and mentions all search locations
-        assert!(err.contains("no bead CLI found"),
-                "Error message should indicate no CLI was found");
-        assert!(err.contains("bead on PATH"),
-                "Error should mention searching PATH for bead");
-        assert!(err.contains(".local/bin/bead"),
-                "Error should mention ~/.local/bin/bead location");
-        assert!(err.contains("bf on PATH"),
-                "Error should mention searching PATH for bf");
-        assert!(err.contains(".local/bin/bf"),
-                "Error should mention ~/.local/bin/bf location");
+        assert!(
+            err.contains("no bead CLI found"),
+            "Error message should indicate no CLI was found"
+        );
+        assert!(
+            err.contains("bead on PATH"),
+            "Error should mention searching PATH for bead"
+        );
+        assert!(
+            err.contains(".local/bin/bead"),
+            "Error should mention ~/.local/bin/bead location"
+        );
+        assert!(
+            err.contains("bf on PATH"),
+            "Error should mention searching PATH for bf"
+        );
+        assert!(
+            err.contains(".local/bin/bf"),
+            "Error should mention ~/.local/bin/bf location"
+        );
     }
 
     #[test]
@@ -1049,11 +1062,16 @@ mod tests {
         };
 
         let result = resolve_bead_cli(&config);
-        assert!(result.is_err(), "Auto backend should error when CLI lacks execute permission");
+        assert!(
+            result.is_err(),
+            "Auto backend should error when CLI lacks execute permission"
+        );
 
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("no bead CLI found"),
-                "Error should indicate no executable CLI was found");
+        assert!(
+            err.contains("no bead CLI found"),
+            "Error should indicate no executable CLI was found"
+        );
     }
 
     #[test]
@@ -1065,7 +1083,11 @@ mod tests {
         // Create a PATH with only non-existent directories
         let nonexistent_path1 = tmp_dir.path().join("nonexistent1/bin");
         let nonexistent_path2 = tmp_dir.path().join("nonexistent2/bin");
-        let path_env = format!("{}:{}", &nonexistent_path1.display(), &nonexistent_path2.display());
+        let path_env = format!(
+            "{}:{}",
+            &nonexistent_path1.display(),
+            &nonexistent_path2.display()
+        );
 
         std::env::set_var("HOME", &home);
         std::env::set_var("PATH", &path_env);
@@ -1076,11 +1098,16 @@ mod tests {
         };
 
         let result = resolve_bead_cli(&config);
-        assert!(result.is_err(), "Auto backend should error when PATH contains only non-existent directories");
+        assert!(
+            result.is_err(),
+            "Auto backend should error when PATH contains only non-existent directories"
+        );
 
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("no bead CLI found"),
-                "Error should indicate CLI was not found despite PATH search");
+        assert!(
+            err.contains("no bead CLI found"),
+            "Error should indicate CLI was not found despite PATH search"
+        );
     }
 
     // ─── Comprehensive fallback chain tests for Auto backend ────────────────────
@@ -1107,27 +1134,39 @@ mod tests {
         let result = resolve_bead_cli(&config);
         assert!(result.is_err(), "Auto should error when no CLI found");
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("no bead CLI found"),
-                "Error message should indicate no CLI was found");
+        assert!(
+            err.contains("no bead CLI found"),
+            "Error message should indicate no CLI was found"
+        );
 
         // Phase 2: Create bf only - verify it's found
         let bf_local = home.join(".local/bin");
         std::fs::create_dir_all(&bf_local).unwrap();
         let bf_bin = create_dummy_executable(&bf_local, "bf");
         let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bf,
-                "With only bf available, Auto should select bead-forge backend");
-        assert_eq!(result.1, bf_bin,
-                "Auto should resolve to ~/.local/bin/bf when bead is absent");
+        assert_eq!(
+            result.0,
+            Backend::Bf,
+            "With only bf available, Auto should select bead-forge backend"
+        );
+        assert_eq!(
+            result.1, bf_bin,
+            "Auto should resolve to ~/.local/bin/bf when bead is absent"
+        );
 
         // Phase 3: Create bead alongside bf - verify bead wins (primary backend)
         let bead_local = home.join(".local/bin");
         let bead_bin = create_dummy_executable(&bead_local, "bead");
         let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bead,
-                "With both bead and bf available, Auto should prefer bead (primary per ADR-013)");
-        assert_eq!(result.1, bead_bin,
-                "Auto should resolve to ~/.local/bin/bead even when bf also exists");
+        assert_eq!(
+            result.0,
+            Backend::Bead,
+            "With both bead and bf available, Auto should prefer bead (primary per ADR-013)"
+        );
+        assert_eq!(
+            result.1, bead_bin,
+            "Auto should resolve to ~/.local/bin/bead even when bf also exists"
+        );
     }
 
     /// Test PATH search behavior with multiple directories.
@@ -1165,18 +1204,28 @@ mod tests {
         // Should find bead first even though bf appears earlier on PATH
         // Per ADR-013: bead (primary) is searched before bf (secondary)
         let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bead,
-                "Should find bead (primary) even when bf appears earlier on PATH");
-        assert_eq!(result.1, bead_bin,
-                "Should use bead from bin-second even though bf exists in bin-first");
+        assert_eq!(
+            result.0,
+            Backend::Bead,
+            "Should find bead (primary) even when bf appears earlier on PATH"
+        );
+        assert_eq!(
+            result.1, bead_bin,
+            "Should use bead from bin-second even though bf exists in bin-first"
+        );
 
         // Remove bead - now bf should be found
         std::fs::remove_file(&bead_bin).unwrap();
         let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bf,
-                "Should find bf (secondary) when bead is not available");
-        assert_eq!(result.1, bf_bin,
-                "Should use bf from bin-first when bead is removed");
+        assert_eq!(
+            result.0,
+            Backend::Bf,
+            "Should find bf (secondary) when bead is not available"
+        );
+        assert_eq!(
+            result.1, bf_bin,
+            "Should use bf from bin-first when bead is removed"
+        );
 
         // Add bead to first directory, bf to second directory
         // Now bead appears earlier on PATH
@@ -1184,10 +1233,15 @@ mod tests {
         let _bf_bin_second = create_dummy_executable(&bin_second, "bf");
 
         let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bead,
-                "Should find bead (primary) when it exists anywhere on PATH");
-        assert_eq!(result.1, bead_bin_first,
-                "Should use bead from bin-first when available");
+        assert_eq!(
+            result.0,
+            Backend::Bead,
+            "Should find bead (primary) when it exists anywhere on PATH"
+        );
+        assert_eq!(
+            result.1, bead_bin_first,
+            "Should use bead from bin-first when available"
+        );
     }
 
     /// Test that the fallback chain is exhaustive and terminates at first match.
@@ -1259,10 +1313,15 @@ mod tests {
         };
 
         let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bf,
-                "With empty PATH, should find bf in ~/.local/bin as fallback");
-        assert_eq!(result.1, bf_local,
-                "Should resolve to ~/.local/bin/bf when PATH is empty");
+        assert_eq!(
+            result.0,
+            Backend::Bf,
+            "With empty PATH, should find bf in ~/.local/bin as fallback"
+        );
+        assert_eq!(
+            result.1, bf_local,
+            "Should resolve to ~/.local/bin/bf when PATH is empty"
+        );
     }
 
     /// Test edge case: PATH with only non-existent directories.
@@ -1294,10 +1353,15 @@ mod tests {
         };
 
         let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bead,
-                "Should find bead in ~/.local/bin after non-existent PATH directories");
-        assert_eq!(result.1, bead_local,
-                "Should fall back to ~/.local/bin/bead when PATH directories don't exist");
+        assert_eq!(
+            result.0,
+            Backend::Bead,
+            "Should find bead in ~/.local/bin after non-existent PATH directories"
+        );
+        assert_eq!(
+            result.1, bead_local,
+            "Should fall back to ~/.local/bin/bead when PATH directories don't exist"
+        );
     }
 
     /// Test edge case: Symlinked CLIs (if supported by test environment).
@@ -1328,7 +1392,10 @@ mod tests {
 
             if symlink(&real_bead, &symlink_bead).is_ok() {
                 std::env::set_var("PATH", &link_dir);
-                std::env::set_var("PATH", &format!("{}:{}", link_dir.display(), real_bin_dir.display()));
+                std::env::set_var(
+                    "PATH",
+                    &format!("{}:{}", link_dir.display(), real_bin_dir.display()),
+                );
 
                 let config = BeadCliConfig {
                     backend: BeadBackend::Auto,
@@ -1336,11 +1403,16 @@ mod tests {
                 };
 
                 let result = resolve_bead_cli(&config).unwrap();
-                assert_eq!(result.0, Backend::Bead,
-                        "Should resolve symlinked bead to bead-rs backend");
+                assert_eq!(
+                    result.0,
+                    Backend::Bead,
+                    "Should resolve symlinked bead to bead-rs backend"
+                );
                 // The resolved path should be the symlink, not the target
-                assert!(result.1.starts_with(&link_dir),
-                        "Should return the symlink path, not the target");
+                assert!(
+                    result.1.starts_with(&link_dir),
+                    "Should return the symlink path, not the target"
+                );
             }
         }
 
@@ -1391,30 +1463,45 @@ mod tests {
         let bead_path = create_dummy_executable(&path_bin, "bead");
         std::env::set_var("PATH", &path_bin);
         let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bead,
-                "Bead on PATH should take priority over bf in ~/.local/bin (ADR-013 primary)");
-        assert_eq!(result.1, bead_path,
-                "Should resolve to bead on PATH, not bf in home");
+        assert_eq!(
+            result.0,
+            Backend::Bead,
+            "Bead on PATH should take priority over bf in ~/.local/bin (ADR-013 primary)"
+        );
+        assert_eq!(
+            result.1, bead_path,
+            "Should resolve to bead on PATH, not bf in home"
+        );
 
         // Test 3: Remove bead from PATH, keep in ~/.local/bin
         std::fs::remove_file(&bead_path).unwrap();
         std::env::set_var("PATH", "");
         let bead_local = create_dummy_executable(&local_bin, "bead");
         let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bead,
-                "Bead in ~/.local/bin should win over bf in same directory (primary per ADR-013)");
-        assert_eq!(result.1, bead_local,
-                "Should resolve to ~/.local/bin/bead, not ~/.local/bin/bf");
+        assert_eq!(
+            result.0,
+            Backend::Bead,
+            "Bead in ~/.local/bin should win over bf in same directory (primary per ADR-013)"
+        );
+        assert_eq!(
+            result.1, bead_local,
+            "Should resolve to ~/.local/bin/bead, not ~/.local/bin/bf"
+        );
 
         // Test 4: Only bf on PATH - should find it
         std::fs::remove_file(&bead_local).unwrap();
         std::env::set_var("PATH", &path_bin);
         let bf_path = create_dummy_executable(&path_bin, "bf");
         let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bf,
-                "With only bf available, should find it on PATH");
-        assert_eq!(result.1, bf_path,
-                "Should resolve to bf on PATH when bead is absent");
+        assert_eq!(
+            result.0,
+            Backend::Bf,
+            "With only bf available, should find it on PATH"
+        );
+        assert_eq!(
+            result.1, bf_path,
+            "Should resolve to bf on PATH when bead is absent"
+        );
     }
 
     #[test]
@@ -1850,9 +1937,11 @@ mod tests {
             expected_backend, backend
         );
         assert_eq!(
-            path, expected_path,
+            path,
+            expected_path,
             "Path mismatch: expected {}, got {}",
-            expected_path.display(), path.display()
+            expected_path.display(),
+            path.display()
         );
     }
 
@@ -5817,7 +5906,10 @@ mod config_tests {
         let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(&PathBuf::from("~/.needle.d/config.yaml"));
-        assert_eq!(result, PathBuf::from("/home/testuser/.needle.d/config.yaml"));
+        assert_eq!(
+            result,
+            PathBuf::from("/home/testuser/.needle.d/config.yaml")
+        );
         std::env::remove_var("HOME");
     }
 
@@ -5856,7 +5948,10 @@ mod config_tests {
         assert_eq!(expand_tilde_str("/path/end~"), "/path/end~");
 
         // Multiple separated tildes: only first at start expands
-        assert_eq!(expand_tilde_str("~/first:~/second"), "/home/testuser/first:~/second");
+        assert_eq!(
+            expand_tilde_str("~/first:~/second"),
+            "/home/testuser/first:~/second"
+        );
 
         // Tilde without slash after it but not at start: should NOT expand
         assert_eq!(expand_tilde_str("/path/~user"), "/path/~user");

@@ -104,9 +104,9 @@ fn verify_backend_identity(
     binary: &Path,
     workspace: &Path,
 ) -> Result<()> {
+    use regex::Regex;
     use std::io::Read;
     use std::process::Stdio;
-    use regex::Regex;
 
     // Get the backend descriptor for this backend type
     let descriptor_name = match backend {
@@ -118,7 +118,10 @@ fn verify_backend_identity(
         .into_iter()
         .find(|d| d.name == descriptor_name)
         .ok_or_else(|| {
-            anyhow::anyhow!("built-in backend descriptor '{}' not found", descriptor_name)
+            anyhow::anyhow!(
+                "built-in backend descriptor '{}' not found",
+                descriptor_name
+            )
         })?;
 
     let mut child = spawn_with_etxtbsy_retry_sync_child(
@@ -2985,7 +2988,10 @@ echo "bf 0.2.0-github"
         );
 
         // Verify that all retries were exhausted and error was propagated
-        assert!(result.is_err(), "Should fail after exhausting all retry attempts");
+        assert!(
+            result.is_err(),
+            "Should fail after exhausting all retry attempts"
+        );
         let err = result.unwrap_err();
         assert_eq!(
             err.raw_os_error(),
@@ -3088,7 +3094,7 @@ echo "bf 0.2.0-github"
                 // Always fail with ETXTBSY
                 Err::<_, io::Error>(make_etxtbsy_error())
             },
-            1, // max_attempts=1 (single attempt, no retries)
+            1,  // max_attempts=1 (single attempt, no retries)
             20, // backoff_ms
         );
 
@@ -3144,11 +3150,8 @@ fi
         std::fs::set_permissions(&bead_rs, perm).unwrap();
 
         // Test that verify_backend_identity succeeds immediately for healthy binary
-        let result = verify_backend_identity(
-            &crate::config::Backend::Bead,
-            &bead_rs,
-            workspace.path(),
-        );
+        let result =
+            verify_backend_identity(&crate::config::Backend::Bead, &bead_rs, workspace.path());
 
         assert!(
             result.is_ok(),
@@ -3166,9 +3169,12 @@ fi
 
         // Create a bead-forge binary when bead-rs is expected
         let wrong_binary = workspace.path().join("wrong-backend-fixture");
-        std::fs::write(&wrong_binary, r#"#!/bin/bash
+        std::fs::write(
+            &wrong_binary,
+            r#"#!/bin/bash
 echo "bf 0.4.1"
-"#)
+"#,
+        )
         .unwrap();
         let mut perm = std::fs::metadata(&wrong_binary).unwrap().permissions();
         perm.set_mode(0o755);
@@ -3199,10 +3205,13 @@ echo "bf 0.4.1"
 
         // Create a binary that always fails (non-zero exit code)
         let failing_binary = workspace.path().join("failing-fixture");
-        std::fs::write(&failing_binary, r#"#!/bin/bash
+        std::fs::write(
+            &failing_binary,
+            r#"#!/bin/bash
 echo "Error: something went wrong" >&2
 exit 1
-"#)
+"#,
+        )
         .unwrap();
         let mut perm = std::fs::metadata(&failing_binary).unwrap().permissions();
         perm.set_mode(0o755);
@@ -3241,7 +3250,8 @@ exit 1
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("failed to inspect bead CLI identity") || err_msg.contains("No such file"),
+            err_msg.contains("failed to inspect bead CLI identity")
+                || err_msg.contains("No such file"),
             "Error should mention spawn failure, got: {}",
             err_msg
         );

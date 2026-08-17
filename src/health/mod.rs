@@ -471,7 +471,9 @@ impl HealthMonitor {
     /// let is_alive = monitor.check_worker_alive("claude-code-glm-5-alpha")?;
     /// ```
     pub fn check_worker_alive(&self, qualified_worker_id: &str) -> Result<bool> {
-        let path = self.heartbeat_dir.join(format!("{}.json", qualified_worker_id));
+        let path = self
+            .heartbeat_dir
+            .join(format!("{}.json", qualified_worker_id));
 
         if !path.exists() {
             tracing::debug!(
@@ -482,11 +484,21 @@ impl HealthMonitor {
             return Ok(false);
         }
 
-        let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read heartbeat file for worker {}: {}", qualified_worker_id, path.display()))?;
+        let content = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "failed to read heartbeat file for worker {}: {}",
+                qualified_worker_id,
+                path.display()
+            )
+        })?;
 
-        let heartbeat: HeartbeatData = serde_json::from_str(&content)
-            .with_context(|| format!("failed to parse heartbeat file for worker {}: {}", qualified_worker_id, path.display()))?;
+        let heartbeat: HeartbeatData = serde_json::from_str(&content).with_context(|| {
+            format!(
+                "failed to parse heartbeat file for worker {}: {}",
+                qualified_worker_id,
+                path.display()
+            )
+        })?;
 
         let age = Utc::now()
             .signed_duration_since(heartbeat.last_heartbeat)
@@ -3566,10 +3578,7 @@ mod tests {
         // Attempt to check if the worker is alive
         let result = monitor.check_worker_alive(qualified_id);
 
-        assert!(
-            result.is_err(),
-            "malformed heartbeat should return error"
-        );
+        assert!(result.is_err(), "malformed heartbeat should return error");
 
         let err = result.unwrap_err();
         let err_msg = err.to_string().to_lowercase();
@@ -3774,10 +3783,7 @@ mod tests {
         // Verify the malformed heartbeat returns error
         let result = monitor.verify_heartbeat();
 
-        assert!(
-            result.is_err(),
-            "malformed heartbeat should return error"
-        );
+        assert!(result.is_err(), "malformed heartbeat should return error");
 
         let err = result.unwrap_err();
         let err_msg = err.to_string().to_lowercase();
@@ -4200,10 +4206,7 @@ mod tests {
 
         // Check that the worker is alive
         let is_alive = monitor.check_worker_alive(worker_id).unwrap();
-        assert!(
-            is_alive,
-            "worker with fresh heartbeat should be alive"
-        );
+        assert!(is_alive, "worker with fresh heartbeat should be alive");
     }
 
     /// Test that check_worker_alive returns false for stale heartbeats.
@@ -4248,10 +4251,7 @@ mod tests {
 
         // Check that the worker is not alive
         let is_alive = monitor.check_worker_alive(worker_id).unwrap();
-        assert!(
-            !is_alive,
-            "worker with stale heartbeat should not be alive"
-        );
+        assert!(!is_alive, "worker with stale heartbeat should not be alive");
     }
 
     /// Test that check_worker_alive returns false when heartbeat file doesn't exist.
@@ -4396,9 +4396,6 @@ mod tests {
 
         // Verify the qualified ID is used correctly
         let is_alive = monitor.check_worker_alive(qualified_id).unwrap();
-        assert!(
-            is_alive,
-            "worker should be found using qualified ID format"
-        );
+        assert!(is_alive, "worker should be found using qualified ID format");
     }
 }

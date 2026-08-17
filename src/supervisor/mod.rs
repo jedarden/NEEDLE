@@ -365,6 +365,19 @@ impl Supervisor {
         // Start telemetry
         self.telemetry.start();
 
+        // Emit worker binary resolved event (fixes GitHub issue jedarden/NEEDLE#11)
+        let worker_binary = resolve_worker_binary(self.config.worker_binary_path.clone())
+            .context("failed to resolve worker binary path for supervisor")?;
+        let binary_source = if self.config.worker_binary_path.is_some() {
+            "config override (worker.worker_binary_path)"
+        } else {
+            "current_exe()"
+        };
+        self.telemetry.emit(EventKind::SupervisorBinaryResolved {
+            worker_binary: worker_binary.display().to_string(),
+            source: binary_source.to_string(),
+        })?;
+
         // Emit supervisor started event
         self.telemetry.emit(EventKind::SupervisorStarted {
             workspace: self.config.workspace.display().to_string(),
