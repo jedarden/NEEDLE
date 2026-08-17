@@ -2247,6 +2247,59 @@ impl Worker {
                     );
                 }
 
+                // ── Atomic claim verification at dispatch time ──
+                // Verify that the bead is still assigned to this worker immediately
+                // before dispatch. This prevents double-dispatch where two workers
+                // dispatch the same bead concurrently.
+                //
+                // This check queries the LIVE bead store (not a stale snapshot) to
+                // ensure the bead is still in_progress and assigned to this worker.
+                // If another worker has reassigned the bead or the bead has been
+                // released, we abort the dispatch.
+                let is_valid = self
+                    .claimer
+                    .verify_claim_at_dispatch(&bead.id, &self.worker_name)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "dispatch-time claim verification failed for bead {}",
+                            bead.id
+                        )
+                    })?;
+
+                if !is_valid {
+                    // Bead is not assigned to this worker - abort dispatch.
+                    // Release the bead back to ready state so another worker can claim it.
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        worker = %self.worker_name,
+                        "dispatch-time claim verification failed: bead not assigned to this worker, aborting dispatch and releasing back to ready state"
+                    );
+
+                    // Release the bead back to open status
+                    if let Err(e) = self.store.release(&bead.id).await {
+                        tracing::error!(
+                            bead_id = %bead.id,
+                            error = %e,
+                            "failed to release bead after dispatch-time verification failure"
+                        );
+                    }
+
+                    // Emit telemetry for the failed verification
+                    let _ = self.telemetry.emit(EventKind::ClaimVerifyFailed {
+                        bead_id: bead.id.clone(),
+                        expected_actor: self.worker_name.clone(),
+                        actual_status: "unknown".to_string(),
+                        actual_assignee: "(not verified)".to_string(),
+                    });
+
+                    bail!(
+                        "dispatch-time claim verification failed for bead {}: bead is not assigned to worker {}",
+                        bead.id,
+                        self.worker_name
+                    );
+                }
+
                 self.exec_started_at = Some(Instant::now());
                 let result = self
                     .dispatcher
