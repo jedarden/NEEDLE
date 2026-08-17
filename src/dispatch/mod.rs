@@ -1342,7 +1342,7 @@ impl Dispatcher {
         // Exit code and optional timeout reason.
         let (exit_code, timeout_reason) = if !has_any_deadline {
             // No deadlines: wait indefinitely.
-            let status = child
+            let status = ProcessGuard::new(child)
                 .wait()
                 .await
                 .context("failed to wait for agent process")?;
@@ -1352,6 +1352,9 @@ impl Dispatcher {
             // At least one deadline is active: use select! to concurrently
             // observe child exit, idle deadline, hard deadline, and cancellation.
             use tokio::select;
+
+            // Wrap child in ProcessGuard for safe waiting and cleanup.
+            let mut guard = ProcessGuard::new(child);
 
             // Idle deadline state: resets on activity.
             let mut idle_deadline = if has_idle_deadline {
@@ -1385,7 +1388,7 @@ impl Dispatcher {
 
                 select! {
                     // Branch 1: child exited (natural or signaled)
-                    status = child.wait() => {
+                    status = guard.wait_borrowed() => {
                         let status = status.context("failed to wait for agent process")?;
                         kill_guard.disarm();
                         break (status.code().unwrap_or(-1), None);
@@ -1415,8 +1418,8 @@ impl Dispatcher {
                                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
                             }
                         }
-                        let _ = child.start_kill();
-                        let _ = ProcessGuard::new(child).wait().await;
+                        let _ = guard.get_mut().and_then(|c| c.start_kill().ok());
+                        let _ = guard.wait().await;
                         kill_guard.disarm();
 
                         // Compute last output age for telemetry.
@@ -1448,8 +1451,8 @@ impl Dispatcher {
                                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
                             }
                         }
-                        let _ = child.start_kill();
-                        let _ = ProcessGuard::new(child).wait().await;
+                        let _ = guard.get_mut().and_then(|c| c.start_kill().ok());
+                        let _ = guard.wait().await;
                         kill_guard.disarm();
 
                         let reason = TimeoutReason::Hard {

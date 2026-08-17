@@ -51,6 +51,22 @@ impl ProcessGuard {
     pub fn get_mut(&mut self) -> Option<&mut Child> {
         self.child.as_mut()
     }
+
+    /// Create a future that waits for the child to exit without consuming the guard.
+    ///
+    /// This allows using the guard in select! branches where the guard needs to remain
+    /// available for other operations. The future will wait for the child to exit
+    /// and return the exit status, but the guard remains owned by the caller.
+    ///
+    /// After this future completes successfully, call `wait()` to consume the guard
+    /// and mark it as reaped, or drop the guard to trigger cleanup.
+    pub async fn wait_borrowed(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        if let Some(ref mut child) = self.child {
+            child.wait().await
+        } else {
+            Err(std::io::Error::other("child already reaped"))
+        }
+    }
 }
 
 impl Drop for ProcessGuard {
