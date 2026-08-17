@@ -4646,10 +4646,11 @@ bead_cli:
         config_expanded
             .bead_cli
             .path
+            .as_ref()
             .unwrap()
             .starts_with(&isolated_home),
         "bead_cli.path should be expanded to isolated home, got: {}",
-        config_expanded.bead_cli.path.unwrap().display()
+        config_expanded.bead_cli.path.as_ref().unwrap().display()
     );
 
     assert_eq!(
@@ -4845,7 +4846,6 @@ strands:
 #[tokio::test]
 async fn explore_workspaces_tilde_expansion() {
     use needle::config::Config;
-    use needle::util::expand_tilde;
     use std::env;
     use std::fs;
 
@@ -5401,7 +5401,6 @@ supervisor: {}
 #[tokio::test]
 async fn prompt_context_files_tilde_expansion() {
     use needle::config::Config;
-    use needle::util::expand_tilde;
     use std::env;
     use std::fs;
 
