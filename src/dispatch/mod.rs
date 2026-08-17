@@ -180,7 +180,9 @@ impl Clone for HardDeadlineTimer {
     /// This is safe because the deadline is an absolute point in time computed
     /// at original creation. Both timers reference the same deadline moment.
     fn clone(&self) -> Self {
-        Self { deadline: self.deadline }
+        Self {
+            deadline: self.deadline,
+        }
     }
 }
 
@@ -4934,5 +4936,3 @@ async fn hard_deadline_timer_expires_after_duration() {
     let remaining = timer.remaining().expect("should have remaining time");
     assert!(remaining <= Duration::from_millis(10));
 }
-
-

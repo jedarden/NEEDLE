@@ -4518,10 +4518,7 @@ mod tests {
 
         // Worker should now be detected as dead (no heartbeat file)
         let is_dead = monitor.check_worker_alive(&qualified_id).unwrap();
-        assert!(
-            !is_dead,
-            "worker should be detected as dead after stopping"
-        );
+        assert!(!is_dead, "worker should be detected as dead after stopping");
 
         // Test stale detection scenario: simulate a dead worker with stale heartbeat file
         // Create a stale heartbeat file manually

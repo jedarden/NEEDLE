@@ -1379,7 +1379,7 @@ mod tests {
                 final_status,
                 labels,
             } => {
-                assert_eq!(final_status, "done");
+                assert_eq!(final_status, "closed");
                 assert_eq!(labels, vec!["verified".to_string()]);
             }
             other => panic!("expected Success, got {:?}", other),

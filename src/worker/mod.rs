@@ -2258,7 +2258,7 @@ impl Worker {
                 // released, we abort the dispatch.
                 let is_valid = self
                     .claimer
-                    .verify_claim_at_dispatch(&bead.id, &self.worker_name)
+                    .verify_claim_at_dispatch(&bead.id, &self.qualified_id())
                     .await
                     .with_context(|| {
                         format!(
@@ -2288,7 +2288,7 @@ impl Worker {
                     // Emit telemetry for the failed verification
                     let _ = self.telemetry.emit(EventKind::ClaimVerifyFailed {
                         bead_id: bead.id.clone(),
-                        expected_actor: self.worker_name.clone(),
+                        expected_actor: self.qualified_id(),
                         actual_status: "unknown".to_string(),
                         actual_assignee: "(not verified)".to_string(),
                     });
@@ -2296,7 +2296,7 @@ impl Worker {
                     bail!(
                         "dispatch-time claim verification failed for bead {}: bead is not assigned to worker {}",
                         bead.id,
-                        self.worker_name
+                        self.qualified_id()
                     );
                 }
 
