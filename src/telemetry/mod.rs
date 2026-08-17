@@ -271,6 +271,7 @@ pub enum EventKind {
         duration_ms: u64,
         agent: String,
         model: Option<String>,
+        provider: Option<String>,
     },
     AgentTimeout {
         bead_id: BeadId,
@@ -1326,6 +1327,7 @@ impl EventKind {
                 duration_ms,
                 agent,
                 model,
+                provider,
             } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
@@ -1333,6 +1335,7 @@ impl EventKind {
                     "duration_ms": duration_ms,
                     "agent": agent,
                     "model": model,
+                    "provider": provider,
                 })
             }
             EventKind::RoutingDecision {
@@ -2982,6 +2985,8 @@ pub struct TelemetryIdentity {
     pub agent: Option<String>,
     /// The resolved model identifier, when the adapter declares one.
     pub model: Option<String>,
+    /// The provider name (e.g., "anthropic", "openai").
+    pub provider: Option<String>,
     /// The worker's workspace. OTLP sinks reduce this to its basename before export.
     pub workspace: Option<PathBuf>,
 }
@@ -3299,6 +3304,7 @@ impl Telemetry {
                     file_sink_for_otlp,
                     identity.agent.as_deref(),
                     identity.model.as_deref(),
+                    identity.provider.as_deref(),
                     identity.workspace.as_deref().and_then(Path::to_str),
                 ) {
                     Ok(otlp) => {
@@ -4639,6 +4645,7 @@ mod tests {
             duration_ms: 1234,
             agent: "claude".to_string(),
             model: Some("claude-sonnet-4-6".to_string()),
+            provider: Some("anthropic".to_string()),
         };
         assert_eq!(kind.duration_ms(), Some(1234));
 
@@ -5165,6 +5172,7 @@ mod tests {
                 duration_ms: 3000,
                 agent: "claude".to_string(),
                 model: Some("claude-sonnet-4-6".to_string()),
+                provider: Some("anthropic".to_string()),
             },
             EventKind::OutcomeClassified {
                 bead_id: id.clone(),
