@@ -167,12 +167,18 @@ budget:
 #
 # `outcome_timeout_seconds` is NOT workspace-overridable; it lives on the global
 # ValidationConfig in ~/.needle/config.yaml under `validation:`, where it has
-# been set to 300. The `gates:` block below already expresses this workspace's
+# been set to 300. The `gates:` block below expresses this workspace's
 # verification via the supported pluggable system.
+#
+# NEEDLE validation gate: Definition of Done (fast lane)
+# This is the SAME command invoked by the pre-commit hook and CI verify step,
+# ensuring a single source of truth for "is this work acceptable?"
+# See scripts/definition-of-done.sh for the unified verification command.
+# The fast lane runs locally in seconds: fmt, clippy, check.
 gates:
   - type: command
     commands:
-      - scripts/verify-shipped-commit.sh
+      - scripts/definition-of-done.sh --fast
 self_modification:
   enabled: false
   canary_workspace: /home/coding/.needle/canary

@@ -1,7 +1,32 @@
 #!/usr/bin/env bash
-# Reject a checkpoint pointer commit whose dynamically named roots are absent.
+# Pre-commit hook: Definition of Done (fast lane) + checkpoint verification
+#
+# This hook runs the fast lane definition-of-done checks before allowing a commit.
+# It counts bypasses so we know when quality gates are being skipped.
+#
+# To bypass this hook (NOT RECOMMENDED), use:
+#   git commit --no-verify -m "..."
+# This will be recorded in .beads/bypasses.jsonl
 
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo "=== Running Definition of Done (fast lane) ==="
+
+# Run the fast lane checks with bypass counting
+if ! scripts/definition-of-done.sh --fast --count-bypass; then
+  echo ""
+  echo "❌ Pre-commit check failed"
+  echo ""
+  echo "Your changes do not meet the Definition of Done."
+  echo "Please fix the issues above before committing."
+  echo ""
+  echo "To bypass (not recommended), use: git commit --no-verify"
+  echo "This will be recorded in .beads/bypasses.jsonl"
+  exit 1
+fi
+
+echo "=== Running checkpoint verification ==="
 "$repo_root/scripts/checkpoint-publish.sh" verify-index
