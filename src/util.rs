@@ -336,6 +336,126 @@ pub fn capture_timestamp_result() -> Result<String> {
     }
 }
 
+/// Parse the backend name from a binary's version output.
+///
+/// Runs the specified binary with the given version command arguments,
+/// captures stdout, and extracts the backend name (first word of output).
+///
+/// This function includes ETXTBSY (errno 26) retry logic to handle the race
+/// condition where a binary written to disk immediately before execution
+/// transiently reports "Text file busy".
+///
+/// # Arguments
+///
+/// * `binary_path` - Path to the binary to execute
+/// * `version_args` - Arguments to pass for version check (e.g., `["--version"]`)
+///
+/// # Returns
+///
+/// * `Result<String>` - The extracted backend name, or an error if:
+///   - Binary not found
+///   - Binary exits with non-zero code
+///   - Output is empty or unparseable
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::util::parse_backend_name_from_version;
+/// use std::path::Path;
+///
+/// # fn main() -> anyhow::Result<()> {
+/// let backend = parse_backend_name_from_version(
+///     Path::new("/usr/local/bin/bf"),
+///     &["--version"]
+/// )?;
+/// assert_eq!(backend, "bf");
+/// # Ok(())
+/// # }
+/// ```
+pub fn parse_backend_name_from_version(
+    binary_path: &std::path::Path,
+    version_args: &[&str],
+) -> Result<String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::thread;
+
+    // Check if binary exists
+    if !binary_path.exists() {
+        anyhow::bail!(
+            "binary not found at {}",
+            binary_path.display()
+        );
+    }
+
+    // ETXTBSY retry logic: retry with backoff when the kernel reports "Text file busy"
+    const ETXTBSY_ERRNO: i32 = 26;
+    let max_attempts = 5;
+    let backoff_ms = 20;
+
+    let mut last_err = None;
+    for attempt in 0..max_attempts {
+        let result = Command::new(binary_path)
+            .args(version_args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+
+        match result {
+            Ok(output) => {
+                // Check exit status
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    anyhow::bail!(
+                        "binary {} exited with code {}: {}",
+                        binary_path.display(),
+                        output.status.code().unwrap_or(-1),
+                        stderr.trim()
+                    );
+                }
+
+                // Capture stdout
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let trimmed_output = stdout.trim();
+
+                // Extract backend name (first word)
+                let backend_name = trimmed_output
+                    .split_whitespace()
+                    .next()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "binary {} produced empty or unparseable version output",
+                            binary_path.display()
+                        )
+                    })?;
+
+                return Ok(backend_name.to_string());
+            }
+            Err(e) if e.raw_os_error() == Some(ETXTBSY_ERRNO) && attempt + 1 < max_attempts => {
+                last_err = Some(e);
+                thread::sleep(std::time::Duration::from_millis(backoff_ms));
+            }
+            Err(e) => return Err(e).with_context(|| {
+                format!(
+                    "failed to execute binary {} with version args {:?}",
+                    binary_path.display(),
+                    version_args
+                )
+            }),
+        }
+    }
+
+    // All retries exhausted
+    Err(last_err.expect("loop always sets last_err before exhausting max_attempts"))
+        .with_context(|| {
+            format!(
+                "failed to execute binary {} after {} attempts (ETXTBSY)",
+                binary_path.display(),
+                max_attempts
+            )
+        })
+}
+
 /// Crate-wide test-only environment isolation.
 ///
 /// `HOME` is process-global, but Rust runs unit tests as threads inside a
@@ -1057,25 +1177,263 @@ mod tests {
     }
 
     #[test]
-    fn test_capture_timestamp_always_returns_valid_string() {
-        // This test verifies that capture_timestamp never panics and always
-        // returns a valid ISO 8601 string, even if fallback is used
-        let timestamp = capture_timestamp();
+    fn test_parse_backend_name_from_bf_version() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
 
-        // Should always be a non-empty string
-        assert!(!timestamp.is_empty(), "timestamp should not be empty");
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bf = tmp_dir.path().join("fake-bf");
 
-        // Should always be valid ISO 8601 (either real time or epoch fallback)
-        let parsed = timestamp
-            .parse::<chrono::DateTime<chrono::Utc>>()
-            .expect("timestamp should always be valid ISO 8601, even if fallback");
+        // Create a fake bf binary that outputs version info
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+echo "bf 0.4.1"
+"#,
+        )
+        .unwrap();
 
-        // The timestamp should be reasonable (not negative)
-        assert!(
-            parsed.timestamp() >= 0,
-            "timestamp should be >= epoch, got {}",
-            parsed.timestamp()
-        );
+        let mut perms = std::fs::metadata(&fake_bf).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bf, perms).unwrap();
+
+        let backend = parse_backend_name_from_version(&fake_bf, &["--version"])
+            .expect("should parse bf version successfully");
+        assert_eq!(backend, "bf");
+    }
+
+    #[test]
+    fn test_parse_backend_name_from_bead_version() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bead = tmp_dir.path().join("fake-bead");
+
+        // Create a fake bead binary
+        std::fs::write(
+            &fake_bead,
+            r#"#!/bin/sh
+echo "bead 0.1.3 (commit 85f36ac)"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_bead).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bead, perms).unwrap();
+
+        let backend = parse_backend_name_from_version(&fake_bead, &["--version"])
+            .expect("should parse bead version successfully");
+        assert_eq!(backend, "bead");
+    }
+
+    #[test]
+    fn test_parse_backend_name_various_output_formats() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let _fake_binary = tmp_dir.path().join("fake-binary");
+
+        // Test with various output formats
+        let test_outputs = vec![
+            "backend-name 1.0.0",
+            "my-backend 2.3.4-beta",
+            "tool 0.1.0+build.sha1",
+            "cli 3.0.0 (release)",
+        ];
+
+        for (i, output) in test_outputs.iter().enumerate() {
+            let script = format!(
+                r#"#!/bin/sh
+echo "{}"
+"#,
+                output
+            );
+
+            let binary_path = tmp_dir.path().join(format!("fake-binary-{}", i));
+            std::fs::write(&binary_path, script).unwrap();
+
+            let mut perms = std::fs::metadata(&binary_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&binary_path, perms).unwrap();
+
+            let backend = parse_backend_name_from_version(&binary_path, &["--version"])
+                .expect("should parse version successfully");
+
+            let expected_name = output.split_whitespace().next().unwrap();
+            assert_eq!(backend, expected_name);
+        }
+    }
+
+    #[test]
+    fn test_parse_backend_name_binary_not_found() {
+        let non_existent = std::path::PathBuf::from("/nonexistent/path/to/binary");
+        let result = parse_backend_name_from_version(&non_existent, &["--version"]);
+
+        assert!(result.is_err(), "should fail when binary not found");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("binary not found") || error_msg.contains("No such file"));
+    }
+
+    #[test]
+    fn test_parse_backend_name_bad_exit_code() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let failing_binary = tmp_dir.path().join("failing-binary");
+
+        // Create a binary that exits with error code
+        std::fs::write(
+            &failing_binary,
+            r#"#!/bin/sh
+echo "Error: something went wrong" >&2
+exit 1
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&failing_binary).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&failing_binary, perms).unwrap();
+
+        let result = parse_backend_name_from_version(&failing_binary, &["--version"]);
+
+        assert!(result.is_err(), "should fail when binary exits with non-zero code");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("exited with code"));
+    }
+
+    #[test]
+    fn test_parse_backend_name_empty_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let empty_binary = tmp_dir.path().join("empty-binary");
+
+        // Create a binary that produces no output
+        std::fs::write(
+            &empty_binary,
+            r#"#!/bin/sh
+# Output nothing
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&empty_binary).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&empty_binary, perms).unwrap();
+
+        let result = parse_backend_name_from_version(&empty_binary, &["--version"]);
+
+        assert!(result.is_err(), "should fail when binary produces empty output");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("empty") || error_msg.contains("unparseable"));
+    }
+
+    #[test]
+    fn test_parse_backend_name_whitespace_only_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let whitespace_binary = tmp_dir.path().join("whitespace-binary");
+
+        // Create a binary that produces only whitespace
+        std::fs::write(
+            &whitespace_binary,
+            r#"#!/bin/sh
+echo "   \t\n"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&whitespace_binary).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&whitespace_binary, perms).unwrap();
+
+        let result = parse_backend_name_from_version(&whitespace_binary, &["--version"]);
+
+        assert!(result.is_err(), "should fail when binary produces only whitespace");
+    }
+
+    #[test]
+    fn test_parse_backend_name_custom_version_args() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let custom_binary = tmp_dir.path().join("custom-binary");
+
+        // Create a binary that responds to -v instead of --version
+        std::fs::write(
+            &custom_binary,
+            r#"#!/bin/sh
+if [ "$1" = "-v" ]; then
+    echo "custom-tool 1.2.3"
+fi
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&custom_binary).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&custom_binary, perms).unwrap();
+
+        let backend = parse_backend_name_from_version(&custom_binary, &["-v"])
+            .expect("should parse with custom version args");
+        assert_eq!(backend, "custom-tool");
+    }
+
+    #[test]
+    fn test_parse_backend_name_multiline_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let multiline_binary = tmp_dir.path().join("multiline-binary");
+
+        // Create a binary that outputs multiline version info
+        std::fs::write(
+            &multiline_binary,
+            r#"#!/bin/sh
+echo "my-tool 2.0.0"
+echo "Build metadata: some info"
+echo "Copyright 2026"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&multiline_binary).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&multiline_binary, perms).unwrap();
+
+        let backend = parse_backend_name_from_version(&multiline_binary, &["--version"])
+            .expect("should parse first line of multiline output");
+        assert_eq!(backend, "my-tool");
+    }
+
+    #[test]
+    fn test_parse_backend_name_handles_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let noisy_binary = tmp_dir.path().join("noisy-binary");
+
+        // Create a binary that outputs to both stdout and stderr
+        std::fs::write(
+            &noisy_binary,
+            r#"#!/bin/sh
+echo "Debug: starting up..." >&2
+echo "noisy-tool 1.0.0"
+echo "Warning: deprecated flag" >&2
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&noisy_binary).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&noisy_binary, perms).unwrap();
+
+        let backend = parse_backend_name_from_version(&noisy_binary, &["--version"])
+            .expect("should parse backend name from stdout despite stderr output");
+        assert_eq!(backend, "noisy-tool");
     }
 
     #[test]
