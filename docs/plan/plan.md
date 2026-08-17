@@ -2086,6 +2086,7 @@ Every NEEDLE telemetry event that isn't already represented as a span event is e
 - `severity_number` / `severity_text`: `INFO` for normal events, `WARN` for `peer.stale` / `telemetry.*.dropped`, `ERROR` for `worker.errored` / `bead.claim.failed` / `agent.timeout`.
 - `body`: the existing event `data` object.
 - `attributes`: flattened from the event envelope (`event_type`, `bead_id`, `workspace`, etc.).
+  - `needle.agent` / `needle.model`: Present on events with dispatch context (e.g., `agent.dispatched`, `effort.recorded`). **Precedence**: when both Resource and record contain the same attribute, the record value wins. This allows the dashboard to show the actual adapter/model dispatched (which can differ from the configured default due to routing rules) while still having a process-invariant fallback when the worker is idle.
 - `trace_id` / `span_id`: linked to the enclosing `bead.lifecycle` or `worker.session` span where applicable.
 
 Events that ARE spans (e.g., `bead.claim.attempted` → a span, not a log) do not double-export as logs.

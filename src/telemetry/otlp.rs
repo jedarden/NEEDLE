@@ -1368,6 +1368,17 @@ impl OtlpSink {
             attrs.push(("duration_ms", AnyValue::from(duration_ms as i64)));
         }
 
+        // Add needle.agent and needle.model from dispatch context when available.
+        // These per-record attributes reflect the actual adapter/model dispatched,
+        // which can differ from the configured default due to routing rules.
+        // Per ADR-016 §2: record value wins over Resource value.
+        if let Some(agent_name) = event.data.get("agent_name").and_then(|v| v.as_str()) {
+            attrs.push(("needle.agent", agent_name.to_string().into()));
+        }
+        if let Some(model) = event.data.get("model").and_then(|v| v.as_str()) {
+            attrs.push(("needle.model", model.to_string().into()));
+        }
+
         log_record.add_attributes(attrs);
 
         logger.emit(log_record);
