@@ -4418,7 +4418,7 @@ output_transform: "needle-transform-custom"
             other => panic!(
                 "expected Hard timeout reason, got {:?}",
                 other
-            );
+            ),
         }
 
         assert!(
@@ -4466,7 +4466,7 @@ output_transform: "needle-transform-custom"
             other => panic!(
                 "expected Hard timeout reason, got {:?}",
                 other
-            );
+            ),
         }
 
         assert!(
