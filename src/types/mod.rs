@@ -3040,124 +3040,534 @@ pub fn parse_error_code(input: &str) -> Option<String> {
 /// assert_eq!(classify_error_code("E9999"), ErrorCategory::Unknown);
 /// ```
 pub fn classify_error_code(code: &str) -> ErrorCategory {
-    match code {
-        // Type mismatch errors
-        "E0308" | "E0309" | "E0310" | "E0311" | "E0312" | "E0313" | "E0314" | "E0315" | "E0316"
-        | "E0317" | "E0369" | "E0370" => ErrorCategory::TypeMismatch,
-
-        // Borrow checker and lifetime errors
-        "E0382" | "E0502" | "E0503" | "E0505" | "E0506" | "E0507" | "E0508" | "E0509" | "E0510"
-        | "E0511" | "E0512" | "E0515" | "E0516" | "E0517" | "E0597" | "E0623" | "E0624"
-        | "E0625" | "E0626" | "E0716" | "E0782" | "E0783" | "E0937" | "E0980" => {
-            ErrorCategory::BorrowChecker
-        }
-
-        // Trait implementation errors
-        "E0038" | "E0046" | "E0117" | "E0118" | "E0119" | "E0120" | "E0183" | "E0207" | "E0210"
-        | "E0220" | "E0227" | "E0229" | "E0230" | "E0277" | "E0365" | "E0366" | "E0367"
-        | "E0368" | "E0381" | "E0390" | "E0391" | "E0412" | "E0423" | "E0437" | "E0558"
-        | "E0574" | "E0647" | "E0699" | "E0708" | "E0719" | "E0781" => ErrorCategory::TraitImpl,
-
-        // Pattern matching errors
-        "E0002" | "E0009" | "E0007" | "E0010" | "E0011" | "E0012" | "E0013" | "E0014" | "E0015"
-        | "E0016" | "E0017" | "E0018" | "E0019" | "E0022" | "E0023" | "E0024" | "E0025"
-        | "E0026" | "E0031" | "E0033" | "E0034" | "E0035" | "E0039" | "E0040" | "E0044"
-        | "E0052" | "E0054" | "E0055" | "E0162" | "E0163" | "E0164" | "E0165" | "E0302"
-        | "E0409" | "E0422" | "E0424" | "E0513" | "E0529" | "E0616" | "E0617" | "E0618"
-        | "E0639" | "E0640" | "E0641" | "E0642" | "E0643" | "E0644" => {
-            ErrorCategory::PatternMatching
-        }
-
-        // Scope and visibility errors
-        "E0403" | "E0404" | "E0405" | "E0406" | "E0407" | "E0408" | "E0411" | "E0413" | "E0414"
-        | "E0415" | "E0501" | "E0583" | "E0603" | "E0604" | "E0605" | "E0606" | "E0607"
-        | "E0608" | "E0609" | "E0610" | "E0611" | "E0612" | "E0613" | "E0614" | "E0615"
-        | "E0621" | "E0622" | "E0631" | "E0633" | "E0634" | "E0636" | "E0742" | "E0743"
-        | "E0744" | "E0745" | "E0750" | "E0758" | "E0759" | "E0760" | "E0761" | "E0762"
-        | "E0763" | "E0764" | "E0765" | "E0766" | "E0767" | "E0768" | "E0769" | "E0770"
-        | "E0771" | "E0772" | "E0773" | "E0774" | "E0775" | "E0776" | "E0777" | "E0778"
-        | "E0779" | "E0780" | "E0790" | "E0791" | "E0792" | "E0793" | "E0794" | "E0795"
-        | "E0796" | "E0797" | "E0798" | "E0799" => ErrorCategory::ScopeVisibility,
-
-        // Syntax errors
-        "E0053" | "E0060" | "E0061" | "E0062" | "E0063" | "E0066" | "E0070" | "E0071" | "E0072"
-        | "E0073" | "E0075" | "E0076" | "E0077" | "E0078" | "E0079" | "E0080" | "E0081"
-        | "E0082" | "E0085" | "E0087" | "E0106" | "E0116" | "E0124" | "E0131" | "E0133"
-        | "E0161" | "E0175" | "E0201" | "E0204" | "E0205" | "E0206" | "E0211" | "E0214"
-        | "E0225" | "E0226" | "E0231" | "E0254" | "E0255" | "E0256" | "E0257" | "E0258"
-        | "E0259" | "E0260" | "E0261" | "E0262" | "E0263" | "E0264" | "E0267" | "E0268"
-        | "E0275" | "E0281" | "E0282" | "E0301" | "E0306" | "E0324" | "E0328" | "E0378"
-        | "E0379" | "E0401" | "E0402" | "E0428" | "E0430" | "E0433" | "E0434" | "E0435"
-        | "E0436" | "E0438" | "E0439" | "E0440" | "E0441" | "E0442" | "E0443" | "E0444"
-        | "E0445" | "E0446" | "E0447" | "E0448" | "E0449" | "E0450" | "E0451" | "E0452"
-        | "E0453" | "E0454" | "E0455" | "E0456" | "E0457" | "E0458" | "E0459" | "E0460"
-        | "E0461" | "E0462" | "E0463" | "E0464" | "E0465" | "E0466" | "E0467" | "E0468"
-        | "E0469" | "E0470" | "E0471" | "E0472" | "E0473" | "E0474" | "E0475" | "E0476"
-        | "E0477" | "E0478" | "E0479" | "E0480" | "E0481" | "E0482" | "E0483" | "E0484"
-        | "E0485" | "E0486" | "E0487" | "E0488" | "E0489" | "E0490" | "E0491" | "E0492"
-        | "E0493" | "E0494" | "E0495" | "E0496" | "E0497" | "E0498" | "E0499" | "E0518"
-        | "E0524" | "E0525" | "E0527" | "E0528" | "E0531" | "E0534" | "E0536" | "E0537"
-        | "E0539" | "E0545" | "E0546" | "E0547" | "E0548" | "E0550" | "E0551" | "E0552"
-        | "E0553" | "E0554" | "E0556" | "E0557" | "E0559" | "E0560" | "E0561" | "E0562"
-        | "E0565" | "E0566" | "E0567" | "E0568" | "E0569" | "E0570" | "E0571" | "E0572"
-        | "E0573" | "E0575" | "E0576" | "E0577" | "E0578" | "E0579" | "E0580" | "E0581"
-        | "E0582" | "E0584" | "E0585" | "E0586" | "E0587" | "E0588" | "E0589" | "E0590"
-        | "E0591" | "E0592" | "E0593" | "E0594" | "E0595" | "E0596" | "E0598" | "E0599"
-        | "E0601" | "E0619" | "E0620" | "E0628" | "E0629" | "E0630" | "E0632" | "E0635"
-        | "E0637" | "E0638" | "E0645" | "E0646" | "E0648" | "E0649" | "E0650" | "E0651"
-        | "E0652" | "E0653" | "E0654" | "E0655" | "E0656" | "E0657" | "E0658" | "E0659"
-        | "E0660" | "E0661" | "E0662" | "E0663" | "E0664" | "E0665" | "E0666" | "E0667"
-        | "E0668" | "E0669" | "E0670" | "E0671" | "E0672" | "E0673" | "E0674" | "E0675"
-        | "E0676" | "E0677" | "E0678" | "E0679" | "E0680" | "E0681" | "E0682" | "E0683"
-        | "E0684" | "E0685" | "E0686" | "E0687" | "E0688" | "E0689" | "E0690" | "E0691"
-        | "E0692" | "E0693" | "E0694" | "E0695" | "E0696" | "E0697" | "E0698" | "E0701"
-        | "E0702" | "E0703" | "E0705" | "E0706" | "E0707" | "E0709" | "E0710" | "E0712"
-        | "E0713" | "E0714" | "E0715" | "E0717" | "E0718" | "E0720" | "E0721" | "E0722"
-        | "E0723" | "E0724" | "E0725" | "E0726" | "E0727" | "E0728" | "E0729" | "E0730"
-        | "E0731" | "E0732" | "E0733" | "E0734" | "E0735" | "E0736" | "E0737" | "E0738"
-        | "E0739" | "E0740" | "E0741" | "E0746" | "E0747" | "E0748" | "E0749" | "E0751"
-        | "E0752" | "E0753" | "E0754" | "E0755" | "E0756" | "E0757" | "E0800" | "E0801"
-        | "E0802" | "E0803" | "E0804" | "E0805" | "E0806" | "E0807" | "E0808" | "E0809"
-        | "E0810" | "E0811" | "E0812" | "E0813" | "E0814" | "E0815" | "E0816" | "E0817"
-        | "E0818" | "E0819" | "E0820" | "E0821" | "E0822" | "E0823" | "E0824" | "E0825"
-        | "E0826" | "E0827" | "E0828" | "E0829" | "E0830" | "E0831" | "E0832" | "E0833"
-        | "E0834" | "E0835" | "E0836" | "E0837" | "E0838" | "E0839" | "E0840" | "E0841"
-        | "E0842" | "E0843" | "E0844" | "E0845" | "E0846" | "E0847" | "E0848" | "E0849"
-        | "E0850" | "E0851" | "E0852" | "E0853" | "E0854" | "E0855" | "E0856" | "E0857"
-        | "E0858" | "E0859" | "E0860" | "E0861" | "E0862" | "E0863" | "E0864" | "E0865"
-        | "E0866" | "E0867" | "E0868" | "E0869" | "E0870" | "E0871" | "E0872" | "E0873"
-        | "E0874" | "E0875" | "E0876" | "E0877" | "E0878" | "E0879" | "E0880" | "E0881"
-        | "E0882" | "E0883" | "E0884" | "E0885" | "E0886" | "E0887" | "E0888" | "E0889"
-        | "E0890" | "E0891" | "E0892" | "E0893" | "E0894" | "E0895" | "E0896" | "E0897"
-        | "E0898" | "E0899" | "E0900" | "E0901" | "E0902" | "E0903" | "E0904" | "E0905"
-        | "E0906" | "E0907" | "E0908" | "E0909" | "E0910" | "E0911" | "E0912" | "E0913"
-        | "E0914" | "E0915" | "E0916" | "E0917" | "E0918" | "E0919" | "E0920" | "E0921"
-        | "E0922" | "E0923" | "E0924" | "E0925" | "E0926" | "E0927" | "E0928" | "E0929"
-        | "E0930" | "E0931" | "E0932" | "E0933" | "E0934" | "E0935" | "E0936" | "E0938"
-        | "E0939" | "E0940" | "E0941" | "E0942" | "E0943" | "E0944" | "E0945" | "E0946"
-        | "E0947" | "E0948" | "E0949" | "E0950" | "E0951" | "E0952" | "E0953" | "E0954"
-        | "E0955" | "E0956" | "E0957" | "E0958" | "E0959" | "E0960" | "E0961" | "E0962"
-        | "E0963" | "E0964" | "E0965" | "E0966" | "E0967" | "E0968" | "E0969" | "E0970"
-        | "E0971" | "E0972" | "E0973" | "E0974" | "E0975" | "E0976" | "E0977" | "E0978"
-        | "E0979" | "E0981" | "E0982" | "E0983" | "E0984" | "E0985" | "E0986" | "E0987"
-        | "E0988" | "E0989" | "E0990" | "E0991" | "E0992" | "E0993" | "E0994" | "E0995"
-        | "E0996" | "E0997" | "E0998" | "E0999" => ErrorCategory::Syntax,
-
-        // Generic and const parameter errors
-        "E0392" | "E0393" | "E0394" | "E0395" | "E0396" | "E0397" | "E0398" | "E0399" | "E0400"
-        | "E0563" | "E0564" => ErrorCategory::Generic,
-
-        // Macro expansion errors
-        "E0276" | "E0519" | "E0520" | "E0521" | "E0522" | "E0523" | "E0704" | "E0784" | "E0785"
-        | "E0786" | "E0787" | "E0788" | "E0789" => ErrorCategory::Macro,
-
-        // Dead code or unused item errors
-        "E0425" | "E0526" => ErrorCategory::DeadCode,
-
-        // Unknown or unmapped error codes
-        _ => ErrorCategory::Unknown,
-    }
+    ERROR_CODE_CATEGORIES
+        .iter()
+        .find_map(|(known_code, category)| (*known_code == code).then_some(*category))
+        .unwrap_or(ErrorCategory::Unknown)
 }
+
+const ERROR_CODE_CATEGORIES: &[(&str, ErrorCategory)] = &[
+    // Keep the mapping explicit. In particular, do not classify unassigned
+    // E0807+ values by range; rustc does not emit those error codes.
+    // Type mismatch errors
+    ("E0308", ErrorCategory::TypeMismatch),
+    ("E0309", ErrorCategory::TypeMismatch),
+    ("E0310", ErrorCategory::TypeMismatch),
+    ("E0311", ErrorCategory::TypeMismatch),
+    ("E0312", ErrorCategory::TypeMismatch),
+    ("E0313", ErrorCategory::TypeMismatch),
+    ("E0314", ErrorCategory::TypeMismatch),
+    ("E0315", ErrorCategory::TypeMismatch),
+    ("E0316", ErrorCategory::TypeMismatch),
+    ("E0317", ErrorCategory::TypeMismatch),
+    ("E0369", ErrorCategory::TypeMismatch),
+    ("E0370", ErrorCategory::TypeMismatch),
+    // Borrow checker and lifetime errors
+    ("E0382", ErrorCategory::BorrowChecker),
+    ("E0502", ErrorCategory::BorrowChecker),
+    ("E0503", ErrorCategory::BorrowChecker),
+    ("E0505", ErrorCategory::BorrowChecker),
+    ("E0506", ErrorCategory::BorrowChecker),
+    ("E0507", ErrorCategory::BorrowChecker),
+    ("E0508", ErrorCategory::BorrowChecker),
+    ("E0509", ErrorCategory::BorrowChecker),
+    ("E0510", ErrorCategory::BorrowChecker),
+    ("E0511", ErrorCategory::BorrowChecker),
+    ("E0512", ErrorCategory::BorrowChecker),
+    ("E0515", ErrorCategory::BorrowChecker),
+    ("E0516", ErrorCategory::BorrowChecker),
+    ("E0517", ErrorCategory::BorrowChecker),
+    ("E0597", ErrorCategory::BorrowChecker),
+    ("E0623", ErrorCategory::BorrowChecker),
+    ("E0624", ErrorCategory::BorrowChecker),
+    ("E0625", ErrorCategory::BorrowChecker),
+    ("E0626", ErrorCategory::BorrowChecker),
+    ("E0716", ErrorCategory::BorrowChecker),
+    ("E0782", ErrorCategory::BorrowChecker),
+    ("E0783", ErrorCategory::BorrowChecker),
+    // Trait implementation errors
+    ("E0038", ErrorCategory::TraitImpl),
+    ("E0046", ErrorCategory::TraitImpl),
+    ("E0117", ErrorCategory::TraitImpl),
+    ("E0118", ErrorCategory::TraitImpl),
+    ("E0119", ErrorCategory::TraitImpl),
+    ("E0120", ErrorCategory::TraitImpl),
+    ("E0183", ErrorCategory::TraitImpl),
+    ("E0207", ErrorCategory::TraitImpl),
+    ("E0210", ErrorCategory::TraitImpl),
+    ("E0220", ErrorCategory::TraitImpl),
+    ("E0227", ErrorCategory::TraitImpl),
+    ("E0229", ErrorCategory::TraitImpl),
+    ("E0230", ErrorCategory::TraitImpl),
+    ("E0277", ErrorCategory::TraitImpl),
+    ("E0365", ErrorCategory::TraitImpl),
+    ("E0366", ErrorCategory::TraitImpl),
+    ("E0367", ErrorCategory::TraitImpl),
+    ("E0368", ErrorCategory::TraitImpl),
+    ("E0381", ErrorCategory::TraitImpl),
+    ("E0390", ErrorCategory::TraitImpl),
+    ("E0391", ErrorCategory::TraitImpl),
+    ("E0412", ErrorCategory::TraitImpl),
+    ("E0423", ErrorCategory::TraitImpl),
+    ("E0437", ErrorCategory::TraitImpl),
+    ("E0558", ErrorCategory::TraitImpl),
+    ("E0574", ErrorCategory::TraitImpl),
+    ("E0647", ErrorCategory::TraitImpl),
+    ("E0699", ErrorCategory::TraitImpl),
+    ("E0708", ErrorCategory::TraitImpl),
+    ("E0719", ErrorCategory::TraitImpl),
+    ("E0781", ErrorCategory::TraitImpl),
+    // Pattern matching errors
+    ("E0002", ErrorCategory::PatternMatching),
+    ("E0009", ErrorCategory::PatternMatching),
+    ("E0007", ErrorCategory::PatternMatching),
+    ("E0010", ErrorCategory::PatternMatching),
+    ("E0011", ErrorCategory::PatternMatching),
+    ("E0012", ErrorCategory::PatternMatching),
+    ("E0013", ErrorCategory::PatternMatching),
+    ("E0014", ErrorCategory::PatternMatching),
+    ("E0015", ErrorCategory::PatternMatching),
+    ("E0016", ErrorCategory::PatternMatching),
+    ("E0017", ErrorCategory::PatternMatching),
+    ("E0018", ErrorCategory::PatternMatching),
+    ("E0019", ErrorCategory::PatternMatching),
+    ("E0022", ErrorCategory::PatternMatching),
+    ("E0023", ErrorCategory::PatternMatching),
+    ("E0024", ErrorCategory::PatternMatching),
+    ("E0025", ErrorCategory::PatternMatching),
+    ("E0026", ErrorCategory::PatternMatching),
+    ("E0031", ErrorCategory::PatternMatching),
+    ("E0033", ErrorCategory::PatternMatching),
+    ("E0034", ErrorCategory::PatternMatching),
+    ("E0035", ErrorCategory::PatternMatching),
+    ("E0039", ErrorCategory::PatternMatching),
+    ("E0040", ErrorCategory::PatternMatching),
+    ("E0044", ErrorCategory::PatternMatching),
+    ("E0052", ErrorCategory::PatternMatching),
+    ("E0054", ErrorCategory::PatternMatching),
+    ("E0055", ErrorCategory::PatternMatching),
+    ("E0162", ErrorCategory::PatternMatching),
+    ("E0163", ErrorCategory::PatternMatching),
+    ("E0164", ErrorCategory::PatternMatching),
+    ("E0165", ErrorCategory::PatternMatching),
+    ("E0302", ErrorCategory::PatternMatching),
+    ("E0409", ErrorCategory::PatternMatching),
+    ("E0422", ErrorCategory::PatternMatching),
+    ("E0424", ErrorCategory::PatternMatching),
+    ("E0513", ErrorCategory::PatternMatching),
+    ("E0529", ErrorCategory::PatternMatching),
+    ("E0616", ErrorCategory::PatternMatching),
+    ("E0617", ErrorCategory::PatternMatching),
+    ("E0618", ErrorCategory::PatternMatching),
+    ("E0639", ErrorCategory::PatternMatching),
+    ("E0640", ErrorCategory::PatternMatching),
+    ("E0641", ErrorCategory::PatternMatching),
+    ("E0642", ErrorCategory::PatternMatching),
+    ("E0643", ErrorCategory::PatternMatching),
+    ("E0644", ErrorCategory::PatternMatching),
+    // Scope and visibility errors
+    ("E0403", ErrorCategory::ScopeVisibility),
+    ("E0404", ErrorCategory::ScopeVisibility),
+    ("E0405", ErrorCategory::ScopeVisibility),
+    ("E0406", ErrorCategory::ScopeVisibility),
+    ("E0407", ErrorCategory::ScopeVisibility),
+    ("E0408", ErrorCategory::ScopeVisibility),
+    ("E0411", ErrorCategory::ScopeVisibility),
+    ("E0413", ErrorCategory::ScopeVisibility),
+    ("E0414", ErrorCategory::ScopeVisibility),
+    ("E0415", ErrorCategory::ScopeVisibility),
+    ("E0501", ErrorCategory::ScopeVisibility),
+    ("E0583", ErrorCategory::ScopeVisibility),
+    ("E0603", ErrorCategory::ScopeVisibility),
+    ("E0604", ErrorCategory::ScopeVisibility),
+    ("E0605", ErrorCategory::ScopeVisibility),
+    ("E0606", ErrorCategory::ScopeVisibility),
+    ("E0607", ErrorCategory::ScopeVisibility),
+    ("E0608", ErrorCategory::ScopeVisibility),
+    ("E0609", ErrorCategory::ScopeVisibility),
+    ("E0610", ErrorCategory::ScopeVisibility),
+    ("E0611", ErrorCategory::ScopeVisibility),
+    ("E0612", ErrorCategory::ScopeVisibility),
+    ("E0613", ErrorCategory::ScopeVisibility),
+    ("E0614", ErrorCategory::ScopeVisibility),
+    ("E0615", ErrorCategory::ScopeVisibility),
+    ("E0621", ErrorCategory::ScopeVisibility),
+    ("E0622", ErrorCategory::ScopeVisibility),
+    ("E0631", ErrorCategory::ScopeVisibility),
+    ("E0633", ErrorCategory::ScopeVisibility),
+    ("E0634", ErrorCategory::ScopeVisibility),
+    ("E0636", ErrorCategory::ScopeVisibility),
+    ("E0742", ErrorCategory::ScopeVisibility),
+    ("E0743", ErrorCategory::ScopeVisibility),
+    ("E0744", ErrorCategory::ScopeVisibility),
+    ("E0745", ErrorCategory::ScopeVisibility),
+    ("E0750", ErrorCategory::ScopeVisibility),
+    ("E0758", ErrorCategory::ScopeVisibility),
+    ("E0759", ErrorCategory::ScopeVisibility),
+    ("E0760", ErrorCategory::ScopeVisibility),
+    ("E0761", ErrorCategory::ScopeVisibility),
+    ("E0762", ErrorCategory::ScopeVisibility),
+    ("E0763", ErrorCategory::ScopeVisibility),
+    ("E0764", ErrorCategory::ScopeVisibility),
+    ("E0765", ErrorCategory::ScopeVisibility),
+    ("E0766", ErrorCategory::ScopeVisibility),
+    ("E0767", ErrorCategory::ScopeVisibility),
+    ("E0768", ErrorCategory::ScopeVisibility),
+    ("E0769", ErrorCategory::ScopeVisibility),
+    ("E0770", ErrorCategory::ScopeVisibility),
+    ("E0771", ErrorCategory::ScopeVisibility),
+    ("E0772", ErrorCategory::ScopeVisibility),
+    ("E0773", ErrorCategory::ScopeVisibility),
+    ("E0774", ErrorCategory::ScopeVisibility),
+    ("E0775", ErrorCategory::ScopeVisibility),
+    ("E0776", ErrorCategory::ScopeVisibility),
+    ("E0777", ErrorCategory::ScopeVisibility),
+    ("E0778", ErrorCategory::ScopeVisibility),
+    ("E0779", ErrorCategory::ScopeVisibility),
+    ("E0780", ErrorCategory::ScopeVisibility),
+    ("E0790", ErrorCategory::ScopeVisibility),
+    ("E0791", ErrorCategory::ScopeVisibility),
+    ("E0792", ErrorCategory::ScopeVisibility),
+    ("E0793", ErrorCategory::ScopeVisibility),
+    ("E0794", ErrorCategory::ScopeVisibility),
+    ("E0795", ErrorCategory::ScopeVisibility),
+    ("E0796", ErrorCategory::ScopeVisibility),
+    ("E0797", ErrorCategory::ScopeVisibility),
+    ("E0798", ErrorCategory::ScopeVisibility),
+    ("E0799", ErrorCategory::ScopeVisibility),
+    // Syntax errors
+    ("E0053", ErrorCategory::Syntax),
+    ("E0060", ErrorCategory::Syntax),
+    ("E0061", ErrorCategory::Syntax),
+    ("E0062", ErrorCategory::Syntax),
+    ("E0063", ErrorCategory::Syntax),
+    ("E0066", ErrorCategory::Syntax),
+    ("E0070", ErrorCategory::Syntax),
+    ("E0071", ErrorCategory::Syntax),
+    ("E0072", ErrorCategory::Syntax),
+    ("E0073", ErrorCategory::Syntax),
+    ("E0075", ErrorCategory::Syntax),
+    ("E0076", ErrorCategory::Syntax),
+    ("E0077", ErrorCategory::Syntax),
+    ("E0078", ErrorCategory::Syntax),
+    ("E0079", ErrorCategory::Syntax),
+    ("E0080", ErrorCategory::Syntax),
+    ("E0081", ErrorCategory::Syntax),
+    ("E0082", ErrorCategory::Syntax),
+    ("E0085", ErrorCategory::Syntax),
+    ("E0087", ErrorCategory::Syntax),
+    ("E0106", ErrorCategory::Syntax),
+    ("E0116", ErrorCategory::Syntax),
+    ("E0124", ErrorCategory::Syntax),
+    ("E0131", ErrorCategory::Syntax),
+    ("E0133", ErrorCategory::Syntax),
+    ("E0161", ErrorCategory::Syntax),
+    ("E0175", ErrorCategory::Syntax),
+    ("E0201", ErrorCategory::Syntax),
+    ("E0204", ErrorCategory::Syntax),
+    ("E0205", ErrorCategory::Syntax),
+    ("E0206", ErrorCategory::Syntax),
+    ("E0211", ErrorCategory::Syntax),
+    ("E0214", ErrorCategory::Syntax),
+    ("E0225", ErrorCategory::Syntax),
+    ("E0226", ErrorCategory::Syntax),
+    ("E0231", ErrorCategory::Syntax),
+    ("E0254", ErrorCategory::Syntax),
+    ("E0255", ErrorCategory::Syntax),
+    ("E0256", ErrorCategory::Syntax),
+    ("E0257", ErrorCategory::Syntax),
+    ("E0258", ErrorCategory::Syntax),
+    ("E0259", ErrorCategory::Syntax),
+    ("E0260", ErrorCategory::Syntax),
+    ("E0261", ErrorCategory::Syntax),
+    ("E0262", ErrorCategory::Syntax),
+    ("E0263", ErrorCategory::Syntax),
+    ("E0264", ErrorCategory::Syntax),
+    ("E0267", ErrorCategory::Syntax),
+    ("E0268", ErrorCategory::Syntax),
+    ("E0275", ErrorCategory::Syntax),
+    ("E0281", ErrorCategory::Syntax),
+    ("E0282", ErrorCategory::Syntax),
+    ("E0301", ErrorCategory::Syntax),
+    ("E0306", ErrorCategory::Syntax),
+    ("E0324", ErrorCategory::Syntax),
+    ("E0328", ErrorCategory::Syntax),
+    ("E0378", ErrorCategory::Syntax),
+    ("E0379", ErrorCategory::Syntax),
+    ("E0401", ErrorCategory::Syntax),
+    ("E0402", ErrorCategory::Syntax),
+    ("E0428", ErrorCategory::Syntax),
+    ("E0430", ErrorCategory::Syntax),
+    ("E0433", ErrorCategory::Syntax),
+    ("E0434", ErrorCategory::Syntax),
+    ("E0435", ErrorCategory::Syntax),
+    ("E0436", ErrorCategory::Syntax),
+    ("E0438", ErrorCategory::Syntax),
+    ("E0439", ErrorCategory::Syntax),
+    ("E0440", ErrorCategory::Syntax),
+    ("E0441", ErrorCategory::Syntax),
+    ("E0442", ErrorCategory::Syntax),
+    ("E0443", ErrorCategory::Syntax),
+    ("E0444", ErrorCategory::Syntax),
+    ("E0445", ErrorCategory::Syntax),
+    ("E0446", ErrorCategory::Syntax),
+    ("E0447", ErrorCategory::Syntax),
+    ("E0448", ErrorCategory::Syntax),
+    ("E0449", ErrorCategory::Syntax),
+    ("E0450", ErrorCategory::Syntax),
+    ("E0451", ErrorCategory::Syntax),
+    ("E0452", ErrorCategory::Syntax),
+    ("E0453", ErrorCategory::Syntax),
+    ("E0454", ErrorCategory::Syntax),
+    ("E0455", ErrorCategory::Syntax),
+    ("E0456", ErrorCategory::Syntax),
+    ("E0457", ErrorCategory::Syntax),
+    ("E0458", ErrorCategory::Syntax),
+    ("E0459", ErrorCategory::Syntax),
+    ("E0460", ErrorCategory::Syntax),
+    ("E0461", ErrorCategory::Syntax),
+    ("E0462", ErrorCategory::Syntax),
+    ("E0463", ErrorCategory::Syntax),
+    ("E0464", ErrorCategory::Syntax),
+    ("E0465", ErrorCategory::Syntax),
+    ("E0466", ErrorCategory::Syntax),
+    ("E0467", ErrorCategory::Syntax),
+    ("E0468", ErrorCategory::Syntax),
+    ("E0469", ErrorCategory::Syntax),
+    ("E0470", ErrorCategory::Syntax),
+    ("E0471", ErrorCategory::Syntax),
+    ("E0472", ErrorCategory::Syntax),
+    ("E0473", ErrorCategory::Syntax),
+    ("E0474", ErrorCategory::Syntax),
+    ("E0475", ErrorCategory::Syntax),
+    ("E0476", ErrorCategory::Syntax),
+    ("E0477", ErrorCategory::Syntax),
+    ("E0478", ErrorCategory::Syntax),
+    ("E0479", ErrorCategory::Syntax),
+    ("E0480", ErrorCategory::Syntax),
+    ("E0481", ErrorCategory::Syntax),
+    ("E0482", ErrorCategory::Syntax),
+    ("E0483", ErrorCategory::Syntax),
+    ("E0484", ErrorCategory::Syntax),
+    ("E0485", ErrorCategory::Syntax),
+    ("E0486", ErrorCategory::Syntax),
+    ("E0487", ErrorCategory::Syntax),
+    ("E0488", ErrorCategory::Syntax),
+    ("E0489", ErrorCategory::Syntax),
+    ("E0490", ErrorCategory::Syntax),
+    ("E0491", ErrorCategory::Syntax),
+    ("E0492", ErrorCategory::Syntax),
+    ("E0493", ErrorCategory::Syntax),
+    ("E0494", ErrorCategory::Syntax),
+    ("E0495", ErrorCategory::Syntax),
+    ("E0496", ErrorCategory::Syntax),
+    ("E0497", ErrorCategory::Syntax),
+    ("E0498", ErrorCategory::Syntax),
+    ("E0499", ErrorCategory::Syntax),
+    ("E0518", ErrorCategory::Syntax),
+    ("E0524", ErrorCategory::Syntax),
+    ("E0525", ErrorCategory::Syntax),
+    ("E0527", ErrorCategory::Syntax),
+    ("E0528", ErrorCategory::Syntax),
+    ("E0531", ErrorCategory::Syntax),
+    ("E0534", ErrorCategory::Syntax),
+    ("E0536", ErrorCategory::Syntax),
+    ("E0537", ErrorCategory::Syntax),
+    ("E0539", ErrorCategory::Syntax),
+    ("E0545", ErrorCategory::Syntax),
+    ("E0546", ErrorCategory::Syntax),
+    ("E0547", ErrorCategory::Syntax),
+    ("E0548", ErrorCategory::Syntax),
+    ("E0550", ErrorCategory::Syntax),
+    ("E0551", ErrorCategory::Syntax),
+    ("E0552", ErrorCategory::Syntax),
+    ("E0553", ErrorCategory::Syntax),
+    ("E0554", ErrorCategory::Syntax),
+    ("E0556", ErrorCategory::Syntax),
+    ("E0557", ErrorCategory::Syntax),
+    ("E0559", ErrorCategory::Syntax),
+    ("E0560", ErrorCategory::Syntax),
+    ("E0561", ErrorCategory::Syntax),
+    ("E0562", ErrorCategory::Syntax),
+    ("E0565", ErrorCategory::Syntax),
+    ("E0566", ErrorCategory::Syntax),
+    ("E0567", ErrorCategory::Syntax),
+    ("E0568", ErrorCategory::Syntax),
+    ("E0569", ErrorCategory::Syntax),
+    ("E0570", ErrorCategory::Syntax),
+    ("E0571", ErrorCategory::Syntax),
+    ("E0572", ErrorCategory::Syntax),
+    ("E0573", ErrorCategory::Syntax),
+    ("E0575", ErrorCategory::Syntax),
+    ("E0576", ErrorCategory::Syntax),
+    ("E0577", ErrorCategory::Syntax),
+    ("E0578", ErrorCategory::Syntax),
+    ("E0579", ErrorCategory::Syntax),
+    ("E0580", ErrorCategory::Syntax),
+    ("E0581", ErrorCategory::Syntax),
+    ("E0582", ErrorCategory::Syntax),
+    ("E0584", ErrorCategory::Syntax),
+    ("E0585", ErrorCategory::Syntax),
+    ("E0586", ErrorCategory::Syntax),
+    ("E0587", ErrorCategory::Syntax),
+    ("E0588", ErrorCategory::Syntax),
+    ("E0589", ErrorCategory::Syntax),
+    ("E0590", ErrorCategory::Syntax),
+    ("E0591", ErrorCategory::Syntax),
+    ("E0592", ErrorCategory::Syntax),
+    ("E0593", ErrorCategory::Syntax),
+    ("E0594", ErrorCategory::Syntax),
+    ("E0595", ErrorCategory::Syntax),
+    ("E0596", ErrorCategory::Syntax),
+    ("E0598", ErrorCategory::Syntax),
+    ("E0599", ErrorCategory::Syntax),
+    ("E0601", ErrorCategory::Syntax),
+    ("E0619", ErrorCategory::Syntax),
+    ("E0620", ErrorCategory::Syntax),
+    ("E0628", ErrorCategory::Syntax),
+    ("E0629", ErrorCategory::Syntax),
+    ("E0630", ErrorCategory::Syntax),
+    ("E0632", ErrorCategory::Syntax),
+    ("E0635", ErrorCategory::Syntax),
+    ("E0637", ErrorCategory::Syntax),
+    ("E0638", ErrorCategory::Syntax),
+    ("E0645", ErrorCategory::Syntax),
+    ("E0646", ErrorCategory::Syntax),
+    ("E0648", ErrorCategory::Syntax),
+    ("E0649", ErrorCategory::Syntax),
+    ("E0650", ErrorCategory::Syntax),
+    ("E0651", ErrorCategory::Syntax),
+    ("E0652", ErrorCategory::Syntax),
+    ("E0653", ErrorCategory::Syntax),
+    ("E0654", ErrorCategory::Syntax),
+    ("E0655", ErrorCategory::Syntax),
+    ("E0656", ErrorCategory::Syntax),
+    ("E0657", ErrorCategory::Syntax),
+    ("E0658", ErrorCategory::Syntax),
+    ("E0659", ErrorCategory::Syntax),
+    ("E0660", ErrorCategory::Syntax),
+    ("E0661", ErrorCategory::Syntax),
+    ("E0662", ErrorCategory::Syntax),
+    ("E0663", ErrorCategory::Syntax),
+    ("E0664", ErrorCategory::Syntax),
+    ("E0665", ErrorCategory::Syntax),
+    ("E0666", ErrorCategory::Syntax),
+    ("E0667", ErrorCategory::Syntax),
+    ("E0668", ErrorCategory::Syntax),
+    ("E0669", ErrorCategory::Syntax),
+    ("E0670", ErrorCategory::Syntax),
+    ("E0671", ErrorCategory::Syntax),
+    ("E0672", ErrorCategory::Syntax),
+    ("E0673", ErrorCategory::Syntax),
+    ("E0674", ErrorCategory::Syntax),
+    ("E0675", ErrorCategory::Syntax),
+    ("E0676", ErrorCategory::Syntax),
+    ("E0677", ErrorCategory::Syntax),
+    ("E0678", ErrorCategory::Syntax),
+    ("E0679", ErrorCategory::Syntax),
+    ("E0680", ErrorCategory::Syntax),
+    ("E0681", ErrorCategory::Syntax),
+    ("E0682", ErrorCategory::Syntax),
+    ("E0683", ErrorCategory::Syntax),
+    ("E0684", ErrorCategory::Syntax),
+    ("E0685", ErrorCategory::Syntax),
+    ("E0686", ErrorCategory::Syntax),
+    ("E0687", ErrorCategory::Syntax),
+    ("E0688", ErrorCategory::Syntax),
+    ("E0689", ErrorCategory::Syntax),
+    ("E0690", ErrorCategory::Syntax),
+    ("E0691", ErrorCategory::Syntax),
+    ("E0692", ErrorCategory::Syntax),
+    ("E0693", ErrorCategory::Syntax),
+    ("E0694", ErrorCategory::Syntax),
+    ("E0695", ErrorCategory::Syntax),
+    ("E0696", ErrorCategory::Syntax),
+    ("E0697", ErrorCategory::Syntax),
+    ("E0698", ErrorCategory::Syntax),
+    ("E0701", ErrorCategory::Syntax),
+    ("E0702", ErrorCategory::Syntax),
+    ("E0703", ErrorCategory::Syntax),
+    ("E0705", ErrorCategory::Syntax),
+    ("E0706", ErrorCategory::Syntax),
+    ("E0707", ErrorCategory::Syntax),
+    ("E0709", ErrorCategory::Syntax),
+    ("E0710", ErrorCategory::Syntax),
+    ("E0712", ErrorCategory::Syntax),
+    ("E0713", ErrorCategory::Syntax),
+    ("E0714", ErrorCategory::Syntax),
+    ("E0715", ErrorCategory::Syntax),
+    ("E0717", ErrorCategory::Syntax),
+    ("E0718", ErrorCategory::Syntax),
+    ("E0720", ErrorCategory::Syntax),
+    ("E0721", ErrorCategory::Syntax),
+    ("E0722", ErrorCategory::Syntax),
+    ("E0723", ErrorCategory::Syntax),
+    ("E0724", ErrorCategory::Syntax),
+    ("E0725", ErrorCategory::Syntax),
+    ("E0726", ErrorCategory::Syntax),
+    ("E0727", ErrorCategory::Syntax),
+    ("E0728", ErrorCategory::Syntax),
+    ("E0729", ErrorCategory::Syntax),
+    ("E0730", ErrorCategory::Syntax),
+    ("E0731", ErrorCategory::Syntax),
+    ("E0732", ErrorCategory::Syntax),
+    ("E0733", ErrorCategory::Syntax),
+    ("E0734", ErrorCategory::Syntax),
+    ("E0735", ErrorCategory::Syntax),
+    ("E0736", ErrorCategory::Syntax),
+    ("E0737", ErrorCategory::Syntax),
+    ("E0738", ErrorCategory::Syntax),
+    ("E0739", ErrorCategory::Syntax),
+    ("E0740", ErrorCategory::Syntax),
+    ("E0741", ErrorCategory::Syntax),
+    ("E0746", ErrorCategory::Syntax),
+    ("E0747", ErrorCategory::Syntax),
+    ("E0748", ErrorCategory::Syntax),
+    ("E0749", ErrorCategory::Syntax),
+    ("E0751", ErrorCategory::Syntax),
+    ("E0752", ErrorCategory::Syntax),
+    ("E0753", ErrorCategory::Syntax),
+    ("E0754", ErrorCategory::Syntax),
+    ("E0755", ErrorCategory::Syntax),
+    ("E0756", ErrorCategory::Syntax),
+    ("E0757", ErrorCategory::Syntax),
+    ("E0800", ErrorCategory::Syntax),
+    ("E0801", ErrorCategory::Syntax),
+    ("E0802", ErrorCategory::Syntax),
+    ("E0803", ErrorCategory::Syntax),
+    ("E0804", ErrorCategory::Syntax),
+    ("E0805", ErrorCategory::Syntax),
+    ("E0806", ErrorCategory::Syntax),
+    // Generic and const parameter errors
+    ("E0392", ErrorCategory::Generic),
+    ("E0393", ErrorCategory::Generic),
+    ("E0394", ErrorCategory::Generic),
+    ("E0395", ErrorCategory::Generic),
+    ("E0396", ErrorCategory::Generic),
+    ("E0397", ErrorCategory::Generic),
+    ("E0398", ErrorCategory::Generic),
+    ("E0399", ErrorCategory::Generic),
+    ("E0400", ErrorCategory::Generic),
+    ("E0563", ErrorCategory::Generic),
+    ("E0564", ErrorCategory::Generic),
+    // Macro expansion errors
+    ("E0276", ErrorCategory::Macro),
+    ("E0519", ErrorCategory::Macro),
+    ("E0520", ErrorCategory::Macro),
+    ("E0521", ErrorCategory::Macro),
+    ("E0522", ErrorCategory::Macro),
+    ("E0523", ErrorCategory::Macro),
+    ("E0704", ErrorCategory::Macro),
+    ("E0784", ErrorCategory::Macro),
+    ("E0785", ErrorCategory::Macro),
+    ("E0786", ErrorCategory::Macro),
+    ("E0787", ErrorCategory::Macro),
+    ("E0788", ErrorCategory::Macro),
+    ("E0789", ErrorCategory::Macro),
+    // Dead code or unused item errors
+    ("E0425", ErrorCategory::DeadCode),
+    ("E0526", ErrorCategory::DeadCode),
+];
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Compilation Error Detection
@@ -3637,6 +4047,42 @@ fn classify_error_code_unknown() {
     assert_eq!(classify_error_code("E1234"), ErrorCategory::Unknown);
     assert_eq!(classify_error_code("E0050"), ErrorCategory::Unknown);
     assert_eq!(classify_error_code("E0099"), ErrorCategory::Unknown);
+}
+
+#[test]
+fn classify_error_code_table_has_unique_codes() {
+    let mut seen = std::collections::HashSet::new();
+    for &(code, _) in ERROR_CODE_CATEGORIES {
+        assert!(seen.insert(code), "duplicate error code in table: {code}");
+    }
+
+    assert_eq!(seen.len(), ERROR_CODE_CATEGORIES.len());
+    assert_eq!(classify_error_code("E0807"), ErrorCategory::Unknown);
+    assert_eq!(classify_error_code("E0999"), ErrorCategory::Unknown);
+}
+
+#[test]
+fn classify_error_code_overlap_categories_are_explicit() {
+    let cases = [
+        ("E0748", ErrorCategory::Syntax),
+        ("E0749", ErrorCategory::Syntax),
+        ("E0750", ErrorCategory::ScopeVisibility),
+        ("E0751", ErrorCategory::Syntax),
+        ("E0758", ErrorCategory::ScopeVisibility),
+        ("E0761", ErrorCategory::ScopeVisibility),
+        ("E0781", ErrorCategory::TraitImpl),
+        ("E0782", ErrorCategory::BorrowChecker),
+        ("E0783", ErrorCategory::BorrowChecker),
+        ("E0784", ErrorCategory::Macro),
+    ];
+
+    for (code, expected) in cases {
+        assert_eq!(
+            classify_error_code(code),
+            expected,
+            "wrong category for {code}"
+        );
+    }
 }
 
 #[test]
