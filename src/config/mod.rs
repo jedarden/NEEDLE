@@ -1349,6 +1349,87 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_bead_cli_bf_backend_finds_on_path() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create bf binary on a custom PATH
+        let bin_dir = home.join("path-bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bf_bin = bin_dir.join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_bin);
+
+        // Set PATH to include bf, HOME to tmp_dir
+        std::env::set_var("PATH", &bin_dir);
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bf,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bf);
+        assert_eq!(path, bf_bin);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_bf_backend_falls_back_to_local_bin() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH to prevent finding bf on PATH
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        // Create ~/.local/bin/bf
+        let local_bin = home.join(".local/bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let bf_local = local_bin.join("bf");
+        std::fs::write(&bf_local, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_local);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bf,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bf);
+        assert_eq!(path, bf_local);
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_bf_backend_returns_bf_variant() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create bf binary on PATH
+        let bin_dir = home.join("path-bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bf_bin = bin_dir.join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_bin);
+
+        std::env::set_var("PATH", &bin_dir);
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bf,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        // Verify Backend::Bf variant is returned
+        assert!(matches!(backend, Backend::Bf));
+        assert_eq!(path, bf_bin);
+    }
+
+    #[test]
     fn test_resolve_bead_cli_auto_error_no_cli_found() {
         let (_lock, _env) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
