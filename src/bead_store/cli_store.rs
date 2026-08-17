@@ -874,11 +874,27 @@ fn parse_beads(shape: ParseShape, output: &str) -> Result<Vec<Bead>> {
             }
             Ok(beads)
         }
-        ParseShape::JsonLines => output
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| serde_json::from_str(line).context("invalid JSON line"))
-            .collect(),
+        ParseShape::JsonLines => {
+            // bead-rs emits a JSON array (`[]`) for an empty result set but
+            // newline-delimited objects otherwise. Accept both shapes: treating
+            // `[]` as a parse error made Explore skip the whole workspace and
+            // Pluck fail its ready query instead of reading "no beads".
+            let mut beads = Vec::new();
+            for line in output.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if line.starts_with('[') {
+                    let batch: Vec<Bead> =
+                        serde_json::from_str(line).context("invalid JSON array line")?;
+                    beads.extend(batch);
+                    continue;
+                }
+                beads.push(serde_json::from_str(line).context("invalid JSON line")?);
+            }
+            Ok(beads)
+        }
         ParseShape::BareId | ParseShape::None => {
             bail!("parse shape {shape:?} cannot produce bead records")
         }
@@ -963,11 +979,23 @@ fn parse_beads_with_claim_history(
                 serde_json::from_str::<Vec<BeadWithClaimHistory>>(output)?
             }
         }
-        ParseShape::JsonLines => output
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(serde_json::from_str::<BeadWithClaimHistory>)
-            .collect::<std::result::Result<Vec<_>, _>>()?,
+        ParseShape::JsonLines => {
+            // Same dual shape as `parse_beads`: bead-rs emits `[]` when the
+            // result set is empty and newline-delimited objects otherwise.
+            let mut records = Vec::new();
+            for line in output.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if line.starts_with('[') {
+                    records.extend(serde_json::from_str::<Vec<BeadWithClaimHistory>>(line)?);
+                    continue;
+                }
+                records.push(serde_json::from_str::<BeadWithClaimHistory>(line)?);
+            }
+            records
+        }
         ParseShape::BareId | ParseShape::None => {
             bail!("parse shape {shape:?} cannot produce bead records")
         }
@@ -981,7 +1009,7 @@ fn parse_beads_with_claim_history(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_beads_with_claim_history, CliBeadStore, ParseShape};
+    use super::{parse_beads, parse_beads_with_claim_history, CliBeadStore, ParseShape};
     use crate::bead_store::{builtin_bead_backends, BeadStore};
 
     #[test]
@@ -1021,6 +1049,48 @@ mod tests {
 
         let parsed = parse_beads_with_claim_history(ParseShape::JsonObject, json).unwrap();
         assert_eq!(parsed[0].1, None);
+    }
+
+    #[test]
+    fn json_lines_parser_reads_empty_array_as_no_beads() {
+        // bead-rs prints `[]` (a JSON array) when a query matches nothing, but
+        // newline-delimited objects when it matches something. Treating `[]` as
+        // a parse error made Explore skip the workspace and Pluck fail outright.
+        let parsed = parse_beads(ParseShape::JsonLines, "[]").unwrap();
+        assert!(parsed.is_empty());
+
+        let parsed = parse_beads(ParseShape::JsonLines, "  []  \n").unwrap();
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn json_lines_parser_still_reads_newline_delimited_objects() {
+        let json = concat!(
+            r#"{"id":"bf-one","title":"first","priority":1,"status":"open","created_at":"2026-08-13T00:00:00Z"}"#,
+            "\n",
+            r#"{"id":"bf-two","title":"second","priority":2,"status":"open","created_at":"2026-08-13T00:00:00Z"}"#,
+            "\n"
+        );
+
+        let parsed = parse_beads(ParseShape::JsonLines, json).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id.as_ref(), "bf-one");
+        assert_eq!(parsed[1].id.as_ref(), "bf-two");
+    }
+
+    #[test]
+    fn json_lines_parser_reads_populated_array_line() {
+        let json = r#"[{"id":"bf-one","title":"first","priority":1,"status":"open","created_at":"2026-08-13T00:00:00Z"}]"#;
+
+        let parsed = parse_beads(ParseShape::JsonLines, json).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].id.as_ref(), "bf-one");
+    }
+
+    #[test]
+    fn claim_history_parser_reads_empty_array_as_no_beads() {
+        let parsed = parse_beads_with_claim_history(ParseShape::JsonLines, "[]").unwrap();
+        assert!(parsed.is_empty());
     }
 
     #[cfg(unix)]
