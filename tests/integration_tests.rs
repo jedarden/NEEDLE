@@ -215,6 +215,14 @@ impl ProcessGuard {
             Err(std::io::Error::other("No child process to wait for"))
         }
     }
+
+    /// Take the inner child process out of the guard, bypassing Drop.
+    ///
+    /// # Safety
+    /// The caller becomes responsible for cleanup (kill + wait) of the child process.
+    fn into_inner(mut self) -> Option<std::process::Child> {
+        self.inner.take()
+    }
 }
 
 impl Drop for ProcessGuard {
@@ -573,7 +581,11 @@ async fn outcome_path_success_exit_0() {
         "expected terminal state, got {:?}",
         result
     );
-    assert_eq!(worker.beads_processed(), 999, "DELIBERATE BREAK FOR CI VERIFICATION - needle-fcf0d892");
+    assert_eq!(
+        worker.beads_processed(),
+        999,
+        "DELIBERATE BREAK FOR CI VERIFICATION - needle-fcf0d892"
+    );
 }
 
 #[tokio::test]
@@ -5129,44 +5141,9 @@ workspace_root = "{}"
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // ProcessGuard ensures cleanup if test panics
-    struct ProcessGuard(Option<std::process::Child>);
-
-    impl ProcessGuard {
-        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-            if let Some(ref mut child) = self.0 {
-                child.try_wait()
-            } else {
-                Ok(None)
-            }
-        }
-
-        fn kill(&mut self) -> std::io::Result<()> {
-            if let Some(ref mut child) = self.0 {
-                child.kill()
-            } else {
-                Ok(())
-            }
-        }
-
-        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-            if let Some(ref mut child) = self.0 {
-                child.wait()
-            } else {
-                Err(std::io::Error::other("No child process to wait for"))
-            }
-        }
-    }
-
-    impl Drop for ProcessGuard {
-        fn drop(&mut self) {
-            let _ = self.kill();
-            let _ = self.wait();
-            let _ = self.0.take();
-        }
-    }
-
-    let mut guard = ProcessGuard(Some(cmd.spawn().expect("Failed to spawn needle process")));
+    let child = cmd.spawn().expect("Failed to spawn needle process");
+    let pid = child.id();
+    let mut guard = ProcessGuard::new(child, Some(pid));
 
     // Wait with timeout - should fail quickly, not hang
     let timeout_duration = Duration::from_secs(10);
@@ -5189,7 +5166,7 @@ workspace_root = "{}"
     };
 
     // Capture stdout and stderr from the completed process
-    let child = guard.0.take().expect("child process should exist");
+    let child = guard.into_inner().expect("child process should exist");
     let output = child
         .wait_with_output()
         .expect("failed to capture process output");
