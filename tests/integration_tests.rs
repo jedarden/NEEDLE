@@ -5763,6 +5763,218 @@ async fn tilde_expansion_position_start_vs_middle_end() {
     println!("✓ Tilde expansion position test passed");
 }
 
+/// Test tilde expansion in strands.weave.exclude_workspaces configuration.
+///
+/// This test validates that tilde-prefixed paths in the weave strand's
+/// exclude_workspaces list are correctly expanded to the HOME directory during
+/// config loading, with proper tempdir isolation.
+#[tokio::test]
+async fn weave_exclude_workspaces_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::fs;
+
+    // Use HomeGuard for proper HOME isolation
+    let _home_guard = HomeGuard::isolate();
+    let isolated_home = _home_guard._temp_dir.path();
+
+    // Create test workspace directories in the isolated home
+    let excluded_ws1 = isolated_home.join("workspaces").join("excluded1");
+    let excluded_ws2 = isolated_home.join("dev").join("excluded2");
+    let absolute_path = PathBuf::from("/absolute/path/excluded3");
+    let relative_path = PathBuf::from("relative/excluded4");
+
+    fs::create_dir_all(&excluded_ws1).expect("failed to create excluded ws1");
+    fs::create_dir_all(&excluded_ws2).expect("failed to create excluded ws2");
+
+    // Test 1: Tilde-prefixed paths are expanded correctly
+    let tilde_path1 = "~/workspaces/excluded1";
+    let expanded1 = expand_tilde(tilde_path1);
+    assert_eq!(
+        expanded1,
+        excluded_ws1.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    let tilde_path2 = "~/dev/excluded2";
+    let expanded2 = expand_tilde(tilde_path2);
+    assert_eq!(
+        expanded2,
+        excluded_ws2.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Config with mixed tilde, absolute, and relative paths
+    let yaml = format!(
+        r#"
+strands:
+  weave:
+    exclude_workspaces:
+      - ~/workspaces/excluded1
+      - ~/dev/excluded2
+      - /absolute/path/excluded3
+      - relative/excluded4
+"#,
+    );
+
+    // Load config - this should trigger tilde expansion
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+
+    // The config should expand tildes
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    // Verify the exclude_workspaces list
+    let exclude_list = &config_expanded.strands.weave.exclude_workspaces;
+
+    // Check that tilde paths were expanded to isolated home
+    assert!(
+        exclude_list.contains(&excluded_ws1),
+        "exclude_workspaces should contain expanded ~/workspaces/excluded1"
+    );
+    assert!(
+        exclude_list.contains(&excluded_ws2),
+        "exclude_workspaces should contain expanded ~/dev/excluded2"
+    );
+
+    // Check that absolute paths are preserved
+    assert!(
+        exclude_list.contains(&absolute_path),
+        "exclude_workspaces should preserve absolute path /absolute/path/excluded3"
+    );
+
+    // Check that relative paths are preserved
+    assert!(
+        exclude_list.contains(&relative_path),
+        "exclude_workspaces should preserve relative path"
+    );
+
+    // Note: HomeGuard automatically restores HOME when dropped
+    println!("✓ Weave exclude_workspaces tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Expanded paths: {:?}, {:?}", excluded_ws1, excluded_ws2);
+    println!("  Preserved absolute: {}", absolute_path.display());
+    println!("  Preserved relative: {}", relative_path.display());
+}
+
+/// Test tilde expansion in strands.splice.report_workspace configuration.
+///
+/// This test validates that tilde-prefixed paths in the splice strand's
+/// report_workspace field are correctly expanded to the HOME directory during
+/// config loading, with proper tempdir isolation.
+#[tokio::test]
+async fn splice_report_workspace_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::fs;
+
+    // Use HomeGuard for proper HOME isolation
+    let _home_guard = HomeGuard::isolate();
+    let isolated_home = _home_guard._temp_dir.path();
+
+    // Create test workspace directory in the isolated home
+    let report_ws = isolated_home.join("reports").join("splice-workspace");
+    fs::create_dir_all(&report_ws).expect("failed to create report workspace");
+
+    // Test 1: Tilde-prefixed path expands correctly
+    let tilde_path = "~/reports/splice-workspace";
+    let expanded = expand_tilde(tilde_path);
+    assert_eq!(
+        expanded,
+        report_ws.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Absolute path is preserved
+    let absolute_path = PathBuf::from("/absolute/path/workspace");
+
+    // Test 3: Relative path is preserved
+    let relative_path = PathBuf::from("relative/workspace");
+
+    // Test 4: Config with tilde path
+    let yaml = format!(
+        r#"
+strands:
+  splice:
+    report_workspace: {}
+"#,
+        tilde_path
+    );
+
+    // Load config - this should trigger tilde expansion
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+
+    // The config should expand tildes
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    // Verify the report_workspace was expanded
+    let report_workspace = &config_expanded.strands.splice.report_workspace;
+    assert!(
+        report_workspace.is_some(),
+        "report_workspace should be set after expansion"
+    );
+
+    let expanded_path = report_workspace.as_ref().unwrap();
+    assert!(
+        expanded_path.starts_with(&isolated_home),
+        "report_workspace should be expanded to isolated home, got: {}",
+        expanded_path.display()
+    );
+
+    assert_eq!(
+        expanded_path, &report_ws,
+        "report_workspace should point to our test workspace"
+    );
+
+    // Test 5: Config with absolute path (should be preserved)
+    let yaml_abs = format!(
+        r#"
+strands:
+  splice:
+    report_workspace: {}
+"#,
+        absolute_path.display()
+    );
+
+    let config_abs: Config = serde_yaml::from_str(&yaml_abs).expect("failed to parse config");
+    let mut config_expanded_abs = config_abs;
+    config_expanded_abs.expand_tildes();
+
+    assert_eq!(
+        config_expanded_abs.strands.splice.report_workspace,
+        Some(absolute_path.clone()),
+        "absolute report_workspace path should be preserved"
+    );
+
+    // Test 6: Config with relative path (should be preserved)
+    let yaml_rel = format!(
+        r#"
+strands:
+  splice:
+    report_workspace: {}
+"#,
+        relative_path.display()
+    );
+
+    let config_rel: Config = serde_yaml::from_str(&yaml_rel).expect("failed to parse config");
+    let mut config_expanded_rel = config_rel;
+    config_expanded_rel.expand_tildes();
+
+    assert_eq!(
+        config_expanded_rel.strands.splice.report_workspace,
+        Some(relative_path.clone()),
+        "relative report_workspace path should be preserved"
+    );
+
+    // Note: HomeGuard automatically restores HOME when dropped
+    println!("✓ Splice report_workspace tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Expanded tilde path: {}", report_ws.display());
+    println!("  Preserved absolute: {}", absolute_path.display());
+    println!("  Preserved relative: {}", relative_path.display());
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // End of Tilde Expansion Integration Tests
 // ═════════════════════════════════════════════════════════════════════════════
