@@ -1,0 +1,2 @@
+Exit code: 101 (compilation failed)
+Duration: 27 seconds

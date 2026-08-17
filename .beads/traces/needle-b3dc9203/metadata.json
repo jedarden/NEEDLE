@@ -1,0 +1,21 @@
+{
+  "bead_id": "needle-b3dc9203",
+  "agent": "claude-code-glm-4.7",
+  "provider": "anthropic",
+  "model": "glm-4.7",
+  "exit_code": 124,
+  "outcome": "timeout",
+  "duration_ms": 600012,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-08-17T06:06:12.884975023Z",
+  "trace_format": "claude_json",
+  "pruned": false,
+  "template_version": null,
+  "timeout_reason": {
+    "hard": {
+      "timeout_secs": 600
+    }
+  }
+}

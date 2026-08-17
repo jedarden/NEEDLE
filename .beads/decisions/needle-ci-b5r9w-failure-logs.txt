@@ -1,0 +1,415 @@
+time=2026-08-16T18:17:32.263Z level=INFO msg="waiting for signals" argo=true signalPath=/var/run/argo/ctr/main/signal
++ rm -rf /workspace/lost+found '/workspace/.[!.]*'
++ git clone --depth 1 --branch main https://git.ardenone.com/jedarden/NEEDLE.git /workspace
+Cloning into '/workspace'...
++ cd /workspace
++ rustc --version
+info: syncing channel updates for 1.95.0-x86_64-unknown-linux-gnu
+info: latest update on 2026-04-16 for version 1.95.0 (59807616e 2026-04-14)
+info: downloading 7 components
+rustc 1.95.0 (59807616e 2026-04-14)
++ cargo fmt -- --check
+Diff in /workspace/src/canary/mod.rs:469:
+                         "--workspace",
+                         &self.canary_workspace.display().to_string(),
+                         "--agent",
+-                        "echo",  // Use explicit hermetic adapter, not global default
++                        "echo", // Use explicit hermetic adapter, not global default
+                         "--identifier",
+                         &format!("canary-{bead_id}"),
+                         "--count",
+Diff in /workspace/src/canary/mod.rs:1715:
+         )
+         .unwrap();
+ 
+-        let runner = CanaryRunner::new(
+-            PathBuf::from("/tmp/.needle"),
+-            workspace.to_path_buf(),
+-            300,
+-        );
++        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+ 
+         let result = runner.validate_bead_backend_binding();
+         assert!(result.is_err());
+Diff in /workspace/src/canary/mod.rs:1748:
+         )
+         .unwrap();
+ 
+-        let runner = CanaryRunner::new(
+-            PathBuf::from("/tmp/.needle"),
+-            workspace.to_path_buf(),
+-            300,
+-        );
++        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+ 
+         let result = runner.validate_bead_backend_binding();
+         assert!(result.is_err());
+Diff in /workspace/src/canary/mod.rs:1788:
+             std::fs::set_permissions(&bead_path, perms).unwrap();
+         }
+ 
+-        let runner = CanaryRunner::new(
+-            PathBuf::from("/tmp/.needle"),
+-            workspace.to_path_buf(),
+-            300,
+-        );
++        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+ 
+         // Should succeed when bead backend is explicitly set and binary exists
+         let result = runner.validate_bead_backend_binding();
+Diff in /workspace/src/canary/mod.rs:1833:
+             std::fs::set_permissions(&bf_path, perms).unwrap();
+         }
+ 
+-        let runner = CanaryRunner::new(
+-            PathBuf::from("/tmp/.needle"),
+-            workspace.to_path_buf(),
+-            300,
+-        );
++        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+ 
+         // Should succeed when bead-forge backend is explicitly set
+         let result = runner.validate_bead_backend_binding();
+Diff in /workspace/src/cli/mod.rs:2727:
+                         })
+                         .ok()
+                 })
+-                    .unwrap_or(None)
++                .unwrap_or(None)
+             });
+ 
+             // Wait with 3s timeout using join_timeout simulation
+Diff in /workspace/src/cli/mod.rs:2746:
+ 
+             if let Some(check) = update_result {
+                 if check.update_available {
+-                    println!("  ⚠️  Update available: running {}, latest is {} — run `needle upgrade`",
+-                        check.current_version, check.latest_version);
++                    println!(
++                        "  ⚠️  Update available: running {}, latest is {} — run `needle upgrade`",
++                        check.current_version, check.latest_version
++                    );
+                     println!();
+                 }
+             }
+Diff in /workspace/src/config/mod.rs:1810:
+         let invalid_inputs = vec!["invalid", "unknown", "foo", "bar", ""];
+         for input in invalid_inputs {
+             let result: Result<BeadBackend, _> = serde_yaml::from_str(input);
+-            assert!(result.is_err(), "Should reject invalid backend: '{}'", input);
++            assert!(
++                result.is_err(),
++                "Should reject invalid backend: '{}'",
++                input
++            );
+         }
+     }
+ 
+Diff in /workspace/src/config/mod.rs:1845:
+ 
+         for (backend, expected) in test_cases {
+             let display = format!("{}", backend);
+-            assert_eq!(display, expected, "Display for {:?} should be {}", backend, expected);
++            assert_eq!(
++                display, expected,
++                "Display for {:?} should be {}",
++                backend, expected
++            );
+         }
+     }
+ 
+Diff in /workspace/src/health/mod.rs:471:
+     /// let is_alive = monitor.check_worker_alive("claude-code-glm-5-alpha")?;
+     /// ```
+     pub fn check_worker_alive(&self, qualified_worker_id: &str) -> Result<bool> {
+-        let path = self.heartbeat_dir.join(format!("{}.json", qualified_worker_id));
++        let path = self
++            .heartbeat_dir
++            .join(format!("{}.json", qualified_worker_id));
+ 
+         if !path.exists() {
+             tracing::debug!(
+Diff in /workspace/src/health/mod.rs:482:
+             return Ok(false);
+         }
+ 
+-        let content = std::fs::read_to_string(&path)
+-            .with_context(|| format!("failed to read heartbeat file for worker {}: {}", qualified_worker_id, path.display()))?;
++        let content = std::fs::read_to_string(&path).with_context(|| {
++            format!(
++                "failed to read heartbeat file for worker {}: {}",
++                qualified_worker_id,
++                path.display()
++            )
++        })?;
+ 
+-        let heartbeat: HeartbeatData = serde_json::from_str(&content)
+-            .with_context(|| format!("failed to parse heartbeat file for worker {}: {}", qualified_worker_id, path.display()))?;
++        let heartbeat: HeartbeatData = serde_json::from_str(&content).with_context(|| {
++            format!(
++                "failed to parse heartbeat file for worker {}: {}",
++                qualified_worker_id,
++                path.display()
++            )
++        })?;
+ 
+         let age = Utc::now()
+             .signed_duration_since(heartbeat.last_heartbeat)
+Diff in /workspace/src/health/mod.rs:3566:
+         // Attempt to check if the worker is alive
+         let result = monitor.check_worker_alive(qualified_id);
+ 
+-        assert!(
+-            result.is_err(),
+-            "malformed heartbeat should return error"
+-        );
++        assert!(result.is_err(), "malformed heartbeat should return error");
+ 
+         let err = result.unwrap_err();
+         let err_msg = err.to_string().to_lowercase();
+Diff in /workspace/src/health/mod.rs:3774:
+         // Verify the malformed heartbeat returns error
+         let result = monitor.verify_heartbeat();
+ 
+-        assert!(
+-            result.is_err(),
+-            "malformed heartbeat should return error"
+-        );
++        assert!(result.is_err(), "malformed heartbeat should return error");
+ 
+         let err = result.unwrap_err();
+         let err_msg = err.to_string().to_lowercase();
+Diff in /workspace/src/health/mod.rs:4200:
+ 
+         // Check that the worker is alive
+         let is_alive = monitor.check_worker_alive(worker_id).unwrap();
+-        assert!(
+-            is_alive,
+-            "worker with fresh heartbeat should be alive"
+-        );
++        assert!(is_alive, "worker with fresh heartbeat should be alive");
+     }
+ 
+     /// Test that check_worker_alive returns false for stale heartbeats.
+Diff in /workspace/src/health/mod.rs:4248:
+ 
+         // Check that the worker is not alive
+         let is_alive = monitor.check_worker_alive(worker_id).unwrap();
+-        assert!(
+-            !is_alive,
+-            "worker with stale heartbeat should not be alive"
+-        );
++        assert!(!is_alive, "worker with stale heartbeat should not be alive");
+     }
+ 
+     /// Test that check_worker_alive returns false when heartbeat file doesn't exist.
+Diff in /workspace/src/health/mod.rs:4396:
+ 
+         // Verify the qualified ID is used correctly
+         let is_alive = monitor.check_worker_alive(qualified_id).unwrap();
+-        assert!(
+-            is_alive,
+-            "worker should be found using qualified ID format"
+-        );
++        assert!(is_alive, "worker should be found using qualified ID format");
+     }
+ }
+ 
+Diff in /workspace/src/types/mod.rs:3140:
+     };
+ 
+     assert_eq!(reason.as_str(), "atomic");
++    assert_eq!(reason.explanation(), "Full test suite cannot be decomposed");
+     assert_eq!(
+-        reason.explanation(),
+-        "Full test suite cannot be decomposed"
+-    );
+-    assert_eq!(
+         reason.to_string(),
+         "atomic: Full test suite cannot be decomposed"
+     );
+Diff in /workspace/src/types/mod.rs:3272:
+     assert_eq!(parsed.title, phase.title);
+     assert_eq!(parsed.description, phase.description);
+     assert_eq!(parsed.is_completed, phase.is_completed);
+-    assert_eq!(parsed.estimated_duration_secs, phase.estimated_duration_secs);
++    assert_eq!(
++        parsed.estimated_duration_secs,
++        phase.estimated_duration_secs
++    );
+ }
+ 
+ #[test]
+Diff in /workspace/src/types/mod.rs:3410:
+     /// Returns true if the proposal indicates the bead should be split.
+     pub fn is_splittable(&self) -> bool {
+         match self {
+-            DecompositionProposal::Timeout { phases, refusal_reason, .. } => {
+-                refusal_reason.is_none() && !phases.is_empty()
+-            }
+-            DecompositionProposal::Ordinary { tasks, refusal_reason, .. } => {
+-                refusal_reason.is_none() && !tasks.is_empty()
+-            }
++            DecompositionProposal::Timeout {
++                phases,
++                refusal_reason,
++                ..
++            } => refusal_reason.is_none() && !phases.is_empty(),
++            DecompositionProposal::Ordinary {
++                tasks,
++                refusal_reason,
++                ..
++            } => refusal_reason.is_none() && !tasks.is_empty(),
+         }
+     }
+ 
+Diff in /workspace/tests/integration_tests.rs:4182:
+     );
+ 
+     assert_eq!(
+-        config_expanded.workspace.home,
+-        custom_needle_home,
++        config_expanded.workspace.home, custom_needle_home,
+         "workspace.home should point to our custom needle home"
+     );
+ 
+Diff in /workspace/tests/integration_tests.rs:4193:
+   home: /absolute/path/to/needle-home
+ "#;
+ 
+-    let config_absolute: Config = serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
++    let config_absolute: Config =
++        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+     let mut config_absolute_expanded = config_absolute;
+     config_absolute_expanded.expand_tildes();
+ 
+Diff in /workspace/tests/integration_tests.rs:4209:
+   home: relative/path/to/needle-home
+ "#;
+ 
+-    let config_relative: Config = serde_yaml::from_str(relative_yaml).expect("failed to parse config");
++    let config_relative: Config =
++        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+     let mut config_relative_expanded = config_relative;
+     config_relative_expanded.expand_tildes();
+ 
+Diff in /workspace/tests/integration_tests.rs:4228:
+ 
+     println!("✓ Workspace home tilde expansion test passed");
+     println!("  Isolated home: {}", isolated_home.display());
+-    println!("  Tilde path ~/.custom-needle -> {}", custom_needle_home.display());
++    println!(
++        "  Tilde path ~/.custom-needle -> {}",
++        custom_needle_home.display()
++    );
+     println!("  Absolute path preserved: /absolute/path/to/needle-home");
+     println!("  Relative path preserved: relative/path/to/needle-home");
+ }
+Diff in /workspace/tests/integration_tests.rs:4295:
+ 
+     // Verify the workspace.default was expanded
+     assert!(
+-        config_expanded.workspace.default.starts_with(&isolated_home),
++        config_expanded
++            .workspace
++            .default
++            .starts_with(&isolated_home),
+         "workspace.default should be expanded to isolated home, got: {}",
+         config_expanded.workspace.default.display()
+     );
+Diff in /workspace/tests/integration_tests.rs:4302:
+ 
+     assert_eq!(
+-        config_expanded.workspace.default,
+-        custom_workspace,
++        config_expanded.workspace.default, custom_workspace,
+         "workspace.default should point to our custom workspace"
+     );
+ 
+Diff in /workspace/tests/integration_tests.rs:4312:
+   default: /absolute/path/to/workspace
+ "#;
+ 
+-    let config_absolute: Config = serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
++    let config_absolute: Config =
++        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+     let mut config_absolute_expanded = config_absolute;
+     config_absolute_expanded.expand_tildes();
+ 
+Diff in /workspace/tests/integration_tests.rs:4328:
+   default: relative/path/to/workspace
+ "#;
+ 
+-    let config_relative: Config = serde_yaml::from_str(relative_yaml).expect("failed to parse config");
++    let config_relative: Config =
++        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+     let mut config_relative_expanded = config_relative;
+     config_relative_expanded.expand_tildes();
+ 
+Diff in /workspace/tests/integration_tests.rs:4344:
+   default: .
+ "#;
+ 
+-    let config_current: Config = serde_yaml::from_str(current_yaml).expect("failed to parse config");
++    let config_current: Config =
++        serde_yaml::from_str(current_yaml).expect("failed to parse config");
+     let mut config_current_expanded = config_current;
+     config_current_expanded.expand_tildes();
+ 
+Diff in /workspace/tests/integration_tests.rs:4363:
+ 
+     println!("✓ Workspace default tilde expansion test passed");
+     println!("  Isolated home: {}", isolated_home.display());
+-    println!("  Tilde path ~/dev/my-workspace -> {}", custom_workspace.display());
++    println!(
++        "  Tilde path ~/dev/my-workspace -> {}",
++        custom_workspace.display()
++    );
+     println!("  Absolute path preserved: /absolute/path/to/workspace");
+     println!("  Relative path preserved: relative/path/to/workspace");
+     println!("  Current directory preserved: .");
+Diff in /workspace/tests/integration_tests.rs:4413:
+ 
+     // Verify both fields were expanded correctly
+     assert_eq!(
+-        config_expanded.workspace.home,
+-        custom_needle_home,
++        config_expanded.workspace.home, custom_needle_home,
+         "workspace.home should be expanded to custom needle home"
+     );
+ 
+Diff in /workspace/tests/integration_tests.rs:4421:
+     assert_eq!(
+-        config_expanded.workspace.default,
+-        custom_workspace,
++        config_expanded.workspace.default, custom_workspace,
+         "workspace.default should be expanded to custom workspace"
+     );
+ 
+Diff in /workspace/tests/integration_tests.rs:4431:
+     );
+ 
+     assert!(
+-        config_expanded.workspace.default.starts_with(&isolated_home),
++        config_expanded
++            .workspace
++            .default
++            .starts_with(&isolated_home),
+         "workspace.default should start with isolated home"
+     );
+ 
+Diff in /workspace/tests/integration_tests.rs:4444:
+ 
+     println!("✓ Combined workspace home and default tilde expansion test passed");
+     println!("  Isolated home: {}", isolated_home.display());
+-    println!("  workspace.home: ~/.custom-needle -> {}", custom_needle_home.display());
++    println!(
++        "  workspace.home: ~/.custom-needle -> {}",
++        custom_needle_home.display()
++    );
+     println!(
+         "  workspace.default: ~/dev/my-workspace -> {}",
+         custom_workspace.display()
+time=2026-08-16T18:18:02.282Z level=INFO msg="sub-process exited" argo=true error="exit status 1"
+time=2026-08-16T18:18:02.282Z level=INFO msg="file signal handler exiting due to context cancellation" argo=true
+Error: exit status 1

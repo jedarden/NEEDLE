@@ -1,0 +1,7 @@
+Already satisfied in the current architecture:
+
+- Batch operations route through `run_argv`, which uses `spawn_with_etxtbsy_retry_child` with retry telemetry.
+- No task-scoped files required changes.
+- Targeted tests were blocked by unrelated concurrent compilation errors.
+- Recorded the finding and closed `needle-24e42694`.
+- No commit or push made, as instructed for no-change work.

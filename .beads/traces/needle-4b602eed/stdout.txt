@@ -1,0 +1,5 @@
+The requested tests are already implemented in [`src/telemetry/file_sink.rs`](/home/coding/NEEDLE/src/telemetry/file_sink.rs) and pushed in commit `627f3d2`.
+
+- `cargo fmt --check`: passed
+- `cargo test` / `cargo build`: blocked by unrelated existing compile errors in `src/outcome/mod.rs` and telemetry matches
+- Bead updated with details; left open because required verification cannot complete.

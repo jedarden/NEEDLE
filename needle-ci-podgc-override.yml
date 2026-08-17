@@ -1,0 +1,34 @@
+# needle-ci workflow submission with podGC override
+# This preserves pod logs after BOTH success AND failure (unlike the template's
+# OnWorkflowSuccess, which only keeps failed pods). Use this for debugging
+# when you need to capture logs from a passing run.
+#
+# Submit with:
+#   kubectl create -f needle-ci-podgc-override.yml --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig
+#
+# Pods will be retained until the workflow's ttlStrategy GCs them (1h success,
+# 48h failure), giving you time to inspect logs with:
+#   kubectl logs -n argo-workflows <pod-name> -c main
+#
+# This workflow references the existing needle-ci WorkflowTemplate and overrides
+# podGC.strategy to OnWorkflowCompletion at submission time.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: needle-ci-debug-
+  namespace: argo-workflows
+  labels:
+    app: needle-ci
+    debug-podgc-override: "true"
+spec:
+  # Override the template's OnWorkflowSuccess to preserve pods on BOTH success
+  # and failure. This is a one-off debug submission — the template itself is
+  # unchanged and normal webhook-triggered runs still use OnWorkflowSuccess.
+  podGC:
+    strategy: OnWorkflowCompletion
+
+  workflowTemplateRef:
+    name: needle-ci
+
+  # All parameters match the WorkflowTemplate defaults — no need to repeat them
+  # here since the template already has defaults for git-repo, branch, etc.

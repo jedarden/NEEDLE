@@ -1,0 +1,10 @@
+Implemented and pushed timestamp capture in [src/test_runner.rs](/home/coding/NEEDLE/src/test_runner.rs:437):
+
+- Captures before `Command::new("cargo")`
+- Stores the timestamp locally
+- Uses the helper’s epoch fallback on capture failure
+- Includes it in spawn logging
+
+Pushed as `9e4ba8e`; bead `needle-2cb3c619` is closed.
+
+`rustfmt --check` passed. Focused cargo tests remain blocked by unrelated existing compile errors elsewhere.

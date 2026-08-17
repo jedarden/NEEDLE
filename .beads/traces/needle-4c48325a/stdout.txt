@@ -1,0 +1,11 @@
+Already satisfied on `origin/main` via `feeaa36c`; no redundant file change or commit was created.
+
+Validated [needle-workflowtemplate.yml](/home/coding/declarative-config/k8s/iad-ci/argo-workflows/needle-workflowtemplate.yml):
+
+- No restrictive node selector
+- Build requests: `1500m CPU / 4Gi`
+- Limits retained: `3000m CPU / 6Gi`
+- YAML and resource checks pass
+- Live capacity confirms eligible compute1-8 placement
+
+Bead `needle-4c48325a` was updated and closed.

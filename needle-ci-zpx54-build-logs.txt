@@ -1,0 +1,49 @@
+NEEDLE CI Build Logs - Workflow needle-ci-zpx54
+================================================
+
+Workflow Status: Failed
+Time: 2026-08-13T16:10:28Z - 2026-08-13T16:10:58Z (~30 seconds)
+Pod: needle-ci-zpx54-verify-1769195334
+Container Status: Error (0/2 containers ready)
+
+Log Contents:
+-------------
+
+time=2026-08-13T16:10:28.446Z level=INFO msg="waiting for signals" argo=true signalPath=/var/run/argo/ctr/main/signal
++ rm -rf /workspace/lost+found '/workspace/.[!.]*'
++ git clone --depth 1 --branch main https://github.com/jedarden/NEEDLE.git /workspace
+Cloning into '/workspace'...
++ cd /workspace
++ rustc --version
+info: syncing channel updates for 1.95.0-x86_64-unknown-linux-gnu
+info: latest update on 2026-04-16 for version 1.95.0 (59807616e 2026-04-14)
+info: downloading 7 components
+rustc 1.95.0 (59807616e 2026-04-14)
++ cargo fmt -- --check
+
+[Formatting violations detected in multiple files]
+
+Files with formatting issues:
+- src/dispatch/mod.rs (multiple locations)
+- tests/checkpoint_roundtrip_fidelity.rs (multiple locations)
+- tests/process_discovery_integration.rs (1 location)
+- tests/workspace_fixtures.rs (multiple locations)
+
+Root cause: Code formatting does not match rustfmt standards
+
+Error Summary:
+--------------
+The build failed at the formatting check stage. The `cargo fmt -- --check` command
+found numerous formatting differences across the codebase. This is a simple fix -
+the code needs to be run through `cargo fmt` to auto-format it to match the
+project's formatting standards.
+
+Pod Status:
+-----------
+Pod still exists despite being ~145 minutes old (over 2 hours). This suggests
+either:
+1. The podGC policy may have been set to OnWorkflowCompletion for this run
+2. There's a delay in cleanup
+3. The pod is being retained for debugging
+
+Timestamp of capture: 2026-08-13
