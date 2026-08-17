@@ -1121,7 +1121,7 @@ impl Worker {
 
         // Warn if idle_action=exit without supervisor supervision
         if self.config.worker.idle_action == crate::types::IdleAction::Exit {
-            match self.health.detect_supervisor() {
+            match self.health.detect_supervisor_direct() {
                 Ok(supervisor_present) => {
                     if !supervisor_present {
                         tracing::warn!(

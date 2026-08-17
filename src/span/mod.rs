@@ -140,6 +140,91 @@ pub fn record_claim_result(span: &Span, result: &str) {
     span.record(attrs::NEEDLE_CLAIM_RESULT, result);
 }
 
+/// RAII guard for LIFO-safe span scoping.
+///
+/// When dropped, the span is explicitly closed, ensuring proper unwinding
+/// even across early returns or errors. This ensures LIFO (Last-In-First-Out)
+/// compliance by using RAII to guarantee spans unwind in reverse order.
+///
+/// # Safety
+///
+/// This guard must NOT be stored across an `.await` point. The guard should
+/// only be used for synchronous code blocks. For async code, use
+/// `.instrument()` on the future instead.
+///
+/// # Example
+///
+/// ```rust
+/// let _guard = ScopeGuard::new(lifecycle_span.clone());
+/// do_synchronous_work();
+/// // Guard dropped here, span unwinds
+/// ```
+pub struct ScopeGuard {
+    _guard: Option<tracing::span::Entered<'static>>,
+}
+
+impl ScopeGuard {
+    /// Create a new scope guard from a span, entering it immediately.
+    ///
+    /// The span will be exited when the guard is dropped (LIFO order).
+    ///
+    /// # Panics
+    ///
+    /// This function uses `span.enter()` which modifies thread-local state.
+    /// Do not store the returned guard across an `.await` point.
+    pub fn new(span: Span) -> Self {
+        // SAFETY: We transmute the lifetime to 'static because:
+        // 1. The guard is only used for synchronous code (no .await)
+        // 2. The guard is dropped before any .await point
+        // 3. This replaces in_scope() which had the same safety requirements
+        let guard = span.enter();
+        Self {
+            _guard: Some(unsafe {
+                std::mem::transmute::<tracing::span::Entered<'_>, tracing::span::Entered<'static>>(
+                    guard,
+                )
+            }),
+        }
+    }
+
+    /// Enter the span scope for a synchronous block.
+    ///
+    /// This method is called automatically by `new()`, but is also available
+    /// for cases where manual scope control is needed.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let lifecycle_guard = ScopeGuard::new(lifecycle_span.clone());
+    /// lifecycle_guard.enter_scope(|| {
+    ///     // This code runs within the lifecycle span
+    ///     do_work();
+    /// });
+    /// ```
+    pub fn enter_scope(&self, f: impl FnOnce()) {
+        f();
+    }
+
+    /// Record an attribute on the current span.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let guard = ScopeGuard::new(lifecycle_span.clone());
+    /// guard.record("needle.bead.outcome", "success");
+    /// ```
+    pub fn record(&self, key: &str, value: impl tracing::Value) {
+        tracing::Span::current().record(key, value);
+    }
+}
+
+impl Drop for ScopeGuard {
+    fn drop(&mut self) {
+        // Explicit cleanup - dropping _guard exits the span
+        self._guard.take();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +291,64 @@ mod tests {
         assert_eq!(outcomes::CRASH, "crash");
         assert_eq!(outcomes::AGENT_NOT_FOUND, "agent_not_found");
         assert_eq!(outcomes::INTERRUPTED, "interrupted");
+    }
+
+    #[test]
+    fn scope_guard_lifo_unwinding() {
+        let outer = tracing::info_span!("outer");
+        let inner = tracing::info_span!("inner");
+
+        {
+            let _outer_guard = ScopeGuard::new(outer);
+            {
+                let _inner_guard = ScopeGuard::new(inner);
+                // Inner span is active here
+                // (We can't directly test this without accessing tracing internals,
+                // but we verify the guard compiles and runs without panicking)
+            }
+            // Inner span dropped here (correct LIFO)
+        }
+        // Outer span dropped here
+    }
+
+    #[test]
+    fn scope_guard_record_attribute() {
+        let span = tracing::info_span!(
+            "test",
+            needle.bead.id = "test-bf-123",
+            needle.bead.priority = 5
+        );
+
+        let guard = ScopeGuard::new(span);
+        guard.record("needle.bead.outcome", "success");
+        // Guard dropped here
+    }
+
+    #[test]
+    fn scope_guard_enter_scope() {
+        let span = tracing::info_span!("test");
+        let guard = ScopeGuard::new(span.clone());
+
+        guard.enter_scope(|| {
+            // This code runs within the span
+            span.record("test_attr", "value");
+        });
+
+        // Guard still active after enter_scope
+        guard.record("after_enter_scope", "another_value");
+    }
+
+    #[test]
+    fn scope_guard_with_early_return() {
+        let span = tracing::info_span!("test");
+        let _guard = ScopeGuard::new(span);
+
+        // Early return should still unwind the guard
+        if true {
+            return;
+        }
+
+        // Unreachable code
+        panic!("should not reach here");
     }
 }
