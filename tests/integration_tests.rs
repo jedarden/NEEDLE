@@ -4424,7 +4424,8 @@ async fn workspace_home_and_default_tilde_expansion_combined() {
 workspace:
   home: ~/.custom-needle
   default: ~/dev/my-workspace
-"#.to_string();
+"#
+    .to_string();
 
     // Load config - this should trigger tilde expansion for both fields
     let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");

@@ -1635,6 +1635,7 @@ mod tests {
         monitor.start_emitter().unwrap();
 
         // Read the heartbeat file multiple times while it's being updated.
+        // The emitter runs in a native thread, so we wait for real time between reads.
         for _ in 0..10 {
             let path = monitor.heartbeat_path();
             if path.exists() {
@@ -1647,7 +1648,7 @@ mod tests {
                     content
                 );
             }
-            std::thread::sleep(Duration::from_millis(100));
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         monitor.stop();

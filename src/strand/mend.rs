@@ -2401,7 +2401,7 @@ mod tests {
         let glm47_foxtrot = "claude-code-glm-4_7-foxtrot";
 
         // A bead assigned to glm-5-foxtrot.
-        let bead = make_in_progress_bead("nd-collision-a", glm5_foxtrot);
+        let bead = make_recent_in_progress_bead("nd-collision-a", glm5_foxtrot);
 
         // Register BOTH workers as alive.
         let registry = Registry::new(reg_dir.path());

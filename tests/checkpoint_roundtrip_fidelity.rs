@@ -48,12 +48,9 @@ use tempfile::TempDir;
 use needle::checkpoint_utils::{flush_checkpoint_to_temp, restore_checkpoint_to_fresh_workspace};
 use needle::workspace_equality::{assert_workspace_eq, WorkspaceEqualityConfig};
 
-/// Path to the bead-forge binary.
-fn bf_path() -> PathBuf {
-    which::which("bf").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(format!("{home}/.local/bin/bf"))
-    })
+/// Path to the bead-rs binary used by the repository's current backend.
+fn bead_path() -> PathBuf {
+    which::which("bead").expect("bead CLI must be installed for checkpoint tests")
 }
 
 /// Create an isolated test workspace with `.beads/` initialized.
@@ -63,16 +60,16 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
         .tempdir()
         .context("failed to create temp dir")?;
 
-    let bf = bf_path();
-    let output = Command::new(&bf)
+    let bead = bead_path();
+    let output = Command::new(&bead)
         .args(["init"])
         .current_dir(dir.path())
         .output()
-        .context("failed to run bf init")?;
+        .context("failed to run bead init")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf init failed: {}",
+            "bead init failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -82,13 +79,26 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
 
 /// Create a bead in the test workspace and return its ID.
 fn create_bead(workspace: &Path, title: &str) -> Result<String> {
-    let bf = bf_path();
+    create_bead_with_priority(workspace, title, None)
+}
+
+/// Create a bead with an optional priority and return its ID.
+fn create_bead_with_priority(
+    workspace: &Path,
+    title: &str,
+    priority: Option<u8>,
+) -> Result<String> {
+    let bead = bead_path();
     let do_create = || {
-        Command::new(&bf)
-            .args(["create", "--title", title, "--description", title])
+        let mut command = Command::new(&bead);
+        command.args(["create", "--title", title, "--description", title]);
+        if let Some(priority) = priority {
+            command.args(["--priority", &priority.to_string()]);
+        }
+        command
             .current_dir(workspace)
             .output()
-            .context("failed to run bf create")
+            .context("failed to run bead create")
     };
 
     let mut output = do_create()?;
@@ -97,8 +107,8 @@ fn create_bead(workspace: &Path, title: &str) -> Result<String> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
-            let _ = Command::new(&bf)
-                .args(["sync", "--flush-only"])
+            let _ = Command::new(&bead)
+                .args(["sync", "flush-only"])
                 .current_dir(workspace)
                 .output();
             output = do_create()?;
@@ -107,7 +117,7 @@ fn create_bead(workspace: &Path, title: &str) -> Result<String> {
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf create failed: {}",
+            "bead create failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -118,35 +128,16 @@ fn create_bead(workspace: &Path, title: &str) -> Result<String> {
 
 /// Add a label to a bead.
 fn add_label(workspace: &Path, bead_id: &str, label: &str) -> Result<()> {
-    let bf = bf_path();
-    let output = Command::new(&bf)
+    let bead = bead_path();
+    let output = Command::new(&bead)
         .args(["label", "add", bead_id, "--label", label])
         .current_dir(workspace)
         .output()
-        .context("failed to run bf label add")?;
+        .context("failed to run bead label add")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf label add failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    Ok(())
-}
-
-/// Update a bead's priority.
-fn update_priority(workspace: &Path, bead_id: &str, priority: u8) -> Result<()> {
-    let bf = bf_path();
-    let output = Command::new(&bf)
-        .args(["update", bead_id, "--priority", &priority.to_string()])
-        .current_dir(workspace)
-        .output()
-        .context("failed to run bf update")?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "bf update failed: {}",
+            "bead label add failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -156,16 +147,16 @@ fn update_priority(workspace: &Path, bead_id: &str, priority: u8) -> Result<()> 
 
 /// Close a bead with a reason.
 fn close_bead(workspace: &Path, bead_id: &str, reason: &str) -> Result<()> {
-    let bf = bf_path();
-    let output = Command::new(&bf)
+    let bead = bead_path();
+    let output = Command::new(&bead)
         .args(["close", bead_id, "--reason", reason])
         .current_dir(workspace)
         .output()
-        .context("failed to run bf close")?;
+        .context("failed to run bead close")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf close failed: {}",
+            "bead close failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -175,16 +166,16 @@ fn close_bead(workspace: &Path, bead_id: &str, reason: &str) -> Result<()> {
 
 /// Create a dependency between two beads.
 fn add_dependency(workspace: &Path, blocker: &str, blocked: &str) -> Result<()> {
-    let bf = bf_path();
-    let output = Command::new(&bf)
-        .args(["dep", "add", blocker, "--blocks", blocked])
+    let bead = bead_path();
+    let output = Command::new(&bead)
+        .args(["dep", "add", blocked, blocker])
         .current_dir(workspace)
         .output()
-        .context("failed to run bf dep add")?;
+        .context("failed to run bead dep add")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf dep add failed: {}",
+            "bead dep add failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -222,9 +213,8 @@ fn populate_workspace(workspace: &Path) -> Result<Vec<String>> {
     bead_ids.push(bead4);
 
     // Bead 5: Bead with high priority
-    let bead5 = create_bead(workspace, "Priority Task")?;
+    let bead5 = create_bead_with_priority(workspace, "Priority Task", Some(1))?;
     add_label(workspace, &bead5, "reviewed")?;
-    update_priority(workspace, &bead5, 1)?;
     bead_ids.push(bead5);
 
     // Bead 6: Closed bead
@@ -332,7 +322,7 @@ async fn checkpoint_roundtrip_preserves_all_bead_state() {
 /// checkpoint flush and restore handle empty workspaces correctly.
 #[tokio::test]
 async fn checkpoint_roundtrip_handles_empty_workspace() {
-    // Create an empty workspace (just bf init, no beads)
+    // Create an empty workspace (just bead init, no beads)
     let source_workspace =
         create_test_workspace("empty").expect("failed to create empty workspace");
 

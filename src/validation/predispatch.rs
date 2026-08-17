@@ -281,7 +281,7 @@ mod tests {
 
         #[async_trait::async_trait]
         impl crate::bead_store::BeadStore for MockBeadStore {
-            async fn show(&self, id: &BeadId) -> crate::types::Result<Bead> {
+            async fn show(&self, id: &BeadId) -> anyhow::Result<Bead> {
                 // Record that show() was called with this ID
                 *self.show_called.write().await = true;
                 *self.show_called_id.write().await = Some(id.clone());
@@ -308,11 +308,11 @@ mod tests {
             async fn ready(
                 &self,
                 _filters: &crate::bead_store::Filters,
-            ) -> crate::types::Result<Vec<Bead>> {
+            ) -> anyhow::Result<Vec<Bead>> {
                 Ok(vec![])
             }
 
-            async fn list_all(&self) -> crate::types::Result<Vec<Bead>> {
+            async fn list_all(&self) -> anyhow::Result<Vec<Bead>> {
                 Ok(vec![])
             }
 
@@ -320,50 +320,47 @@ mod tests {
                 &self,
                 _id: &BeadId,
                 _actor: &str,
-            ) -> crate::types::Result<crate::types::ClaimResult> {
+            ) -> anyhow::Result<crate::types::ClaimResult> {
                 Ok(crate::types::ClaimResult::NotClaimable {
                     reason: "mock".to_string(),
                 })
             }
 
-            async fn claim_auto(
-                &self,
-                _actor: &str,
-            ) -> crate::types::Result<crate::types::ClaimResult> {
+            async fn claim_auto(&self, _actor: &str) -> anyhow::Result<crate::types::ClaimResult> {
                 Ok(crate::types::ClaimResult::NotClaimable {
                     reason: "mock".to_string(),
                 })
             }
 
-            async fn release(&self, _id: &BeadId) -> crate::types::Result<()> {
+            async fn release(&self, _id: &BeadId) -> anyhow::Result<()> {
                 Ok(())
             }
 
-            async fn block(&self, _id: &BeadId) -> crate::types::Result<()> {
+            async fn block(&self, _id: &BeadId) -> anyhow::Result<()> {
                 Ok(())
             }
 
-            async fn clear_assignee(&self, _id: &BeadId) -> crate::types::Result<()> {
+            async fn clear_assignee(&self, _id: &BeadId) -> anyhow::Result<()> {
                 Ok(())
             }
 
-            async fn flush(&self) -> crate::types::Result<()> {
+            async fn flush(&self) -> anyhow::Result<()> {
                 Ok(())
             }
 
-            async fn reopen(&self, _id: &BeadId) -> crate::types::Result<()> {
+            async fn reopen(&self, _id: &BeadId) -> anyhow::Result<()> {
                 Ok(())
             }
 
-            async fn labels(&self, _id: &BeadId) -> crate::types::Result<Vec<String>> {
+            async fn labels(&self, _id: &BeadId) -> anyhow::Result<Vec<String>> {
                 Ok(vec![])
             }
 
-            async fn add_label(&self, _id: &BeadId, _label: &str) -> crate::types::Result<()> {
+            async fn add_label(&self, _id: &BeadId, _label: &str) -> anyhow::Result<()> {
                 Ok(())
             }
 
-            async fn remove_label(&self, _id: &BeadId, _label: &str) -> crate::types::Result<()> {
+            async fn remove_label(&self, _id: &BeadId, _label: &str) -> anyhow::Result<()> {
                 Ok(())
             }
 
@@ -372,7 +369,7 @@ mod tests {
                 _title: &str,
                 _body: &str,
                 _labels: &[&str],
-            ) -> crate::types::Result<BeadId> {
+            ) -> anyhow::Result<BeadId> {
                 Ok(BeadId::from("bf-new".to_string()))
             }
 
@@ -380,7 +377,7 @@ mod tests {
                 &self,
                 _blocker_id: &BeadId,
                 _blocked_id: &BeadId,
-            ) -> crate::types::Result<()> {
+            ) -> anyhow::Result<()> {
                 Ok(())
             }
 
@@ -388,19 +385,19 @@ mod tests {
                 &self,
                 _blocked_id: &BeadId,
                 _blocker_id: &BeadId,
-            ) -> crate::types::Result<()> {
+            ) -> anyhow::Result<()> {
                 Ok(())
             }
 
-            async fn doctor_repair(&self) -> crate::types::Result<crate::bead_store::RepairReport> {
+            async fn doctor_repair(&self) -> anyhow::Result<crate::bead_store::RepairReport> {
                 Ok(crate::bead_store::RepairReport::default())
             }
 
-            async fn doctor_check(&self) -> crate::types::Result<crate::bead_store::RepairReport> {
+            async fn doctor_check(&self) -> anyhow::Result<crate::bead_store::RepairReport> {
                 Ok(crate::bead_store::RepairReport::default())
             }
 
-            async fn full_rebuild(&self) -> crate::types::Result<()> {
+            async fn full_rebuild(&self) -> anyhow::Result<()> {
                 Ok(())
             }
 
@@ -423,7 +420,7 @@ mod tests {
         assert_eq!(result, Some(expected_notes));
 
         // Verify that store.show() was called with the correct bead_id
-        assert_eq!(*show_called.read().await, true);
+        assert!(*show_called.read().await);
         assert_eq!(*show_called_id.read().await, Some(bead_id));
     }
 }

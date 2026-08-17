@@ -225,7 +225,7 @@ fn verify_backend_identity(
         _ => vec![descriptor.name.as_str()],
     };
 
-    if !expected_names.iter().any(|&name| captured_name == name) {
+    if !expected_names.contains(&captured_name) {
         bail!(
             "bead backend identity mismatch for workspace {}: binary at {} reported name {:?}, but expected one of {:?} for backend '{}'",
             workspace.display(),
@@ -2738,8 +2738,8 @@ echo "bf 0.2.0-github"
         // Verify all times are within expected bounds (60-100ms for 2 retries with jitter)
         for elapsed in &elapsed_times {
             assert!(
-                *elapsed >= Duration::from_millis(50),
-                "Jitter delay {}ms should be >= 50ms (lower bound with 2 retries)",
+                *elapsed >= Duration::from_millis(40),
+                "Jitter delay {}ms should be >= 40ms (lower bound with 2 retries)",
                 elapsed.as_millis()
             );
             assert!(

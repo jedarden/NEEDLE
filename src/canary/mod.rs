@@ -413,8 +413,71 @@ impl CanaryRunner {
             .join(format!("{bead_id}.yaml"));
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read expected outcome: {}", path.display()))?;
-        serde_yaml::from_str(&content)
-            .with_context(|| format!("invalid expected outcome YAML: {}", path.display()))
+        let outcome: ExpectedOutcome = serde_yaml::from_str(&content)
+            .with_context(|| format!("invalid expected outcome YAML: {}", path.display()))?;
+
+        // Validate that the expected final_status is a valid bead-forge status.
+        // This prevents stale expectations from blocking upgrades (see needle-a55a9e18).
+        self.validate_expected_status(&outcome, bead_id, &path)?;
+
+        Ok(outcome)
+    }
+
+    /// Validate that expected final_status values are valid bead-forge statuses.
+    ///
+    /// bead-forge (bf) uses: open, in_progress, blocked, closed, completed, pending, ready
+    /// bead-rs uses: open, in_progress, blocked, closed, deferred
+    ///
+    /// Both treat "closed" as equivalent to "done" — a successfully completed bead.
+    fn validate_expected_status(
+        &self,
+        expected: &ExpectedOutcome,
+        _bead_id: &str,
+        path: &Path,
+    ) -> Result<()> {
+        // Valid statuses across both backends (union of both sets)
+        let valid_statuses = [
+            "open",
+            "in_progress",
+            "blocked",
+            "closed",
+            "completed",
+            "pending",
+            "ready",
+            "deferred",
+        ];
+
+        let status_to_check = match expected {
+            ExpectedOutcome::Success { final_status, .. } => Some(final_status.as_str()),
+            ExpectedOutcome::Failure { final_status, .. } => Some(final_status.as_str()),
+            ExpectedOutcome::Timeout { final_status } => Some(final_status.as_str()),
+            ExpectedOutcome::StateMachine { .. } => None, // State machine tests don't check final_status
+        };
+
+        if let Some(status) = status_to_check {
+            if !valid_statuses.contains(&status) {
+                bail!(
+                    "invalid expected final_status '{status}' in {}: must be one of {:?}. \
+                     This indicates a stale canary expectation that must be updated to match \
+                     current bead CLI vocabulary. Run 'bead show <bead_id> --json' to see \
+                     actual statuses in use.",
+                    path.display(),
+                    valid_statuses
+                );
+            }
+
+            // Additional check: "done" is not a valid bead-forge status (it's "closed")
+            if status == "done" {
+                bail!(
+                    "invalid expected final_status 'done' in {}: bead-forge uses 'closed' \
+                     for completed beads, not 'done'. Update the expectation to use 'closed'. \
+                     See ADR for needle-a55a9e18 for details.",
+                    path.display()
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Run a single canary test.
@@ -1303,7 +1366,7 @@ mod tests {
 
         std::fs::write(
             expected_dir.join("test-ok.yaml"),
-            "type: success\nfinal_status: done\nlabels:\n  - verified\n",
+            "type: success\nfinal_status: closed\nlabels:\n  - verified\n",
         )
         .unwrap();
 
@@ -1761,13 +1824,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path();
 
-        // Create a valid .needle.yaml with bead-rs backend
-        std::fs::write(
-            workspace.join(".needle.yaml"),
-            "bead_cli:\n  backend: bead-rs\n",
-        )
-        .unwrap();
-
         // Mock a bead binary
         let bead_path = tmp.path().join("bead");
         std::fs::write(&bead_path, "#!/bin/sh\nexit 0").unwrap();
@@ -1779,6 +1835,16 @@ mod tests {
             perms.set_mode(0o755);
             std::fs::set_permissions(&bead_path, perms).unwrap();
         }
+
+        // Bind the workspace to the mock binary explicitly.
+        std::fs::write(
+            workspace.join(".needle.yaml"),
+            format!(
+                "bead_cli:\n  backend: bead-rs\n  path: {}\n",
+                bead_path.display()
+            ),
+        )
+        .unwrap();
 
         let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
 
@@ -1802,13 +1868,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path();
 
-        // Create a valid .needle.yaml with bead-forge backend
-        std::fs::write(
-            workspace.join(".needle.yaml"),
-            "bead_cli:\n  backend: bead-forge\n",
-        )
-        .unwrap();
-
         // Mock a bf binary
         let bf_path = tmp.path().join("bf");
         std::fs::write(&bf_path, "#!/bin/sh\nexit 0").unwrap();
@@ -1820,6 +1879,16 @@ mod tests {
             perms.set_mode(0o755);
             std::fs::set_permissions(&bf_path, perms).unwrap();
         }
+
+        // Bind the workspace to the mock binary explicitly.
+        std::fs::write(
+            workspace.join(".needle.yaml"),
+            format!(
+                "bead_cli:\n  backend: bead-forge\n  path: {}\n",
+                bf_path.display()
+            ),
+        )
+        .unwrap();
 
         let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
 

@@ -1398,7 +1398,7 @@ mod tests {
                 std::env::set_var("PATH", &link_dir);
                 std::env::set_var(
                     "PATH",
-                    &format!("{}:{}", link_dir.display(), real_bin_dir.display()),
+                    format!("{}:{}", link_dir.display(), real_bin_dir.display()),
                 );
 
                 let config = BeadCliConfig {
@@ -1924,6 +1924,7 @@ mod tests {
     /// let result = resolve_bead_cli(&config);
     /// assert_backend_resolution(result, Backend::Bead, PathBuf::from("/path/to/bead"));
     /// ```
+    #[allow(dead_code)]
     fn assert_backend_resolution(
         result: Result<(Backend, PathBuf)>,
         expected_backend: Backend,
@@ -9453,39 +9454,21 @@ resource_attributes:
 
         assert!(config.enabled, "enabled should be true");
         assert_eq!(
-            config.endpoint,
-            "http://otel-collector.tailnet:4317",
+            config.endpoint, "http://otel-collector.tailnet:4317",
             "endpoint should match"
         );
         assert_eq!(config.protocol, "grpc", "protocol should match");
+        assert_eq!(config.headers.len(), 1, "should have one header");
         assert_eq!(
-            config.headers.len(),
-            1,
-            "should have one header"
-        );
-        assert_eq!(
-            config.headers[0],
-            "authorization: Bearer ${OTEL_TOKEN}",
+            config.headers[0], "authorization: Bearer ${OTEL_TOKEN}",
             "header format should match"
         );
         assert_eq!(config.timeout_ms, 5000, "timeout_ms should match");
         assert_eq!(config.compression, "gzip", "compression should match");
-        assert!(
-            !config.tls.insecure,
-            "TLS insecure should be false"
-        );
-        assert_eq!(
-            config.tls.ca_file, "",
-            "TLS ca_file should be empty"
-        );
-        assert!(
-            config.signals.traces,
-            "traces signal should be enabled"
-        );
-        assert!(
-            config.signals.metrics,
-            "metrics signal should be enabled"
-        );
+        assert!(!config.tls.insecure, "TLS insecure should be false");
+        assert_eq!(config.tls.ca_file, "", "TLS ca_file should be empty");
+        assert!(config.signals.traces, "traces signal should be enabled");
+        assert!(config.signals.metrics, "metrics signal should be enabled");
         assert!(config.signals.logs, "logs signal should be enabled");
         assert_eq!(
             config.resource_attributes.len(),

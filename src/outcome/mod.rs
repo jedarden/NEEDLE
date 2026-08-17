@@ -494,75 +494,17 @@ impl OutcomeHandler {
                     bead_id: bead.id.clone(),
                 });
 
-                // Use verify_shipped_work to decide close-vs-release.
-                // If the agent shipped work, close the bead. Otherwise, release
-                // and increment failure count so repeat offenders quarantine.
-                if self.config.worker.enforce_shipped_work {
-                    match verify_shipped_work(&current, &bead.workspace, store).await {
-                        Ok(crate::validation::GateResult::Pass) => {
-                            tracing::info!(
-                                bead_id = %bead.id,
-                                "shipped work detected — closing orphaned bead"
-                            );
-                            // Close the bead to finish what the agent started.
-                            let _ = tokio::time::timeout(
-                                std::time::Duration::from_secs(30),
-                                store
-                                    .close(&bead.id, "shipped work detected (agent did not close)"),
-                            )
-                            .await;
-                            // Clear the predispatch snapshot since work is complete.
-                            crate::validation::predispatch::clear(&bead.workspace, &bead.id).await;
-                            events.push(EventKind::BeadCompleted {
-                                bead_id: bead.id.clone(),
-                                duration_ms: 0,
-                            });
-                        }
-                        Ok(crate::validation::GateResult::Fail(reason)) => {
-                            tracing::warn!(
-                                bead_id = %bead.id,
-                                reason = %reason,
-                                "no shipped work detected — releasing orphaned bead with failure increment"
-                            );
-                            // Release and increment failure count to apply quarantine.
-                            let mut release_events = self.release_bead(store, bead).await?;
-                            events.append(&mut release_events);
-                            let release_succeeded = events
-                                .iter()
-                                .any(|e| matches!(e, EventKind::BeadReleased { .. }));
-                            if release_succeeded {
-                                let _ = self.increment_failure_count(store, bead).await;
-                            }
-                            return Ok((BeadAction::Released, events));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                bead_id = %bead.id,
-                                error = %e,
-                                "shipped-work check errored — releasing orphaned bead with failure increment"
-                            );
-                            // On error, release and increment failure count.
-                            let mut release_events = self.release_bead(store, bead).await?;
-                            events.append(&mut release_events);
-                            let release_succeeded = events
-                                .iter()
-                                .any(|e| matches!(e, EventKind::BeadReleased { .. }));
-                            if release_succeeded {
-                                let _ = self.increment_failure_count(store, bead).await;
-                            }
-                            return Ok((BeadAction::Released, events));
-                        }
-                    }
-                } else {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        "enforce_shipped_work disabled — releasing orphaned bead"
-                    );
-                    // If enforce_shipped_work is disabled, just release without closing.
-                    let mut release_events = self.release_bead(store, bead).await?;
-                    events.append(&mut release_events);
-                    return Ok((BeadAction::Released, events));
-                }
+                // An agent that exits successfully without closing its bead has
+                // left the dispatch unaccounted for. Release the claim so the
+                // bead cannot remain permanently orphaned, regardless of the
+                // shipped-work verification policy.
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "releasing orphaned bead after successful agent exit"
+                );
+                let mut release_events = self.release_bead(store, bead).await?;
+                events.append(&mut release_events);
+                return Ok((BeadAction::Released, events));
             }
             Ok(None) => {
                 // Timeout - emit telemetry and continue.

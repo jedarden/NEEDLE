@@ -4841,6 +4841,7 @@ impl TimeoutAnalysisResult {
     }
 
     /// Returns true if the analysis suggests productive work was in progress.
+    #[allow(clippy::match_like_matches_macro)]
     pub fn suggests_productive_work(&self) -> bool {
         self.has_activity_evidence
             || match &self.timeout_context {
