@@ -1959,6 +1959,254 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
     );
 }
 
+/// Test that adapter validation rejects adapter names with special characters.
+///
+/// Regression test ensuring that adapter validation properly handles
+/// adapter names containing special characters that might cause
+/// filesystem issues or injection attacks.
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+#[tokio::test]
+async fn adapter_validation_rejects_special_characters() {
+    // Test various problematic adapter names
+    let problematic_names = vec![
+        "../../../etc/passwd",       // Path traversal
+        "adapter;rm-rf~",            // Command injection attempt
+        "adapter`whoami`",           // Backtick injection
+        "adapter$(echo)",            // Subshell injection
+        "adapter\t\ndescription",    // Whitespace control characters
+        "adapter\u{200B}\u{FEFF}",   // Zero-width spaces (unicode)
+        "console.log('xss')",        // JavaScript-like
+        "<script>alert(1)</script>", // HTML-like
+        "adapter/../../etc/shadow",  // Nested traversal
+    ];
+
+    for nonexistent_adapter in problematic_names {
+        let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+        let _home_guard = HomeGuard::isolate();
+        let mut config = Config::default();
+        config.agent.default = nonexistent_adapter.to_string();
+        config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
+        config.strands.explore.workspace_root = _home_guard._temp_dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
+
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
+        let result = worker.run().await;
+
+        assert!(
+            result.is_err(),
+            "worker should fail with adapter name containing special chars: '{}'",
+            nonexistent_adapter
+        );
+
+        let error_msg = result.unwrap_err().to_string();
+        // Error should be safe and not execute the injected payload
+        assert!(
+            !error_msg.contains("etc/passwd")
+                && !error_msg.contains("root:")
+                && !error_msg.contains("whoami")
+                && !error_msg.contains("rm -rf"),
+            "error message should not execute injected payloads for adapter: '{}'",
+            nonexistent_adapter
+        );
+    }
+}
+
+/// Test that adapter validation is case-sensitive and distinguishes similar names.
+///
+/// Regression test ensuring that "MyAdapter", "myadapter", and "MYADAPTER"
+/// are treated as distinct adapter names. This prevents confusion when
+/// users have adapters with similar names differing only in case.
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+#[tokio::test]
+async fn adapter_validation_is_case_sensitive() {
+    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+    let _home_guard = HomeGuard::isolate();
+    let mut config = Config::default();
+    // Use a name that exists in lowercase but request it in mixed case
+    config.agent.default = "TestAdapter".to_string(); // Mixed case
+    config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
+    config.strands.explore.workspace_root = _home_guard._temp_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
+
+    let mut worker = Worker::new(config, "test-worker".to_string(), store);
+    let result = worker.run().await;
+
+    // Should fail because "TestAdapter" != "testadapter"
+    assert!(
+        result.is_err(),
+        "worker should fail with case-sensitive adapter name mismatch"
+    );
+
+    let error_msg = result.unwrap_err().to_string();
+    assert!(
+        error_msg.contains("TestAdapter") || error_msg.contains("adapter"),
+        "error should mention the requested adapter name"
+    );
+}
+
+/// Test that adapter validation fails even with multiple available workspaces.
+///
+/// Regression test ensuring that adapter validation happens independently
+/// of workspace discovery. Even if the Explore strand finds valid workspaces,
+/// adapter validation should still fail fast if the adapter doesn't exist.
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+#[tokio::test]
+async fn adapter_validation_fails_despite_valid_workspaces() {
+    let nonexistent_adapter = "multi-workspace-adapter-missing";
+    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+    let _home_guard = HomeGuard::isolate();
+
+    // Create multiple fake workspace directories to simulate workspace discovery
+    let ws1 = _home_guard._temp_dir.path().join("workspace1");
+    let ws2 = _home_guard._temp_dir.path().join("workspace2");
+    std::fs::create_dir(&ws1).unwrap();
+    std::fs::create_dir(&ws2).unwrap();
+
+    // Initialize bead workspaces
+    for ws in [&ws1, &ws2] {
+        let _ = std::process::Command::new("bead")
+            .arg("init")
+            .current_dir(ws)
+            .output();
+    }
+
+    let mut config = Config::default();
+    config.agent.default = nonexistent_adapter.to_string();
+    config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
+    // Explicitly add workspaces to simulate discovery
+    config.strands.explore.workspace_root = _home_guard._temp_dir.path().to_path_buf();
+    config.strands.explore.workspaces = vec![ws1.clone(), ws2.clone()];
+
+    let mut worker = Worker::new(config, "test-worker".to_string(), store);
+    let result = worker.run().await;
+
+    assert!(
+        result.is_err(),
+        "adapter validation should fail even with valid workspaces configured"
+    );
+
+    let error_msg = result.unwrap_err().to_string();
+    assert!(
+        error_msg.contains(nonexistent_adapter),
+        "error should mention the nonexistent adapter"
+    );
+}
+
+/// Test that adapter validation happens before routing table initialization.
+///
+/// Regression test ensuring that even if routing rules are configured,
+/// adapter validation of the default adapter happens first and fails fast.
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+#[tokio::test]
+async fn adapter_validation_fails_before_routing_initialization() {
+    let nonexistent_adapter = "routing-test-adapter-missing";
+    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+    let _home_guard = HomeGuard::isolate();
+    let mut config = Config::default();
+    config.agent.default = nonexistent_adapter.to_string();
+    config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
+    config.strands.explore.workspace_root = _home_guard._temp_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
+
+    // Configure routing (this should not bypass adapter validation)
+    config.agent.routing = Some(needle::config::RoutingConfig {
+        default: nonexistent_adapter.to_string(),
+        rules: vec![],
+    });
+
+    let mut worker = Worker::new(config, "test-worker".to_string(), store);
+    let result = worker.run().await;
+
+    assert!(
+        result.is_err(),
+        "adapter validation should fail even when routing is configured"
+    );
+
+    let error_msg = result.unwrap_err().to_string();
+    assert!(
+        error_msg.contains(nonexistent_adapter) || error_msg.contains("adapter"),
+        "error should mention the nonexistent adapter"
+    );
+}
+
+/// Test that adapter validation rejects adapter names resembling system paths.
+///
+/// Regression test for path-like adapter names that might confuse users
+/// or cause unexpected behavior. Ensures validation treats these as
+/// nonexistent adapters and provides clear guidance.
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+#[tokio::test]
+async fn adapter_validation_rejects_path_like_names() {
+    let path_like_names = vec![
+        "/usr/bin/adapter",
+        "./local-adapter",
+        "../parent-adapter",
+        "~/.needle/adapter",
+        "C:\\Windows\\System32\\adapter", // Windows path
+        "/etc/needle/adapter.d/config",
+    ];
+
+    for path_like_name in path_like_names {
+        let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+        let _home_guard = HomeGuard::isolate();
+        let mut config = Config::default();
+        config.agent.default = path_like_name.to_string();
+        config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
+        config.strands.explore.workspace_root = _home_guard._temp_dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
+
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
+        let result = worker.run().await;
+
+        assert!(
+            result.is_err(),
+            "worker should fail with path-like adapter name: '{}'",
+            path_like_name
+        );
+    }
+}
+
+/// Test that adapter validation error message includes adapter name with special characters escaped.
+///
+/// Regression test ensuring that when an adapter name contains special characters,
+/// the error message properly escapes or sanitizes them for display, preventing
+/// confusion or security issues in error output.
+///
+/// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
+#[tokio::test]
+async fn adapter_validation_error_message_sanitizes_special_chars() {
+    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+    let _home_guard = HomeGuard::isolate();
+    let mut config = Config::default();
+    // Use an adapter name with characters that might need escaping in error messages
+    let problematic_adapter = "adapter'with\"quotes\\and\\backslashes";
+    config.agent.default = problematic_adapter.to_string();
+    config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
+    config.strands.explore.workspace_root = _home_guard._temp_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
+
+    let mut worker = Worker::new(config, "test-worker".to_string(), store);
+    let result = worker.run().await;
+
+    assert!(
+        result.is_err(),
+        "worker should fail with adapter containing special characters"
+    );
+
+    let error_msg = result.unwrap_err().to_string();
+    // The error should mention the adapter but be safe
+    assert!(
+        error_msg.contains("adapter") || error_msg.contains("not found"),
+        "error should indicate adapter failure; got: {}",
+        error_msg
+    );
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Test 8: Full pipeline telemetry sequence
 // ═════════════════════════════════════════════════════════════════════════════

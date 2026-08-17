@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn test_is_tilde_prefix_with_tilde_slash() {
         // "~/foo" should return true (tilde prefix)
-        assert!(is_tilde_prefix("~/foo"));
+        assert!(!is_tilde_prefix("~/foo")); // TEMPORARILY BROKEN FOR CI VERIFICATION
         assert!(is_tilde_prefix("~/"));
         assert!(is_tilde_prefix("~/Documents/file.txt"));
         assert!(is_tilde_prefix("~/path/to/file"));
