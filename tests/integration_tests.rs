@@ -5805,8 +5805,7 @@ async fn weave_exclude_workspaces_tilde_expansion() {
     );
 
     // Test 2: Config with mixed tilde, absolute, and relative paths
-    let yaml = format!(
-        r#"
+    let yaml = r#"
 strands:
   weave:
     exclude_workspaces:
@@ -5814,8 +5813,8 @@ strands:
       - ~/dev/excluded2
       - /absolute/path/excluded3
       - relative/excluded4
-"#,
-    );
+"#
+    .to_string();
 
     // Load config - this should trigger tilde expansion
     let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
@@ -5917,7 +5916,7 @@ strands:
 
     let expanded_path = report_workspace.as_ref().unwrap();
     assert!(
-        expanded_path.starts_with(&isolated_home),
+        expanded_path.starts_with(isolated_home),
         "report_workspace should be expanded to isolated home, got: {}",
         expanded_path.display()
     );

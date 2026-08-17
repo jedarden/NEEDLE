@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::prompt::PromptBuilder;
 use crate::telemetry::Telemetry;
-use crate::types::{Bead, BeadId};
+use crate::types::Bead;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // ResolveDecision enum
@@ -336,12 +336,10 @@ impl ResolveResponse {
         }
 
         // Must contain one of the decision type markers
-        let has_decision_marker = json.contains("\"complete\"")
+        json.contains("\"complete\"")
             || json.contains("\"retry\"")
             || json.contains("\"blocked\"")
-            || json.contains("\"split\"");
-
-        has_decision_marker
+            || json.contains("\"split\"")
     }
 }
 
@@ -499,7 +497,7 @@ impl Resolver {
         );
 
         // Build the resolve prompt
-        let prompt = match self.build_prompt(context) {
+        let _prompt = match self.build_prompt(context) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
@@ -615,7 +613,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::BeadStatus;
+    use crate::types::{BeadId, BeadStatus};
     use chrono::Utc;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -636,23 +634,6 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
-    }
-
-    fn test_resolve_context() -> ResolveContext<'static> {
-        // This needs to work with references, so we create a static bead
-        // For testing purposes, this is a bit awkward but works
-        let bead = test_bead();
-        let bead_ref = Box::leak(Box::new(bead));
-
-        ResolveContext::new(
-            bead_ref,
-            0,
-            "stdout output".to_string(),
-            "stderr output".to_string(),
-            Duration::from_secs(60),
-            Utc::now(),
-            false,
-        )
     }
 
     #[test]
