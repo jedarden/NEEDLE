@@ -1,0 +1,11 @@
+config::config_tests::supervisor_config_from_env_expands_tilde
+config::config_tests::test_config_expand_tildes_missing_home
+config::config_tests::worker_binary_path_tilde_is_expanded
+dispatch::tests::activity_detection_with_mixed_stdout_stderr
+dispatch::tests::idle_timeout_fires_when_no_activity
+mitosis::timeout_context::tests::git_dirty_paths_filters_untracked
+telemetry::file_sink::tests::test_file_sink_append_mode
+telemetry::file_sink::tests::test_file_sink_daily_rotation
+telemetry::file_sink::tests::test_file_sink_permissions
+telemetry::tests::boot_event_written_to_file_on_telemetry_creation
+telemetry::tests::file_sink_writes_jsonl
