@@ -1969,7 +1969,7 @@ telemetry:
     endpoint: "http://otel-collector.tailnet:4317"    # gRPC default; use 4318 for HTTP
     protocol: grpc                                     # grpc | http/protobuf
     headers:
-      authorization: "Bearer ${OTEL_TOKEN}"            # env interpolation
+      - "authorization: Bearer ${OTEL_TOKEN}"         # env interpolation; format: "key: value"
     timeout_ms: 5000
     compression: gzip                                  # none | gzip
     tls:
@@ -1980,8 +1980,8 @@ telemetry:
       metrics: true
       logs: true
     resource_attributes:
-      deployment.environment: "production"
-      service.namespace: "needle-fleet"
+      - "deployment.environment=production"           # format: "key=value"
+      - "service.namespace=needle-fleet"
 ```
 
 Design:
@@ -2554,7 +2554,7 @@ telemetry:
     enabled: false
     endpoint: "http://localhost:4317"
     protocol: grpc              # grpc | http/protobuf
-    headers: {}                 # e.g., authorization: "Bearer ${OTEL_TOKEN}"
+    headers: []                 # array of "key: value" strings, e.g., ["authorization: Bearer ${OTEL_TOKEN}"]
     timeout_ms: 5000
     compression: gzip           # none | gzip
     tls:
@@ -2565,8 +2565,8 @@ telemetry:
       metrics: true
       logs: true
     resource_attributes:
-      deployment.environment: "development"
-      service.namespace: "needle-fleet"
+      - "deployment.environment=development"      # format: "key=value"
+      - "service.namespace=needle-fleet"
 
 # ── Cost Tracking ──
 pricing: {}

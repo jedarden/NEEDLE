@@ -412,7 +412,11 @@ pub struct BeadCliConfig {
     ///
     /// When set, bypasses all discovery and uses this path directly.
     /// Useful for testing or non-standard installations.
-    #[serde(default, alias = "explicit_path")]
+    #[serde(
+        default,
+        alias = "explicit_path",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub path: Option<PathBuf>,
 }
 
@@ -3601,6 +3605,7 @@ impl LearningConfig {
 
 /// File sink configuration for telemetry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileSinkConfig {
     /// Enable or disable the file sink.
     #[serde(default = "FileSinkConfig::default_enabled")]
@@ -3668,6 +3673,7 @@ pub enum ColorMode {
 
 /// Stdout sink configuration for human-readable telemetry output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StdoutSinkConfig {
     /// Enable or disable the stdout sink.
     #[serde(default)]
@@ -3991,6 +3997,7 @@ impl OtlpSinkConfig {
 
 /// Telemetry configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
     #[serde(default)]
     pub file_sink: FileSinkConfig,
@@ -9411,5 +9418,79 @@ headers: []
         let config = OtlpTlsConfig::default();
         assert!(!config.insecure, "Default insecure should be false");
         assert_eq!(config.ca_file, "", "Default ca_file should be empty");
+    }
+
+    #[test]
+    fn test_otlp_config_plan_md_format() {
+        // Test that the exact OTLP config format documented in plan.md loads correctly.
+        // This ensures plan.md stays in sync with the actual config schema.
+        let yaml = r#"
+enabled: true
+endpoint: "http://otel-collector.tailnet:4317"
+protocol: "grpc"
+headers:
+  - "authorization: Bearer ${OTEL_TOKEN}"
+timeout_ms: 5000
+compression: "gzip"
+tls:
+  insecure: false
+  ca_file: ""
+signals:
+  traces: true
+  metrics: true
+  logs: true
+resource_attributes:
+  - "deployment.environment=production"
+  - "service.namespace=needle-fleet"
+"#;
+
+        let result: Result<OtlpSinkConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "plan.md OTLP config format should deserialize successfully"
+        );
+        let config = result.unwrap();
+
+        assert!(config.enabled, "enabled should be true");
+        assert_eq!(
+            config.endpoint,
+            "http://otel-collector.tailnet:4317",
+            "endpoint should match"
+        );
+        assert_eq!(config.protocol, "grpc", "protocol should match");
+        assert_eq!(
+            config.headers.len(),
+            1,
+            "should have one header"
+        );
+        assert_eq!(
+            config.headers[0],
+            "authorization: Bearer ${OTEL_TOKEN}",
+            "header format should match"
+        );
+        assert_eq!(config.timeout_ms, 5000, "timeout_ms should match");
+        assert_eq!(config.compression, "gzip", "compression should match");
+        assert!(
+            !config.tls.insecure,
+            "TLS insecure should be false"
+        );
+        assert_eq!(
+            config.tls.ca_file, "",
+            "TLS ca_file should be empty"
+        );
+        assert!(
+            config.signals.traces,
+            "traces signal should be enabled"
+        );
+        assert!(
+            config.signals.metrics,
+            "metrics signal should be enabled"
+        );
+        assert!(config.signals.logs, "logs signal should be enabled");
+        assert_eq!(
+            config.resource_attributes.len(),
+            2,
+            "should have two resource attributes"
+        );
     }
 }
