@@ -620,6 +620,35 @@ pub enum EventKind {
         restored_hash: String,
     },
 
+    // ── Upgrade checks ──
+    /// Emitted when an upgrade check begins
+    UpgradeCheckStarted {
+        /// Source of the check (e.g., "cli", "worker", "download_to_testing")
+        source: String,
+    },
+    /// Emitted when an upgrade check completes successfully
+    UpgradeCheckCompleted {
+        /// Source of the check
+        source: String,
+        /// Current version
+        current_version: String,
+        /// Latest available version
+        latest_version: String,
+        /// Whether an update is available
+        update_available: bool,
+        /// Whether release notes were included
+        has_release_notes: bool,
+    },
+    /// Emitted when an upgrade check fails
+    UpgradeCheckFailed {
+        /// Source of the check
+        source: String,
+        /// Error message describing what went wrong
+        error_message: String,
+        /// Error type/category (e.g., "network", "parse", "api")
+        error_type: String,
+    },
+
     // ── Canary testing ──
     CanaryStarted {
         suite: String,
@@ -892,6 +921,9 @@ impl EventKind {
             EventKind::UpgradeDetected { .. } => "worker.upgrade.detected",
             EventKind::UpgradeCompleted { .. } => "worker.upgrade.completed",
             EventKind::RollbackCompleted { .. } => "rollback.completed",
+            EventKind::UpgradeCheckStarted { .. } => "upgrade_check.started",
+            EventKind::UpgradeCheckCompleted { .. } => "upgrade_check.completed",
+            EventKind::UpgradeCheckFailed { .. } => "upgrade_check.failed",
             EventKind::CanaryStarted { .. } => "canary.started",
             EventKind::CanarySuiteCompleted { .. } => "canary.suite_completed",
             EventKind::CanaryPromoted { .. } => "canary.promoted",
@@ -1633,6 +1665,35 @@ impl EventKind {
                 serde_json::json!({
                     "rolled_back_hash": rolled_back_hash,
                     "restored_hash": restored_hash,
+                })
+            }
+            EventKind::UpgradeCheckStarted { source } => {
+                serde_json::json!({ "source": source })
+            }
+            EventKind::UpgradeCheckCompleted {
+                source,
+                current_version,
+                latest_version,
+                update_available,
+                has_release_notes,
+            } => {
+                serde_json::json!({
+                    "source": source,
+                    "current_version": current_version,
+                    "latest_version": latest_version,
+                    "update_available": update_available,
+                    "has_release_notes": has_release_notes,
+                })
+            }
+            EventKind::UpgradeCheckFailed {
+                source,
+                error_message,
+                error_type,
+            } => {
+                serde_json::json!({
+                    "source": source,
+                    "error_message": error_message,
+                    "error_type": error_type,
                 })
             }
             EventKind::OutputTransformSpawned {
