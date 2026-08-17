@@ -4420,13 +4420,11 @@ async fn workspace_home_and_default_tilde_expansion_combined() {
     env::set_var("HOME", &isolated_home);
 
     // Test combined tilde expansion in both fields
-    let yaml = format!(
-        r#"
+    let yaml = r#"
 workspace:
   home: ~/.custom-needle
   default: ~/dev/my-workspace
-"#
-    );
+"#.to_string();
 
     // Load config - this should trigger tilde expansion for both fields
     let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
@@ -4654,8 +4652,8 @@ bead_cli:
     );
 
     assert_eq!(
-        config_expanded.bead_cli.path.unwrap(),
-        custom_bead_cli,
+        config_expanded.bead_cli.path.as_ref().unwrap().as_path(),
+        custom_bead_cli.as_path(),
         "bead_cli.path should point to our custom bead cli"
     );
 
