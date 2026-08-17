@@ -632,6 +632,16 @@ pub enum EventKind {
         rolled_back_hash: String,
         restored_hash: String,
     },
+    /// Emitted when a worker exits cleanly due to detecting a stale binary.
+    /// This signals the supervisor to relaunch with the new binary.
+    BinaryFreshnessExit {
+        /// Hash of the current (stale) binary.
+        old_hash: String,
+        /// Hash of the new binary on disk.
+        new_hash: String,
+        /// Whether the current binary was deleted/unlinked.
+        was_deleted: bool,
+    },
 
     // ── Upgrade checks ──
     /// Emitted when an upgrade check begins
@@ -779,6 +789,38 @@ pub enum EventKind {
     SupervisorBinaryResolved {
         worker_binary: String,
         source: String,
+    },
+    /// Emitted when the supervisor detects a new worker binary
+    SupervisorBinaryRotationDetected {
+        /// Path to the old binary
+        old_binary: String,
+        /// Path to the new binary
+        new_binary: String,
+        /// Hash of the old binary
+        old_hash: String,
+        /// Hash of the new binary
+        new_hash: String,
+    },
+    /// Emitted when the supervisor begins draining workers for binary rotation
+    SupervisorWorkerDrainStarted {
+        /// Number of workers being drained
+        active_workers: u32,
+        /// Timeout for graceful drain
+        drain_timeout_secs: u64,
+    },
+    /// Emitted when worker drain completes successfully
+    SupervisorWorkerDrainCompleted {
+        /// Number of workers that were drained
+        workers_drained: u32,
+        /// Time taken for drain to complete
+        duration_secs: u64,
+    },
+    /// Emitted when the supervisor relaunches workers with a new binary
+    SupervisorWorkerRelaunched {
+        /// Number of workers relaunched
+        workers_count: u32,
+        /// Path to the new binary
+        new_binary: String,
     },
 
     // ── Explore strand telemetry ──
@@ -936,6 +978,7 @@ impl EventKind {
             EventKind::UpgradeDetected { .. } => "worker.upgrade.detected",
             EventKind::UpgradeCompleted { .. } => "worker.upgrade.completed",
             EventKind::RollbackCompleted { .. } => "rollback.completed",
+            EventKind::BinaryFreshnessExit { .. } => "worker.binary_freshness_exit",
             EventKind::UpgradeCheckStarted { .. } => "upgrade_check.started",
             EventKind::UpgradeCheckCompleted { .. } => "upgrade_check.completed",
             EventKind::UpgradeCheckFailed { .. } => "upgrade_check.failed",
@@ -962,6 +1005,12 @@ impl EventKind {
             EventKind::SupervisorWorkerSpawned { .. } => "supervisor.worker_spawned",
             EventKind::SupervisorIdleCycle { .. } => "supervisor.idle_cycle",
             EventKind::SupervisorBinaryResolved { .. } => "supervisor.binary_resolved",
+            EventKind::SupervisorBinaryRotationDetected { .. } => {
+                "supervisor.binary_rotation_detected"
+            }
+            EventKind::SupervisorWorkerDrainStarted { .. } => "supervisor.worker_drain_started",
+            EventKind::SupervisorWorkerDrainCompleted { .. } => "supervisor.worker_drain_completed",
+            EventKind::SupervisorWorkerRelaunched { .. } => "supervisor.worker_relaunched",
             EventKind::ExploreScanSummary { .. } => "explore.scan_summary",
             EventKind::ExploreStarvationAlarm { .. } => "explore.starvation_alarm",
             EventKind::SinkError { .. } => "telemetry.sink_error",
@@ -1081,6 +1130,7 @@ impl EventKind {
             | EventKind::UpgradeDetected { .. }
             | EventKind::UpgradeCompleted { .. }
             | EventKind::RollbackCompleted { .. }
+            | EventKind::BinaryFreshnessExit { .. }
             | EventKind::CanaryStarted { .. }
             | EventKind::CanarySuiteCompleted { .. }
             | EventKind::CanaryPromoted { .. }
@@ -1106,7 +1156,11 @@ impl EventKind {
             | EventKind::SupervisorStopped { .. }
             | EventKind::SupervisorWorkerSpawned { .. }
             | EventKind::SupervisorIdleCycle { .. }
-            | EventKind::SupervisorBinaryResolved { .. } => None,
+            | EventKind::SupervisorBinaryResolved { .. }
+            | EventKind::SupervisorBinaryRotationDetected { .. }
+            | EventKind::SupervisorWorkerDrainStarted { .. }
+            | EventKind::SupervisorWorkerDrainCompleted { .. }
+            | EventKind::SupervisorWorkerRelaunched { .. } => None,
             EventKind::ExploreScanSummary { .. } => None,
             EventKind::ExploreStarvationAlarm { .. } => None,
             EventKind::SpawnPathModifiedInPlace { .. } => None,
@@ -1700,6 +1754,17 @@ impl EventKind {
                     "restored_hash": restored_hash,
                 })
             }
+            EventKind::BinaryFreshnessExit {
+                old_hash,
+                new_hash,
+                was_deleted,
+            } => {
+                serde_json::json!({
+                    "old_hash": old_hash,
+                    "new_hash": new_hash,
+                    "was_deleted": was_deleted,
+                })
+            }
             EventKind::UpgradeCheckStarted { source } => {
                 serde_json::json!({ "source": source })
             }
@@ -2266,6 +2331,38 @@ impl EventKind {
                 "worker_binary": worker_binary,
                 "source": source,
             }),
+            EventKind::SupervisorBinaryRotationDetected {
+                old_binary,
+                new_binary,
+                old_hash,
+                new_hash,
+            } => serde_json::json!({
+                "old_binary": old_binary,
+                "new_binary": new_binary,
+                "old_hash": old_hash,
+                "new_hash": new_hash,
+            }),
+            EventKind::SupervisorWorkerDrainStarted {
+                active_workers,
+                drain_timeout_secs,
+            } => serde_json::json!({
+                "active_workers": active_workers,
+                "drain_timeout_secs": drain_timeout_secs,
+            }),
+            EventKind::SupervisorWorkerDrainCompleted {
+                workers_drained,
+                duration_secs,
+            } => serde_json::json!({
+                "workers_drained": workers_drained,
+                "duration_secs": duration_secs,
+            }),
+            EventKind::SupervisorWorkerRelaunched {
+                workers_count,
+                new_binary,
+            } => serde_json::json!({
+                "workers_count": workers_count,
+                "new_binary": new_binary,
+            }),
         }
     }
 
@@ -2352,6 +2449,7 @@ impl EventKind {
             | EventKind::UpgradeDetected { .. }
             | EventKind::UpgradeCompleted { .. }
             | EventKind::RollbackCompleted { .. }
+            | EventKind::BinaryFreshnessExit { .. }
             | EventKind::UpgradeCheckStarted { .. }
             | EventKind::UpgradeCheckCompleted { .. }
             | EventKind::UpgradeCheckFailed { .. }
@@ -2396,6 +2494,10 @@ impl EventKind {
             | EventKind::SupervisorWorkerSpawned { .. }
             | EventKind::SupervisorIdleCycle { .. }
             | EventKind::SupervisorBinaryResolved { .. }
+            | EventKind::SupervisorBinaryRotationDetected { .. }
+            | EventKind::SupervisorWorkerDrainStarted { .. }
+            | EventKind::SupervisorWorkerDrainCompleted { .. }
+            | EventKind::SupervisorWorkerRelaunched { .. }
             | EventKind::ExploreStarvationAlarm { .. }
             | EventKind::SinkError { .. }
             | EventKind::OtlpDropped { .. }
