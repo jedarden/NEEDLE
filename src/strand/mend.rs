@@ -57,9 +57,10 @@ pub async fn cleanup_orphaned_in_progress(
 }
 
 /// Scan all in-progress beads in a store and release any whose assignee is
-/// orphaned or whose claim is older than `claim_ttl`. Claim age is independent
-/// of worker liveness so a worker name that is reused by a relaunch cannot pin
-/// a bead forever.
+/// orphaned, whose claim is older than `claim_ttl`, or whose claim was
+/// superseded by a newer claim from the same assignee. Claim age and claim
+/// recency are independent of worker liveness so a worker name that is reused
+/// by a relaunch cannot pin an abandoned bead forever.
 async fn cleanup_in_progress(
     store: &dyn BeadStore,
     registry: &Registry,
@@ -85,8 +86,8 @@ async fn cleanup_in_progress(
         .collect();
 
     // For each assignee with multiple in_progress beads, identify which bead
-    // has the MAX updated_at (the only plausible active claim). All other
-    // in_progress beads for that assignee are stale by definition, regardless
+    // has the MAX updated_at (the only plausible active claim). Claims with an
+    // older updated_at for that assignee are stale by definition, regardless
     // of whether the worker session is alive.
     use std::collections::HashMap;
     let mut newest_bead_by_assignee: HashMap<String, (DateTime<Utc>, BeadId)> = HashMap::new();
@@ -124,10 +125,30 @@ async fn cleanup_in_progress(
         let stale_by_age =
             claim_ttl.is_some_and(|ttl| claim_age.map(|age| age >= ttl).unwrap_or(false));
 
+        // If this assignee has multiple in_progress beads, only the most
+        // recently updated one is valid. This catches claims leaked by the
+        // dispatch layer even when the worker's session/process is still
+        // alive, including when this is the current worker's own identity.
+        let newest_claim = newest_bead_by_assignee.get(assignee);
+        let is_superseded = newest_claim
+            .map(|(newest_updated, _)| bead.updated_at < *newest_updated)
+            .unwrap_or(false);
+        if is_superseded {
+            if let Some((_, newest_bead_id)) = newest_claim {
+                tracing::info!(
+                    bead_id = %bead.id,
+                    assignee = %assignee,
+                    age_secs = claim_age.map_or(0, |age| age.as_secs()),
+                    newest_bead_id = %newest_bead_id,
+                    "releasing in-progress bead superseded by newer claim from same assignee"
+                );
+            }
+        }
+
         // Claim age is an independent release condition. A live worker may
         // still hold an abandoned claim, especially when --count 1 relaunches
         // under the same worker name indefinitely.
-        if !stale_by_age && assignee == qualified_id {
+        if !is_superseded && !stale_by_age && assignee == qualified_id {
             continue;
         }
 
@@ -135,36 +156,19 @@ async fn cleanup_in_progress(
         // claim has exceeded its age limit. Workers register with fully-qualified
         // IDs ({adapter}-{worker_id}), so this comparison prevents collisions
         // when workers from different adapter pools share a NATO name.
-        if !stale_by_age && live_worker_ids.contains(assignee.as_str()) {
+        if !is_superseded && !stale_by_age && live_worker_ids.contains(assignee.as_str()) {
             continue;
         }
 
-        // NEW CHECK: If this assignee has multiple in_progress beads, only the
-        // most recently updated one is valid. This bead is reap-eligible if it is
-        // NOT the newest for its assignee. This catches claims leaked by the
-        // dispatch layer even when the worker's session/process is still alive.
-        let is_superseded = newest_bead_by_assignee.get(assignee).is_some_and(
-            |(newest_updated, newest_bead_id)| {
-                bead.updated_at < *newest_updated || bead.id != *newest_bead_id
-            },
-        );
-        if is_superseded {
-            tracing::info!(
-                bead_id = %bead.id,
-                assignee = %assignee,
-                age_secs = claim_age.map_or(0, |age| age.as_secs()),
-                newest_bead_id = %newest_bead_by_assignee.get(assignee).unwrap().1,
-                "releasing in-progress bead superseded by newer claim from same assignee"
-            );
-            // Superseded claims are reap-eligible regardless of worker liveness.
-            // Fall through to the release logic below without further checks.
-        }
-
-        let reason = if stale_by_age {
-            let age_secs = claim_age.map_or(0, |age| age.as_secs());
-            format!("stale claim: age {age_secs}s exceeds configured claim TTL")
-        } else {
-            format!("orphaned: assignee {assignee} has no live worker")
+        let reason = match (is_superseded, newest_claim) {
+            (true, Some((_, newest_bead_id))) => {
+                format!("superseded by newer in-progress claim {newest_bead_id} from same assignee")
+            }
+            (false, _) if stale_by_age => {
+                let age_secs = claim_age.map_or(0, |age| age.as_secs());
+                format!("stale claim: age {age_secs}s exceeds configured claim TTL")
+            }
+            _ => format!("orphaned: assignee {assignee} has no live worker"),
         };
 
         tracing::info!(
@@ -2254,15 +2258,16 @@ mod tests {
 
         let assignee = "claude-code-glm-5-commitgraph-2";
 
-        // Create 3 in_progress beads for the same assignee with distinct timestamps.
+        // Create 3 recent in_progress beads for the same assignee with distinct
+        // timestamps, so the stale-age path cannot account for the releases.
         let mut bead_old = make_in_progress_bead("nd-old", assignee);
-        bead_old.updated_at = Utc::now() - chrono::Duration::seconds(3600); // 1 hour ago
+        bead_old.updated_at = Utc::now() - chrono::Duration::seconds(3);
 
         let mut bead_medium = make_in_progress_bead("nd-medium", assignee);
-        bead_medium.updated_at = Utc::now() - chrono::Duration::seconds(1800); // 30 min ago
+        bead_medium.updated_at = Utc::now() - chrono::Duration::seconds(2);
 
         let mut bead_new = make_in_progress_bead("nd-new", assignee);
-        bead_new.updated_at = Utc::now() - chrono::Duration::seconds(60); // 1 min ago (newest)
+        bead_new.updated_at = Utc::now() - chrono::Duration::seconds(1);
 
         // Register the worker as alive (current PID).
         let registry = Registry::new(reg_dir.path());
@@ -2285,7 +2290,7 @@ mod tests {
             hb_dir.path().to_path_buf(),
             Duration::from_secs(300),
             lock_dir.path().to_path_buf(),
-            "test-worker".to_string(),
+            assignee.to_string(),
             registry,
             Telemetry::new("test-worker".to_string()),
             PathBuf::from("/tmp/needle-test-logs"),
