@@ -32,6 +32,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::util::capture_timestamp;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
 // ──────────────────────────────────────────────────────────────────────────────
@@ -435,6 +437,11 @@ impl TestRunner {
     pub fn run_tests(&self, args: &[&str]) -> Result<TestResult> {
         let start = Instant::now();
 
+        // Capture the launch timestamp before constructing the command. The
+        // helper supplies an epoch fallback if reading the system clock fails,
+        // so a timestamp is retained even when command launch fails.
+        let launch_timestamp = capture_timestamp();
+
         // Build the command
         let mut cmd = Command::new("cargo");
         cmd.arg("test");
@@ -456,6 +463,7 @@ impl TestRunner {
         tracing::debug!(
             workspace = %self.workspace.display(),
             args = ?args,
+            launch_timestamp = %launch_timestamp,
             "spawning cargo test process"
         );
 
