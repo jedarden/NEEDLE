@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::bead_store::BeadStore;
 use crate::config::{LimitsConfig, MendConfig};
@@ -84,6 +84,29 @@ async fn cleanup_in_progress(
         .map(|w| w.id.clone())
         .collect();
 
+    // For each assignee with multiple in_progress beads, identify which bead
+    // has the MAX updated_at (the only plausible active claim). All other
+    // in_progress beads for that assignee are stale by definition, regardless
+    // of whether the worker session is alive.
+    use std::collections::HashMap;
+    let mut newest_bead_by_assignee: HashMap<String, (DateTime<Utc>, BeadId)> = HashMap::new();
+    for bead in &all_beads {
+        if bead.status != BeadStatus::InProgress {
+            continue;
+        }
+        let assignee = match &bead.assignee {
+            Some(a) if !a.is_empty() => a,
+            _ => continue,
+        };
+        let entry = newest_bead_by_assignee
+            .entry(assignee.clone())
+            .or_insert((bead.updated_at, bead.id.clone()));
+        // Update if this bead is newer than the current newest for this assignee
+        if bead.updated_at > entry.0 {
+            *entry = (bead.updated_at, bead.id.clone());
+        }
+    }
+
     let mut released = 0u32;
     let now = Utc::now();
 
@@ -114,6 +137,27 @@ async fn cleanup_in_progress(
         // when workers from different adapter pools share a NATO name.
         if !stale_by_age && live_worker_ids.contains(assignee.as_str()) {
             continue;
+        }
+
+        // NEW CHECK: If this assignee has multiple in_progress beads, only the
+        // most recently updated one is valid. This bead is reap-eligible if it is
+        // NOT the newest for its assignee. This catches claims leaked by the
+        // dispatch layer even when the worker's session/process is still alive.
+        let is_superseded = newest_bead_by_assignee.get(assignee).is_some_and(
+            |(newest_updated, newest_bead_id)| {
+                bead.updated_at < *newest_updated || bead.id != *newest_bead_id
+            },
+        );
+        if is_superseded {
+            tracing::info!(
+                bead_id = %bead.id,
+                assignee = %assignee,
+                age_secs = claim_age.map_or(0, |age| age.as_secs()),
+                newest_bead_id = %newest_bead_by_assignee.get(assignee).unwrap().1,
+                "releasing in-progress bead superseded by newer claim from same assignee"
+            );
+            // Superseded claims are reap-eligible regardless of worker liveness.
+            // Fall through to the release logic below without further checks.
         }
 
         let reason = if stale_by_age {
@@ -2196,6 +2240,135 @@ mod tests {
             "expected WorkCreated after releasing bead from dead registered worker, got: {result:?}"
         );
         assert_eq!(release_count.load(Ordering::Relaxed), 1);
+    }
+
+    // ── Superseded claim tests ───────────────────────────────────────────────────
+
+    /// Multiple in_progress beads for same assignee: only newest is valid.
+    /// Older beads are reaped even if worker is alive (dispatch leak detection).
+    #[tokio::test]
+    async fn superseded_claims_reaped_even_with_live_worker() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let assignee = "claude-code-glm-5-commitgraph-2";
+
+        // Create 3 in_progress beads for the same assignee with distinct timestamps.
+        let mut bead_old = make_in_progress_bead("nd-old", assignee);
+        bead_old.updated_at = Utc::now() - chrono::Duration::seconds(3600); // 1 hour ago
+
+        let mut bead_medium = make_in_progress_bead("nd-medium", assignee);
+        bead_medium.updated_at = Utc::now() - chrono::Duration::seconds(1800); // 30 min ago
+
+        let mut bead_new = make_in_progress_bead("nd-new", assignee);
+        bead_new.updated_at = Utc::now() - chrono::Duration::seconds(60); // 1 min ago (newest)
+
+        // Register the worker as alive (current PID).
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: assignee.to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now() - chrono::Duration::seconds(7200),
+                beads_processed: 10,
+            })
+            .unwrap();
+
+        let (store, release_count, _) = MockBeadStore::new(vec![bead_old, bead_medium, bead_new]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after reaping superseded claims, got: {result:?}"
+        );
+        assert_eq!(
+            release_count.load(Ordering::Relaxed),
+            2,
+            "should release exactly 2 older beads (newest bead should be untouched)"
+        );
+    }
+
+    /// Single in_progress bead for assignee: NOT reaped if worker alive.
+    /// Verifies the superseded check doesn't regress the normal liveness path.
+    #[tokio::test]
+    async fn single_claim_not_reaped_when_worker_alive() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let assignee = "claude-active-worker";
+
+        // Single in_progress bead, not stale.
+        let bead = make_recent_in_progress_bead("nd-single", assignee);
+
+        // Register the worker as alive.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: assignee.to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 1,
+            })
+            .unwrap();
+
+        let (store, release_count, _) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when single claim is from live worker, got: {result:?}"
+        );
+        assert_eq!(
+            release_count.load(Ordering::Relaxed),
+            0,
+            "single claim should NOT be reaped when worker is alive"
+        );
     }
 
     // ── Stale assignee on open bead tests ────────────────────────────────────
