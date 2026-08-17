@@ -108,6 +108,28 @@ pub enum GateConfig {
     },
 }
 
+/// Validation errors that can occur during bead store validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidationError {
+    /// Invalid dependency kind or type.
+    InvalidKind {
+        /// The invalid kind value that was encountered.
+        kind: String,
+    },
+}
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationError::InvalidKind { kind } => {
+                write!(f, "invalid kind: '{}'", kind)
+            }
+        }
+    }
+}
+
+impl std::error::Error for ValidationError {}
+
 /// A single gate command that failed (for backwards compatibility).
 #[derive(Debug, Clone)]
 pub struct GateFailure {
