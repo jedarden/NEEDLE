@@ -22,6 +22,7 @@ use crate::bead_store::{discover_default, BeadStore, Filters};
 use crate::config::{CliOverrides, Config, ConfigLoader};
 use crate::registry::{is_pid_alive, Registry};
 use crate::telemetry::{EventKind, Telemetry};
+use crate::upgrade;
 
 /// Default interval for polling the ready queue (seconds).
 const DEFAULT_POLL_INTERVAL_SECS: u64 = 10;
@@ -35,6 +36,89 @@ const MAX_CONSECUTIVE_ERRORS: u32 = 5;
 
 /// Long backoff duration after error threshold (seconds).
 const ERROR_BACKOFF_SECS: u64 = 60;
+
+/// Default interval for checking GitHub releases (seconds).
+const DEFAULT_UPDATE_CHECK_INTERVAL_SECS: u64 = 21600;
+
+/// Upgrade-check callback used by [`UpgradePoller`].
+pub type UpgradeCheckFn = Arc<dyn Fn(&Telemetry) -> Result<()> + Send + Sync>;
+
+/// State machine for periodic supervisor upgrade checks.
+///
+/// The poller deliberately owns its clock state separately from the queue
+/// polling loop. A busy or empty queue must not change when the next release
+/// check is due, and an upgrade-check failure must not stop the supervisor.
+pub struct UpgradePoller {
+    enabled: bool,
+    interval: Duration,
+    last_check: Option<Instant>,
+    check: UpgradeCheckFn,
+}
+
+impl UpgradePoller {
+    /// Create a production poller using the GitHub-release testing-channel
+    /// downloader.
+    pub fn new(enabled: bool, interval_secs: u64) -> Self {
+        Self::with_checker(
+            enabled,
+            interval_secs,
+            Arc::new(|telemetry| {
+                upgrade::download_to_testing_channel_with_telemetry(Some(telemetry)).map(|_| ())
+            }),
+        )
+    }
+
+    /// Create a poller with an injected checker. This is useful for embedding
+    /// and deterministic integration tests; production callers should use
+    /// [`UpgradePoller::new`].
+    pub fn with_checker(enabled: bool, interval_secs: u64, check: UpgradeCheckFn) -> Self {
+        Self {
+            enabled,
+            // Config validation rejects values below 60 seconds. Keep the
+            // runtime safe for callers that construct this type directly.
+            interval: Duration::from_secs(interval_secs.max(1)),
+            last_check: None,
+            check,
+        }
+    }
+
+    /// Whether automatic upgrade checks are enabled.
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Configured interval between checks.
+    pub fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    /// Poll using the current monotonic time.
+    ///
+    /// Returns `true` when a check was attempted, including when the checker
+    /// reported an error. The error is logged and the supervisor continues;
+    /// the checker is responsible for emitting failure telemetry.
+    pub fn poll(&mut self, telemetry: &Telemetry) -> bool {
+        self.poll_at(telemetry, Instant::now())
+    }
+
+    /// Poll at an explicit monotonic time. This keeps interval behavior
+    /// deterministic in integration tests without sleeping for real hours.
+    pub fn poll_at(&mut self, telemetry: &Telemetry, now: Instant) -> bool {
+        if !self.enabled
+            || self
+                .last_check
+                .is_some_and(|last| now.duration_since(last) < self.interval)
+        {
+            return false;
+        }
+
+        self.last_check = Some(now);
+        if let Err(error) = (self.check)(telemetry) {
+            tracing::warn!(error = %error, "automatic upgrade check failed");
+        }
+        true
+    }
+}
 
 /// Supervisor configuration.
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +141,12 @@ pub struct SupervisorConfig {
     /// When `None`, the supervisor resolves `std::env::current_exe()`.
     #[serde(default)]
     pub worker_binary_path: Option<PathBuf>,
+    /// Whether the supervisor periodically checks for GitHub releases.
+    #[serde(default = "SupervisorConfig::default_auto_upgrade_check")]
+    pub auto_upgrade_check: bool,
+    /// Seconds between automatic GitHub release checks.
+    #[serde(default = "SupervisorConfig::default_update_check_interval_secs")]
+    pub update_check_interval_secs: u64,
 }
 
 impl Default for SupervisorConfig {
@@ -68,6 +158,8 @@ impl Default for SupervisorConfig {
             agent: None,
             agent_timeout: None,
             worker_binary_path: None,
+            auto_upgrade_check: Self::default_auto_upgrade_check(),
+            update_check_interval_secs: Self::default_update_check_interval_secs(),
         }
     }
 }
@@ -79,6 +171,14 @@ impl SupervisorConfig {
 
     pub fn default_poll_interval_secs() -> u64 {
         DEFAULT_POLL_INTERVAL_SECS
+    }
+
+    pub fn default_auto_upgrade_check() -> bool {
+        false
+    }
+
+    pub fn default_update_check_interval_secs() -> u64 {
+        DEFAULT_UPDATE_CHECK_INTERVAL_SECS
     }
 
     /// Load supervisor configuration from a file (TOML, YAML, or JSON).
@@ -147,6 +247,8 @@ impl SupervisorConfig {
             agent: Some(config.agent.default.clone()),
             agent_timeout: Some(config.agent.timeout),
             worker_binary_path: config.worker.worker_binary_path.clone(),
+            auto_upgrade_check: config.supervisor.auto_upgrade_check,
+            update_check_interval_secs: config.supervisor.update_check_interval_secs,
         }
     }
 }
@@ -165,6 +267,8 @@ pub struct Supervisor {
     telemetry: Telemetry,
     /// Shutdown flag for graceful termination.
     shutdown: Arc<AtomicBool>,
+    /// Periodic GitHub release checker.
+    upgrade_poller: UpgradePoller,
 }
 
 /// Source of the resolved worker binary path.
@@ -314,6 +418,9 @@ impl Supervisor {
                 Telemetry::new(qualified_id)
             });
 
+        let upgrade_poller =
+            UpgradePoller::new(config.auto_upgrade_check, config.update_check_interval_secs);
+
         Ok(Supervisor {
             config,
             needle_config,
@@ -321,6 +428,7 @@ impl Supervisor {
             registry,
             telemetry,
             shutdown: Arc::new(AtomicBool::new(false)),
+            upgrade_poller,
         })
     }
 
@@ -493,6 +601,10 @@ impl Supervisor {
     /// Returns true if a worker was spawned, false otherwise.
     async fn tick(&mut self) -> Result<bool> {
         reap_zombie_children();
+
+        // Check independently of queue depth and worker capacity so a full or
+        // idle fleet still notices an available release.
+        self.upgrade_poller.poll(&self.telemetry);
 
         // Get active workers
         let active_workers = self.registry.list().unwrap_or_default();
@@ -808,6 +920,8 @@ pub async fn run_supervisor(workspace_opt: Option<PathBuf>) -> Result<()> {
         agent: Some(config.agent.default.clone()),
         agent_timeout: Some(config.agent.timeout),
         worker_binary_path: config.worker.worker_binary_path.clone(),
+        auto_upgrade_check: config.supervisor.auto_upgrade_check,
+        update_check_interval_secs: config.supervisor.update_check_interval_secs,
     };
 
     // Create and run supervisor
@@ -827,6 +941,63 @@ mod tests {
         assert!(config.workspace.exists() || config.workspace == std::path::Path::new("."));
         assert!(config.max_workers > 0);
         assert!(config.poll_interval_secs > 0);
+        assert!(!config.auto_upgrade_check);
+        assert_eq!(
+            config.update_check_interval_secs,
+            DEFAULT_UPDATE_CHECK_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn upgrade_poller_checks_immediately_when_enabled() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_checker = Arc::clone(&calls);
+        let checker: UpgradeCheckFn = Arc::new(move |_| {
+            calls_for_checker.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let mut poller = UpgradePoller::with_checker(true, 60, checker);
+
+        assert!(poller.poll_at(
+            &Telemetry::new("upgrade-poller-test".to_string()),
+            Instant::now()
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn disabled_upgrade_poller_never_calls_checker() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_checker = Arc::clone(&calls);
+        let checker: UpgradeCheckFn = Arc::new(move |_| {
+            calls_for_checker.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let start = Instant::now();
+        let mut poller = UpgradePoller::with_checker(false, 60, checker);
+        let telemetry = Telemetry::new("upgrade-poller-disabled-test".to_string());
+
+        assert!(!poller.poll_at(&telemetry, start));
+        assert!(!poller.poll_at(&telemetry, start + Duration::from_secs(600)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn upgrade_poller_respects_configured_interval() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_checker = Arc::clone(&calls);
+        let checker: UpgradeCheckFn = Arc::new(move |_| {
+            calls_for_checker.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let start = Instant::now();
+        let mut poller = UpgradePoller::with_checker(true, 60, checker);
+        let telemetry = Telemetry::new("upgrade-poller-interval-test".to_string());
+
+        assert!(poller.poll_at(&telemetry, start));
+        assert!(!poller.poll_at(&telemetry, start + Duration::from_secs(59)));
+        assert!(poller.poll_at(&telemetry, start + Duration::from_secs(60)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -838,6 +1009,8 @@ poll_interval_secs: 20
 agent: claude
 agent_timeout: 7200
 worker_binary_path: /usr/local/bin/needle
+auto_upgrade_check: true
+update_check_interval_secs: 3600
 "#;
 
         let config: SupervisorConfig = serde_yaml::from_str(yaml_content)
@@ -852,6 +1025,8 @@ worker_binary_path: /usr/local/bin/needle
             config.worker_binary_path,
             Some(PathBuf::from("/usr/local/bin/needle"))
         );
+        assert!(config.auto_upgrade_check);
+        assert_eq!(config.update_check_interval_secs, 3600);
     }
 
     #[test]
@@ -862,6 +1037,8 @@ max_workers = 6
 poll_interval_secs = 15
 agent = "claude"
 agent_timeout = 3600
+auto_upgrade_check = true
+update_check_interval_secs = 7200
 "#;
 
         let config: SupervisorConfig =
@@ -872,6 +1049,8 @@ agent_timeout = 3600
         assert_eq!(config.poll_interval_secs, 15);
         assert_eq!(config.agent, Some("claude".to_string()));
         assert_eq!(config.agent_timeout, Some(3600));
+        assert!(config.auto_upgrade_check);
+        assert_eq!(config.update_check_interval_secs, 7200);
     }
 
     #[test]
@@ -911,6 +1090,11 @@ max_workers: 4
         assert_eq!(config.agent, None);
         assert_eq!(config.agent_timeout, None);
         assert_eq!(config.worker_binary_path, None);
+        assert!(!config.auto_upgrade_check);
+        assert_eq!(
+            config.update_check_interval_secs,
+            DEFAULT_UPDATE_CHECK_INTERVAL_SECS
+        );
     }
 
     #[test]
@@ -1272,6 +1456,8 @@ poll_interval_secs = 12
             agent: Some("claude".to_string()),
             agent_timeout: Some(3600),
             worker_binary_path: None, // Test default resolution
+            auto_upgrade_check: false,
+            update_check_interval_secs: DEFAULT_UPDATE_CHECK_INTERVAL_SECS,
         };
 
         // Create capture sink and telemetry
