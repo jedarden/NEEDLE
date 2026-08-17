@@ -1256,6 +1256,7 @@ fn outcome_classify_covers_all_exit_code_ranges() {
     ];
 
     for code in test_codes {
+        // CI VERIFICATION TRIGGER: Trigger fresh workflow to capture logs
         // Should not panic.
         let outcome = Outcome::classify(code, false);
         // Verify specific mappings.
