@@ -4479,6 +4479,1034 @@ workspace:
     );
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// Tilde Expansion Integration Tests — Additional Path Configuration Fields
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Test tilde expansion in agent.adapters_dir configuration.
+///
+/// This test validates that tilde-prefixed paths in agent.adapters_dir are
+/// correctly expanded to the HOME directory during config loading, with proper
+/// tempdir isolation to avoid contaminating the real user environment.
+#[tokio::test]
+async fn agent_adapters_dir_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create a custom adapters directory in the isolated location
+    let custom_adapters_dir = isolated_home.join(".custom-adapters");
+    fs::create_dir_all(&custom_adapters_dir).expect("failed to create custom adapters dir");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde-prefixed path (~/.custom-adapters)
+    let tilde_path = "~/.custom-adapters";
+    let expanded = expand_tilde(tilde_path);
+
+    assert_eq!(
+        expanded,
+        custom_adapters_dir.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Tilde expansion works in agent.adapters_dir config context
+    let yaml = format!(
+        r#"
+agent:
+  adapters_dir: {}
+"#,
+        tilde_path
+    );
+
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    assert!(
+        config_expanded.agent.adapters_dir.starts_with(&isolated_home),
+        "agent.adapters_dir should be expanded to isolated home, got: {}",
+        config_expanded.agent.adapters_dir.display()
+    );
+
+    assert_eq!(
+        config_expanded.agent.adapters_dir, custom_adapters_dir,
+        "agent.adapters_dir should point to our custom adapters directory"
+    );
+
+    // Test 3: Absolute path should pass through unchanged
+    let absolute_yaml = r#"
+agent:
+  adapters_dir: /absolute/path/to/adapters
+"#;
+
+    let config_absolute: Config =
+        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let mut config_absolute_expanded = config_absolute;
+    config_absolute_expanded.expand_tildes();
+
+    assert_eq!(
+        config_absolute_expanded.agent.adapters_dir,
+        std::path::PathBuf::from("/absolute/path/to/adapters"),
+        "absolute paths should pass through unchanged"
+    );
+
+    // Test 4: Relative path should pass through unchanged
+    let relative_yaml = r#"
+agent:
+  adapters_dir: relative/path/to/adapters
+"#;
+
+    let config_relative: Config =
+        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let mut config_relative_expanded = config_relative;
+    config_relative_expanded.expand_tildes();
+
+    assert_eq!(
+        config_relative_expanded.agent.adapters_dir,
+        std::path::PathBuf::from("relative/path/to/adapters"),
+        "relative paths should pass through unchanged"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Agent adapters_dir tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!(
+        "  Tilde path ~/.custom-adapters -> {}",
+        custom_adapters_dir.display()
+    );
+}
+
+/// Test tilde expansion in bead_cli.path configuration.
+///
+/// This test validates that tilde-prefixed paths in bead_cli.path are
+/// correctly expanded to the HOME directory during config loading, with proper
+/// tempdir isolation to avoid contaminating the real user environment.
+#[tokio::test]
+async fn bead_cli_path_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create a custom bead cli path in the isolated location
+    let custom_bead_cli = isolated_home.join(".local/bin/custom-bead");
+    fs::create_dir_all(custom_bead_cli.parent().unwrap()).expect("failed to create parent dir");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde-prefixed path (~/.local/bin/custom-bead)
+    let tilde_path = "~/.local/bin/custom-bead";
+    let expanded = expand_tilde(tilde_path);
+
+    assert_eq!(
+        expanded,
+        custom_bead_cli.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Tilde expansion works in bead_cli.path config context
+    let yaml = format!(
+        r#"
+bead_cli:
+  path: {}
+"#,
+        tilde_path
+    );
+
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    assert!(
+        config_expanded.bead_cli.path.unwrap().starts_with(&isolated_home),
+        "bead_cli.path should be expanded to isolated home, got: {}",
+        config_expanded.bead_cli.path.unwrap().display()
+    );
+
+    assert_eq!(
+        config_expanded.bead_cli.path.unwrap(),
+        custom_bead_cli,
+        "bead_cli.path should point to our custom bead cli"
+    );
+
+    // Test 3: Absolute path should pass through unchanged
+    let absolute_yaml = r#"
+bead_cli:
+  path: /usr/local/bin/bead
+"#;
+
+    let config_absolute: Config =
+        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let mut config_absolute_expanded = config_absolute;
+    config_absolute_expanded.expand_tildes();
+
+    assert_eq!(
+        config_absolute_expanded.bead_cli.path.unwrap(),
+        std::path::PathBuf::from("/usr/local/bin/bead"),
+        "absolute paths should pass through unchanged"
+    );
+
+    // Test 4: Relative path should pass through unchanged
+    let relative_yaml = r#"
+bead_cli:
+  path: ./local/bin/bead
+"#;
+
+    let config_relative: Config =
+        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let mut config_relative_expanded = config_relative;
+    config_relative_expanded.expand_tildes();
+
+    assert_eq!(
+        config_relative_expanded.bead_cli.path.unwrap(),
+        std::path::PathBuf::from("./local/bin/bead"),
+        "relative paths should pass through unchanged"
+    );
+
+    // Test 5: None/missing path should remain None
+    let none_yaml = r#"
+bead_cli:
+  backend: bead-rs
+"#;
+
+    let config_none: Config = serde_yaml::from_str(none_yaml).expect("failed to parse config");
+    let mut config_none_expanded = config_none;
+    config_none_expanded.expand_tildes();
+
+    assert!(
+        config_none_expanded.bead_cli.path.is_none(),
+        "None path should remain None after expansion"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Bead CLI path tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!(
+        "  Tilde path ~/.local/bin/custom-bead -> {}",
+        custom_bead_cli.display()
+    );
+}
+
+/// Test tilde expansion in strands.explore.workspace_root configuration.
+///
+/// This test validates that tilde-prefixed paths in strands.explore.workspace_root
+/// are correctly expanded to the HOME directory during config loading, with proper
+/// tempdir isolation to avoid contaminating the real user environment.
+#[tokio::test]
+async fn explore_workspace_root_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create a custom workspace root in the isolated location
+    let custom_workspace_root = isolated_home.join("dev-workspaces");
+    fs::create_dir_all(&custom_workspace_root).expect("failed to create custom workspace root");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde-prefixed path (~/dev-workspaces)
+    let tilde_path = "~/dev-workspaces";
+    let expanded = expand_tilde(tilde_path);
+
+    assert_eq!(
+        expanded,
+        custom_workspace_root.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Tilde expansion works in strands.explore.workspace_root config context
+    let yaml = format!(
+        r#"
+strands:
+  explore:
+    workspace_root: {}
+"#,
+        tilde_path
+    );
+
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    assert!(
+        config_expanded.strands.explore.workspace_root.starts_with(&isolated_home),
+        "strands.explore.workspace_root should be expanded to isolated home, got: {}",
+        config_expanded.strands.explore.workspace_root.display()
+    );
+
+    assert_eq!(
+        config_expanded.strands.explore.workspace_root, custom_workspace_root,
+        "strands.explore.workspace_root should point to our custom workspace root"
+    );
+
+    // Test 3: Absolute path should pass through unchanged
+    let absolute_yaml = r#"
+strands:
+  explore:
+    workspace_root: /absolute/path/to/workspaces
+"#;
+
+    let config_absolute: Config =
+        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let mut config_absolute_expanded = config_absolute;
+    config_absolute_expanded.expand_tildes();
+
+    assert_eq!(
+        config_absolute_expanded.strands.explore.workspace_root,
+        std::path::PathBuf::from("/absolute/path/to/workspaces"),
+        "absolute paths should pass through unchanged"
+    );
+
+    // Test 4: Relative path should pass through unchanged
+    let relative_yaml = r#"
+strands:
+  explore:
+    workspace_root: relative/path/to/workspaces
+"#;
+
+    let config_relative: Config =
+        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let mut config_relative_expanded = config_relative;
+    config_relative_expanded.expand_tildes();
+
+    assert_eq!(
+        config_relative_expanded.strands.explore.workspace_root,
+        std::path::PathBuf::from("relative/path/to/workspaces"),
+        "relative paths should pass through unchanged"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Explore workspace_root tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!(
+        "  Tilde path ~/dev-workspaces -> {}",
+        custom_workspace_root.display()
+    );
+}
+
+/// Test tilde expansion in strands.explore.workspaces configuration (Vec<PathBuf>).
+///
+/// This test validates that tilde-prefixed paths in strands.explore.workspaces
+/// (a vector of paths) are correctly expanded to the HOME directory during config
+/// loading, with proper tempdir isolation to avoid contaminating the real user environment.
+#[tokio::test]
+async fn explore_workspaces_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create custom workspaces in the isolated location
+    let workspace1 = isolated_home.join("dev/workspace1");
+    let workspace2 = isolated_home.join("dev/workspace2");
+    fs::create_dir_all(&workspace1).expect("failed to create workspace1");
+    fs::create_dir_all(&workspace2).expect("failed to create workspace2");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde-prefixed paths in workspaces list
+    let yaml = r#"
+strands:
+  explore:
+    workspaces:
+      - ~/dev/workspace1
+      - ~/dev/workspace2
+"#;
+
+    let config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    assert_eq!(
+        config_expanded.strands.explore.workspaces.len(),
+        2,
+        "should have 2 workspaces"
+    );
+
+    assert!(
+        config_expanded.strands.explore.workspaces[0].starts_with(&isolated_home),
+        "first workspace should be expanded to isolated home, got: {}",
+        config_expanded.strands.explore.workspaces[0].display()
+    );
+
+    assert_eq!(
+        config_expanded.strands.explore.workspaces[0], workspace1,
+        "first workspace should point to our custom workspace1"
+    );
+
+    assert_eq!(
+        config_expanded.strands.explore.workspaces[1], workspace2,
+        "second workspace should point to our custom workspace2"
+    );
+
+    // Test 2: Absolute paths should pass through unchanged
+    let absolute_yaml = r#"
+strands:
+  explore:
+    workspaces:
+      - /absolute/path/to/workspace1
+      - /absolute/path/to/workspace2
+"#;
+
+    let config_absolute: Config =
+        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let mut config_absolute_expanded = config_absolute;
+    config_absolute_expanded.expand_tildes();
+
+    assert_eq!(
+        config_absolute_expanded.strands.explore.workspaces[0],
+        std::path::PathBuf::from("/absolute/path/to/workspace1"),
+        "absolute paths should pass through unchanged"
+    );
+
+    assert_eq!(
+        config_absolute_expanded.strands.explore.workspaces[1],
+        std::path::PathBuf::from("/absolute/path/to/workspace2"),
+        "second absolute path should pass through unchanged"
+    );
+
+    // Test 3: Relative paths should pass through unchanged
+    let relative_yaml = r#"
+strands:
+  explore:
+    workspaces:
+      - relative/workspace1
+      - relative/workspace2
+"#;
+
+    let config_relative: Config =
+        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let mut config_relative_expanded = config_relative;
+    config_relative_expanded.expand_tildes();
+
+    assert_eq!(
+        config_relative_expanded.strands.explore.workspaces[0],
+        std::path::PathBuf::from("relative/workspace1"),
+        "relative paths should pass through unchanged"
+    );
+
+    // Test 4: Mixed tilde and absolute paths
+    let mixed_yaml = r#"
+strands:
+  explore:
+    workspaces:
+      - ~/dev/workspace1
+      - /absolute/path/to/workspace2
+"#;
+
+    let config_mixed: Config = serde_yaml::from_str(mixed_yaml).expect("failed to parse config");
+    let mut config_mixed_expanded = config_mixed;
+    config_mixed_expanded.expand_tildes();
+
+    assert_eq!(
+        config_mixed_expanded.strands.explore.workspaces[0], workspace1,
+        "tilde path should be expanded in mixed list"
+    );
+
+    assert_eq!(
+        config_mixed_expanded.strands.explore.workspaces[1],
+        std::path::PathBuf::from("/absolute/path/to/workspace2"),
+        "absolute path should pass through unchanged in mixed list"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Explore workspaces tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!(
+        "  Tilde path ~/dev/workspace1 -> {}",
+        workspace1.display()
+    );
+    println!(
+        "  Tilde path ~/dev/workspace2 -> {}",
+        workspace2.display()
+    );
+}
+
+/// Test tilde expansion in strands.learning.global_learnings_file configuration.
+///
+/// This test validates that tilde-prefixed paths in
+/// strands.learning.global_learnings_file are correctly expanded to the HOME
+/// directory during config loading, with proper tempdir isolation to avoid
+/// contaminating the real user environment.
+#[tokio::test]
+async fn learning_global_learnings_file_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create a custom learnings file directory in the isolated location
+    let custom_learnings_dir = isolated_home.join(".config/needle");
+    fs::create_dir_all(&custom_learnings_dir).expect("failed to create learnings dir");
+    let custom_learnings_file = custom_learnings_dir.join("global-learnings.md");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde-prefixed path (~/.config/needle/global-learnings.md)
+    let tilde_path = "~/.config/needle/global-learnings.md";
+    let expanded = expand_tilde(tilde_path);
+
+    assert_eq!(
+        expanded,
+        custom_learnings_file.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Tilde expansion works in strands.learning.global_learnings_file config context
+    let yaml = format!(
+        r#"
+strands:
+  learning:
+    global_learnings_file: {}
+"#,
+        tilde_path
+    );
+
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    assert!(
+        config_expanded.strands.learning.global_learnings_file.starts_with(&isolated_home),
+        "global_learnings_file should be expanded to isolated home, got: {}",
+        config_expanded.strands.learning.global_learnings_file.display()
+    );
+
+    assert_eq!(
+        config_expanded.strands.learning.global_learnings_file, custom_learnings_file,
+        "global_learnings_file should point to our custom learnings file"
+    );
+
+    // Test 3: Absolute path should pass through unchanged
+    let absolute_yaml = r#"
+strands:
+  learning:
+    global_learnings_file: /absolute/path/to/learnings.md
+"#;
+
+    let config_absolute: Config =
+        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let mut config_absolute_expanded = config_absolute;
+    config_absolute_expanded.expand_tildes();
+
+    assert_eq!(
+        config_absolute_expanded.strands.learning.global_learnings_file,
+        std::path::PathBuf::from("/absolute/path/to/learnings.md"),
+        "absolute paths should pass through unchanged"
+    );
+
+    // Test 4: Relative path should pass through unchanged
+    let relative_yaml = r#"
+strands:
+  learning:
+    global_learnings_file: relative/path/to/learnings.md
+"#;
+
+    let config_relative: Config =
+        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let mut config_relative_expanded = config_relative;
+    config_relative_expanded.expand_tildes();
+
+    assert_eq!(
+        config_relative_expanded.strands.learning.global_learnings_file,
+        std::path::PathBuf::from("relative/path/to/learnings.md"),
+        "relative paths should pass through unchanged"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Learning global_learnings_file tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!(
+        "  Tilde path ~/.config/needle/global-learnings.md -> {}",
+        custom_learnings_file.display()
+    );
+}
+
+/// Test tilde expansion in telemetry.file_sink.log_dir configuration.
+///
+/// This test validates that tilde-prefixed paths in telemetry.file_sink.log_dir
+/// (an Option<PathBuf>) are correctly expanded to the HOME directory during
+/// config loading, with proper tempdir isolation to avoid contaminating the
+/// real user environment.
+#[tokio::test]
+async fn telemetry_log_dir_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create a custom log directory in the isolated location
+    let custom_log_dir = isolated_home.join(".needle-logs");
+    fs::create_dir_all(&custom_log_dir).expect("failed to create custom log dir");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde-prefixed path (~/.needle-logs)
+    let tilde_path = "~/.needle-logs";
+    let expanded = expand_tilde(tilde_path);
+
+    assert_eq!(
+        expanded,
+        custom_log_dir.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Tilde expansion works in telemetry.file_sink.log_dir config context
+    let yaml = format!(
+        r#"
+telemetry:
+  file_sink:
+    log_dir: {}
+"#,
+        tilde_path
+    );
+
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    assert!(
+        config_expanded
+            .telemetry
+            .file_sink
+            .log_dir
+            .as_ref()
+            .unwrap()
+            .starts_with(&isolated_home),
+        "log_dir should be expanded to isolated home, got: {}",
+        config_expanded.telemetry.file_sink.log_dir.as_ref().unwrap().display()
+    );
+
+    assert_eq!(
+        config_expanded.telemetry.file_sink.log_dir.unwrap(),
+        custom_log_dir,
+        "log_dir should point to our custom log directory"
+    );
+
+    // Test 3: Absolute path should pass through unchanged
+    let absolute_yaml = r#"
+telemetry:
+  file_sink:
+    log_dir: /var/log/needle
+"#;
+
+    let config_absolute: Config =
+        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let mut config_absolute_expanded = config_absolute;
+    config_absolute_expanded.expand_tildes();
+
+    assert_eq!(
+        config_absolute_expanded.telemetry.file_sink.log_dir.unwrap(),
+        std::path::PathBuf::from("/var/log/needle"),
+        "absolute paths should pass through unchanged"
+    );
+
+    // Test 4: Relative path should pass through unchanged
+    let relative_yaml = r#"
+telemetry:
+  file_sink:
+    log_dir: ./logs/needle
+"#;
+
+    let config_relative: Config =
+        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let mut config_relative_expanded = config_relative;
+    config_relative_expanded.expand_tildes();
+
+    assert_eq!(
+        config_relative_expanded.telemetry.file_sink.log_dir.unwrap(),
+        std::path::PathBuf::from("./logs/needle"),
+        "relative paths should pass through unchanged"
+    );
+
+    // Test 5: None/missing log_dir should remain None
+    let none_yaml = r#"
+telemetry:
+  file_sink: {}
+"#;
+
+    let config_none: Config = serde_yaml::from_str(none_yaml).expect("failed to parse config");
+    let mut config_none_expanded = config_none;
+    config_none_expanded.expand_tildes();
+
+    assert!(
+        config_none_expanded.telemetry.file_sink.log_dir.is_none(),
+        "None log_dir should remain None after expansion"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Telemetry log_dir tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!(
+        "  Tilde path ~/.needle-logs -> {}",
+        custom_log_dir.display()
+    );
+}
+
+/// Test tilde expansion in supervisor.heartbeat_path configuration.
+///
+/// This test validates that tilde-prefixed paths in supervisor.heartbeat_path
+/// (an Option<PathBuf>) are correctly expanded to the HOME directory during
+/// config loading, with proper tempdir isolation to avoid contaminating the
+/// real user environment.
+#[tokio::test]
+async fn supervisor_heartbeat_path_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create a custom heartbeat directory in the isolated location
+    let custom_heartbeat_dir = isolated_home.join(".needle-heartbeat");
+    fs::create_dir_all(&custom_heartbeat_dir).expect("failed to create heartbeat dir");
+    let custom_heartbeat_path = custom_heartbeat_dir.join("supervisor.heartbeat");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde-prefixed path (~/.needle-heartbeat/supervisor.heartbeat)
+    let tilde_path = "~/.needle-heartbeat/supervisor.heartbeat";
+    let expanded = expand_tilde(tilde_path);
+
+    assert_eq!(
+        expanded,
+        custom_heartbeat_path.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Tilde expansion works in supervisor.heartbeat_path config context
+    let yaml = format!(
+        r#"
+supervisor:
+  heartbeat_path: {}
+"#,
+        tilde_path
+    );
+
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    assert!(
+        config_expanded
+            .supervisor
+            .heartbeat_path
+            .as_ref()
+            .unwrap()
+            .starts_with(&isolated_home),
+        "heartbeat_path should be expanded to isolated home, got: {}",
+        config_expanded.supervisor.heartbeat_path.as_ref().unwrap().display()
+    );
+
+    assert_eq!(
+        config_expanded.supervisor.heartbeat_path.unwrap(),
+        custom_heartbeat_path,
+        "heartbeat_path should point to our custom heartbeat file"
+    );
+
+    // Test 3: Absolute path should pass through unchanged
+    let absolute_yaml = r#"
+supervisor:
+  heartbeat_path: /var/run/needle/supervisor.heartbeat
+"#;
+
+    let config_absolute: Config =
+        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let mut config_absolute_expanded = config_absolute;
+    config_absolute_expanded.expand_tildes();
+
+    assert_eq!(
+        config_absolute_expanded.supervisor.heartbeat_path.unwrap(),
+        std::path::PathBuf::from("/var/run/needle/supervisor.heartbeat"),
+        "absolute paths should pass through unchanged"
+    );
+
+    // Test 4: Relative path should pass through unchanged
+    let relative_yaml = r#"
+supervisor:
+  heartbeat_path: ./runtime/supervisor.heartbeat
+"#;
+
+    let config_relative: Config =
+        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let mut config_relative_expanded = config_relative;
+    config_relative_expanded.expand_tildes();
+
+    assert_eq!(
+        config_relative_expanded.supervisor.heartbeat_path.unwrap(),
+        std::path::PathBuf::from("./runtime/supervisor.heartbeat"),
+        "relative paths should pass through unchanged"
+    );
+
+    // Test 5: None/missing heartbeat_path should remain None
+    let none_yaml = r#"
+supervisor: {}
+"#;
+
+    let config_none: Config = serde_yaml::from_str(none_yaml).expect("failed to parse config");
+    let mut config_none_expanded = config_none;
+    config_none_expanded.expand_tildes();
+
+    assert!(
+        config_none_expanded.supervisor.heartbeat_path.is_none(),
+        "None heartbeat_path should remain None after expansion"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Supervisor heartbeat_path tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!(
+        "  Tilde path ~/.needle-heartbeat/supervisor.heartbeat -> {}",
+        custom_heartbeat_path.display()
+    );
+}
+
+/// Test tilde expansion in prompt.context_files configuration (Vec<PathBuf>).
+///
+/// This test validates that tilde-prefixed paths in prompt.context_files
+/// (a vector of paths) are correctly expanded to the HOME directory during
+/// config loading, with proper tempdir isolation to avoid contaminating the
+/// real user environment.
+#[tokio::test]
+async fn prompt_context_files_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Create custom context files in the isolated location
+    let context1 = isolated_home.join(".config/needle/context1.md");
+    let context2 = isolated_home.join(".config/needle/context2.md");
+    fs::create_dir_all(context1.parent().unwrap()).expect("failed to create context dir");
+    fs::write(&context1, "# Context 1").expect("failed to write context1");
+    fs::write(&context2, "# Context 2").expect("failed to write context2");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde-prefixed paths in context_files list
+    let yaml = r#"
+prompt:
+  context_files:
+    - ~/.config/needle/context1.md
+    - ~/.config/needle/context2.md
+"#;
+
+    let config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    assert_eq!(
+        config_expanded.prompt.context_files.len(),
+        2,
+        "should have 2 context files"
+    );
+
+    assert!(
+        config_expanded.prompt.context_files[0].starts_with(&isolated_home),
+        "first context file should be expanded to isolated home, got: {}",
+        config_expanded.prompt.context_files[0].display()
+    );
+
+    assert_eq!(
+        config_expanded.prompt.context_files[0], context1,
+        "first context file should point to our custom context1"
+    );
+
+    assert_eq!(
+        config_expanded.prompt.context_files[1], context2,
+        "second context file should point to our custom context2"
+    );
+
+    // Test 2: Absolute paths should pass through unchanged
+    let absolute_yaml = r#"
+prompt:
+  context_files:
+    - /absolute/path/to/context1.md
+    - /absolute/path/to/context2.md
+"#;
+
+    let config_absolute: Config =
+        serde_yaml::from_str(absolute_yaml).expect("failed to parse config");
+    let mut config_absolute_expanded = config_absolute;
+    config_absolute_expanded.expand_tildes();
+
+    assert_eq!(
+        config_absolute_expanded.prompt.context_files[0],
+        std::path::PathBuf::from("/absolute/path/to/context1.md"),
+        "absolute paths should pass through unchanged"
+    );
+
+    assert_eq!(
+        config_absolute_expanded.prompt.context_files[1],
+        std::path::PathBuf::from("/absolute/path/to/context2.md"),
+        "second absolute path should pass through unchanged"
+    );
+
+    // Test 3: Relative paths should pass through unchanged
+    let relative_yaml = r#"
+prompt:
+  context_files:
+    - relative/context1.md
+    - relative/context2.md
+"#;
+
+    let config_relative: Config =
+        serde_yaml::from_str(relative_yaml).expect("failed to parse config");
+    let mut config_relative_expanded = config_relative;
+    config_relative_expanded.expand_tildes();
+
+    assert_eq!(
+        config_relative_expanded.prompt.context_files[0],
+        std::path::PathBuf::from("relative/context1.md"),
+        "relative paths should pass through unchanged"
+    );
+
+    // Test 4: Mixed tilde and absolute paths
+    let mixed_yaml = r#"
+prompt:
+  context_files:
+    - ~/.config/needle/context1.md
+    - /absolute/path/to/context2.md
+"#;
+
+    let config_mixed: Config = serde_yaml::from_str(mixed_yaml).expect("failed to parse config");
+    let mut config_mixed_expanded = config_mixed;
+    config_mixed_expanded.expand_tildes();
+
+    assert_eq!(
+        config_mixed_expanded.prompt.context_files[0], context1,
+        "tilde path should be expanded in mixed list"
+    );
+
+    assert_eq!(
+        config_mixed_expanded.prompt.context_files[1],
+        std::path::PathBuf::from("/absolute/path/to/context2.md"),
+        "absolute path should pass through unchanged in mixed list"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Prompt context_files tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!(
+        "  Tilde path ~/.config/needle/context1.md -> {}",
+        context1.display()
+    );
+    println!(
+        "  Tilde path ~/.config/needle/context2.md -> {}",
+        context2.display()
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// End of Tilde Expansion Integration Tests
+// ═════════════════════════════════════════════════════════════════════════════
+
 /// Test absolute and relative paths in worker_binary_path configuration.
 ///
 /// This test validates that absolute paths are preserved and relative paths
