@@ -344,7 +344,7 @@ impl BeadStore for CliBeadStore {
 
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
         let values = if self.has_quirk("limit_zero_returns_empty_set") {
-            HashMap::from([("limit", "999999".to_string())])
+            HashMap::from([("limit", "--limit 999999".to_string())])
         } else {
             HashMap::new()
         };
@@ -365,7 +365,7 @@ impl BeadStore for CliBeadStore {
 
     async fn list_all(&self) -> Result<Vec<Bead>> {
         let values = if self.has_quirk("limit_zero_returns_empty_set") {
-            HashMap::from([("limit", "999999".to_string())])
+            HashMap::from([("limit", "--limit 999999".to_string())])
         } else {
             HashMap::new()
         };
@@ -883,7 +883,7 @@ fn parse_doctor_output(output: &str) -> RepairReport {
 }
 
 fn is_optional_placeholder(name: &str) -> bool {
-    matches!(name, "model" | "harness" | "harness_version")
+    matches!(name, "model" | "harness" | "harness_version" | "limit")
 }
 
 fn placeholders(template: &str) -> Result<Vec<String>> {
@@ -1186,7 +1186,7 @@ mod tests {
     fn cli_store_conditional_limit_workaround() {
         use crate::bead_store::backend::builtin_bead_backends;
 
-        // Test with bead-forge (HAS the quirk)
+        // Test with bead-forge (verified against 0.4.1, quirk does NOT apply)
         let bead_forge = builtin_bead_backends()
             .into_iter()
             .find(|backend| backend.name == "bead-forge")
@@ -1213,8 +1213,8 @@ mod tests {
         )
         .unwrap();
 
-        // bead-forge has the quirk, so has_quirk should return true
-        assert!(store_with_quirk.has_quirk("limit_zero_returns_empty_set"));
+        // bead-forge 0.4.1 does NOT have the quirk (only applied to <= 0.2.0)
+        assert!(!store_with_quirk.has_quirk("limit_zero_returns_empty_set"));
 
         // Test with bead-rs (does NOT have the quirk)
         let bead_rs = builtin_bead_backends()
