@@ -3297,6 +3297,10 @@ impl Worker {
     /// processing with the stale binary. This is distinct from `check_hot_reload()`,
     /// which exits cleanly when a new binary is detected to allow supervisor relaunch.
     ///
+    /// The check compares git commit SHAs embedded in the build metadata, not binary
+    /// file hashes. This ensures we detect when the codebase has advanced even if the
+    /// binary layout happens to hash similarly.
+    ///
     /// Returns `Ok(())` if the check ran (or was skipped due to interval), `Err` if
     /// the check itself failed (non-fatal, continues with current binary).
     async fn check_freshness(&mut self) -> Result<()> {
@@ -3321,57 +3325,57 @@ impl Worker {
         // Update the last check time
         self.last_freshness_check = Some(now);
 
-        let needle_home = &self.config.workspace.home;
-        match upgrade::check_hot_reload(needle_home) {
-            Ok(HotReloadCheck::NewBinaryDetected {
-                old_hash,
-                new_hash,
-                stable_path: _,
-            }) => {
-                // Only warn if we haven't already warned about this stale binary
-                if !self.stale_binary_warned {
-                    tracing::warn!(
-                        old_hash = %&old_hash[..12],
-                        new_hash = %&new_hash[..12],
-                        "running binary is STALE compared to needle-stable on disk — \
-                         consider restarting this worker to pick up the latest binary. \
-                         This check runs every {} seconds (configured by worker.freshness_check_interval_secs). \
-                         Set to 0 to disable freshness checking.",
-                        interval_secs
-                    );
-                    self.stale_binary_warned = true;
-                }
-                Ok(())
-            }
-            Ok(HotReloadCheck::CurrentBinaryDeleted {
-                stable_hash,
-                stable_path: _,
-            }) => {
-                // Current binary has been deleted/unlinked — this is unusual but not fatal
-                // for freshness checking (hot-reload will handle the actual exit)
-                if !self.stale_binary_warned {
-                    tracing::warn!(
-                        stable_hash = %&stable_hash[..12],
-                        "current binary has been deleted/unlink — hot-reload will handle the exit"
-                    );
-                    self.stale_binary_warned = true;
-                }
-                Ok(())
-            }
-            Ok(HotReloadCheck::NoChange) => {
-                // Binary is fresh — reset the warned flag so we warn again if it becomes stale later
-                self.stale_binary_warned = false;
-                Ok(())
-            }
-            Ok(HotReloadCheck::Skipped { reason }) => {
-                tracing::debug!(reason = %reason, "freshness check skipped");
-                Ok(())
+        // Get the running binary's build metadata
+        let current_metadata = crate::build_metadata::BuildMetadata::current();
+        let current_commit = &current_metadata.commit_sha;
+
+        // Get the stable binary's build metadata
+        let stable_metadata = match crate::build_metadata::BuildMetadata::from_stable_binary() {
+            Ok(Some(metadata)) => metadata,
+            Ok(None) => {
+                // No stable binary exists — skip the check
+                tracing::debug!("no needle-stable binary found, skipping freshness check");
+                return Ok(());
             }
             Err(e) => {
-                tracing::warn!(error = %e, "freshness check failed, continuing");
-                Ok(())
+                // Failed to read stable binary metadata — log and continue
+                tracing::warn!(error = %e, "failed to read needle-stable build metadata, skipping freshness check");
+                return Ok(());
             }
+        };
+
+        let stable_commit = &stable_metadata.commit_sha;
+
+        // Compare commit SHAs
+        if current_commit != stable_commit {
+            // Only warn if we haven't already warned about this stale binary
+            if !self.stale_binary_warned {
+                tracing::warn!(
+                    current_commit = %&current_commit[..12],
+                    stable_commit = %&stable_commit[..12],
+                    current_version = %current_metadata.version,
+                    stable_version = %stable_metadata.version,
+                    "running binary is STALE — current commit {} differs from needle-stable commit {}. \
+                     Consider restarting this worker to pick up the latest binary. \
+                     This check runs every {} seconds (configured by worker.freshness_check_interval_secs). \
+                     Set to 0 to disable freshness checking.",
+                    &current_commit[..12],
+                    &stable_commit[..12],
+                    interval_secs
+                );
+                self.stale_binary_warned = true;
+            }
+        } else {
+            // Binary is fresh — reset the warned flag so we warn again if it becomes stale later
+            self.stale_binary_warned = false;
+            tracing::debug!(
+                commit = %&current_commit[..12],
+                version = %current_metadata.version,
+                "binary freshness check passed — running commit matches needle-stable"
+            );
         }
+
+        Ok(())
     }
 
     // ── Terminal state handlers ─────────────────────────────────────────────
