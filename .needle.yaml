@@ -187,7 +187,7 @@ self_modification:
   hot_reload: true
 fabric:
   enabled: true
-  endpoint: http://localhost:3000/api/events
+  endpoint: http://needle-feed-ex44-apexalgo-iad-ts.ardenone.com/ingest
   timeout: 2
   batching: false
 supervisor:

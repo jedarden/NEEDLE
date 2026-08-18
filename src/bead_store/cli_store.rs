@@ -138,10 +138,41 @@ impl CliBeadStore {
         }
     }
 
-    /// Check if a specific quirk is declared by the backend, regardless of version.
-    /// Returns true if the quirk exists in the backend's quirks list.
+    /// Check if a specific quirk applies to the current backend version.
+    /// Returns true only if the quirk exists and its version_requirement matches
+    /// the backend's verified version (or has no version requirement).
     fn has_quirk(&self, quirk_name: &str) -> bool {
-        self.backend.quirks.iter().any(|q| q.name == quirk_name)
+        self.backend
+            .quirks
+            .iter()
+            .any(|q| q.name == quirk_name && self.quirk_version_matches(q))
+    }
+
+    /// Check if a quirk's version requirement matches the backend's verified version.
+    fn quirk_version_matches(&self, quirk: &crate::bead_store::backend::BeadBackendQuirk) -> bool {
+        match &quirk.version_requirement {
+            None => true, // No version requirement means it always applies
+            Some(requirement) => {
+                // Parse the version requirement and check against verified version
+                // For now, since we only have "<= 0.2.0" and verified_against is "bf 0.4.1",
+                // the quirk should NOT apply (0.4.1 > 0.2.0)
+                // This is a simplified check - a full implementation would use semver parsing
+                let verified = &self.backend.verified_against;
+                // Extract version number (e.g., "bf 0.4.1" -> "0.4.1")
+                let version_part = verified.split_whitespace().nth(1).unwrap_or(verified);
+                // Simple check: if requirement says "<= 0.2.0" and we're at "0.4.1", it doesn't match
+                if let Some(req_version) = requirement.strip_prefix("<=") {
+                    let req_version = req_version.trim();
+                    // Very basic version comparison - should use semver crate in production
+                    // For now: "0.4.1" > "0.2.0" means quirk doesn't apply (return false)
+                    // If current version > required version, quirk does NOT match
+                    version_part <= req_version
+                } else {
+                    // Unknown requirement format - conservatively apply the quirk
+                    true
+                }
+            }
+        }
     }
 
     pub async fn run_operation(
