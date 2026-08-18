@@ -2152,6 +2152,61 @@ mod tests {
     }
 
     #[test]
+    fn test_resource_contains_provider_when_supplied() {
+        let config = make_test_config();
+        let resource = OtlpSink::build_resource(
+            "test-worker-id",
+            "test-session-id",
+            &config,
+            Some("claude-anthropic-sonnet"),
+            Some("claude-sonnet-4-6"),
+            Some("anthropic"),
+            Some("/test/workspace"),
+        )
+        .expect("build_resource should succeed");
+
+        let provider_attr = resource
+            .iter()
+            .find(|(key, _)| key.as_str() == "needle.model.provider");
+
+        assert!(
+            provider_attr.is_some(),
+            "needle.model.provider should be present in resource when supplied"
+        );
+
+        match &provider_attr.unwrap().1 {
+            opentelemetry::Value::String(s) => {
+                assert_eq!(s.as_str(), "anthropic", "provider value should match input");
+            }
+            _ => panic!("needle.model.provider should be a String value"),
+        }
+    }
+
+    #[test]
+    fn test_resource_absent_when_provider_not_supplied() {
+        let config = make_test_config();
+        let resource = OtlpSink::build_resource(
+            "test-worker-id",
+            "test-session-id",
+            &config,
+            Some("builtin_opencode"),
+            None, // No model
+            None, // No provider
+            Some("/test/workspace"),
+        )
+        .expect("build_resource should succeed");
+
+        // When provider is None, the attribute should not be in the resource
+        assert!(
+            resource
+                .iter()
+                .find(|(key, _)| key.as_str() == "needle.model.provider")
+                .is_none(),
+            "needle.model.provider should be absent when not supplied"
+        );
+    }
+
+    #[test]
     fn test_cannot_override_service_name_via_config() {
         let mut config = make_test_config();
         config
@@ -2176,6 +2231,93 @@ mod tests {
         assert!(
             err_msg.contains("cannot override reserved resource attribute"),
             "error should mention reserved attribute"
+        );
+    }
+
+    #[test]
+    fn test_exported_log_record_contains_provider_attribute() {
+        use opentelemetry_sdk::logs::{LogBatch, SdkLogRecord, SdkLoggerProvider};
+
+        #[derive(Debug, Clone, Default)]
+        struct CapturingLogExporter {
+            records: Arc<Mutex<Vec<SdkLogRecord>>>,
+        }
+
+        impl SdkLogExporter for CapturingLogExporter {
+            async fn export(&self, batch: LogBatch<'_>) -> opentelemetry_sdk::error::OTelSdkResult {
+                let mut records = self.records.lock().expect("log exporter mutex poisoned");
+                records.extend(batch.iter().map(|(record, _)| record.clone()));
+                Ok(())
+            }
+        }
+
+        let exporter = CapturingLogExporter::default();
+        let mut sink = make_test_sink();
+        sink.logger_provider = Arc::new(
+            SdkLoggerProvider::builder()
+                .with_simple_exporter(exporter.clone())
+                .build(),
+        );
+
+        // Test with provider in event data (simulating a DispatchCompleted event)
+        sink.emit_log(&make_test_event(
+            "agent.completed",
+            None,
+            serde_json::json!({
+                "agent": "claude-anthropic-sonnet",
+                "model": "claude-sonnet-4-6",
+                "provider": "anthropic",
+            }),
+        ))
+        .expect("log record should be emitted");
+
+        let records = exporter
+            .records
+            .lock()
+            .expect("log exporter mutex poisoned");
+
+        // Verify provider attribute is present in the exported record
+        let provider_attr = records[0]
+            .attributes_iter()
+            .find(|(key, _)| key.as_str() == "needle.model.provider")
+            .expect("needle.model.provider should be present in record attributes");
+
+        match &provider_attr.1 {
+            AnyValue::String(value) => {
+                assert_eq!(
+                    value.as_str(),
+                    "anthropic",
+                    "provider should match event data"
+                );
+            }
+            _ => panic!("needle.model.provider should be a String value"),
+        }
+
+        // Test with None provider (adapter that declares no provider, e.g., opencode)
+        exporter.records.lock().unwrap().clear();
+        sink.emit_log(&make_test_event(
+            "agent.completed",
+            None,
+            serde_json::json!({
+                "agent": "builtin_opencode",
+                "model": "opencode",
+                // provider field absent/None
+            }),
+        ))
+        .expect("log record should be emitted");
+
+        let records = exporter
+            .records
+            .lock()
+            .expect("log exporter mutex poisoned");
+
+        // When provider is None/absent, the attribute should not be present
+        assert!(
+            records[0]
+                .attributes_iter()
+                .find(|(key, _)| key.as_str() == "needle.model.provider")
+                .is_none(),
+            "needle.model.provider should be absent when adapter declares no provider"
         );
     }
 
