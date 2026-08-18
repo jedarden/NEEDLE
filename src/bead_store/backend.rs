@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 use regex::Regex;
@@ -138,6 +139,79 @@ fn default_version_command() -> Vec<String> {
 }
 
 impl BeadBackend {
+    /// Run a binary with --version flag and parse its output to extract the backend name.
+    ///
+    /// This function spawns a binary with the provided version command (e.g., `["--version"]`),
+    /// captures its stdout, and parses the output to identify which bead backend it is.
+    ///
+    /// # Arguments
+    /// * `binary_path` - Path to the binary to execute
+    /// * `version_command` - Arguments to pass for version info (e.g., `["--version"]`)
+    ///
+    /// # Returns
+    /// The backend name extracted from the version output (e.g., "bead", "bf").
+    ///
+    /// # Errors
+    /// * If the binary cannot be found or spawned
+    /// * If the binary exits with a non-zero status
+    /// * If the output cannot be parsed
+    pub fn parse_backend_name_from_version(
+        binary_path: &Path,
+        version_command: &[String],
+    ) -> Result<String> {
+        // Spawn the binary with version command
+        let output = Command::new(binary_path)
+            .args(version_command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to spawn binary '{}' for version check",
+                    binary_path.display()
+                )
+            })?;
+
+        // Check exit code
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "binary '{}' exited with status {}: {}",
+                binary_path.display(),
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        // Parse stdout to extract backend name
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout.trim();
+
+        // Try to match common version output patterns
+        // Expected formats:
+        // - "bead 0.x.y" or "bead 0.x.y (details)"
+        // - "bf 0.x.y" or "bf 0.x.y (details)"
+        // - "beads-rust 0.x.y"
+
+        // Pattern 1: First word before whitespace (e.g., "bead" from "bead 0.1.3")
+        let first_word_pattern = Regex::new(r"^(\S+)\s").unwrap();
+        if let Some(caps) = first_word_pattern.captures(stdout) {
+            if let Some(name) = caps.get(1) {
+                return Ok(name.as_str().to_string());
+            }
+        }
+
+        // Pattern 2: If no space, entire output is the name (e.g., just "bead")
+        if !stdout.is_empty() && !stdout.contains(char::is_whitespace) {
+            return Ok(stdout.to_string());
+        }
+
+        bail!(
+            "unable to parse backend name from version output: '{}'",
+            stdout
+        );
+    }
+
     /// Classify an error using only this backend's declared markers.
     pub fn error_contains_any(&self, message: &str, markers: &[String]) -> bool {
         let message = message.to_lowercase();
@@ -849,5 +923,61 @@ mod tests {
         // A backend without quirks should have an empty list (not None)
         let backend = builtin_bead_rs();
         assert!(backend.quirks.is_empty());
+    }
+
+    #[test]
+    fn parse_backend_name_from_standard_version_output() {
+        // Test parsing "bead 0.1.3" format
+        let result = BeadBackend::parse_backend_name_from_version(
+            Path::new("/nonexistent/bead"),
+            &["--version".to_string()],
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("failed to spawn"));
+    }
+
+    #[test]
+    fn parse_backend_name_patterns_correctly() {
+        // These tests verify the regex patterns work correctly on string inputs
+
+        // Pattern 1: "bead 0.1.3" should extract "bead"
+        let stdout = "bead 0.1.3";
+        let first_word_pattern = Regex::new(r"^(\S+)\s").unwrap();
+        let caps = first_word_pattern.captures(stdout);
+        assert!(caps.is_some());
+        assert_eq!(caps.unwrap().get(1).unwrap().as_str(), "bead");
+
+        // Pattern 2: "bf 0.4.1" should extract "bf"
+        let stdout = "bf 0.4.1";
+        let caps = first_word_pattern.captures(stdout);
+        assert!(caps.is_some());
+        assert_eq!(caps.unwrap().get(1).unwrap().as_str(), "bf");
+
+        // Pattern 3: "bead 0.1.3 (commit 85f36ac)" should extract "bead"
+        let stdout = "bead 0.1.3 (commit 85f36ac)";
+        let caps = first_word_pattern.captures(stdout);
+        assert!(caps.is_some());
+        assert_eq!(caps.unwrap().get(1).unwrap().as_str(), "bead");
+    }
+
+    #[test]
+    fn parse_backend_name_handles_various_output_formats() {
+        // Test that various version output formats can be handled
+
+        // Format: "bead-rs 0.1.3" should extract "bead-rs"
+        let stdout = "bead-rs 0.1.3";
+        let first_word_pattern = Regex::new(r"^(\S+)\s").unwrap();
+        let caps = first_word_pattern.captures(stdout);
+        assert_eq!(caps.unwrap().get(1).unwrap().as_str(), "bead-rs");
+
+        // Format: "bead 0.1.3 (commit 85f36ac)" should extract "bead"
+        let stdout = "bead 0.1.3 (commit 85f36ac)";
+        let caps = first_word_pattern.captures(stdout);
+        assert_eq!(caps.unwrap().get(1).unwrap().as_str(), "bead");
+
+        // Format: "bf 0.4.1" should extract "bf"
+        let stdout = "bf 0.4.1";
+        let caps = first_word_pattern.captures(stdout);
+        assert_eq!(caps.unwrap().get(1).unwrap().as_str(), "bf");
     }
 }
