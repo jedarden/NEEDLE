@@ -6961,3 +6961,11 @@ workspace_root = "{}"
         stderr_output
     );
 }
+
+// CI verification test for needle-318c33ba
+// This test is intentionally broken to verify that test failures surface correctly
+#[tokio::test]
+async fn ci_verification_test_failure() {
+    // This test intentionally fails to verify CI shows test failures correctly
+    panic!("CI VERIFICATION TEST FAILURE - This test is meant to fail to verify needle-ci retryStrategy fix surfaces test failures correctly");
+}
