@@ -631,8 +631,8 @@ async fn outcome_path_success_exit_0() {
     );
     assert_eq!(
         worker.beads_processed(),
-        999,
-        "DELIBERATE BREAK FOR CI VERIFICATION - needle-fcf0d892"
+        1,
+        "expected exactly 1 bead to be processed"
     );
 }
 
