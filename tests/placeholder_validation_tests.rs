@@ -21,7 +21,6 @@ fn test_backend_validate_with_valid_placeholders() {
 
     let result = backend.validate(&source);
     assert!(result.is_ok());
-    assert!(false, "intentional test failure for CI verification");
 }
 
 #[test]
