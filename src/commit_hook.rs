@@ -574,42 +574,22 @@ mod tests {
         // diverging local and remote history.
         //
         // Setup:
-        // 1. Create a local bare remote
-        // 2. Clone it to create a workspace
-        // 3. Make a commit in the workspace
-        // 4. Push to the remote
-        // 5. Call inject_bead_id_trailer
+        // 1. Create a workspace with a commit
+        // 2. Add a remote and push the commit
+        // 3. Call inject_bead_id_trailer
         // Expected: HEAD SHA unchanged, no trailer added
 
-        let temp_dir = tempfile::TempDir::new().unwrap();
-
-        // Create a bare remote repository
-        let remote_path = temp_dir.path().join("remote.git");
-        run_git_in_dir(&remote_path, &["init", "--bare"]);
-
-        // Clone the remote to create a workspace
-        let workspace_path = temp_dir.path().join("workspace");
-        run_git_in_dir(
-            &workspace_path,
-            &["clone", remote_path.to_str().unwrap(), "."],
-        );
-        run_git(&workspace_path, &["config", "user.name", "Test"]);
-        run_git(
-            &workspace_path,
-            &["config", "user.email", "test@example.com"],
-        );
-
-        // Get the initial HEAD
-        let base_head = run_git(&workspace_path, &["rev-parse", "HEAD"]);
+        let (repo_path, _temp_dir) = create_git_repo();
+        let base_head = run_git(&repo_path, &["rev-parse", "HEAD"]);
 
         let bead_id = crate::types::BeadId::from("needle-abc123");
 
         // Create a commit for this bead
-        let file = workspace_path.join("file.txt");
+        let file = repo_path.join("file.txt");
         fs::write(&file, "content").unwrap();
-        run_git(&workspace_path, &["add", "file.txt"]);
+        run_git(&repo_path, &["add", "file.txt"]);
         run_git(
-            &workspace_path,
+            &repo_path,
             &[
                 "commit",
                 "-m",
@@ -617,33 +597,48 @@ mod tests {
             ],
         );
 
-        // Get HEAD before push
-        let head_before_injection = run_git(&workspace_path, &["rev-parse", "HEAD"]);
+        // Create a local bare remote and push to it
+        let temp_remote_dir = tempfile::TempDir::new().unwrap();
+        let remote_path = temp_remote_dir.path().join("remote.git");
+        fs::create_dir_all(&remote_path).unwrap();
+        // Initialize bare repo directly
+        let output = Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote_path)
+            .output();
+        assert!(output.unwrap().status.success(), "git init --bare failed");
 
-        // Push to the remote
-        run_git(&workspace_path, &["push", "origin", "main"]);
+        // Add remote and push
+        run_git(
+            &repo_path,
+            &["remote", "add", "origin", remote_path.to_str().unwrap()],
+        );
+        run_git(&repo_path, &["push", "-u", "origin", "main"]);
+
+        // Get HEAD before injection
+        let head_before_injection = run_git(&repo_path, &["rev-parse", "HEAD"]);
 
         // Verify HEAD is in remote tracking branch
-        let remote_contains = run_git(&workspace_path, &["branch", "-r", "--contains", "HEAD"]);
+        let remote_contains = run_git(&repo_path, &["branch", "-r", "--contains", "HEAD"]);
         assert!(
             !remote_contains.is_empty(),
             "HEAD should be in remote branch"
         );
 
         // Try to inject the trailer - should skip because HEAD is pushed
-        inject_bead_id_trailer(&workspace_path, &bead_id, &base_head)
+        inject_bead_id_trailer(&repo_path, &bead_id, &base_head)
             .await
             .unwrap();
 
         // Verify HEAD SHA is unchanged (no amend occurred)
-        let head_after_injection = run_git(&workspace_path, &["rev-parse", "HEAD"]);
+        let head_after_injection = run_git(&repo_path, &["rev-parse", "HEAD"]);
         assert_eq!(
             head_before_injection, head_after_injection,
             "HEAD SHA should not change when amend is skipped for pushed commits"
         );
 
         // Verify no trailer was added
-        let trailers = get_trailers(&workspace_path);
+        let trailers = get_trailers(&repo_path);
         assert!(
             !trailers.contains(bead_id.as_ref()),
             "No trailer should be added when HEAD is already pushed"
@@ -665,35 +660,17 @@ mod tests {
         // 5. Call inject_bead_id_trailer
         // Expected: HEAD SHA changed (amended), trailer added
 
-        let temp_dir = tempfile::TempDir::new().unwrap();
-
-        // Create a bare remote repository
-        let remote_path = temp_dir.path().join("remote.git");
-        run_git_in_dir(&remote_path, &["init", "--bare"]);
-
-        // Clone the remote to create a workspace
-        let workspace_path = temp_dir.path().join("workspace");
-        run_git_in_dir(
-            &workspace_path,
-            &["clone", remote_path.to_str().unwrap(), "."],
-        );
-        run_git(&workspace_path, &["config", "user.name", "Test"]);
-        run_git(
-            &workspace_path,
-            &["config", "user.email", "test@example.com"],
-        );
-
-        // Get the initial HEAD
-        let base_head = run_git(&workspace_path, &["rev-parse", "HEAD"]);
+        let (repo_path, _temp_dir) = create_git_repo();
+        let base_head = run_git(&repo_path, &["rev-parse", "HEAD"]);
 
         let bead_id = crate::types::BeadId::from("needle-def456");
 
         // Create a commit for this bead
-        let file = workspace_path.join("file.txt");
+        let file = repo_path.join("file.txt");
         fs::write(&file, "content").unwrap();
-        run_git(&workspace_path, &["add", "file.txt"]);
+        run_git(&repo_path, &["add", "file.txt"]);
         run_git(
-            &workspace_path,
+            &repo_path,
             &[
                 "commit",
                 "-m",
@@ -702,35 +679,36 @@ mod tests {
         );
 
         // Get HEAD before injection
-        let head_before_injection = run_git(&workspace_path, &["rev-parse", "HEAD"]);
+        let head_before_injection = run_git(&repo_path, &["rev-parse", "HEAD"]);
 
-        // Verify HEAD is NOT in remote tracking branch (hasn't been pushed yet)
-        let remote_contains = run_git(&workspace_path, &["branch", "-r", "--contains", "HEAD"]);
+        // Verify HEAD is NOT in remote tracking branch (no remotes configured)
+        let remote_contains = run_git(&repo_path, &["branch", "-r", "--contains", "HEAD"]);
         assert!(
             remote_contains.is_empty(),
-            "HEAD should not be in remote branch before push"
+            "HEAD should not be in remote branch when no remotes configured"
         );
 
         // Inject the trailer - should succeed because HEAD is not pushed
-        inject_bead_id_trailer(&workspace_path, &bead_id, &base_head)
+        inject_bead_id_trailer(&repo_path, &bead_id, &base_head)
             .await
             .unwrap();
 
         // Verify HEAD SHA changed (amend occurred)
-        let head_after_injection = run_git(&workspace_path, &["rev-parse", "HEAD"]);
+        let head_after_injection = run_git(&repo_path, &["rev-parse", "HEAD"]);
         assert_ne!(
             head_before_injection, head_after_injection,
             "HEAD SHA should change when amend is performed on unpushed commits"
         );
 
         // Verify the trailer was added
-        let trailers = get_trailers(&workspace_path);
+        let trailers = get_trailers(&repo_path);
         assert!(
             trailers.contains(bead_id.as_ref()),
             "Trailer should be added when HEAD is not pushed"
         );
     }
 
+    #[allow(dead_code)]
     fn run_git_in_dir(dir: &Path, args: &[&str]) -> String {
         // Ensure parent directory exists for commands that need it (e.g., git init --bare)
         if let Some(parent) = dir.parent() {

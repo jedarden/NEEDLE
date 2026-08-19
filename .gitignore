@@ -14,6 +14,14 @@ p95_*
 
 # Benchmark artifacts
 benchmark_*.txt
+full_benchmark.txt
+
+# Cargo install metadata (never belongs in a repo)
+.crates.toml
+.crates2.json
+
+# Misinvocation artifacts
+--help
 
 # Criterion output
 criterion/
