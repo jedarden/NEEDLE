@@ -2293,6 +2293,8 @@ mod tests {
             _ => panic!("needle.model.provider should be a String value"),
         }
 
+        drop(records);
+
         // Test with None provider (adapter that declares no provider, e.g., opencode)
         exporter.records.lock().unwrap().clear();
         sink.emit_log(&make_test_event(
