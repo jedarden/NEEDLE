@@ -569,7 +569,7 @@ mod tests {
     async fn skips_trailer_injection_when_head_already_pushed() {
         use super::inject_bead_id_trailer;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
 
         // Regression test for needle-9c8640b7: when HEAD is already pushed to
         // a remote, inject_bead_id_trailer should skip the amend to avoid
@@ -630,10 +630,15 @@ mod tests {
             "HEAD should be in remote branch after push"
         );
 
+        drop(setup_env_guard);
+        drop(setup_env_lock);
+
         // Try to inject the trailer - should skip because HEAD is pushed
         inject_bead_id_trailer(&repo_path, &bead_id, &base_head)
             .await
             .unwrap();
+
+        let (_verify_env_lock, _verify_env_guard) = crate::util::test_env::isolate_env();
 
         // Verify HEAD SHA is unchanged (no amend occurred)
         let head_after_injection = run_git(&repo_path, &["rev-parse", "HEAD"]);
