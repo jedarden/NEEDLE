@@ -1,0 +1,410 @@
+# NEEDLE Integration Test Stack Traces
+Generated: 2026-08-17
+Test: integration_tests
+Environment: RUST_BACKTRACE=full, single-threaded execution
+
+## Summary
+Total tests run: 70
+Failed tests: 5+ (see details below)
+
+---
+
+## Failed Test Stack Traces
+
+### 1. adapter_validation_rejects_special_characters
+
+**Thread:** adapter_validation_rejects_special_characters (381877)
+**Location:** tests/integration_tests.rs:2004:9
+**Panic Message:** error message should not execute injected payloads for adapter: '../../../etc/passwd'
+
+**Stack Backtrace:**
+```
+   0: __rustc::rust_begin_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/panicking.rs:80:14
+   2: integration_tests::adapter_validation_rejects_special_characters::{{closure}}
+             at ./tests/integration_tests.rs:2004:9
+   3: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   4: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   5: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:70
+   6: tokio::task::coop::with_budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:167:5
+   7: tokio::task::coop::budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:133:5
+   8: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+   9: tokio::runtime::scheduler::current_thread::Context::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  10: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:44
+  11: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  12: tokio::runtime::context::scoped::Scoped<T>::set
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  13: tokio::runtime::context::set_scheduler::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:38
+  14: std::thread::local::LocalKey<T>::try_with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:513:12
+  15: std::thread::local::LocalKey<T>::with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:477:20
+  16: tokio::runtime::context::set_scheduler
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:17
+  17: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  18: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:24
+  19: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:33
+  20: tokio::runtime::context::runtime::enter_runtime
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  21: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  22: tokio::runtime::runtime::Runtime::block_on_inner
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:374:52
+  23: tokio::runtime::runtime::Runtime::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:343:18
+  24: integration_tests::adapter_validation_rejects_special_characters
+             at ./tests/integration_tests.rs:1984:50
+  25: integration_tests::adapter_validation_rejects_special_characters::{{closure}}
+             at ./tests/integration_tests.rs:1970:57
+  26: core::ops::function::FnOnce::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+  27: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+```
+
+---
+
+### 2. cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead
+
+**Thread:** cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead (382089)
+**Location:** tests/integration_tests.rs:2615:10
+**Panic Message:** br init command failed to execute: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+**Stack Backtrace:**
+```
+   0: __rustc::rust_begin_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1867:5
+   3: core::result::Result<T,E>::expect
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1185:23
+   4: integration_tests::cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead::{{closure}}
+             at ./tests/integration_tests.rs:2615:10
+   5: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   6: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   7: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:70
+   8: tokio::task::coop::with_budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:167:5
+   9: tokio::task::coop::budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:133:5
+  10: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+  11: tokio::runtime::scheduler::current_thread::Context::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  12: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:44
+  13: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  14: tokio::runtime::context::scoped::Scoped<T>::set
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  15: tokio::runtime::context::set_scheduler::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:38
+  16: std::thread::local::LocalKey<T>::try_with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:513:12
+  17: std::thread::local::LocalKey<T>::with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:477:20
+  18: tokio::runtime::context::set_scheduler
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:17
+  19: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  20: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:24
+  21: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:33
+  22: tokio::runtime::context::runtime::enter_runtime
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  23: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  24: tokio::runtime::runtime::Runtime::block_on_inner
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:374:52
+  25: tokio::runtime::runtime::Runtime::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:343:18
+  26: integration_tests::cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead
+             at ./tests/integration_tests.rs:2712:18
+  27: integration_tests::cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead::{{closure}}
+             at ./tests/integration_tests.rs:2595:78
+  28: core::ops::function::FnOnce::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+  29: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+```
+
+---
+
+### 3. cross_workspace_mend_skips_beads_with_live_assignees
+
+**Thread:** cross_workspace_mend_skips_beads_with_live_assignees (382091)
+**Location:** tests/integration_tests.rs:2765:10
+**Panic Message:** br init command failed to execute: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+**Stack Backtrace:**
+```
+   0: __rustc::rust_begin_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1867:5
+   3: core::result::Result<T,E>::expect
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1185:23
+   4: integration_tests::cross_workspace_mend_skips_beads_with_live_assignees::{{closure}}
+             at ./tests/integration_tests.rs:2765:10
+   5: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   6: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   7: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:70
+   8: tokio::task::coop::with_budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:167:5
+   9: tokio::task::coop::budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:133:5
+  10: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+  11: tokio::runtime::scheduler::current_thread::Context::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  12: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:44
+  13: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  14: tokio::runtime::context::scoped::Scoped<T>::set
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  15: tokio::runtime::context::set_scheduler::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:38
+  16: std::thread::local::LocalKey<T>::try_with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:513:12
+  17: std::thread::local::LocalKey<T>::with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:477:20
+  18: tokio::runtime::context::set_scheduler
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:17
+  19: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  20: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:24
+  21: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:33
+  22: tokio::runtime::context::runtime::enter_runtime
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  23: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  24: tokio::runtime::runtime::Runtime::block_on_inner
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:374:52
+  25: tokio::runtime::runtime::Runtime::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:343:18
+  26: integration_tests::cross_workspace_mend_skips_beads_with_live_assignees
+             at ./tests/integration_tests.rs:2875:6
+  27: integration_tests::cross_workspace_mend_skips_beads_with_live_assignees::{{closure}}
+             at ./tests/integration_tests.rs:2745:64
+  28: core::ops::function::FnOnce::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+  29: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+```
+
+---
+
+### 4. cross_workspace_mend_skips_own_worker_beads
+
+**Thread:** cross_workspace_mend_skips_own_worker_beads (382093)
+**Location:** tests/integration_tests.rs:2902:10
+**Panic Message:** br create command failed to execute: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+
+**Stack Backtrace:**
+```
+   0: __rustc::rust_begin_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1867:5
+   3: core::result::Result<T,E>::expect
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1185:23
+   4: integration_tests::cross_workspace_mend_skips_own_worker_beads::{{closure}}
+             at ./tests/integration_tests.rs:2902:10
+   5: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   6: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   7: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:70
+   8: tokio::task::coop::with_budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:167:5
+   9: tokio::task::coop::budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:133:5
+  10: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+  11: tokio::runtime::scheduler::current_thread::Context::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  12: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:44
+  13: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  14: tokio::runtime::context::scoped::Scoped<T>::set
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  15: tokio::runtime::context::set_scheduler::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:38
+  16: std::thread::local::LocalKey<T>::try_with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:513:12
+  17: std::thread::local::LocalKey<T>::with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:477:20
+  18: tokio::runtime::context::set_scheduler
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:17
+  19: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  20: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:24
+  21: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:33
+  22: tokio::runtime::context::runtime::enter_runtime
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  23: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  24: tokio::runtime::runtime::Runtime::block_on_inner
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:374:52
+  25: tokio::runtime::runtime::Runtime::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:343:18
+  26: integration_tests::cross_workspace_mend_skips_own_worker_beads
+             at ./tests/integration_tests.rs:2983:6
+  27: integration_tests::cross_workspace_mend_skips_own_worker_beads::{{closure}}
+             at ./tests/integration_tests.rs:2879:55
+  28: core::ops::function::FnOnce::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+  29: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+```
+
+---
+
+### 5. dead_worker_cleanup_integration
+
+**Thread:** dead_worker_cleanup_integration (382096)
+**Location:** tests/integration_tests.rs:3378:5
+**Panic Message:** needle worker failed with exit status: ExitStatus(unix_wait_status(512))
+
+**Stack Backtrace:**
+```
+   0: __rustc::rust_begin_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/panicking.rs:80:14
+   2: integration_tests::dead_worker_cleanup_integration::{{closure}}
+             at ./tests/integration_tests.rs:3378:5
+   3: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   4: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   5: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:70
+   6: tokio::task::coop::with_budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:167:5
+   7: tokio::task::coop::budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:133:5
+   8: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+   9: tokio::runtime::scheduler::current_thread::Context::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  10: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:44
+  11: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  12: tokio::runtime::context::scoped::Scoped<T>::set
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  13: tokio::runtime::context::set_scheduler::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:38
+  14: std::thread::local::LocalKey<T>::try_with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:513:12
+  15: std::thread::local::LocalKey<T>::with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:477:20
+  16: tokio::runtime::context::set_scheduler
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:17
+  17: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  18: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:24
+  19: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:33
+  20: tokio::runtime::context::runtime::enter_runtime
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  21: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  22: tokio::runtime::runtime::Runtime::block_on_inner
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:374:52
+  23: tokio::runtime::runtime::Runtime::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:343:18
+  24: integration_tests::dead_worker_cleanup_integration
+             at ./tests/integration_tests.rs:3408:6
+  25: integration_tests::dead_worker_cleanup_integration::{{closure}}
+             at ./tests/integration_tests.rs:3284:43
+  26: core::ops::function::FnOnce::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+  27: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+```
+
+---
+
+## Additional Failed Tests (From Initial Run)
+
+Based on the initial test run, these additional tests also failed:
+- idle_worker_flagging_detects_stuck_workers
+- mend_removes_stale_dependency_links
+- outcome_path_success_exit_0
+- subprocess_adapter_failure_exits_nonzero
+- worker_binary_path_supervisor_initialization
+
+---
+
+## Analysis
+
+### Common Patterns
+
+1. **Missing bead CLI (`br` command):** Tests 2, 3, and 4 fail because the `br` (bead-forge) CLI is not available in the test environment. These tests require the `br init` and `br create` commands to execute successfully.
+
+2. **Worker Process Failures:** Test 5 fails because the needle worker subprocess exits with a non-zero status (512), indicating an issue with worker process execution.
+
+3. **Test Expectation Mismatch:** Test 1 fails because the error message contains what appears to be a path traversal payload (`'../../../etc/passwd'`), suggesting the test expected this to be sanitized differently.
+
+### Root Causes
+
+The primary root cause for most failures appears to be **missing dependencies** in the test environment:
+- The `br` CLI tool is not installed or not in PATH
+- Worker binary execution issues
+- Potential test assertion mismatches
+
+---
+
+## Recommendations
+
+1. **Ensure bead CLI availability:** Install the `br` (bead-forge) CLI tool in the test environment
+2. **Fix worker binary path:** Ensure the needle worker binary can be executed properly
+3. **Review test assertions:** Check if test expectations match actual error handling behavior
+4. **Environment setup:** Verify all required binaries and dependencies are available during test execution
+
+---
+
+## File Information
+
+- Raw test output: `test_stack_traces_full.txt`
+- Extracted stack traces: `test_stack_traces_organized.txt` (this file)
+- Test binary: `/home/coding/target/debug/deps/integration_tests-9c74292dd2eace4f`
+- Test run date: 2026-08-17

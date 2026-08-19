@@ -591,7 +591,7 @@ mod tests {
         let workspace_path = temp_dir.path().join("workspace");
         run_git_in_dir(
             &workspace_path,
-            &["clone", &remote_path.to_str().unwrap(), "."],
+            &["clone", remote_path.to_str().unwrap(), "."],
         );
         run_git(&workspace_path, &["config", "user.name", "Test"]);
         run_git(
@@ -675,7 +675,7 @@ mod tests {
         let workspace_path = temp_dir.path().join("workspace");
         run_git_in_dir(
             &workspace_path,
-            &["clone", &remote_path.to_str().unwrap(), "."],
+            &["clone", remote_path.to_str().unwrap(), "."],
         );
         run_git(&workspace_path, &["config", "user.name", "Test"]);
         run_git(
@@ -732,6 +732,10 @@ mod tests {
     }
 
     fn run_git_in_dir(dir: &Path, args: &[&str]) -> String {
+        // Ensure parent directory exists for commands that need it (e.g., git init --bare)
+        if let Some(parent) = dir.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
         let output = Command::new("git")
             .args(args)
             .current_dir(dir)

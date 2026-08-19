@@ -141,6 +141,7 @@ impl CliBeadStore {
     /// Check if a specific quirk applies to the current backend version.
     /// Returns true only if the quirk exists and its version_requirement matches
     /// the backend's verified version (or has no version requirement).
+    #[allow(dead_code)]
     fn has_quirk(&self, quirk_name: &str) -> bool {
         self.backend
             .quirks
@@ -149,6 +150,7 @@ impl CliBeadStore {
     }
 
     /// Check if a quirk's version requirement matches the backend's verified version.
+    #[allow(dead_code)]
     fn quirk_version_matches(&self, quirk: &crate::bead_store::backend::BeadBackendQuirk) -> bool {
         match &quirk.version_requirement {
             None => true, // No version requirement means it always applies

@@ -1,0 +1,17 @@
+{
+  "bead_id": "needle-f411ff1d",
+  "agent": "claude-code-glm-4.7",
+  "provider": "anthropic",
+  "model": "glm-4.7",
+  "exit_code": 0,
+  "outcome": "success",
+  "duration_ms": 758039,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-08-18T02:55:47.586357389Z",
+  "trace_format": "claude_json",
+  "pruned": false,
+  "template_version": null,
+  "timeout_reason": null
+}

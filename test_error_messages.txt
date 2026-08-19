@@ -1,0 +1,274 @@
+================================================================================
+CI FAILURE: cargo fmt -- --check (Formatting Check)
+================================================================================
+The CI pipeline failed during formatting validation. The following files have
+formatting differences that must be fixed before the tests can run:
+
+================================================================================
+FILE: src/bead_store/mod.rs
+================================================================================
+
+DIFF at line 2341:
+---------
+         // Verify that not all elapsed times are identical (jitter is working)
+         // With ±25% jitter on exponential backoff, times should vary
+-        let unique_times: std::collections::HashSet<_> = elapsed_times
+-            .iter()
+-            .map(|d| d.as_millis())
+-            .collect();
++        let unique_times: std::collections::HashSet<_> =
++            elapsed_times.iter().map(|d| d.as_millis()).collect();
+
+DIFF at line 2408:
+---------
+         // Verify jitter creates variation
+-        let unique_times: std::collections::HashSet<_> = elapsed_times
+-            .iter()
+-            .map(|d| d.as_millis())
+-            .collect();
++        let unique_times: std::collections::HashSet<_> =
++            elapsed_times.iter().map(|d| d.as_millis()).collect();
+
+DIFF at line 2658:
+---------
+         // With jitter, the 10 runs should have varying elapsed times
+         // If all times are identical, jitter is not working
+-        let unique_times: std::collections::HashSet<_> = elapsed_times
+-            .iter()
+-            .map(|d| d.as_millis())
+-            .collect();
++        let unique_times: std::collections::HashSet<_> =
++            elapsed_times.iter().map(|d| d.as_millis()).collect();
+
+DIFF at line 2722:
+---------
+         // Attempt 2: 20ms * 2^2 = 80ms ± 20ms (60-100ms)
+
+         // Minimum total: (15 + 30 + 60) = 105ms
+-        let min_expected = ((BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4) as f64 * (1.0 - JITTER_PERCENT)) as u64;
++        let min_expected =
++            ((BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4) as f64 * (1.0 - JITTER_PERCENT)) as u64;
+
+         // Maximum total: (25 + 50 + 100) = 175ms
+-        let max_expected = ((BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4) as f64 * (1.0 + JITTER_PERCENT)) as u64;
++        let max_expected =
++            ((BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4) as f64 * (1.0 + JITTER_PERCENT)) as u64;
+
+DIFF at line 2823:
+---------
+         // Calculate expected delays:
+         // 10ms, 20ms, 40ms, 80ms, 160ms, 320ms
+         // Sum: 630ms ± 157.5ms (472.5-787.5ms)
+-        let base_sum = BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4 + BASE_MS * 8 + BASE_MS * 16 + BASE_MS * 32;
++        let base_sum =
++            BASE_MS * 1 + BASE_MS * 2 + BASE_MS * 4 + BASE_MS * 8 + BASE_MS * 16 + BASE_MS * 32;
+
+================================================================================
+FILE: src/canary/mod.rs
+================================================================================
+
+DIFF at line 345:
+---------
+         // Verify the backend binary exists
+-        let (backend_type, binary_path) = crate::config::resolve_bead_cli(&workspace_config.bead_cli)
+-            .with_context(|| {
++        let (backend_type, binary_path) =
++            crate::config::resolve_bead_cli(&workspace_config.bead_cli).with_context(|| {
+                 format!(
+                     "failed to resolve bead CLI backend '{}' for canary workspace {}",
+                     backend,
+
+DIFF at line 463:
+---------
+                         "--workspace",
+                         &self.canary_workspace.display().to_string(),
+                         "--agent",
+-                        "echo",  // Use explicit hermetic adapter, not global default
++                        "echo", // Use explicit hermetic adapter, not global default
+                         "--identifier",
+                         &format!("canary-{bead_id}"),
+
+DIFF at line 1709:
+---------
+         )
+         .unwrap();
+
+-        let runner = CanaryRunner::new(
+-            PathBuf::from("/tmp/.needle"),
+-            workspace.to_path_buf(),
+-            300,
+-        );
++        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+
+DIFF at line 1742:
+---------
+         )
+         .unwrap();
+
+-        let runner = CanaryRunner::new(
+-            PathBuf::from("/tmp/.needle"),
+-            workspace.to_path_buf(),
+-            300,
+-        );
++        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+
+DIFF at line 1782:
+---------
+             std::fs::set_permissions(&bead_path, perms).unwrap();
+         }
+
+-        let runner = CanaryRunner::new(
+-            PathBuf::from("/tmp/.needle"),
+-            workspace.to_path_buf(),
+-            300,
+-        );
++        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+
+DIFF at line 1824:
+---------
+             std::fs::set_permissions(&bf_path, perms).unwrap();
+         }
+
+-        let runner = CanaryRunner::new(
+-            PathBuf::from("/tmp/.needle"),
+-            workspace.to_path_buf(),
+-            300,
+-        );
++        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+
+================================================================================
+FILE: src/cli/mod.rs
+================================================================================
+
+DIFF at line 2727:
+---------
+                         })
+                         .ok()
+                 })
+-                    .unwrap_or(None)
++                .unwrap_or(None)
+             });
+
+DIFF at line 2746:
+---------
+             if let Some(check) = update_result {
+                 if check.update_available {
+-                    println!("  ⚠️  Update available: running {}, latest is {} — run `needle upgrade`",
+-                        check.current_version, check.latest_version);
++                    println!(
++                        "  ⚠️  Update available: running {}, latest is {} — run `needle upgrade`",
++                        check.current_version, check.latest_version
++                    );
+                     println!();
+                 }
+             }
+
+================================================================================
+FILE: src/health/mod.rs
+================================================================================
+
+DIFF at line 471:
+---------
+     /// let is_alive = monitor.check_worker_alive("claude-code-glm-5-alpha")?;
+     /// ```
+     pub fn check_worker_alive(&self, qualified_worker_id: &str) -> Result<bool> {
+-        let path = self.heartbeat_dir.join(format!("{}.json", qualified_worker_id));
++        let path = self
++            .heartbeat_dir
++            .join(format!("{}.json", qualified_worker_id));
+
+DIFF at line 482:
+---------
+             return Ok(false);
+         }
+
+-        let content = std::fs::read_to_string(&path)
+-            .with_context(|| format!("failed to read heartbeat file for worker {}: {}", qualified_worker_id, path.display()))?;
++        let content = std::fs::read_to_string(&path).with_context(|| {
++            format!(
++                "failed to read heartbeat file for worker {}: {}",
++                qualified_worker_id,
++                path.display()
++            )
++        })?;
+
+-        let heartbeat: HeartbeatData = serde_json::from_str(&content)
+-            .with_context(|| format!("failed to parse heartbeat file for worker {}: {}", qualified_worker_id, path.display()))?;
++        let heartbeat: HeartbeatData = serde_json::from_str(&content).with_context(|| {
++            format!(
++                "failed to parse heartbeat file for worker {}: {}",
++                qualified_worker_id,
++                path.display()
++            )
++        })?;
+
+DIFF at line 3566:
+---------
+         // Attempt to check if the worker is alive
+         let result = monitor.check_worker_alive(qualified_id);
+
+-        assert!(
+-            result.is_err(),
+-            "malformed heartbeat should return error"
+-        );
++        assert!(result.is_err(), "malformed heartbeat should return error");
+
+DIFF at line 3774:
+---------
+         // Verify the malformed heartbeat returns error
+         let result = monitor.verify_heartbeat();
+
+-        assert!(
+-            result.is_err(),
+-            "malformed heartbeat should return error"
+-        );
++        assert!(result.is_err(), "malformed heartbeat should return error");
+
+DIFF at line 4200:
+---------
+         // Check that the worker is alive
+         let is_alive = monitor.check_worker_alive(worker_id).unwrap();
+-        assert!(
+-            is_alive,
+-            "worker with fresh heartbeat should be alive"
+-        );
++        assert!(is_alive, "worker with fresh heartbeat should be alive");
+
+DIFF at line 4248:
+---------
+         // Check that the worker is not alive
+         let is_alive = monitor.check_worker_alive(worker_id).unwrap();
+-        assert!(
+-            !is_alive,
+-            "worker with stale heartbeat should not be alive"
+-        );
++        assert!(!is_alive, "worker with stale heartbeat should not be alive");
+
+DIFF at line 4396:
+---------
+         // Verify the qualified ID is used correctly
+         let is_alive = monitor.check_worker_alive(qualified_id).unwrap();
+-        assert!(
+-            is_alive,
+-            "worker should be found using qualified ID format"
+-        );
++        assert!(is_alive, "worker should be found using qualified ID format");
+
+================================================================================
+SUMMARY
+================================================================================
+
+Total files with formatting issues: 4
+- src/bead_store/mod.rs: 5 diffs
+- src/canary/mod.rs: 5 diffs
+- src/cli/mod.rs: 2 diffs
+- src/health/mod.rs: 8 diffs
+
+FIX INSTRUCTIONS:
+Run `cargo fmt` to automatically reformat all files according to rustfmt's
+style guide. This will resolve all the formatting differences above.
+
+CI WORKFLOW: needle-ci-glr9w
+FAILED STEP: verify (cargo fmt -- --check)
+EXIT CODE: 1
+TIMESTAMP: 2026-08-16T05:08:12.968Z

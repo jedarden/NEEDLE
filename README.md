@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75+-orange.svg)](rust-toolchain.toml)
-[![Version](https://img.shields.io/badge/version-0.3.1-green.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.4.0-green.svg)](Cargo.toml)
 
 **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
@@ -23,8 +23,14 @@ curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.s
 # Or build from source (needs Rust 1.75+, see rust-toolchain.toml)
 cargo install --git https://github.com/jedarden/NEEDLE
 
-# Run a worker against a bead-tracked workspace
+# Configure your bead workspace backend (required)
 cd /path/to/your/workspace
+cat > .needle.yaml << 'EOF'
+bead_cli:
+  backend: bead-rs  # or 'bead-forge' for legacy bf/br workspaces
+EOF
+
+# Run a worker
 needle run --agent claude --identity alpha
 ```
 
@@ -41,14 +47,14 @@ See [`docs/examples/`](docs/examples/) for end-to-end configurations.
 
 A **bead** is a work item — the unit of work NEEDLE processes. Think of it as a structured task ticket: a title, a body describing the deliverable and acceptance criteria, a status (`open`, `in_progress`, `done`), and optional metadata like priority and dependencies.
 
-Beads live in a **bead store** — a SQLite database (`beads.db`) plus a JSONL checkpoint file (`issues.jsonl`) in a `.beads/` directory inside your project. The `br` CLI manages the bead store: create beads, list them, claim them, close them.
+Beads live in a **bead store** — a pluggable backend managed by a bead CLI. The current primary backend is **bead-rs**, which uses a SQLite database (`beads.db`) plus a checkpoint directory (`.beads/checkpoint/` with `current.json`, `forensic.jsonl`, and `objects/`). The legacy **bead-forge** backend uses `issues.jsonl`.
 
 ```bash
-# Create a bead
-br create --title "Add pagination to search results" --body "..."
+# Create a bead (bead-rs backend)
+bead create --title "Add pagination to search results" --priority 2 --issue-type task
 
 # List open beads
-br list --status open
+bead list --status open
 
 # NEEDLE does the rest: claims, dispatches, and closes beads automatically
 ```
@@ -133,7 +139,7 @@ Query the bead queue for the next claimable bead in **deterministic priority ord
 
 ### 🔒 Step 2: Claim
 
-Attempt an **atomic claim** via `br update --claim`. SQLite transaction isolation guarantees exactly one worker succeeds. If the claim fails (race lost), return to Step 1 with the losing candidate excluded.
+Attempt an **atomic claim** via the bead CLI (`bead claim` for bead-rs, `bf claim` for bead-forge). SQLite transaction isolation guarantees exactly one worker succeeds. If the claim fails (race lost), return to Step 1 with the losing candidate excluded.
 
 ### 📋 Step 3: Build
 
@@ -186,7 +192,7 @@ When the primary workspace has no claimable beads, NEEDLE follows a **strand seq
 
 Multiple NEEDLE workers run independently with **no central orchestrator**. Coordination happens through the shared bead queue:
 
-- **Atomicity** — `br update --claim` uses SQLite transactions; exactly one worker wins each claim
+- **Atomicity** — the bead CLI's claim command uses SQLite transactions; exactly one worker wins each claim
 - **Determinism** — all workers compute the same priority order; races are resolved by the database, not by timing
 - **Independence** — each worker is a self-contained loop in its own tmux session
 - **Naming** — workers use NATO alphabet identifiers: `alpha`, `bravo`, `charlie`, ...
@@ -194,7 +200,7 @@ Multiple NEEDLE workers run independently with **no central orchestrator**. Coor
 ```
   needle-claude-sonnet-alpha ──┐
   needle-claude-sonnet-bravo ──┤
-  needle-codex-gpt4-charlie ───┼──► Shared .beads/ (SQLite + JSONL)
+  needle-codex-gpt4-charlie ───┼──► Shared .beads/ (SQLite + checkpoint)
   needle-opencode-qwen-delta ──┤
   needle-aider-sonnet-echo ────┘
 ```

@@ -1,0 +1,12 @@
+Completed and closed `needle-16546862`.
+
+Recorded the full inventory in bead notes, including:
+
+- All four expected YAML assertions.
+- Current live canary statuses and labels.
+- Stale failure assertions (`blocked` and `failure-count:1`).
+- Timeout scenario caveat.
+- Verified bead-forge vocabulary via `bf show --json`.
+- Recommended changes for each file.
+
+No repository files were changed, so no commit or push was made.

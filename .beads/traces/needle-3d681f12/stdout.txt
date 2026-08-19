@@ -1,0 +1,5 @@
+Audit completed and recorded on bead `needle-3d681f12`, now closed.
+
+Key finding: `src/worker/mod.rs::full_cycle_with_echo_agent` is the only test writing to the real `~/.needle/state/heartbeats/` path.
+
+The complete module-grouped catalog, including all unguarded tests and temp-directory classifications, is in the bead notes. No source files changed, so no commit or push was made.

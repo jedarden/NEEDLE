@@ -1,0 +1,602 @@
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.10s
+     Running tests/integration_tests.rs (/home/coding/target/debug/deps/integration_tests-9c74292dd2eace4f)
+
+running 70 tests
+test adapter_validation_error_message_sanitizes_special_chars ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter 'adapter'with"quotes\and\backslashes' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents/adapter'with"quotes\and\backslashes.yaml
+  - ~/.local/bin/claude-config/agents/adapter'with"quotes\and\backslashes/config.json
+  - ~/.config/needle/adapters/adapter'with"quotes\and\backslashes.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter 'adapter'with"quotes\and\backslashes' not found in any of the expected configuration directories
+ok
+test adapter_validation_fails_before_routing_initialization ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter 'routing-test-adapter-missing' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents/routing-test-adapter-missing.yaml
+  - ~/.local/bin/claude-config/agents/routing-test-adapter-missing/config.json
+  - ~/.config/needle/adapters/routing-test-adapter-missing.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter 'routing-test-adapter-missing' not found in any of the expected configuration directories
+ok
+test adapter_validation_fails_despite_valid_workspaces ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter 'multi-workspace-adapter-missing' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents/multi-workspace-adapter-missing.yaml
+  - ~/.local/bin/claude-config/agents/multi-workspace-adapter-missing/config.json
+  - ~/.config/needle/adapters/multi-workspace-adapter-missing.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter 'multi-workspace-adapter-missing' not found in any of the expected configuration directories
+ok
+test adapter_validation_happens_before_main_worker_loop ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter 'timing-test-adapter-missing' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents/timing-test-adapter-missing.yaml
+  - ~/.local/bin/claude-config/agents/timing-test-adapter-missing/config.json
+  - ~/.config/needle/adapters/timing-test-adapter-missing.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter 'timing-test-adapter-missing' not found in any of the expected configuration directories
+ok
+test adapter_validation_is_case_sensitive ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter 'TestAdapter' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents/TestAdapter.yaml
+  - ~/.local/bin/claude-config/agents/TestAdapter/config.json
+  - ~/.config/needle/adapters/TestAdapter.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter 'TestAdapter' not found in any of the expected configuration directories
+ok
+test adapter_validation_rejects_path_like_names ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: WARNING - no sinks configured, events will be discarded!
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter '/usr/bin/adapter' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents//usr/bin/adapter.yaml
+  - ~/.local/bin/claude-config/agents//usr/bin/adapter/config.json
+  - ~/.config/needle/adapters//usr/bin/adapter.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter '/usr/bin/adapter' not found in any of the expected configuration directories
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter './local-adapter' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents/./local-adapter.yaml
+  - ~/.local/bin/claude-config/agents/./local-adapter/config.json
+  - ~/.config/needle/adapters/./local-adapter.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter './local-adapter' not found in any of the expected configuration directories
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter '../parent-adapter' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents/../parent-adapter.yaml
+  - ~/.local/bin/claude-config/agents/../parent-adapter/config.json
+  - ~/.config/needle/adapters/../parent-adapter.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter '../parent-adapter' not found in any of the expected configuration directories
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: WARNING - no sinks configured, events will be discarded!
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter '~/.needle/adapter' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents/~/.needle/adapter.yaml
+  - ~/.local/bin/claude-config/agents/~/.needle/adapter/config.json
+  - ~/.config/needle/adapters/~/.needle/adapter.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter '~/.needle/adapter' not found in any of the expected configuration directories
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter 'C:\Windows\System32\adapter' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents/C:\Windows\System32\adapter.yaml
+  - ~/.local/bin/claude-config/agents/C:\Windows\System32\adapter/config.json
+  - ~/.config/needle/adapters/C:\Windows\System32\adapter.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter 'C:\Windows\System32\adapter' not found in any of the expected configuration directories
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: WARNING - no sinks configured, events will be discarded!
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter '/etc/needle/adapter.d/config' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents//etc/needle/adapter.d/config.yaml
+  - ~/.local/bin/claude-config/agents//etc/needle/adapter.d/config/config.json
+  - ~/.config/needle/adapters//etc/needle/adapter.d/config.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter '/etc/needle/adapter.d/config' not found in any of the expected configuration directories
+ok
+test adapter_validation_rejects_special_characters ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: WARNING - no sinks configured, events will be discarded!
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ERROR: Configured agent adapter '../../../etc/passwd' was not found.
+Startup is aborting to prevent claiming beads with an invalid adapter configuration.
+
+To fix this, check one of these locations for your adapter configuration:
+  - ~/.needle/agents/../../../etc/passwd.yaml
+  - ~/.local/bin/claude-config/agents/../../../etc/passwd/config.json
+  - ~/.config/needle/adapters/../../../etc/passwd.yaml
+
+Common causes:
+  - Adapter file does not exist or is in a different location
+  - Incorrect adapter name specified in agent.default config
+  - Adapter file exists but is missing required fields (provider, model, etc.)
+
+Underlying error: adapter '../../../etc/passwd' not found in any of the expected configuration directories
+
+thread 'adapter_validation_rejects_special_characters' (381877) panicked at tests/integration_tests.rs:2004:9:
+error message should not execute injected payloads for adapter: '../../../etc/passwd'
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/panicking.rs:80:14
+   2: integration_tests::adapter_validation_rejects_special_characters::{{closure}}
+             at ./tests/integration_tests.rs:2004:9
+   3: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   4: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   5: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:70
+   6: tokio::task::coop::with_budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:167:5
+   7: tokio::task::coop::budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:133:5
+   8: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+   9: tokio::runtime::scheduler::current_thread::Context::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  10: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:44
+  11: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  12: tokio::runtime::context::scoped::Scoped<T>::set
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  13: tokio::runtime::context::set_scheduler::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:38
+  14: std::thread::local::LocalKey<T>::try_with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:513:12
+  15: std::thread::local::LocalKey<T>::with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:477:20
+  16: tokio::runtime::context::set_scheduler
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:17
+  17: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  18: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:24
+  19: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:33
+  20: tokio::runtime::context::runtime::enter_runtime
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  21: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  22: tokio::runtime::runtime::Runtime::block_on_inner
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:374:52
+  23: tokio::runtime::runtime::Runtime::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:343:18
+  24: integration_tests::adapter_validation_rejects_special_characters
+             at ./tests/integration_tests.rs:1984:50
+  25: integration_tests::adapter_validation_rejects_special_characters::{{closure}}
+             at ./tests/integration_tests.rs:1970:57
+  26: core::ops::function::FnOnce::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+  27: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+test agent_adapters_dir_tilde_expansion ... ✓ Agent adapters_dir tilde expansion test passed
+  Isolated home: /home/coding/.tmp/.tmph14OUz/fake-home
+  Tilde path ~/.custom-adapters -> /home/coding/.tmp/.tmph14OUz/fake-home/.custom-adapters
+ok
+test bead_cli_path_tilde_expansion ... ✓ Bead CLI path tilde expansion test passed
+  Isolated home: /home/coding/.tmp/.tmpc5Gkav/fake-home
+  Tilde path ~/.local/bin/custom-bead -> /home/coding/.tmp/.tmpc5Gkav/fake-home/.local/bin/custom-bead
+ok
+test cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead ... 
+thread 'cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead' (382089) panicked at tests/integration_tests.rs:2615:10:
+br init command failed to execute: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1867:5
+   3: core::result::Result<T,E>::expect
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1185:23
+   4: integration_tests::cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead::{{closure}}
+             at ./tests/integration_tests.rs:2615:10
+   5: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   6: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   7: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:70
+   8: tokio::task::coop::with_budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:167:5
+   9: tokio::task::coop::budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:133:5
+  10: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+  11: tokio::runtime::scheduler::current_thread::Context::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  12: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:44
+  13: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  14: tokio::runtime::context::scoped::Scoped<T>::set
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  15: tokio::runtime::context::set_scheduler::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:38
+  16: std::thread::local::LocalKey<T>::try_with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:513:12
+  17: std::thread::local::LocalKey<T>::with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:477:20
+  18: tokio::runtime::context::set_scheduler
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:17
+  19: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  20: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:24
+  21: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:33
+  22: tokio::runtime::context::runtime::enter_runtime
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  23: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  24: tokio::runtime::runtime::Runtime::block_on_inner
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:374:52
+  25: tokio::runtime::runtime::Runtime::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:343:18
+  26: integration_tests::cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead
+             at ./tests/integration_tests.rs:2712:18
+  27: integration_tests::cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead::{{closure}}
+             at ./tests/integration_tests.rs:2595:78
+  28: core::ops::function::FnOnce::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+  29: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+test cross_workspace_mend_skips_beads_with_live_assignees ... 
+thread 'cross_workspace_mend_skips_beads_with_live_assignees' (382091) panicked at tests/integration_tests.rs:2765:10:
+br init command failed to execute: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1867:5
+   3: core::result::Result<T,E>::expect
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1185:23
+   4: integration_tests::cross_workspace_mend_skips_beads_with_live_assignees::{{closure}}
+             at ./tests/integration_tests.rs:2765:10
+   5: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   6: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   7: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:70
+   8: tokio::task::coop::with_budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:167:5
+   9: tokio::task::coop::budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:133:5
+  10: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+  11: tokio::runtime::scheduler::current_thread::Context::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  12: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:44
+  13: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  14: tokio::runtime::context::scoped::Scoped<T>::set
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  15: tokio::runtime::context::set_scheduler::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:38
+  16: std::thread::local::LocalKey<T>::try_with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:513:12
+  17: std::thread::local::LocalKey<T>::with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:477:20
+  18: tokio::runtime::context::set_scheduler
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:17
+  19: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  20: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:24
+  21: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:33
+  22: tokio::runtime::context::runtime::enter_runtime
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  23: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  24: tokio::runtime::runtime::Runtime::block_on_inner
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:374:52
+  25: tokio::runtime::runtime::Runtime::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:343:18
+  26: integration_tests::cross_workspace_mend_skips_beads_with_live_assignees
+             at ./tests/integration_tests.rs:2875:6
+  27: integration_tests::cross_workspace_mend_skips_beads_with_live_assignees::{{closure}}
+             at ./tests/integration_tests.rs:2745:64
+  28: core::ops::function::FnOnce::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+  29: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+test cross_workspace_mend_skips_own_worker_beads ... 
+thread 'cross_workspace_mend_skips_own_worker_beads' (382093) panicked at tests/integration_tests.rs:2902:10:
+br create command failed to execute: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/panicking.rs:80:14
+   2: core::result::unwrap_failed
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1867:5
+   3: core::result::Result<T,E>::expect
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/result.rs:1185:23
+   4: integration_tests::cross_workspace_mend_skips_own_worker_beads::{{closure}}
+             at ./tests/integration_tests.rs:2902:10
+   5: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   6: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   7: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:70
+   8: tokio::task::coop::with_budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:167:5
+   9: tokio::task::coop::budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:133:5
+  10: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+  11: tokio::runtime::scheduler::current_thread::Context::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  12: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:44
+  13: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  14: tokio::runtime::context::scoped::Scoped<T>::set
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  15: tokio::runtime::context::set_scheduler::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:38
+  16: std::thread::local::LocalKey<T>::try_with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:513:12
+  17: std::thread::local::LocalKey<T>::with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:477:20
+  18: tokio::runtime::context::set_scheduler
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:17
+  19: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  20: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:24
+  21: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:33
+  22: tokio::runtime::context::runtime::enter_runtime
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  23: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  24: tokio::runtime::runtime::Runtime::block_on_inner
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:374:52
+  25: tokio::runtime::runtime::Runtime::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:343:18
+  26: integration_tests::cross_workspace_mend_skips_own_worker_beads
+             at ./tests/integration_tests.rs:2983:6
+  27: integration_tests::cross_workspace_mend_skips_own_worker_beads::{{closure}}
+             at ./tests/integration_tests.rs:2879:55
+  28: core::ops::function::FnOnce::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+  29: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+test dead_worker_cleanup_integration ... 
+thread 'dead_worker_cleanup_integration' (382096) panicked at tests/integration_tests.rs:3378:5:
+needle worker failed with exit status: ExitStatus(unix_wait_status(512))
+stack backtrace:
+   0: __rustc::rust_begin_unwind
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/panicking.rs:689:5
+   1: core::panicking::panic_fmt
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/panicking.rs:80:14
+   2: integration_tests::dead_worker_cleanup_integration::{{closure}}
+             at ./tests/integration_tests.rs:3378:5
+   3: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   4: <core::pin::Pin<P> as core::future::future::Future>::poll
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/future/future.rs:133:9
+   5: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:70
+   6: tokio::task::coop::with_budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:167:5
+   7: tokio::task::coop::budget
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/task/coop/mod.rs:133:5
+   8: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:830:25
+   9: tokio::runtime::scheduler::current_thread::Context::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:488:19
+  10: tokio::runtime::scheduler::current_thread::CoreGuard::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:829:44
+  11: tokio::runtime::scheduler::current_thread::CoreGuard::enter::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:68
+  12: tokio::runtime::context::scoped::Scoped<T>::set
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/scoped.rs:40:9
+  13: tokio::runtime::context::set_scheduler::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:38
+  14: std::thread::local::LocalKey<T>::try_with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:513:12
+  15: std::thread::local::LocalKey<T>::with
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/std/src/thread/local.rs:477:20
+  16: tokio::runtime::context::set_scheduler
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context.rs:187:17
+  17: tokio::runtime::scheduler::current_thread::CoreGuard::enter
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:906:27
+  18: tokio::runtime::scheduler::current_thread::CoreGuard::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:817:24
+  19: tokio::runtime::scheduler::current_thread::CurrentThread::block_on::{{closure}}
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:218:33
+  20: tokio::runtime::context::runtime::enter_runtime
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/context/runtime.rs:65:16
+  21: tokio::runtime::scheduler::current_thread::CurrentThread::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/scheduler/current_thread/mod.rs:206:9
+  22: tokio::runtime::runtime::Runtime::block_on_inner
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:374:52
+  23: tokio::runtime::runtime::Runtime::block_on
+             at /home/coding/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.1/src/runtime/runtime.rs:343:18
+  24: integration_tests::dead_worker_cleanup_integration
+             at ./tests/integration_tests.rs:3408:6
+  25: integration_tests::dead_worker_cleanup_integration::{{closure}}
+             at ./tests/integration_tests.rs:3284:43
+  26: core::ops::function::FnOnce::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+  27: <fn() -> core::result::Result<(), alloc::string::String> as core::ops::function::FnOnce<()>>::call_once
+             at /rustc/59807616e1fa2540724bfbac14d7976d7e4a3860/library/core/src/ops/function.rs:250:5
+note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.
+FAILED
+test debug_worker_hang ... DEBUG: Starting test
+DEBUG: Creating empty store
+DEBUG: Creating config
+DEBUG: Creating worker
+DEBUG: About to call run()
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+DEBUG: run() returned: Ok(Stopped)
+ok
+test deterministic_ordering_same_beads_same_order ... ok
+test deterministic_ordering_tiebreak_by_id ... ok
+test dispatcher_captures_stdout_and_stderr ... ok
+test dispatcher_timeout_kills_process ... ok
+test end_to_end_single_bead_success ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+NEEDLE telemetry: sink flush failed: failed to flush logger provider: Operation failed: errs: [Err(InternalFailure("export error: Status { code: Unavailable, message: \"tcp connect error\", source: Some(tonic::transport::Error(Transport, ConnectError(ConnectError(\"tcp connect error\", 127.0.0.1:4317, Os { code: 111, kind: ConnectionRefused, message: \"Connection refused\" })))) }"))]
+ok
+test end_to_end_worker_loops_to_next_bead ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+NEEDLE telemetry: sink flush failed: failed to flush logger provider: Operation failed: errs: [Err(InternalFailure("export error: Status { code: Unavailable, message: \"tcp connect error\", source: Some(tonic::transport::Error(Transport, ConnectError(ConnectError(\"tcp connect error\", 127.0.0.1:4317, Os { code: 111, kind: ConnectionRefused, message: \"Connection refused\" })))) }"))]
+ok
+test exhaustion_empty_workspace ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+NEEDLE telemetry: sink flush failed: failed to flush logger provider: Operation failed: errs: [Err(InternalFailure("export error: Status { code: Unavailable, message: \"tcp connect error\", source: Some(tonic::transport::Error(Transport, ConnectError(ConnectError(\"tcp connect error\", 127.0.0.1:4317, Os { code: 111, kind: ConnectionRefused, message: \"Connection refused\" })))) }"))]
+ok
+test exhaustion_with_idle_action_exit ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
+ok
+test exhaustion_with_idle_action_wait_survives_sleep ... NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: init.step.started
