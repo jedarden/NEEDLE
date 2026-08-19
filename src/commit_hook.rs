@@ -569,6 +569,8 @@ mod tests {
     async fn skips_trailer_injection_when_head_already_pushed() {
         use super::inject_bead_id_trailer;
 
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
         // Regression test for needle-9c8640b7: when HEAD is already pushed to
         // a remote, inject_bead_id_trailer should skip the amend to avoid
         // diverging local and remote history.

@@ -2796,6 +2796,7 @@ mod tests {
             .with_writer(captured.clone())
             .with_ansi(false)
             .without_time()
+            .with_max_level(tracing::Level::DEBUG)
             .finish();
 
         // Run the test within the tracing subscriber context
