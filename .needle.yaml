@@ -49,7 +49,7 @@ strands:
     force_failure_threshold: 0
     repeat_interval: 0
   weave:
-    enabled: false
+    enabled: true
     max_beads_per_run: 5
     cooldown_hours: 24
     exclude_workspaces: []
