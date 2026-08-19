@@ -575,8 +575,9 @@ mod tests {
         //
         // Setup:
         // 1. Create a workspace with a commit
-        // 2. Add a remote and push the commit
-        // 3. Call inject_bead_id_trailer
+        // 2. Add a remote (simulating a pushed state)
+        // 3. Manually set up remote tracking to simulate pushed state
+        // 4. Call inject_bead_id_trailer
         // Expected: HEAD SHA unchanged, no trailer added
 
         let (repo_path, _temp_dir) = create_git_repo();
@@ -597,11 +598,13 @@ mod tests {
             ],
         );
 
-        // Create a local bare remote and push to it
+        // Get HEAD before injection
+        let head_before_injection = run_git(&repo_path, &["rev-parse", "HEAD"]);
+
+        // Create a bare remote and push
         let temp_remote_dir = tempfile::TempDir::new().unwrap();
         let remote_path = temp_remote_dir.path().join("remote.git");
         fs::create_dir_all(&remote_path).unwrap();
-        // Initialize bare repo directly
         let output = Command::new("git")
             .args(["init", "--bare"])
             .current_dir(&remote_path)
@@ -613,16 +616,16 @@ mod tests {
             &repo_path,
             &["remote", "add", "origin", remote_path.to_str().unwrap()],
         );
-        run_git(&repo_path, &["push", "-u", "origin", "main"]);
 
-        // Get HEAD before injection
-        let head_before_injection = run_git(&repo_path, &["rev-parse", "HEAD"]);
+        // Push the current branch to origin
+        let current_branch = run_git(&repo_path, &["branch", "--show-current"]);
+        run_git(&repo_path, &["push", "-u", "origin", &current_branch]);
 
         // Verify HEAD is in remote tracking branch
         let remote_contains = run_git(&repo_path, &["branch", "-r", "--contains", "HEAD"]);
         assert!(
             !remote_contains.is_empty(),
-            "HEAD should be in remote branch"
+            "HEAD should be in remote branch after push"
         );
 
         // Try to inject the trailer - should skip because HEAD is pushed
