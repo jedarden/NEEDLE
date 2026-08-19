@@ -6,7 +6,7 @@
 //!
 //! KAIROS-inspired four-phase cycle:
 //! 1. **Orient** — read current learnings.md and existing skills, check sizes.
-//! 2. **Gather** — read bead close bodies from issues.jsonl since last
+//! 2. **Gather** — query closed beads through the configured bead store since last
 //!    consolidation; read traces for failed beads.
 //! 3. **Consolidate** — extract retrospective blocks, identify cross-bead
 //!    patterns, merge into learnings.md, deduplicate, resolve contradictions.
@@ -321,17 +321,58 @@ impl ReflectStrand {
     /// `force` bypasses cooldown and minimum bead threshold checks (used by
     /// the `needle reflect` CLI command).
     pub async fn consolidate(&self, force: bool) -> Result<ReflectSummary> {
+        self.consolidate_inner(force, None).await
+    }
+
+    /// Run consolidation using the configured bead-store backend.
+    ///
+    /// Production callers use this path so Reflect works with bead-rs' SQLite
+    /// store and checkpoint layout. `consolidate()` remains as a compatibility
+    /// entry point for legacy flat-file workspaces.
+    pub async fn consolidate_with_store(
+        &self,
+        force: bool,
+        store: &dyn BeadStore,
+    ) -> Result<ReflectSummary> {
+        self.consolidate_inner(force, Some(store)).await
+    }
+
+    async fn consolidate_inner(
+        &self,
+        force: bool,
+        store: Option<&dyn BeadStore>,
+    ) -> Result<ReflectSummary> {
         // ── Phase 1: Orient ───────────────────────────────────────────────────
         let state = ReflectState::load(&self.state_dir)?;
 
-        let issues_path = self.workspace.join(".beads").join("issues.jsonl");
-        if !issues_path.exists() {
-            tracing::debug!("reflect: no issues.jsonl found, skipping");
-            return Ok(ReflectSummary::default());
-        }
-
         // Count total closed beads and collect those since last consolidation.
-        let all_closed = self.read_closed_beads(&issues_path)?;
+        let all_closed = if let Some(store) = store {
+            store
+                .list_all()
+                .await
+                .context("reflect: failed to list beads from configured store")?
+                .into_iter()
+                .filter(|bead| bead.status == crate::types::BeadStatus::Closed)
+                .map(|bead| ClosedBeadRecord {
+                    id: bead.id.to_string(),
+                    title: Some(bead.title),
+                    status: "closed".to_string(),
+                    close_reason: bead.body,
+                    // bead-rs exposes the final mutation time but does not
+                    // currently include a separate closed_at field in list JSON.
+                    closed_at: Some(bead.updated_at),
+                    assignee: bead.assignee,
+                    labels: bead.labels,
+                })
+                .collect()
+        } else {
+            let issues_path = self.workspace.join(".beads").join("issues.jsonl");
+            if !issues_path.exists() {
+                tracing::debug!("reflect: no legacy issues.jsonl found, skipping");
+                return Ok(ReflectSummary::default());
+            }
+            self.read_closed_beads(&issues_path)?
+        };
         let total_closed = all_closed.len() as u64;
 
         let since_last: Vec<&ClosedBeadRecord> = match &state {
@@ -1382,7 +1423,7 @@ impl super::Strand for ReflectStrand {
             };
         }
 
-        match self.consolidate(false).await {
+        match self.consolidate_with_store(false, _store).await {
             Ok(_) => StrandResult::NoWork,
             Err(e) => StrandResult::Error(StrandError::ConfigError(format!(
                 "reflect consolidation failed: {e}"

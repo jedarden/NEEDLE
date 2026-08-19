@@ -5325,8 +5325,11 @@ fn cmd_reflect(workspace: Option<PathBuf>, force: bool) -> Result<()> {
         agent,
     );
 
+    let store =
+        crate::bead_store::open_configured(&config.bead_cli, workspace_root, None, None, None)?;
+
     let rt = tokio::runtime::Runtime::new().context("failed to create tokio runtime")?;
-    let summary = rt.block_on(strand.consolidate(force))?;
+    let summary = rt.block_on(strand.consolidate_with_store(force, store.as_ref()))?;
 
     if summary.beads_processed == 0 && summary.learnings_added == 0 {
         println!(
