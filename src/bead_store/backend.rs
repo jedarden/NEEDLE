@@ -493,7 +493,7 @@ fn builtin_bead_rs() -> BeadBackend {
     operations.insert(
         "ready".into(),
         operation(
-            &["list", "--ready", "--json", "{limit}"],
+            &["list", "--ready", "--json", "--limit", "{limit}"],
             None,
             Some(ParseShape::JsonLines),
         ),
@@ -501,7 +501,7 @@ fn builtin_bead_rs() -> BeadBackend {
     operations.insert(
         "list_all".into(),
         operation(
-            &["list", "--json", "{limit}"],
+            &["list", "--json", "--limit", "{limit}"],
             None,
             Some(ParseShape::JsonLines),
         ),
@@ -802,7 +802,7 @@ fn builtin_bead_forge() -> BeadBackend {
     operations.insert(
         "ready".into(),
         operation(
-            &["ready", "--json", "{limit}"],
+            &["ready", "--json", "--limit", "{limit}"],
             None,
             Some(ParseShape::JsonLines),
         ),
@@ -810,7 +810,7 @@ fn builtin_bead_forge() -> BeadBackend {
     operations.insert(
         "list_all".into(),
         operation(
-            &["list", "--json", "{limit}"],
+            &["list", "--json", "--limit", "{limit}"],
             None,
             Some(ParseShape::JsonLines),
         ),

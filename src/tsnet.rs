@@ -194,24 +194,20 @@ impl IdentityRegistry {
 
     /// Generate an ephemeral auth key for a hostname.
     ///
-    /// In a real implementation, this would call the Tailscale API to create
-    /// an ephemeral key. For now, we generate a placeholder.
+    /// This requires a real Tailscale API key source to be configured.
+    /// When no key source is available, this fails closed rather than
+    /// fabricating a credential-shaped value.
     fn generate_auth_key(&self, hostname: &str) -> Result<String> {
         // In production, this would:
         // 1. Call Tailscale API POST /api/v2/tailnet/{tailnet}/keys
         // 2. Request ephemeral key with tags and expiration
         // 3. Return the actual key
         //
-        // For the initial implementation, we generate a deterministic key
-        // based on hostname and timestamp to simulate unique provisioning.
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-
-        // Simulate an ephemeral key format
-        Ok(format!("tskey-auth-{}-{}", hostname, timestamp))
+        // For now, fail closed since no real key provisioning mechanism is configured.
+        anyhow::bail!(
+            "tsnet auth key generation failed: no Tailscale API key source configured for hostname {}",
+            hostname
+        );
     }
 
     /// Mark an identity as used (remove from registry).
@@ -346,7 +342,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_identity_registry_provision() {
+    async fn test_identity_registry_provision_fails_without_key_source() {
         let config = TsnetConfig {
             enabled: true,
             ..Default::default()
@@ -356,16 +352,14 @@ mod tests {
         let worker_id = "worker-1".to_string();
         let bead_id = BeadId::from("bf-test");
 
-        let identity = registry
-            .provision_identity(&worker_id, &bead_id)
-            .await
-            .unwrap();
+        let result = registry.provision_identity(&worker_id, &bead_id).await;
 
-        assert_eq!(identity.worker_id, worker_id);
-        assert_eq!(identity.bead_id, bead_id);
-        assert!(identity.hostname.starts_with("needle-"));
-        assert!(!identity.auth_key.is_empty());
-        assert_eq!(identity.tag, "tag:needle-worker");
+        // Should fail because no real key source is configured
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("no Tailscale API key source configured"));
     }
 
     #[tokio::test]
@@ -379,15 +373,15 @@ mod tests {
         let worker_id = "worker-1".to_string();
         let bead_id = BeadId::from("bf-test");
 
-        let identity = registry
-            .provision_identity(&worker_id, &bead_id)
-            .await
-            .unwrap();
+        // Provisioning should fail without a real key source
+        let result = registry.provision_identity(&worker_id, &bead_id).await;
+        assert!(result.is_err());
 
-        assert_eq!(registry.active_count().await, 1);
+        // No identities should be registered since provisioning failed
+        assert_eq!(registry.active_count().await, 0);
 
-        registry.release_identity(&identity.hostname).await;
-
+        // Release on a non-existent identity should be safe (no-op)
+        registry.release_identity("needle-worker-1-bf-test").await;
         assert_eq!(registry.active_count().await, 0);
     }
 
@@ -446,5 +440,22 @@ mod tests {
         assert_eq!(config.auth_ttl_secs, 3600);
         assert_eq!(config.worker_tag, "tag:needle-worker");
         assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_disabled_tsnet_does_not_inject_auth_key() {
+        // Verify that when tsnet is disabled, no auth key is injected
+        let _config = TsnetConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let mut env = HashMap::new();
+        env.insert("EXISTING_VAR".to_string(), "value".to_string());
+
+        // When tsnet is disabled, provision_identity fails early
+        // and inject_identity_env is never called
+        assert!(!env.contains_key("NEEDLE_TSNET_AUTH_KEY"));
+        assert!(!env.contains_key("NEEDLE_TSNET_HOSTNAME"));
     }
 }

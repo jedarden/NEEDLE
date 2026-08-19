@@ -343,11 +343,7 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
-        let values = if self.has_quirk("limit_zero_returns_empty_set") {
-            HashMap::from([("limit", "--limit 999999".to_string())])
-        } else {
-            HashMap::new()
-        };
+        let values = HashMap::from([("limit", "999999".to_string())]);
         let stdout = self.run_operation("ready", &values).await?;
         let mut beads = self.parse_beads("ready", &stdout)?;
         if let Some(assignee) = &filters.assignee {
@@ -364,11 +360,7 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn list_all(&self) -> Result<Vec<Bead>> {
-        let values = if self.has_quirk("limit_zero_returns_empty_set") {
-            HashMap::from([("limit", "--limit 999999".to_string())])
-        } else {
-            HashMap::new()
-        };
+        let values = HashMap::from([("limit", "999999".to_string())]);
         let stdout = self.run_operation("list_all", &values).await?;
         self.parse_beads("list_all", &stdout)
     }
@@ -1056,6 +1048,7 @@ fn parse_beads_with_claim_history(
 mod tests {
     use super::{parse_beads, parse_beads_with_claim_history, CliBeadStore, ParseShape};
     use crate::bead_store::{builtin_bead_backends, BeadStore};
+    use std::collections::HashMap;
 
     #[test]
     fn claim_history_parser_counts_only_claim_mutations() {
@@ -1183,7 +1176,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_store_conditional_limit_workaround() {
+    fn cli_store_ready_limit_is_rendered_as_flag_and_value() {
         use crate::bead_store::backend::builtin_bead_backends;
 
         // Test with bead-forge (verified against 0.4.1, quirk does NOT apply)
@@ -1215,6 +1208,11 @@ mod tests {
 
         // bead-forge 0.4.1 does NOT have the quirk (only applied to <= 0.2.0)
         assert!(!store_with_quirk.has_quirk("limit_zero_returns_empty_set"));
+        let values = HashMap::from([("limit", "999999".to_string())]);
+        assert_eq!(
+            store_with_quirk.render_operation("ready", &values).unwrap(),
+            ["ready", "--json", "--limit", "999999"]
+        );
 
         // Test with bead-rs (does NOT have the quirk)
         let bead_rs = builtin_bead_backends()
@@ -1234,5 +1232,11 @@ mod tests {
 
         // bead-rs does not have the quirk, so has_quirk should return false
         assert!(!store_without_quirk.has_quirk("limit_zero_returns_empty_set"));
+        assert_eq!(
+            store_without_quirk
+                .render_operation("ready", &values)
+                .unwrap(),
+            ["list", "--ready", "--json", "--limit", "999999"]
+        );
     }
 }
