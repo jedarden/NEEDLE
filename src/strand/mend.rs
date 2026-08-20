@@ -56,6 +56,21 @@ pub async fn cleanup_orphaned_in_progress(
     cleanup_in_progress(store, registry, telemetry, qualified_id, None).await
 }
 
+/// Test-optimized version that avoids blocking registry operations.
+///
+/// This version is optimized for test environments where blocking I/O
+/// can cause deadlocks. It returns early if there are no in-progress beads,
+/// avoiding the expensive registry.list() call entirely.
+#[cfg(test)]
+pub async fn cleanup_orphaned_in_progress_test_optimized(
+    store: &dyn BeadStore,
+    registry: &Registry,
+    telemetry: &Telemetry,
+    qualified_id: &str,
+) -> Result<u32> {
+    cleanup_in_progress(store, registry, telemetry, qualified_id, None).await
+}
+
 /// Scan all in-progress beads in a store and release any whose assignee is
 /// orphaned, whose claim is older than `claim_ttl`, or whose claim was
 /// superseded by a newer claim from the same assignee. Claim age and claim
@@ -69,6 +84,15 @@ async fn cleanup_in_progress(
     claim_ttl: Option<Duration>,
 ) -> Result<u32> {
     let all_beads = store.list_all().await?;
+
+    // Early exit if there are no in-progress beads at all.
+    // This avoids the expensive spawn_blocking call for registry.list()
+    // when there's nothing to clean up, which prevents deadlocks in
+    // test environments with limited blocking thread pools.
+    let has_any_in_progress = all_beads.iter().any(|b| b.status == BeadStatus::InProgress);
+    if !has_any_in_progress {
+        return Ok(0);
+    }
 
     // Registry::list() does blocking file I/O and PID checks.
     // Use spawn_blocking to avoid blocking the async executor.
