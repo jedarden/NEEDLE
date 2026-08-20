@@ -1306,7 +1306,7 @@ fn outcome_classify_covers_all_exit_code_ranges() {
 
     for code in test_codes {
         // Should not panic.
-        let outcome = Outcome::classify(code, false);
+        let outcome = Outcome::classify(code, false, true);
         // Verify specific mappings.
         match code {
             0 => assert_eq!(outcome, Outcome::Success),
@@ -1322,7 +1322,7 @@ fn outcome_classify_covers_all_exit_code_ranges() {
     // Verify interrupted flag always wins.
     for code in [-1, 0, 1, 127, 137] {
         assert_eq!(
-            Outcome::classify(code, true),
+            Outcome::classify(code, true, false),
             Outcome::Interrupted,
             "was_interrupted=true must always return Interrupted for code {code}"
         );

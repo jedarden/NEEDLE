@@ -27,8 +27,8 @@ use crate::validation::{verify_shipped_work, GateConfig, GateReport, ValidationG
 /// Classify an agent exit code into an `Outcome`, with shutdown signal support.
 ///
 /// Delegates to `Outcome::classify()`. Provided here for ergonomic imports.
-pub fn classify(exit_code: i32, was_interrupted: bool) -> Outcome {
-    Outcome::classify(exit_code, was_interrupted)
+pub fn classify(exit_code: i32, was_interrupted: bool, verified: bool) -> Outcome {
+    Outcome::classify(exit_code, was_interrupted, verified)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -195,11 +195,60 @@ impl OutcomeHandler {
         Ok(events)
     }
 
+    /// Run verification gates for a bead, returning whether all passed.
+    ///
+    /// This is extracted as a helper so it can be called BEFORE outcome classification.
+    /// Verification must determine Success, not just exit code 0.
+    async fn run_verification_gates(&self, bead: &Bead) -> Result<(bool, Option<GateReport>)> {
+        // Try pluggable gates first, fall back to legacy verification commands.
+        let gate_opt = if !self.config.gates.is_empty() {
+            // New pluggable gate system. Fill in each command gate's stderr
+            // cap from `validation.stderr_cap_bytes` unless the gate already
+            // set its own override — see GitHub issue jedarden/NEEDLE#9.
+            let default_stderr_cap = self.config.validation.stderr_cap_bytes;
+            let gate_configs: Vec<(String, GateConfig)> = self
+                .config
+                .gates
+                .iter()
+                .enumerate()
+                .map(|(i, config)| {
+                    let mut config = config.clone();
+                    let GateConfig::Command {
+                        stderr_cap_bytes, ..
+                    } = &mut config;
+                    if stderr_cap_bytes.is_none() {
+                        *stderr_cap_bytes = Some(default_stderr_cap);
+                    }
+                    (format!("gate_{}", i), config)
+                })
+                .collect();
+            ValidationGate::new(gate_configs, bead.workspace.clone())
+        } else if !self.config.verification.is_empty() {
+            // Legacy verification command format.
+            ValidationGate::from_commands_with_stderr_cap(
+                self.config.verification.clone(),
+                bead.workspace.clone(),
+                self.config.validation.stderr_cap_bytes,
+            )
+        } else {
+            // No gates configured — treat as verified (backward compatible).
+            return Ok((true, None));
+        };
+
+        // Run the gate and return the result.
+        let gate = gate_opt.ok_or_else(|| {
+            anyhow::anyhow!("validation gate creation failed - all gates failed to initialize")
+        })?;
+        let report = gate.run(bead).await?;
+        let all_passed = report.all_passed;
+        Ok((all_passed, Some(report)))
+    }
+
     /// Handle a process output for the given bead.
     ///
-    /// Uses `classify()` to determine the outcome, then dispatches to the
-    /// per-outcome handler. Every `Outcome` variant has an explicit arm —
-    /// no wildcards. Returns a `HandlerResult` describing what happened.
+    /// CRITICAL: For exit code 0, verification gates run BEFORE classification.
+    /// This ensures Success means verification passed, not just that the agent exited 0.
+    /// An agent that exits 0 but fails verification produces Failure, not Success.
     #[tracing::instrument(
         name = "bead.outcome",
         skip(self, store, bead, output),
@@ -216,7 +265,16 @@ impl OutcomeHandler {
         output: &AgentOutcome,
         was_interrupted: bool,
     ) -> Result<HandlerResult> {
-        let outcome = classify(output.exit_code, was_interrupted);
+        // For exit code 0, run verification BEFORE classification.
+        // This is the core fix: Success must mean verification passed.
+        let (verified, gate_report) = if output.exit_code == 0 && !was_interrupted {
+            self.run_verification_gates(bead).await?
+        } else {
+            // Non-zero exit or interrupted — verification irrelevant.
+            (true, None)
+        };
+
+        let outcome = classify(output.exit_code, was_interrupted, verified);
 
         // Set outcome as span attribute
         tracing::Span::current().record("needle.outcome", outcome.as_str());
@@ -224,6 +282,7 @@ impl OutcomeHandler {
         tracing::info!(
             bead_id = %bead.id,
             exit_code = output.exit_code,
+            verified,
             outcome = %outcome,
             "handling agent outcome"
         );
@@ -237,8 +296,19 @@ impl OutcomeHandler {
         });
 
         let (bead_action, telemetry_events) = match outcome.clone() {
-            Outcome::Success => self.handle_success(store, bead).await?,
-            Outcome::Failure => self.handle_failure(store, bead).await?,
+            Outcome::Success => self.handle_success(store, bead, gate_report).await?,
+            Outcome::Failure => {
+                // If we have a gate report with failures, handle as gate failure.
+                if let Some(report) = gate_report {
+                    if !report.all_passed {
+                        self.handle_gate_failure(store, bead, &report).await?
+                    } else {
+                        self.handle_failure(store, bead).await?
+                    }
+                } else {
+                    self.handle_failure(store, bead).await?
+                }
+            }
             Outcome::Timeout => self.handle_timeout(store, bead).await?,
             Outcome::AgentNotFound => self.handle_agent_not_found(store, bead).await?,
             Outcome::Interrupted => self.handle_interrupted(store, bead).await?,
@@ -296,8 +366,9 @@ impl OutcomeHandler {
                 "outcome handler cancelled before starting, returning early"
             );
             // Return a default HandlerResult to allow the worker to recover.
+            // Verification never ran, so conservatively treat as unverified.
             return Ok(HandlerResult {
-                outcome: classify(output.exit_code, was_interrupted),
+                outcome: classify(output.exit_code, was_interrupted, false),
                 bead_action: BeadAction::None,
                 telemetry_events: vec![],
             });
@@ -339,7 +410,7 @@ impl OutcomeHandler {
                 // Emit a timeout event for observability.
                 let _ = telemetry.emit(EventKind::WorkerHandlingTimeout {
                     bead_id: bead_id.clone(),
-                    outcome: classify(output.exit_code, was_interrupted)
+                    outcome: classify(output.exit_code, was_interrupted, false)
                         .as_str()
                         .to_string(),
                     operation: "handle".to_string(),
@@ -347,8 +418,9 @@ impl OutcomeHandler {
                 });
                 // Return a default HandlerResult to allow the worker to recover.
                 // The worker's 60-second timeout wrapper will handle best-effort release.
+                // Verification never ran, so conservatively treat as unverified.
                 Ok(HandlerResult {
-                    outcome: classify(output.exit_code, was_interrupted),
+                    outcome: classify(output.exit_code, was_interrupted, false),
                     bead_action: BeadAction::Released,
                     telemetry_events: vec![EventKind::BeadReleased {
                         bead_id,
@@ -359,12 +431,15 @@ impl OutcomeHandler {
         }
     }
 
-    /// Success: run validation gates (if configured), then verify bead closure.
+    /// Success: verification already passed, now verify bead closure.
+    ///
+    /// CRITICAL: This is only called when verification PASSED.
+    /// If verification failed, classification produces Failure and handle_failure
+    /// is called instead. This ensures Success means verification passed.
     ///
     /// Flow:
-    /// 1. If validation gates are configured (new or legacy format), run them.
-    /// 2. If any gate fails: reopen the bead (if agent closed it) and release it.
-    /// 3. If all gates pass (or none configured): check if agent closed the bead.
+    /// 1. If gates ran, emit VerificationPassed telemetry.
+    /// 2. Check if agent closed the bead.
     ///    - Closed → emit BeadCompleted.
     ///    - Still open → emit BeadOrphaned warning.
     ///
@@ -373,51 +448,12 @@ impl OutcomeHandler {
         &self,
         store: &dyn BeadStore,
         bead: &Bead,
+        gate_report: Option<GateReport>,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::info!(bead_id = %bead.id, "agent completed successfully");
 
-        // Try pluggable gates first, fall back to legacy verification commands.
-        let gate = if !self.config.gates.is_empty() {
-            // New pluggable gate system. Fill in each command gate's stderr
-            // cap from `validation.stderr_cap_bytes` unless the gate already
-            // set its own override — see GitHub issue jedarden/NEEDLE#9.
-            let default_stderr_cap = self.config.validation.stderr_cap_bytes;
-            let gate_configs: Vec<(String, GateConfig)> = self
-                .config
-                .gates
-                .iter()
-                .enumerate()
-                .map(|(i, config)| {
-                    let mut config = config.clone();
-                    let GateConfig::Command {
-                        stderr_cap_bytes, ..
-                    } = &mut config;
-                    if stderr_cap_bytes.is_none() {
-                        *stderr_cap_bytes = Some(default_stderr_cap);
-                    }
-                    (format!("gate_{}", i), config)
-                })
-                .collect();
-            ValidationGate::new(gate_configs, bead.workspace.clone())
-        } else if !self.config.verification.is_empty() {
-            // Legacy verification command format.
-            ValidationGate::from_commands_with_stderr_cap(
-                self.config.verification.clone(),
-                bead.workspace.clone(),
-                self.config.validation.stderr_cap_bytes,
-            )
-        } else {
-            None
-        };
-
-        if let Some(gate) = gate {
-            let report = gate.run(bead).await?;
-
-            if !report.all_passed {
-                return self.handle_gate_failure(store, bead, &report).await;
-            }
-
-            // All gates passed — emit telemetry.
+        // If gates ran and passed, emit telemetry.
+        if let Some(report) = gate_report {
             let gates_run = report.results.len() as u32;
             self.telemetry.emit(EventKind::VerificationPassed {
                 bead_id: bead.id.clone(),
@@ -1515,34 +1551,57 @@ mod tests {
 
     #[test]
     fn classify_was_interrupted_always_returns_interrupted() {
-        assert_eq!(classify(0, true), Outcome::Interrupted);
-        assert_eq!(classify(1, true), Outcome::Interrupted);
-        assert_eq!(classify(127, true), Outcome::Interrupted);
+        assert_eq!(classify(0, true, true), Outcome::Interrupted);
+        assert_eq!(classify(1, true, false), Outcome::Interrupted);
+        assert_eq!(classify(127, true, true), Outcome::Interrupted);
     }
 
     #[test]
-    fn classify_not_interrupted_uses_exit_code() {
-        assert_eq!(classify(0, false), Outcome::Success);
-        assert_eq!(classify(1, false), Outcome::Failure);
-        assert_eq!(classify(124, false), Outcome::Timeout);
-        assert_eq!(classify(127, false), Outcome::AgentNotFound);
-        assert_eq!(classify(129, false), Outcome::Crash(129));
+    fn classify_not_interrupted_uses_exit_code_and_verification() {
+        // Exit code 0 with verification passes → Success
+        assert_eq!(classify(0, false, true), Outcome::Success);
+        // Exit code 0 with verification fails → Failure
+        assert_eq!(classify(0, false, false), Outcome::Failure);
+        // Non-zero exit codes always fail regardless of verification
+        assert_eq!(classify(1, false, true), Outcome::Failure);
+        assert_eq!(classify(1, false, false), Outcome::Failure);
+        assert_eq!(classify(124, false, true), Outcome::Timeout);
+        assert_eq!(classify(127, false, true), Outcome::AgentNotFound);
+        assert_eq!(classify(129, false, true), Outcome::Crash(129));
     }
 
     #[test]
     fn classify_no_wildcard_arms() {
         // Verify key exit codes map correctly per spec.
-        assert_eq!(classify(0, false), Outcome::Success);
-        assert_eq!(classify(1, false), Outcome::Failure);
-        assert_eq!(classify(2, false), Outcome::Failure);
-        assert_eq!(classify(99, false), Outcome::Failure);
-        assert_eq!(classify(100, false), Outcome::Failure);
-        assert_eq!(classify(124, false), Outcome::Timeout);
-        assert_eq!(classify(125, false), Outcome::Failure);
-        assert_eq!(classify(128, false), Outcome::Failure); // not >128 per spec
-        assert_eq!(classify(129, false), Outcome::Crash(129));
-        assert_eq!(classify(137, false), Outcome::Crash(137));
-        assert_eq!(classify(-9, false), Outcome::Crash(-9));
+        // Exit code 0 ONLY succeeds when verification passes
+        assert_eq!(classify(0, false, true), Outcome::Success);
+        assert_eq!(classify(0, false, false), Outcome::Failure);
+        assert_eq!(classify(1, false, true), Outcome::Failure);
+        assert_eq!(classify(2, false, true), Outcome::Failure);
+        assert_eq!(classify(99, false, true), Outcome::Failure);
+        assert_eq!(classify(100, false, true), Outcome::Failure);
+        assert_eq!(classify(124, false, true), Outcome::Timeout);
+        assert_eq!(classify(125, false, true), Outcome::Failure);
+        assert_eq!(classify(128, false, true), Outcome::Failure); // not >128 per spec
+        assert_eq!(classify(129, false, true), Outcome::Crash(129));
+        assert_eq!(classify(137, false, true), Outcome::Crash(137));
+        assert_eq!(classify(-9, false, true), Outcome::Crash(-9));
+    }
+
+    #[test]
+    fn classify_verification_gate() {
+        // The core fix: exit code 0 does NOT guarantee Success.
+        // Verification is the gate.
+        assert_eq!(
+            classify(0, false, false),
+            Outcome::Failure,
+            "exit_code=0, verified=false must return Failure"
+        );
+        assert_eq!(
+            classify(0, false, true),
+            Outcome::Success,
+            "exit_code=0, verified=true must return Success"
+        );
     }
 
     // ── handle tests ──

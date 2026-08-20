@@ -152,14 +152,14 @@ proptest! {
     /// classify() never panics for any i32 exit code.
     #[test]
     fn exhaustive_outcomes_no_panic(exit_code: i32) {
-        let _ = Outcome::classify(exit_code, false);
-        let _ = Outcome::classify(exit_code, true);
+        let _ = Outcome::classify(exit_code, false, false);
+        let _ = Outcome::classify(exit_code, true, false);
     }
 
     /// classify() returns a valid Outcome for every exit code.
     #[test]
     fn exhaustive_outcomes_valid_variant(exit_code: i32) {
-        let outcome = Outcome::classify(exit_code, false);
+        let outcome = Outcome::classify(exit_code, false, true);
 
         // Verify the outcome is a known variant by exhaustively matching.
         match outcome {
@@ -193,7 +193,7 @@ proptest! {
     /// was_interrupted=true always produces Interrupted, regardless of exit code.
     #[test]
     fn exhaustive_outcomes_interrupted_overrides(exit_code: i32) {
-        let outcome = Outcome::classify(exit_code, true);
+        let outcome = Outcome::classify(exit_code, true, false);
         prop_assert_eq!(outcome, Outcome::Interrupted,
             "was_interrupted=true must always produce Interrupted for exit_code={}",
             exit_code);
@@ -203,8 +203,8 @@ proptest! {
     /// same result.
     #[test]
     fn exhaustive_outcomes_idempotent(exit_code: i32, was_interrupted: bool) {
-        let a = Outcome::classify(exit_code, was_interrupted);
-        let b = Outcome::classify(exit_code, was_interrupted);
+        let a = Outcome::classify(exit_code, was_interrupted, true);
+        let b = Outcome::classify(exit_code, was_interrupted, true);
         prop_assert_eq!(a, b, "classify must be deterministic");
     }
 }
