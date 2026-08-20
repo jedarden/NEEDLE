@@ -297,6 +297,20 @@ fn clear_atexit_state() {
     // No-op on non-Unix platforms
 }
 
+/// Safely truncate a commit SHA for display.
+///
+/// Commit SHAs from `BuildMetadata` can be full SHAs (40+ chars), abbreviated
+/// SHAs (7-12 chars), or "unknown" (7 chars). This function bounds the slice
+/// to avoid panicking on short SHAs.
+pub fn truncate_commit_sha(sha: &str) -> &str {
+    let max_len = 12;
+    if sha.len() <= max_len {
+        sha
+    } else {
+        &sha[..max_len]
+    }
+}
+
 /// TTL for race-lost bead exclusions.
 ///
 /// After losing a claim race, a bead is excluded from selection for this duration
@@ -3350,17 +3364,19 @@ impl Worker {
         if current_commit != stable_commit {
             // Only warn if we haven't already warned about this stale binary
             if !self.stale_binary_warned {
+                let current_display = truncate_commit_sha(current_commit);
+                let stable_display = truncate_commit_sha(stable_commit);
                 tracing::warn!(
-                    current_commit = %&current_commit[..12],
-                    stable_commit = %&stable_commit[..12],
+                    current_commit = %current_display,
+                    stable_commit = %stable_display,
                     current_version = %current_metadata.version,
                     stable_version = %stable_metadata.version,
                     "running binary is STALE — current commit {} differs from needle-stable commit {}. \
                      Consider restarting this worker to pick up the latest binary. \
                      This check runs every {} seconds (configured by worker.freshness_check_interval_secs). \
                      Set to 0 to disable freshness checking.",
-                    &current_commit[..12],
-                    &stable_commit[..12],
+                    current_display,
+                    stable_display,
                     interval_secs
                 );
                 self.stale_binary_warned = true;
@@ -3368,8 +3384,9 @@ impl Worker {
         } else {
             // Binary is fresh — reset the warned flag so we warn again if it becomes stale later
             self.stale_binary_warned = false;
+            let current_display = truncate_commit_sha(current_commit);
             tracing::debug!(
-                commit = %&current_commit[..12],
+                commit = %current_display,
                 version = %current_metadata.version,
                 "binary freshness check passed — running commit matches needle-stable"
             );

@@ -140,6 +140,7 @@ use needle::types::{
     Bead, BeadId, BeadStatus, ClaimResult, IdleAction, InputMethod, Outcome, StrandResult,
     WorkerState,
 };
+use needle::worker::truncate_commit_sha;
 use needle::worker::Worker;
 
 // ─── Test isolation infrastructure ───────────────────────────────────────────────
@@ -1306,7 +1307,7 @@ fn outcome_classify_covers_all_exit_code_ranges() {
 
     for code in test_codes {
         // Should not panic.
-        let outcome = Outcome::classify(code, false, true);
+        let outcome = Outcome::classify(code, false);
         // Verify specific mappings.
         match code {
             0 => assert_eq!(outcome, Outcome::Success),
@@ -1322,7 +1323,7 @@ fn outcome_classify_covers_all_exit_code_ranges() {
     // Verify interrupted flag always wins.
     for code in [-1, 0, 1, 127, 137] {
         assert_eq!(
-            Outcome::classify(code, true, false),
+            Outcome::classify(code, true),
             Outcome::Interrupted,
             "was_interrupted=true must always return Interrupted for code {code}"
         );
@@ -6959,6 +6960,59 @@ workspace_root = "{}"
             || stderr_output.contains("not found"),
         "stderr should mention the nonexistent adapter; got: {}",
         stderr_output
+    );
+}
+
+// Test for needle-161e49b7: verify commit SHA truncation doesn't panic on short SHAs
+// This covers the bug where `&sha[..12]` panicked on 7-char SHAs like "ee18678"
+#[tokio::test]
+async fn truncate_commit_sha_handles_short_shas() {
+    // Short SHA (7 chars) - should return full string
+    let short_sha = "ee18678";
+    assert_eq!(
+        truncate_commit_sha(short_sha),
+        "ee18678",
+        "short SHA should be returned as-is"
+    );
+
+    // "unknown" fallback (7 chars) - should return full string
+    let unknown = "unknown";
+    assert_eq!(
+        truncate_commit_sha(unknown),
+        "unknown",
+        "'unknown' should be returned as-is"
+    );
+
+    // Empty string - edge case
+    let empty = "";
+    assert_eq!(
+        truncate_commit_sha(empty),
+        "",
+        "empty string should be returned as-is"
+    );
+
+    // Full SHA (40 chars) - should truncate to 12 chars
+    let full_sha = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0";
+    assert_eq!(
+        truncate_commit_sha(full_sha),
+        "a1b2c3d4e5f6",
+        "full SHA should be truncated to 12 chars"
+    );
+
+    // Exactly 12 chars - should return full string
+    let exactly_12 = "123456789012";
+    assert_eq!(
+        truncate_commit_sha(exactly_12),
+        "123456789012",
+        "12-char SHA should be returned as-is"
+    );
+
+    // 13 chars - should truncate to 12
+    let thirteen = "1234567890123";
+    assert_eq!(
+        truncate_commit_sha(thirteen),
+        "123456789012",
+        "13-char SHA should be truncated to 12"
     );
 }
 
