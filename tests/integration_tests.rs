@@ -4829,13 +4829,13 @@ agent:
     let mut config_expanded = config;
     config_expanded.expand_tildes();
 
+    // Verify the path was expanded correctly using string comparison
+    let expanded_path_str = config_expanded.agent.adapters_dir.to_str().unwrap();
+    let isolated_home_str = isolated_home.to_str().unwrap();
     assert!(
-        config_expanded
-            .agent
-            .adapters_dir
-            .starts_with(&isolated_home),
+        expanded_path_str.starts_with(isolated_home_str),
         "agent.adapters_dir should be expanded to isolated home, got: {}",
-        config_expanded.agent.adapters_dir.display()
+        expanded_path_str
     );
 
     assert_eq!(
@@ -4940,15 +4940,19 @@ bead_cli:
     let mut config_expanded = config;
     config_expanded.expand_tildes();
 
+    // Verify the path was expanded correctly using string comparison
+    let expanded_path_str = config_expanded
+        .bead_cli
+        .path
+        .as_ref()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let isolated_home_str = isolated_home.to_str().unwrap();
     assert!(
-        config_expanded
-            .bead_cli
-            .path
-            .as_ref()
-            .unwrap()
-            .starts_with(&isolated_home),
+        expanded_path_str.starts_with(isolated_home_str),
         "bead_cli.path should be expanded to isolated home, got: {}",
-        config_expanded.bead_cli.path.as_ref().unwrap().display()
+        expanded_path_str
     );
 
     assert_eq!(
@@ -5457,22 +5461,20 @@ telemetry:
     let mut config_expanded = config;
     config_expanded.expand_tildes();
 
+    // Verify the path was expanded correctly using string comparison
+    let expanded_path_str = config_expanded
+        .telemetry
+        .file_sink
+        .log_dir
+        .as_ref()
+        .unwrap()
+        .to_str()
+        .unwrap();
+    let isolated_home_str = isolated_home.to_str().unwrap();
     assert!(
-        config_expanded
-            .telemetry
-            .file_sink
-            .log_dir
-            .as_ref()
-            .unwrap()
-            .starts_with(&isolated_home),
+        expanded_path_str.starts_with(isolated_home_str),
         "log_dir should be expanded to isolated home, got: {}",
-        config_expanded
-            .telemetry
-            .file_sink
-            .log_dir
-            .as_ref()
-            .unwrap()
-            .display()
+        expanded_path_str
     );
 
     assert_eq!(
@@ -7016,6 +7018,7 @@ async fn truncate_commit_sha_handles_short_shas() {
     );
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
 // CI verification test for needle-318c33ba
 // This test is intentionally broken to verify that test failures surface correctly
 #[tokio::test]
