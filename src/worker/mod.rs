@@ -5426,6 +5426,184 @@ mod tests {
     }
 
     #[test]
+    fn config_reload_requested_mid_dispatch_waits_for_cycle_boundary() {
+        use std::collections::HashMap;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", home.path());
+
+        let config_path = home.path().join(".config/needle/config.yaml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        let mut config = valid_test_config();
+        config.agent.default = "old-agent".to_string();
+        config.agent.routing = None;
+        config.agent.adapters_dir = home.path().join("adapters");
+        config.worker.config_reload_check_interval_secs = 1;
+        config.worker.idle_action = IdleAction::Exit;
+        config.worker.enforce_shipped_work = false;
+        config.workspace.home = home.path().join(".needle");
+        config.workspace.default = workspace.path().to_path_buf();
+        config.self_modification.hot_reload = false;
+        config.strands.explore.enabled = false;
+        config.strands.explore.workspace_root = workspace.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
+
+        std::fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+
+        let mut bead = make_test_bead("needle-reload-boundary");
+        bead.workspace = workspace.path().to_path_buf();
+        let store = Arc::new(MockStore::new(vec![bead.clone()]));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (helper, mut worker) = runtime.block_on(async {
+            let helper = crate::telemetry::test_utils::TestHelper::new("reload-boundary-test");
+            let worker = Worker::new_with_telemetry(
+                config.clone(),
+                "reload-boundary".to_string(),
+                store.clone(),
+                helper.telemetry().clone(),
+            );
+            (helper, worker)
+        });
+
+        let dispatch_started = workspace.path().join("dispatch-started");
+        let release_dispatch = workspace.path().join("release-dispatch");
+        let mut old_environment = HashMap::new();
+        old_environment.insert(
+            "NEEDLE_TEST_DISPATCH_STARTED".to_string(),
+            dispatch_started.display().to_string(),
+        );
+        old_environment.insert(
+            "NEEDLE_TEST_RELEASE_DISPATCH".to_string(),
+            release_dispatch.display().to_string(),
+        );
+        let old_adapter = crate::dispatch::AgentAdapter {
+            name: "old-agent".to_string(),
+            description: None,
+            agent_cli: "bash".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: concat!(
+                "touch \"$NEEDLE_TEST_DISPATCH_STARTED\"; ",
+                "while [ ! -e \"$NEEDLE_TEST_RELEASE_DISPATCH\" ]; do sleep 0.01; done; ",
+                "printf old-config"
+            )
+            .to_string(),
+            environment: old_environment,
+            timeout_secs: 10,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            provider: None,
+            model: None,
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+            harness: None,
+            harness_version: None,
+        };
+        let new_adapter = crate::dispatch::AgentAdapter {
+            name: "new-agent".to_string(),
+            description: None,
+            agent_cli: "bash".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: "printf new-config".to_string(),
+            environment: HashMap::new(),
+            timeout_secs: 10,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            provider: None,
+            model: None,
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+            harness: None,
+            harness_version: None,
+        };
+        let mut adapters = HashMap::new();
+        adapters.insert(old_adapter.name.clone(), old_adapter);
+        adapters.insert(new_adapter.name.clone(), new_adapter);
+        worker.dispatcher =
+            Dispatcher::with_adapters(adapters, helper.telemetry().clone(), config.agent.timeout);
+        worker.boot().unwrap();
+
+        let mut candidate = config;
+        candidate.agent.default = "new-agent".to_string();
+        let candidate_yaml = serde_yaml::to_string(&candidate).unwrap();
+
+        let terminal_state = runtime
+            .block_on(async {
+                let request_reload_during_dispatch = async {
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while !dispatch_started.exists() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("old-config dispatch did not start");
+
+                    std::fs::write(&config_path, candidate_yaml).unwrap();
+                    helper.sync().await;
+
+                    assert_eq!(helper.events_by_type("agent.dispatched").len(), 1);
+                    helper.assert_event_not_emitted("config.reload.detected");
+                    helper.assert_event_not_emitted("config.reload.applied");
+
+                    {
+                        let mut beads = store.beads.lock().unwrap();
+                        let claimed = beads
+                            .iter_mut()
+                            .find(|stored| stored.id == bead.id)
+                            .expect("claimed test bead should remain in the mock store");
+                        claimed.status = BeadStatus::Closed;
+                    }
+
+                    std::fs::write(&release_dispatch, b"").unwrap();
+                };
+
+                let (state, ()) =
+                    tokio::join!(worker.run_state_machine(), request_reload_during_dispatch);
+                state
+            })
+            .unwrap();
+        runtime.block_on(helper.sync());
+
+        assert_eq!(terminal_state, WorkerState::Stopped);
+        assert_eq!(worker.config.agent.default, "new-agent");
+
+        let trace_stdout = std::fs::read_to_string(
+            workspace
+                .path()
+                .join(".beads/traces/needle-reload-boundary/stdout.txt"),
+        )
+        .unwrap();
+        assert_eq!(trace_stdout, "old-config");
+
+        let events = helper.all_events();
+        let dispatch_completed = events
+            .iter()
+            .find(|event| event.event_type == "agent.completed")
+            .expect("old-config dispatch should complete");
+        assert_eq!(dispatch_completed.data["agent"], "old-agent");
+        let reload_detected = events
+            .iter()
+            .find(|event| event.event_type == "config.reload.detected")
+            .expect("changed config should be detected at the cycle boundary");
+        let reload_applied = events
+            .iter()
+            .find(|event| event.event_type == "config.reload.applied")
+            .expect("changed config should be applied at the cycle boundary");
+
+        assert!(dispatch_completed.sequence < reload_detected.sequence);
+        assert!(reload_detected.sequence < reload_applied.sequence);
+        assert!(reload_applied.data["changed_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key == "agent.default"));
+    }
+
+    #[test]
     fn tier_c_config_reload_emits_restart_required_event() {
         let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
