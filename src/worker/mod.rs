@@ -1327,8 +1327,70 @@ impl Worker {
 
     // ── State handlers ──────────────────────────────────────────────────────
 
+    /// Reject a claim attempt when this worker already owns a claim.
+    ///
+    /// `current_bead` also carries unclaimed strand candidates, so ownership
+    /// requires both the claimed status and this worker's qualified ID. If a
+    /// stale state transition reaches a claim entry point while that condition
+    /// holds, release the existing claim before returning an invariant error.
+    /// The caller cannot proceed to a second backend claim.
+    async fn ensure_claim_slot_available(&mut self) -> Result<()> {
+        let actor = self.qualified_id();
+        let held_bead = self
+            .current_bead
+            .as_ref()
+            .filter(|bead| {
+                bead.status == BeadStatus::InProgress
+                    && bead.assignee.as_deref() == Some(actor.as_str())
+            })
+            .cloned();
+
+        let Some(bead) = held_bead else {
+            return Ok(());
+        };
+
+        tracing::error!(
+            bead_id = %bead.id,
+            worker_id = %actor,
+            "single-claim invariant blocked a second claim attempt"
+        );
+
+        match tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await {
+            Ok(Ok(())) => {
+                self.current_bead = None;
+                self.telemetry.emit(EventKind::BeadReleased {
+                    bead_id: bead.id.clone(),
+                    reason: "single_claim_invariant_recovery".to_string(),
+                })?;
+                bail!(
+                    "single-claim invariant blocked a second claim attempt; released existing claim {}",
+                    bead.id
+                );
+            }
+            Ok(Err(error)) => {
+                Err(error).with_context(|| {
+                    format!(
+                        "single-claim invariant blocked a second claim attempt, but existing claim {} could not be released",
+                        bead.id
+                    )
+                })
+            }
+            Err(_) => {
+                bail!(
+                    "single-claim invariant blocked a second claim attempt; timed out releasing existing claim {}",
+                    bead.id
+                );
+            }
+        }
+    }
+
     /// SELECTING: run strand waterfall to find a candidate bead.
     async fn do_select(&mut self) -> Result<()> {
+        // Claim ownership must be checked before clearing per-cycle state. A
+        // leaked claim here would otherwise be forgotten and claim_auto could
+        // assign this same worker a second bead.
+        self.ensure_claim_slot_available().await?;
+
         // Clear per-cycle state.
         // Preserve race-lost exclusions with TTL and beads that lost a race in the current cycle.
         // NOTE: Do NOT reset retry_count or consecutive_race_lost here — they must
@@ -1682,6 +1744,8 @@ impl Worker {
 
     /// CLAIMING: attempt to claim the selected bead.
     async fn do_claim(&mut self) -> Result<()> {
+        self.ensure_claim_slot_available().await?;
+
         let bead_id = match self.current_bead {
             Some(ref b) => b.id.clone(),
             None => {
@@ -4821,6 +4885,74 @@ mod tests {
         // (skips Claiming state which was used in the old two-phase select/claim flow)
         assert_eq!(*worker.state(), WorkerState::Building);
         assert!(worker.current_bead.is_some());
+    }
+
+    #[tokio::test]
+    async fn regression_2026_08_17_worker_never_holds_two_claims() {
+        // On 2026-08-17, needle-55ec0193 remained held after a nominally
+        // successful dispatch and was re-claimed by the same worker in the same
+        // second. A second selection cycle must not overwrite that first claim
+        // and acquire another bead. MockStore intentionally permits one actor to
+        // claim multiple different beads so this test exercises the Worker
+        // invariant rather than inheriting protection from the backend.
+        let bead_a = make_test_bead("needle-claim-a");
+        let bead_b = make_test_bead("needle-claim-b");
+        let store = Arc::new(MockStore::new(vec![bead_a.clone(), bead_b.clone()]));
+        let mut worker = make_worker(store.clone());
+        worker.boot().unwrap();
+
+        worker.do_select().await.unwrap();
+
+        let worker_id = worker.qualified_id();
+        assert_eq!(
+            worker.current_bead.as_ref().map(|bead| &bead.id),
+            Some(&bead_a.id)
+        );
+        assert_eq!(
+            store.show(&bead_a.id).await.unwrap().status,
+            BeadStatus::InProgress
+        );
+
+        // Simulate the leaked transition that re-entered SELECTING without
+        // applying a terminal BeadAction for bead A, then attempt to claim B.
+        worker.set_state(WorkerState::Selecting).unwrap();
+        let error = worker.do_select().await.unwrap_err();
+
+        assert!(
+            error.to_string().contains("single-claim invariant"),
+            "unexpected second-claim error: {error:#}"
+        );
+        let stored_beads = store.beads.lock().unwrap();
+        let held_by_worker: Vec<_> = stored_beads
+            .iter()
+            .filter(|bead| {
+                bead.status == BeadStatus::InProgress
+                    && bead.assignee.as_deref() == Some(worker_id.as_str())
+            })
+            .map(|bead| bead.id.clone())
+            .collect();
+        assert!(
+            held_by_worker.len() <= 1,
+            "worker held multiple beads simultaneously: {held_by_worker:?}"
+        );
+        assert_eq!(
+            stored_beads
+                .iter()
+                .find(|bead| bead.id == bead_a.id)
+                .unwrap()
+                .status,
+            BeadStatus::Open,
+            "the first claim must be released before rejecting the second"
+        );
+        assert_eq!(
+            stored_beads
+                .iter()
+                .find(|bead| bead.id == bead_b.id)
+                .unwrap()
+                .status,
+            BeadStatus::Open,
+            "bead B must remain unclaimed after the rejected attempt"
+        );
     }
 
     // ── Specialized mock stores for claim tests ──
