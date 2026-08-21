@@ -24,11 +24,21 @@ use crate::validation::{verify_shipped_work, GateConfig, GateReport, ValidationG
 // classify (convenience re-export)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Classify an agent exit code into an `Outcome`, with shutdown signal support.
+/// Classify an agent result into an `Outcome`, with verification and shutdown
+/// signal support.
 ///
-/// Delegates to `Outcome::classify()`. Provided here for ergonomic imports.
+/// Interruption takes precedence. Otherwise, failed verification is always a
+/// failure; only verified results are delegated to the exit-code classifier.
 pub fn classify(exit_code: i32, was_interrupted: bool, verified: bool) -> Outcome {
-    Outcome::classify(exit_code, was_interrupted, verified)
+    if was_interrupted {
+        return Outcome::Interrupted;
+    }
+
+    if !verified {
+        return Outcome::Failure;
+    }
+
+    Outcome::classify(exit_code, false)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2042,7 +2052,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.outcome, Outcome::Failure);
         assert_eq!(result.bead_action, BeadAction::Released);
 
         let actions = store.actions();
