@@ -26,6 +26,22 @@ worker:
   launch_stagger_seconds: 2   # Delay between worker launches (default: 2)
 ```
 
+### Configuration Hot-Reload Check
+
+`worker.config_reload_check_interval_secs` controls how often a worker checks
+for configuration changes at the cycle boundary, between dispatches. A value
+of `0` disables the check and is the default until the feature has had fleet
+time:
+
+```yaml
+worker:
+  config_reload_check_interval_secs: 0  # Seconds between checks; 0 disables (default)
+```
+
+This setting is Tier C (restart-required) because it gates the reload mechanism
+itself. In particular, a worker started with the default `0` cannot discover a
+file change that enables polling; restart the worker after changing this value.
+
 ### Worker Binary Path Override
 
 **When to use this:** Set `worker_binary_path` when the running binary's path is deliberately not what should be spawned as workers. This is needed in these cases:

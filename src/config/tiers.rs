@@ -292,6 +292,12 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("worker.launch_stagger_seconds", ReloadTier::RestartRequired),
     ("worker.identifier_scheme", ReloadTier::RestartRequired),
     ("worker.worker_binary_path", ReloadTier::RestartRequired),
+    // Configuration reload polling is itself a process-level capability. With
+    // the default interval of 0, a restart is required to enable the poller.
+    (
+        "worker.config_reload_check_interval_secs",
+        ReloadTier::RestartRequired,
+    ),
     // Workspace paths (Tier C - process identity depends on these)
     ("workspace.home", ReloadTier::RestartRequired),
     ("workspace.default", ReloadTier::RestartRequired),
@@ -332,6 +338,10 @@ mod tests {
         );
         assert_eq!(
             get_tier_for_key("workspace.home"),
+            Some(ReloadTier::RestartRequired)
+        );
+        assert_eq!(
+            get_tier_for_key("worker.config_reload_check_interval_secs"),
             Some(ReloadTier::RestartRequired)
         );
     }

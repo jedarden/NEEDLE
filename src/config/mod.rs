@@ -318,6 +318,14 @@ pub struct WorkerConfig {
     #[serde(default = "WorkerConfig::default_freshness_check_interval_secs")]
     pub freshness_check_interval_secs: u64,
 
+    /// Interval (seconds) between configuration hot-reload checks at the cycle boundary.
+    ///
+    /// Set to 0 to disable configuration hot-reload checking (the default until
+    /// the feature has had fleet time). This setting gates the reload mechanism
+    /// itself, so changing it requires a worker restart (Tier C).
+    #[serde(default = "WorkerConfig::default_config_reload_check_interval_secs")]
+    pub config_reload_check_interval_secs: u64,
+
     /// Explicit path to the worker binary `needle supervise` spawns.
     ///
     /// When `None` (the default), the supervisor resolves
@@ -353,6 +361,7 @@ impl Default for WorkerConfig {
             idle_backoff_max: Self::default_idle_backoff_max(),
             short_retry_backoff: Self::default_short_retry_backoff(),
             freshness_check_interval_secs: Self::default_freshness_check_interval_secs(),
+            config_reload_check_interval_secs: Self::default_config_reload_check_interval_secs(),
             worker_binary_path: None,
         }
     }
@@ -414,6 +423,9 @@ impl WorkerConfig {
     }
     fn default_freshness_check_interval_secs() -> u64 {
         300 // 5 minutes default
+    }
+    fn default_config_reload_check_interval_secs() -> u64 {
+        0
     }
 }
 
@@ -5745,11 +5757,7 @@ impl Config {
 
         old_hashes
             .iter()
-            .filter(|(section, old_hash)| {
-                new_hashes
-                    .get(*section)
-                    .map_or(true, |new_hash| new_hash != *old_hash)
-            })
+            .filter(|(section, old_hash)| new_hashes.get(*section) != Some(*old_hash))
             .map(|(section, _)| section.clone())
             .collect()
     }
@@ -5908,6 +5916,7 @@ fn validate_worker_field(field: &str, key_path: &str) -> Result<(), ConfigError>
         "idle_backoff_min",
         "idle_backoff_max",
         "short_retry_backoff",
+        "config_reload_check_interval_secs",
         "worker_binary_path",
     ];
 
@@ -9535,6 +9544,21 @@ agent:
     // ── worker.worker_binary_path (GitHub issue jedarden/NEEDLE#11) ──
 
     #[test]
+    fn config_reload_check_interval_defaults_to_disabled() {
+        assert_eq!(
+            Config::default().worker.config_reload_check_interval_secs,
+            0
+        );
+    }
+
+    #[test]
+    fn config_reload_check_interval_parses_from_yaml() {
+        let yaml = "worker:\n  config_reload_check_interval_secs: 60\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.worker.config_reload_check_interval_secs, 60);
+    }
+
+    #[test]
     fn worker_binary_path_defaults_to_none() {
         assert_eq!(Config::default().worker.worker_binary_path, None);
     }
@@ -11013,6 +11037,7 @@ resource_attributes:
             "worker.idle_backoff_min",
             "worker.idle_backoff_max",
             "worker.short_retry_backoff",
+            "worker.config_reload_check_interval_secs",
             "worker.worker_binary_path",
         ];
 
@@ -11541,7 +11566,7 @@ path: null
 
         for section in expected_sections {
             assert!(
-                hashes.contains_key(&section.to_string()),
+                hashes.contains_key(section),
                 "expected section '{}' to be in hashes",
                 section
             );
@@ -11580,7 +11605,7 @@ path: null
 
     #[test]
     fn section_hashes_detect_changes() {
-        let mut config1 = Config::default();
+        let config1 = Config::default();
         let mut config2 = Config::default();
 
         // Modify agent section
