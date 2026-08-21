@@ -15,9 +15,7 @@ use opentelemetry_sdk::logs::{
     BatchLogProcessor, LogBatch, LogExporter as SdkLogExporter, SdkLoggerProvider,
 };
 use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
-use opentelemetry_sdk::resource::{
-    Resource, SdkProvidedResourceDetector, TelemetryResourceDetector,
-};
+use opentelemetry_sdk::resource::Resource;
 use opentelemetry_sdk::trace::{
     BatchSpanProcessor, SdkTracerProvider, SpanData, SpanExporter as SdkSpanExporter,
 };
@@ -826,11 +824,10 @@ impl OtlpSink {
             }
         }
 
-        // Detect SDK-provided attributes (telemetry.sdk.*)
-        let resource = builder
-            .with_detector(Box::new(TelemetryResourceDetector))
-            .with_detector(Box::new(SdkProvidedResourceDetector))
-            .build();
+        // `Resource::builder()` has already applied the SDK detectors. Keep
+        // explicit NEEDLE attributes last so the SDK fallback
+        // `service.name=unknown_service` cannot overwrite `service.name`.
+        let resource = builder.build();
 
         Ok(resource)
     }
