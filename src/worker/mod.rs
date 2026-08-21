@@ -3558,8 +3558,9 @@ impl Worker {
     /// The check is gated by `worker.config_reload_check_interval_secs`. A zero
     /// interval disables it. Both the file mtime and its SHA-256 content hash
     /// are compared so an in-place rewrite that preserves mtime is detected.
-    /// Detection is reported here; validation and application are handled by
-    /// the subsequent config-reload stages.
+    /// A changed candidate is loaded and validated before any subsequent
+    /// config-reload stage can apply it. Invalid candidates are rejected while
+    /// the worker continues with its running configuration.
     async fn check_config_reload(&mut self) -> Result<()> {
         let interval_secs = self.config.worker.config_reload_check_interval_secs;
         if interval_secs == 0 {
@@ -3576,7 +3577,17 @@ impl Worker {
         self.last_config_reload_check = Some(now);
 
         let path = global_config_path();
-        let current = read_config_file_fingerprint(&path)?;
+        let current = match read_config_file_fingerprint(&path) {
+            Ok(current) => current,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "configuration reload check failed; keeping the running config"
+                );
+                return Ok(());
+            }
+        };
         let changed = self
             .config_reload_fingerprint
             .as_ref()
@@ -3590,10 +3601,78 @@ impl Worker {
                 path = %path.display(),
                 "global configuration change detected at cycle boundary"
             );
-            self.telemetry.emit(EventKind::ConfigReloadDetected)?;
+            if let Err(error) = self
+                .telemetry
+                .emit_try_lock(EventKind::ConfigReloadDetected)
+            {
+                tracing::warn!(error = %error, "failed to emit config.reload.detected");
+            }
+
+            // This is the hard safety gate for reload. Keep the candidate
+            // separate from self.config and validate it before a later reload
+            // stage is allowed to swap or rebuild anything. In particular, a
+            // malformed edit must not become a worker error: polling makes a
+            // bad edit visible to every worker, so fail-closed behaviour here
+            // would turn one operator mistake into a fleet-wide outage.
+            let _candidate = self.load_validated_config_candidate(&path);
         }
 
         Ok(())
+    }
+
+    /// Load and validate a configuration candidate for a reload.
+    ///
+    /// `None` means the candidate was rejected and the current configuration
+    /// must remain in use. Rejection is deliberately reported as telemetry and
+    /// a warning rather than returned as an error: a bad reload must never
+    /// propagate into the worker state machine's `Result` path.
+    ///
+    /// The returned candidate is owned and remains separate from `self.config`
+    /// so callers can validate it before performing an all-or-nothing swap.
+    fn load_validated_config_candidate(&self, path: &Path) -> Option<Config> {
+        let candidate = match ConfigLoader::load_from_path(path) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.reject_config_reload(vec![
+                    "candidate could not be loaded; see the worker warning for details".to_string(),
+                ]);
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %error,
+                    "configuration reload rejected; keeping the running config"
+                );
+                return None;
+            }
+        };
+
+        let validation_errors = ConfigLoader::validate(&candidate);
+        if !validation_errors.is_empty() {
+            let validation_errors = validation_errors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            self.reject_config_reload(validation_errors.clone());
+            tracing::warn!(
+                path = %path.display(),
+                validation_errors = ?validation_errors,
+                "configuration reload rejected; keeping the running config"
+            );
+            return None;
+        }
+
+        Some(candidate)
+    }
+
+    /// Emit a reload rejection without allowing telemetry failure to stop the
+    /// worker. The event intentionally carries diagnostics only; it never
+    /// includes configuration contents or resolved secret/header values.
+    fn reject_config_reload(&self, validation_errors: Vec<String>) {
+        if let Err(error) = self
+            .telemetry
+            .emit_try_lock(EventKind::ConfigReloadRejected { validation_errors })
+        {
+            tracing::warn!(error = %error, "failed to emit config.reload.rejected");
+        }
     }
 
     /// Check whether the running binary is stale compared to the latest needle-stable.
@@ -4757,6 +4836,63 @@ mod tests {
 
         assert!(first_check.is_some());
         assert_eq!(worker.last_config_reload_check, first_check);
+    }
+
+    #[test]
+    fn invalid_reload_candidate_is_rejected_without_mutating_running_config() {
+        let worker = make_worker(Arc::new(MockStore::empty()));
+        let running_max_workers = worker.config.worker.max_workers;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.yaml");
+        std::fs::write(&path, "worker:\n  max_workers: 0\n").unwrap();
+
+        assert!(worker.load_validated_config_candidate(&path).is_none());
+        assert_eq!(worker.config.worker.max_workers, running_max_workers);
+    }
+
+    #[test]
+    fn valid_reload_candidate_is_returned_separately_from_running_config() {
+        let worker = make_worker(Arc::new(MockStore::empty()));
+        let running_max_workers = worker.config.worker.max_workers;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.yaml");
+        std::fs::write(&path, "worker:\n  max_workers: 2\n").unwrap();
+
+        let candidate = worker
+            .load_validated_config_candidate(&path)
+            .expect("valid candidate should pass validation");
+
+        assert_eq!(candidate.worker.max_workers, 2);
+        assert_eq!(worker.config.worker.max_workers, running_max_workers);
+    }
+
+    #[test]
+    fn invalid_config_reload_is_non_fatal_and_keeps_running_config() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/needle/config.yaml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "worker:\n  max_workers: 4\n").unwrap();
+        std::env::set_var("HOME", home.path());
+
+        let mut config = valid_test_config();
+        config.worker.config_reload_check_interval_secs = 60;
+        let mut worker = Worker::new(
+            config,
+            "config-reload-invalid".to_string(),
+            Arc::new(MockStore::empty()),
+        );
+        let running_max_workers = worker.config.worker.max_workers;
+
+        std::fs::write(&config_path, "worker:\n  max_workers: 0\n").unwrap();
+        worker.last_config_reload_check = None;
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(worker.check_config_reload())
+            .expect("reload rejection must not escape the reload check");
+
+        assert_eq!(worker.config.worker.max_workers, running_max_workers);
     }
 
     #[derive(Clone, Default)]
