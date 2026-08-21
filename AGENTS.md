@@ -92,18 +92,57 @@ test worker at `/home/coding` or another directory containing real projects.
 
 ## Verification
 
-- Run `cargo fmt --check` for Rust changes.
-- Run targeted tests for the modules or behavior changed.
-- Run `cargo clippy --all-targets -- -D warnings` when practical. Existing
-  unrelated warnings must be reported distinctly rather than silently fixed as
-  part of an unrelated task.
-- On this host, the `cargo` wrapper may offload a clean repository to iad-ci and
-  use a resource-limited local fallback for a dirty repository. Do not assume a
-  command ran remotely; report what actually ran and its result.
-- The authoritative full verification is the `needle-ci` workflow on iad-ci
-  after a push to `main`. Do not claim full-suite success from targeted tests.
-- If required CI fails, record the failure on the bead, fix it, and do not close
-  the bead as successfully completed.
+Your work is complete when `scripts/definition-of-done.sh --fast` passes with zero failures.
+
+Before closing any bead:
+1. Run `scripts/definition-of-done.sh --fast`
+2. If it fails, address ALL reported issues (not just the first one)
+3. Re-run until it passes
+4. Only then close the bead
+
+This ensures the same verification that runs in pre-commit hooks and CI gates.
+
+### Definition of Done
+
+NEEDLE uses a unified definition-of-done system invoked identically by:
+- **Pre-commit hook**: `scripts/definition-of-done.sh --fast --count-bypass`
+- **NEEDLE validation gate**: `scripts/definition-of-done.sh --fast` (configured in `.needle.yaml`)
+- **CI verify step**: `scripts/definition-of-done.sh --all` (runs both lanes)
+- **Agent completion**: `scripts/definition-of-done.sh --fast` (run before closing beads)
+
+This single source of truth prevents drift between surfaces and ensures "what is the agent held to?" has exactly one answer.
+
+### Verification Lanes
+
+The unified script splits checks by COST, not by tool:
+
+**Fast lane** (seconds, runs locally under cgroup):
+- `cargo fmt --check`
+- `cargo clippy --all-targets -- -D warnings`
+- `cargo check`
+
+**Slow lane** (tests, may submit to iad-ci):
+- `cargo test --lib` (unit tests)
+- `cargo test --test integration_tests` (integration tests)
+
+**Full verification** (CI runs on push to main):
+- Both fast and slow lanes together
+
+### Failure Aggregation
+
+The unified script aggregates ALL failures rather than aborting on the first. This prevents wasted cycles where an agent fixes fmt, gets re-dispatched, discovers clippy, and has to repeat. Each run learns everything at once.
+
+### Bypass Counting
+
+Pre-commit bypasses are recorded in `.beads/bypasses.jsonl`. Each `git commit --no-verify` increments the count, making invisible bypasses impossible. Monitor this file to detect when quality gates are being skipped.
+
+### On this Host
+
+The `cargo` wrapper may offload a clean repository to iad-ci and use a resource-limited local fallback for a dirty repository. Do not assume a command ran remotely; report what actually ran and its result.
+
+The authoritative full verification is the `needle-ci` workflow on iad-ci after a push to `main`. Do not claim full-suite success from the fast lane alone.
+
+If CI fails, record the failure on the bead, fix it, and do not close the bead as successfully completed.
 
 ## Bead Workflow
 
