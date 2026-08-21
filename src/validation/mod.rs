@@ -25,6 +25,8 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::config::{ConfigTier, ReloadTier};
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
 // ──────────────────────────────────────────────────────────────────────────────
@@ -106,6 +108,13 @@ pub enum GateConfig {
         #[serde(default)]
         stderr_cap_bytes: Option<usize>,
     },
+}
+
+impl ConfigTier for Vec<GateConfig> {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier B: Gate configuration requires rebuilding OutcomeHandler
+        ReloadTier::Rebuild
+    }
 }
 
 /// Validation errors that can occur during bead store validation.

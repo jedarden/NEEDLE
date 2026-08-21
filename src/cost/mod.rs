@@ -12,6 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::{ConfigTier, ReloadTier};
 use crate::dispatch::TokenUsage;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -82,6 +83,18 @@ impl Default for BudgetConfig {
             warn_usd: 0.0,
             stop_usd: 0.0,
         }
+    }
+}
+
+impl ConfigTier for BudgetConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        ReloadTier::Live
+    }
+}
+
+impl ConfigTier for PricingConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        ReloadTier::Live
     }
 }
 

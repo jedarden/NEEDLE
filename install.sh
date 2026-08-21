@@ -243,7 +243,7 @@ Use --skip-checksum to bypass this check (not recommended)."
   got:      ${actual_hash}
 
 The downloaded binary may be corrupted or tampered with.
-Use --skip-checksum to bypass this check (not recommended)."
+This verification CANNOT be bypassed for security reasons."
                 fi
                 success "Checksum verified."
             fi

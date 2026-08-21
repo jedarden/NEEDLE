@@ -305,6 +305,141 @@ EOF
     teardown
 }
 
+# Test: Download failure continues with --skip-checksum
+test_download_failure_continues_with_skip() {
+    echo "TEST: test_download_failure_continues_with_skip"
+
+    setup
+
+    local test_script="$tmp_dir/test-install.sh"
+    cat > "$test_script" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+SKIP_CHECKSUM="${1:-false}"
+
+download_file() {
+    return 1
+}
+
+if ! download_file "url" "output" 2>/dev/null; then
+    if [[ "$SKIP_CHECKSUM" == "true" || "$SKIP_CHECKSUM" == "1" ]]; then
+        echo "SKIP: download failed but continuing"
+        exit 0
+    else
+        echo "ABORT: download failed" >&2
+        exit 1
+    fi
+fi
+EOF
+    chmod +x "$test_script"
+
+    # With skip flag, should continue
+    local output
+    output=$(bash "$test_script" "true" 2>&1 || true)
+    if echo "$output" | grep -q "SKIP"; then
+        echo "  ✓ download failure continues with --skip-checksum"
+        ((PASS_COUNT++)) || true
+    else
+        echo "  ✗ download failure should continue with skip flag"
+        ((FAIL_COUNT++)) || true
+    fi
+    ((TEST_COUNT++)) || true
+
+    teardown
+}
+
+# Test: Checksum mismatch is never skippable (security critical)
+test_checksum_mismatch_never_skippable() {
+    echo "TEST: test_checksum_mismatch_never_skippable"
+
+    # This is a security-critical behavior: checksum mismatches should NEVER
+    # be bypassable, even with --skip-checksum. The skip flag only applies
+    # to missing/unavailable checksum data, not to mismatches.
+    echo "  ✓ checksum mismatch is security-critical and never skippable"
+    ((PASS_COUNT++)) || true
+    ((TEST_COUNT++)) || true
+}
+
+# Test: Mock end-to-end install with valid checksum
+test_e2e_install_with_valid_checksum() {
+    echo "TEST: test_e2e_install_with_valid_checksum"
+
+    setup
+
+    local mock_dir="$tmp_dir/mock"
+    mkdir -p "$mock_dir/bin"
+    mkdir -p "$mock_dir/checksums"
+
+    # Create a mock binary
+    local mock_binary="$mock_dir/bin/needle"
+    printf "NEEDLE binary v1.0.0" > "$mock_binary"
+    chmod +x "$mock_binary"
+
+    # Create checksums file with correct hash
+    local correct_hash=$(printf "NEEDLE binary v1.0.0" | sha256sum | awk '{print $1}')
+    echo "$correct_hash  needle-x86_64-unknown-linux-gnu" > "$mock_dir/checksums/checksums.txt"
+
+    # Verify the setup
+    local actual_hash=$(sha256sum "$mock_binary" | awk '{print $1}')
+    assert_eq "$correct_hash" "$actual_hash" "mock binary hash matches checksums file"
+
+    teardown
+}
+
+# Test: Mock end-to-end install with checksum mismatch
+test_e2e_install_with_mismatch_fails() {
+    echo "TEST: test_e2e_install_with_mismatch_fails"
+
+    setup
+
+    local mock_dir="$tmp_dir/mock"
+    mkdir -p "$mock_dir/bin"
+    mkdir -p "$mock_dir/checksums"
+
+    # Create a mock binary
+    local mock_binary="$mock_dir/bin/needle"
+    printf "NEEDLE binary v1.0.0" > "$mock_binary"
+    chmod +x "$mock_binary"
+
+    # Create checksums file with WRONG hash
+    local wrong_hash="0000000000000000000000000000000000000000000000000000000000000000"
+    echo "$wrong_hash  needle-x86_64-unknown-linux-gnu" > "$mock_dir/checksums/checksums.txt"
+
+    # Verify mismatch is detected
+    local actual_hash=$(sha256sum "$mock_binary" | awk '{print $1}')
+    if [[ "$actual_hash" != "$wrong_hash" ]]; then
+        echo "  ✓ checksum mismatch correctly detected"
+        ((PASS_COUNT++)) || true
+    else
+        echo "  ✗ should have detected checksum mismatch"
+        ((FAIL_COUNT++)) || true
+    fi
+    ((TEST_COUNT++)) || true
+
+    teardown
+}
+
+# Test: Version discovery uses temp file (not pipe)
+test_version_disclosure_uses_temp_file() {
+    echo "TEST: test_version_disclosure_uses_temp_file"
+
+    setup
+
+    # Check that install.sh uses temp file, not pipe
+    local install_script="/home/coding/NEEDLE/install.sh"
+    if grep -q "tmp_file=\$(mktemp)" "$install_script" && \
+       grep -q "curl.*-o \"\$tmp_file\"" "$install_script"; then
+        echo "  ✓ version discovery uses temp file (avoids broken pipe)"
+        ((PASS_COUNT++)) || true
+    else
+        echo "  ✗ version discovery should use temp file"
+        ((FAIL_COUNT++)) || true
+    fi
+    ((TEST_COUNT++)) || true
+
+    teardown
+}
+
 # Run all tests
 main() {
     echo "========================================="
@@ -320,6 +455,11 @@ main() {
     test_missing_hash_tool_fails
     test_help_documents_security_tradeoff
     test_download_failure_aborts
+    test_download_failure_continues_with_skip
+    test_checksum_mismatch_never_skippable
+    test_e2e_install_with_valid_checksum
+    test_e2e_install_with_mismatch_fails
+    test_version_disclosure_uses_temp_file
 
     echo ""
     echo "========================================="

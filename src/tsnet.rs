@@ -28,6 +28,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::config::{ConfigTier, ReloadTier};
 use crate::types::{BeadId, WorkerId};
 
 /// Configuration for tsnet identity provisioning.
@@ -68,6 +69,13 @@ impl Default for TsnetConfig {
             worker_tag: Self::default_tag(),
             enabled: false,
         }
+    }
+}
+
+impl ConfigTier for TsnetConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier C: Embed-level, subprocess-facing configuration
+        ReloadTier::RestartRequired
     }
 }
 

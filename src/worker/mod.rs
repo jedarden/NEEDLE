@@ -52,6 +52,23 @@ use crate::types::{
 use crate::upgrade::{self, HotReloadCheck};
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Helper functions
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Safely truncate a string to at most N characters for display.
+///
+/// Commit SHAs from build metadata can be as short as 7 characters (e.g., 'ee18678')
+/// or the fallback 'unknown' (also 7 chars). This helper prevents panics when
+/// slicing strings shorter than the desired display length.
+fn truncate_for_display(s: &str, max_len: usize) -> &str {
+    // Use character boundaries, not byte indices, to handle non-ASCII safely
+    match s.char_indices().nth(max_len) {
+        Some((idx, _)) => &s[..idx],
+        None => s, // String is shorter than max_len, return as-is
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Global shutdown flag for signal handlers
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -3386,8 +3403,8 @@ impl Worker {
                 stable_path: _,
             }) => {
                 tracing::info!(
-                    old_hash = %&old_hash[..12],
-                    new_hash = %&new_hash[..12],
+                    old_hash = %truncate_for_display(&old_hash, 12),
+                    new_hash = %truncate_for_display(&new_hash, 12),
                     "new :stable binary detected — exiting cleanly for supervisor relaunch"
                 );
 
@@ -3418,7 +3435,7 @@ impl Worker {
                 // Current binary has been deleted/unlinked (e.g., mv-replaced while running).
                 // This is an unconditional signal to exit cleanly so the supervisor can relaunch.
                 tracing::error!(
-                    stable_hash = %&stable_hash[..12],
+                    stable_hash = %truncate_for_display(&stable_hash, 12),
                     "current binary has been deleted/unlinked — exiting cleanly for supervisor relaunch"
                 );
 
@@ -4488,6 +4505,63 @@ mod tests {
     use async_trait::async_trait;
     use std::io::Write;
     use std::sync::Mutex;
+
+    // ── Tests for truncate_for_display ──
+
+    #[test]
+    fn test_truncate_for_display_with_short_sha() {
+        // Test with 7-character SHA (actual observed case: 'ee18678')
+        let short_sha = "ee18678";
+        assert_eq!(truncate_for_display(short_sha, 12), short_sha);
+        assert_eq!(truncate_for_display(short_sha, 12).len(), 7);
+    }
+
+    #[test]
+    fn test_truncate_for_display_with_unknown() {
+        // Test with 'unknown' fallback (also 7 characters)
+        let unknown = "unknown";
+        assert_eq!(truncate_for_display(unknown, 12), unknown);
+        assert_eq!(truncate_for_display(unknown, 12).len(), 7);
+    }
+
+    #[test]
+    fn test_truncate_for_display_with_long_sha() {
+        // Test with long SHA (40 characters)
+        let long_sha = "a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6q7r8s9t0";
+        assert_eq!(truncate_for_display(long_sha, 12), "a1b2c3d4e5f6");
+        assert_eq!(truncate_for_display(long_sha, 12).len(), 12);
+    }
+
+    #[test]
+    fn test_truncate_for_display_with_exact_length() {
+        // Test when string length equals max_len
+        let exact = "abcdefghijkl";
+        assert_eq!(truncate_for_display(exact, 12), exact);
+        assert_eq!(truncate_for_display(exact, 12).len(), 12);
+    }
+
+    #[test]
+    fn test_truncate_for_display_with_empty_string() {
+        // Test with empty string
+        assert_eq!(truncate_for_display("", 12), "");
+        assert_eq!(truncate_for_display("", 12).len(), 0);
+    }
+
+    #[test]
+    fn test_truncate_for_display_with_unicode() {
+        // Test with Unicode characters (uses char_indices, not byte slicing)
+        let unicode = "hello世界";
+        // 5 chars + 2 chars = 7 chars total, 11 bytes
+        assert_eq!(truncate_for_display(unicode, 12), unicode);
+        assert_eq!(truncate_for_display(unicode, 12).chars().count(), 7);
+    }
+
+    #[test]
+    fn test_truncate_for_display_unicode_truncation() {
+        // Test truncating within a Unicode string
+        let unicode = "helloworld";
+        assert_eq!(truncate_for_display(unicode, 5), "hello");
+    }
 
     #[derive(Clone, Default)]
     struct CapturedLogs(std::sync::Arc<Mutex<Vec<u8>>>);

@@ -7,9 +7,30 @@
 //! 4. Environment variables (`NEEDLE_*`)
 //! 5. CLI arguments (highest precedence)
 //!
-//! Config is loaded once at boot and never reloaded.
+//! Config is loaded once at boot, but can be reloaded at the cycle boundary
+//! via the hot-reload mechanism. See [`tiers`] for reload tier classification.
 //!
 //! Leaf module — depends only on `types`.
+
+pub mod tiers;
+
+pub use crate::config::tiers::ReloadTier;
+
+/// Trait for config structs to declare their reload tier.
+///
+/// Every config struct that can be part of a reloadable configuration must
+/// implement this trait. The tier determines how changes to that config
+/// are applied at runtime.
+///
+/// # Tiers
+///
+/// - **Tier A (Live)**: Swap `self.config`; effective next cycle, no rebuild.
+/// - **Tier B (Rebuild)**: Component reconstructed from new config at cycle boundary.
+/// - **Tier C (Restart Required)**: Cannot change without restarting the process.
+pub trait ConfigTier {
+    /// Returns the reload tier for this config section.
+    fn reload_tier(&self) -> ReloadTier;
+}
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -182,6 +203,12 @@ impl Default for AgentConfig {
     }
 }
 
+impl ConfigTier for AgentConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        ReloadTier::Live
+    }
+}
+
 impl AgentConfig {
     fn default_agent() -> String {
         "claude".to_string()
@@ -329,6 +356,17 @@ impl Default for WorkerConfig {
     }
 }
 
+impl ConfigTier for WorkerConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Worker config has mixed tiers:
+        // - Tier A: idle_* timeouts, max_claim_retries, cpu/memory warnings
+        // - Tier C: max_workers, launch_stagger, identifier_scheme, worker_binary_path
+        // We return RestartRequired for the struct as a whole since Tier C fields exist.
+        // Individual fields will be checked at runtime.
+        ReloadTier::RestartRequired
+    }
+}
+
 impl WorkerConfig {
     fn default_max_workers() -> u32 {
         4
@@ -416,6 +454,12 @@ impl WorkspaceConfig {
     }
 }
 
+impl ConfigTier for WorkspaceConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        ReloadTier::RestartRequired
+    }
+}
+
 /// Workspace-level labels override (`.needle.yaml` `workspace:` section).
 ///
 /// Only `labels` is overridable at the workspace level; the path fields
@@ -490,6 +534,13 @@ impl Default for BeadCliConfig {
 impl BeadCliConfig {
     fn default_backend() -> BeadBackend {
         BeadBackend::Auto
+    }
+}
+
+impl ConfigTier for BeadCliConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier C: Backend selection is process-scoped and cannot be reloaded
+        ReloadTier::RestartRequired
     }
 }
 
@@ -4205,6 +4256,13 @@ pub struct StrandsConfig {
     pub learning: LearningConfig,
 }
 
+impl ConfigTier for StrandsConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier A: Strand thresholds and cooldowns are read live during execution
+        ReloadTier::Live
+    }
+}
+
 /// Resolve strand configuration for post-Pluck decision analysis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveConfig {
@@ -4765,6 +4823,13 @@ pub struct TelemetryConfig {
     pub otlp_sink: OtlpSinkConfig,
 }
 
+impl ConfigTier for TelemetryConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier B: Telemetry system must be rebuilt to install/uninstall OTLP layer
+        ReloadTier::Rebuild
+    }
+}
+
 /// Health monitoring configuration (heartbeat, peer detection).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthConfig {
@@ -4814,6 +4879,13 @@ impl HealthConfig {
     }
     fn default_heartbeat_dir() -> Option<PathBuf> {
         None
+    }
+}
+
+impl ConfigTier for HealthConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier C: Health monitoring installed at boot with global tracing subscriber
+        ReloadTier::RestartRequired
     }
 }
 
@@ -5015,6 +5087,13 @@ impl SupervisorConfig {
     }
 }
 
+impl ConfigTier for SupervisorConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier C: Supervisor controls daemon lifecycle and process identity
+        ReloadTier::RestartRequired
+    }
+}
+
 /// Per-provider concurrency and rate limits.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderLimits {
@@ -5043,6 +5122,13 @@ pub struct LimitsConfig {
     /// Per-model limits keyed by model name (e.g., `claude-opus`).
     #[serde(default)]
     pub models: BTreeMap<String, ModelLimits>,
+}
+
+impl ConfigTier for LimitsConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier B: Rate limiting must be rebuilt to update token buckets and limits
+        ReloadTier::Rebuild
+    }
 }
 
 /// A/B test variant for a prompt template.
@@ -5099,6 +5185,13 @@ pub struct PromptConfig {
     /// ```
     #[serde(default)]
     pub variants: std::collections::BTreeMap<String, Vec<VariantConfig>>,
+}
+
+impl ConfigTier for PromptConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier B: PromptBuilder must be rebuilt to update templates and context files
+        ReloadTier::Rebuild
+    }
 }
 
 /// Self-modification (hot-reload) configuration.
@@ -5162,6 +5255,13 @@ impl SelfModificationConfig {
 
     fn default_hot_reload() -> bool {
         true
+    }
+}
+
+impl ConfigTier for SelfModificationConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier C: Controls the hot-reload mechanism itself, cannot be reloaded
+        ReloadTier::RestartRequired
     }
 }
 
@@ -5234,6 +5334,13 @@ impl OutcomeConfig {
     }
 }
 
+impl ConfigTier for OutcomeConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier A: Quarantine threshold is read live during outcome handling
+        ReloadTier::Live
+    }
+}
+
 /// Validation gate execution configuration.
 ///
 /// Both fields preserve NEEDLE's previous hardcoded behavior as their default,
@@ -5268,6 +5375,13 @@ impl ValidationConfig {
     }
     fn default_stderr_cap_bytes() -> usize {
         4096
+    }
+}
+
+impl ConfigTier for ValidationConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier B: Gate execution settings require rebuilding OutcomeHandler
+        ReloadTier::Rebuild
     }
 }
 
