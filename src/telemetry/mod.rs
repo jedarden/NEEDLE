@@ -3143,6 +3143,10 @@ pub struct TelemetryIdentity {
 enum WriterMessage {
     Event(TelemetryEvent),
     Flush(tokio::sync::oneshot::Sender<()>),
+    ReplaceSinks {
+        sinks: Vec<Box<dyn Sink>>,
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 /// Holds the receiver and sinks until they can be spawned in an async context.
@@ -3557,10 +3561,30 @@ impl Telemetry {
 
         tokio::spawn(async move {
             let mut rx = receiver;
+            let mut sinks: Vec<Box<dyn Sink>> = vec![Box::new(sink)];
             while let Some(msg) = rx.recv().await {
-                if let WriterMessage::Event(event) = msg {
-                    if let Err(e) = sink.accept(&event) {
-                        tracing::warn!(error = %e, "test sink accept failed");
+                match msg {
+                    WriterMessage::Event(event) => {
+                        for sink in &sinks {
+                            if let Err(e) = sink.accept(&event) {
+                                tracing::warn!(error = %e, "test sink accept failed");
+                            }
+                        }
+                    }
+                    WriterMessage::Flush(reply) => {
+                        for sink in &sinks {
+                            if let Err(e) = sink.flush(std::time::Duration::from_secs(5)) {
+                                tracing::warn!(error = %e, "test sink flush failed");
+                            }
+                        }
+                        reply.send(()).ok();
+                    }
+                    WriterMessage::ReplaceSinks {
+                        sinks: replacement,
+                        reply,
+                    } => {
+                        sinks = replacement;
+                        reply.send(()).ok();
                     }
                 }
             }
@@ -3576,6 +3600,37 @@ impl Telemetry {
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
             otlp_shutdown: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Replace the sinks owned by the background writer.
+    ///
+    /// The replacement is sent through the same FIFO channel as events. This
+    /// means every event already queued is delivered to the current sinks
+    /// before the writer installs the replacement, and events emitted after
+    /// this method returns use only the new sinks. The writer remains alive
+    /// throughout the swap.
+    ///
+    /// The writer must have been started before calling this method. Use
+    /// [`start`](Self::start) or [`start_and_wait`](Self::start_and_wait)
+    /// during initialization first.
+    pub async fn replace_sinks(&self, sinks: Vec<Box<dyn Sink>>) -> Result<()> {
+        let (reply, replaced) = tokio::sync::oneshot::channel();
+        {
+            let sender = self
+                .sender
+                .lock()
+                .map_err(|_| anyhow::anyhow!("telemetry sender lock poisoned"))?;
+            let sender = sender
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("telemetry writer is shut down"))?;
+            sender
+                .send(WriterMessage::ReplaceSinks { sinks, reply })
+                .map_err(|_| anyhow::anyhow!("telemetry writer channel is disconnected"))?;
+        }
+
+        replaced
+            .await
+            .map_err(|_| anyhow::anyhow!("telemetry writer stopped before replacing sinks"))
     }
 
     /// Update the workspace attached to subsequently emitted events.
@@ -3956,9 +4011,6 @@ impl Telemetry {
                 }
             };
             eprintln!("NEEDLE telemetry writer thread: started successfully");
-            if sinks.is_empty() {
-                eprintln!("NEEDLE telemetry writer thread: WARNING - no sinks configured, events will be discarded!");
-            }
             let mut receiver = receiver;
             rt.block_on(async move {
                 // Signal that the writer is ready to process events.
@@ -3972,6 +4024,10 @@ impl Telemetry {
 
                 let deadline = std::time::Duration::from_secs(5);
                 let mut event_count = 0u64;
+                let mut sinks = sinks;
+                if sinks.is_empty() {
+                    eprintln!("NEEDLE telemetry writer thread: WARNING - no sinks configured, events will be discarded!");
+                }
                 while let Some(msg) = receiver.recv().await {
                     match msg {
                         WriterMessage::Event(event) => {
@@ -3992,6 +4048,16 @@ impl Telemetry {
                                     eprintln!("NEEDLE telemetry: sink flush failed: {:#}", e);
                                     tracing::warn!(error = ?e, "telemetry sink flush on demand failed");
                                 }
+                            }
+                            reply.send(()).ok();
+                        }
+                        WriterMessage::ReplaceSinks {
+                            sinks: replacement,
+                            reply,
+                        } => {
+                            sinks = replacement;
+                            if sinks.is_empty() {
+                                eprintln!("NEEDLE telemetry writer thread: WARNING - no sinks configured, events will be discarded!");
                             }
                             reply.send(()).ok();
                         }
@@ -6378,6 +6444,46 @@ mod tests {
         let e2 = events2.lock().unwrap();
         assert_eq!(e1.len(), 1, "sink1 must receive the event");
         assert_eq!(e2.len(), 1, "sink2 must receive the event");
+    }
+
+    /// Replacing sinks is ordered with events already queued on the writer
+    /// channel and does not require restarting the writer thread.
+    #[tokio::test]
+    async fn replace_sinks_preserves_queued_events_and_keeps_writer_alive() {
+        let (old_sink, old_events) = MemorySink::new();
+        let telemetry =
+            Telemetry::with_boxed_sinks("test-replace-sinks".to_string(), vec![Box::new(old_sink)]);
+        telemetry.start_and_wait().await.unwrap();
+
+        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry
+            .emit(EventKind::WorkerStarted {
+                worker_name: "test-replace-sinks".to_string(),
+                version: "0.0.0".to_string(),
+            })
+            .unwrap();
+
+        let (new_sink, new_events) = MemorySink::new();
+        telemetry
+            .replace_sinks(vec![Box::new(new_sink)])
+            .await
+            .unwrap();
+
+        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.shutdown().await;
+
+        let old_events = old_events.lock().unwrap();
+        assert_eq!(old_events.len(), 2, "queued events must reach old sinks");
+        assert_eq!(old_events[0].event_type, "worker.queue_empty");
+        assert_eq!(old_events[1].event_type, "worker.started");
+
+        let new_events = new_events.lock().unwrap();
+        assert_eq!(
+            new_events.len(),
+            1,
+            "events after replacement use new sinks"
+        );
+        assert_eq!(new_events[0].event_type, "worker.queue_empty");
     }
 
     /// `flush(deadline)` is called on every registered sink during graceful
