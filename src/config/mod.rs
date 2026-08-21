@@ -5761,6 +5761,102 @@ impl Config {
             .map(|(section, _)| section.clone())
             .collect()
     }
+
+    /// Return the Tier-C keys whose values differ from another configuration.
+    ///
+    /// Tier-C values remain on the running snapshot during a reload because
+    /// changing them would alter process identity or a component installed at
+    /// boot. The reload path uses this list to report those changes instead of
+    /// silently discarding them.
+    pub fn changed_restart_required_keys(&self, other: &Config) -> Vec<String> {
+        fn differs<T: Serialize>(current: &T, candidate: &T) -> bool {
+            match (
+                serde_json::to_value(current),
+                serde_json::to_value(candidate),
+            ) {
+                (Ok(current), Ok(candidate)) => current != candidate,
+                // All Config fields are serializable. Treat an unexpected
+                // serialization failure as a difference so a stale value is
+                // never kept without reporting it.
+                _ => true,
+            }
+        }
+
+        let mut changed = Vec::new();
+        macro_rules! check {
+            ($key:literal, $current:expr, $candidate:expr) => {
+                if differs(&$current, &$candidate) {
+                    changed.push($key.to_string());
+                }
+            };
+        }
+
+        check!(
+            "worker.max_workers",
+            self.worker.max_workers,
+            other.worker.max_workers
+        );
+        check!(
+            "worker.launch_stagger_seconds",
+            self.worker.launch_stagger_seconds,
+            other.worker.launch_stagger_seconds
+        );
+        check!(
+            "worker.identifier_scheme",
+            self.worker.identifier_scheme,
+            other.worker.identifier_scheme
+        );
+        check!(
+            "worker.worker_binary_path",
+            self.worker.worker_binary_path,
+            other.worker.worker_binary_path
+        );
+        check!(
+            "worker.config_reload_check_interval_secs",
+            self.worker.config_reload_check_interval_secs,
+            other.worker.config_reload_check_interval_secs
+        );
+
+        check!("workspace.home", self.workspace.home, other.workspace.home);
+        check!(
+            "workspace.default",
+            self.workspace.default,
+            other.workspace.default
+        );
+        check!(
+            "bead_cli.backend",
+            self.bead_cli.backend,
+            other.bead_cli.backend
+        );
+        check!("bead_cli.path", self.bead_cli.path, other.bead_cli.path);
+        check!(
+            "health.heartbeat_interval_secs",
+            self.health.heartbeat_interval_secs,
+            other.health.heartbeat_interval_secs
+        );
+        check!(
+            "health.heartbeat_ttl_secs",
+            self.health.heartbeat_ttl_secs,
+            other.health.heartbeat_ttl_secs
+        );
+        check!(
+            "health.heartbeat_dir",
+            self.health.heartbeat_dir,
+            other.health.heartbeat_dir
+        );
+
+        // These sections are process-scoped as a whole, so report their
+        // section key rather than exposing individual values.
+        check!("tsnet", self.tsnet, other.tsnet);
+        check!(
+            "self_modification",
+            self.self_modification,
+            other.self_modification
+        );
+        check!("supervisor", self.supervisor, other.supervisor);
+
+        changed
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -6314,26 +6410,57 @@ impl ConfigLoader {
         Ok(Some(overrides))
     }
 
+    /// Return the non-overridable top-level keys present in a workspace config.
+    ///
+    /// Workspace config is loaded before the worker's telemetry emitter exists,
+    /// so the worker calls this once more after boot telemetry is available in
+    /// order to emit `config.reload.restart_required` for the ignored keys.
+    pub fn workspace_non_overridable_keys(workspace_root: &Path) -> Result<Vec<String>> {
+        let path = workspace_root.join(".needle.yaml");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read workspace config: {}", path.display()))?;
+        Self::non_overridable_keys(&text, &path)
+    }
+
     /// Warn about non-overridable top-level keys in workspace config YAML.
     fn warn_non_overridable_keys(yaml_text: &str, path: &Path) -> Result<()> {
+        for key in Self::non_overridable_keys(yaml_text, path)? {
+            tracing::warn!(
+                key = %key,
+                path = %path.display(),
+                "workspace config contains non-overridable setting '{}' — ignored",
+                key,
+            );
+        }
+        Ok(())
+    }
+
+    /// Parse non-overridable top-level keys from workspace YAML.
+    fn non_overridable_keys(yaml_text: &str, path: &Path) -> Result<Vec<String>> {
         let value: serde_yaml::Value = serde_yaml::from_str(yaml_text)
             .with_context(|| format!("invalid YAML in workspace config: {}", path.display()))?;
 
-        if let serde_yaml::Value::Mapping(map) = value {
-            for key in map.keys() {
-                if let serde_yaml::Value::String(key_str) = key {
-                    if NON_OVERRIDABLE_KEYS.contains(&key_str.as_str()) {
-                        tracing::warn!(
-                            key = %key_str,
-                            path = %path.display(),
-                            "workspace config contains non-overridable setting '{}' — ignored",
-                            key_str,
-                        );
+        let mut keys = match value {
+            serde_yaml::Value::Mapping(map) => map
+                .keys()
+                .filter_map(|key| match key {
+                    serde_yaml::Value::String(key)
+                        if NON_OVERRIDABLE_KEYS.contains(&key.as_str()) =>
+                    {
+                        Some(key.clone())
                     }
-                }
-            }
-        }
-        Ok(())
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        keys.sort();
+        keys.dedup();
+        Ok(keys)
     }
 
     /// Apply workspace overrides to a config.
@@ -7574,6 +7701,20 @@ mod config_tests {
         // Should not return error — non-overridable keys produce warnings, not errors.
         let result = ConfigLoader::warn_non_overridable_keys(yaml, path);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn workspace_non_overridable_keys_are_reportable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "telemetry:\n  otlp_sink:\n    enabled: true\nworker:\n  max_workers: 99\nagent:\n  timeout: 120\n",
+        )
+        .unwrap();
+
+        let keys = ConfigLoader::workspace_non_overridable_keys(dir.path()).unwrap();
+
+        assert_eq!(keys, vec!["telemetry".to_string(), "worker".to_string()]);
     }
 
     #[test]
@@ -11689,6 +11830,48 @@ path: null
         assert!(
             changed.contains(&"limits".to_string()),
             "changed sections should include 'limits'"
+        );
+    }
+
+    #[test]
+    fn changed_restart_required_keys_name_each_changed_tier_c_value() {
+        let config1 = Config::default();
+        let mut config2 = config1.clone();
+        config2.worker.max_workers += 1;
+        config2.worker.launch_stagger_seconds += 1;
+        config2.worker.identifier_scheme = IdentifierScheme::Sequential;
+        config2.worker.worker_binary_path = Some(PathBuf::from("/opt/needle"));
+        config2.worker.config_reload_check_interval_secs = 60;
+        config2.workspace.home.push("reloaded");
+        config2.workspace.default.push("reloaded-workspace");
+        config2.bead_cli.backend = BeadBackend::Bead;
+        config2.bead_cli.path = Some(PathBuf::from("/opt/bead"));
+        config2.health.heartbeat_interval_secs += 1;
+        config2.health.heartbeat_ttl_secs += 1;
+        config2.health.heartbeat_dir = Some(PathBuf::from("heartbeats"));
+        config2.tsnet.enabled = true;
+        config2.self_modification.enabled = true;
+        config2.supervisor.auto_upgrade_check = !config2.supervisor.auto_upgrade_check;
+
+        assert_eq!(
+            config1.changed_restart_required_keys(&config2),
+            vec![
+                "worker.max_workers",
+                "worker.launch_stagger_seconds",
+                "worker.identifier_scheme",
+                "worker.worker_binary_path",
+                "worker.config_reload_check_interval_secs",
+                "workspace.home",
+                "workspace.default",
+                "bead_cli.backend",
+                "bead_cli.path",
+                "health.heartbeat_interval_secs",
+                "health.heartbeat_ttl_secs",
+                "health.heartbeat_dir",
+                "tsnet",
+                "self_modification",
+                "supervisor",
+            ]
         );
     }
 

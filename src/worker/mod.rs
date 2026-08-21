@@ -569,6 +569,19 @@ impl Worker {
     ) -> Self {
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);
 
+        // Workspace configuration is loaded before the worker's telemetry
+        // emitter exists. Report ignored workspace-level settings now that
+        // structured telemetry is available, rather than leaving the boot-time
+        // warning as the only indication that the file had no effect.
+        match ConfigLoader::workspace_non_overridable_keys(&config.workspace.default) {
+            Ok(keys) => report_restart_required_config(&telemetry, keys),
+            Err(error) => tracing::warn!(
+                path = %config.workspace.default.join(".needle.yaml").display(),
+                error = %error,
+                "failed to inspect workspace config for non-overridable settings"
+            ),
+        }
+
         // Phase: Strand setup
         let _ = telemetry.emit(EventKind::InitStepStarted {
             step: "strand_setup".to_string(),
@@ -3644,6 +3657,9 @@ impl Worker {
             // bad edit visible to every worker, so fail-closed behaviour here
             // would turn one operator mistake into a fleet-wide outage.
             if let Some(candidate) = self.load_validated_config_candidate(&path) {
+                let restart_required_keys = self.config.changed_restart_required_keys(&candidate);
+                report_restart_required_config(&self.telemetry, restart_required_keys);
+
                 let changed_keys = self.apply_tier_a_config(candidate);
                 if !changed_keys.is_empty() {
                     tracing::info!(changed_keys = ?changed_keys, "applied Tier-A configuration at cycle boundary");
@@ -5024,6 +5040,25 @@ fn is_workspace_unset(path: &std::path::Path) -> bool {
     s.is_empty() || s == "."
 }
 
+/// Report configuration changes that cannot be applied by the running worker.
+///
+/// Keep this best-effort: a telemetry failure must never turn a configuration
+/// diagnostic into a worker failure. The event carries key names only, never
+/// configuration values or resolved secrets.
+fn report_restart_required_config(telemetry: &Telemetry, keys: Vec<String>) {
+    if keys.is_empty() {
+        return;
+    }
+
+    tracing::warn!(
+        keys = ?keys,
+        "configuration changes require a worker restart; keeping the running values"
+    );
+    if let Err(error) = telemetry.emit_try_lock(EventKind::ConfigReloadRestartRequired { keys }) {
+        tracing::warn!(error = %error, "failed to emit config.reload.restart_required");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5119,6 +5154,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restart_required_config_report_emits_named_keys() {
+        let helper = crate::telemetry::test_utils::TestHelper::new("restart-required-test");
+
+        report_restart_required_config(
+            helper.telemetry(),
+            vec!["workspace.home".to_string(), "bead_cli.backend".to_string()],
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let events = helper.events_by_type("config.reload.restart_required");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].data,
+            serde_json::json!({
+                "keys": ["workspace.home", "bead_cli.backend"]
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn config_reload_check_is_disabled_when_interval_is_zero() {
         let mut worker = make_worker(Arc::new(MockStore::empty()));
 
@@ -5144,6 +5199,78 @@ mod tests {
 
         assert!(first_check.is_some());
         assert_eq!(worker.last_config_reload_check, first_check);
+    }
+
+    #[test]
+    fn tier_c_config_reload_emits_restart_required_event() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/needle/config.yaml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, "worker:\n  max_workers: 4\n").unwrap();
+        std::env::set_var("HOME", home.path());
+
+        let mut config = valid_test_config();
+        let workspace = tempfile::tempdir().unwrap();
+        config.workspace.default = workspace.path().to_path_buf();
+        config.worker.config_reload_check_interval_secs = 60;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (helper, mut worker) = runtime.block_on(async {
+            let helper = crate::telemetry::test_utils::TestHelper::new("tier-c-reload-test");
+            let worker = Worker::new_with_telemetry(
+                config,
+                "tier-c-reload".to_string(),
+                Arc::new(MockStore::empty()),
+                helper.telemetry().clone(),
+            );
+            (helper, worker)
+        });
+
+        std::fs::write(&config_path, "worker:\n  max_workers: 5\n").unwrap();
+        worker.last_config_reload_check = None;
+        runtime.block_on(async {
+            worker.check_config_reload().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        });
+
+        let events = helper.events_by_type("config.reload.restart_required");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].data["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key == "worker.max_workers"));
+        assert_eq!(worker.config.worker.max_workers, 4);
+    }
+
+    #[tokio::test]
+    async fn workspace_non_overridable_config_emits_restart_required_event() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "telemetry:\n  otlp_sink:\n    enabled: true\nworker:\n  max_workers: 99\n",
+        )
+        .unwrap();
+
+        let mut config = valid_test_config();
+        config.workspace.default = workspace.path().to_path_buf();
+        let helper = crate::telemetry::test_utils::TestHelper::new("workspace-config-test");
+        let _worker = Worker::new_with_telemetry(
+            config,
+            "workspace-config".to_string(),
+            Arc::new(MockStore::empty()),
+            helper.telemetry().clone(),
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let events = helper.events_by_type("config.reload.restart_required");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].data,
+            serde_json::json!({
+                "keys": ["telemetry", "worker"]
+            })
+        );
     }
 
     #[test]
