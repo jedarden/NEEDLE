@@ -486,7 +486,19 @@ fn install_transform_binaries(install_dir: &Path, platform_suffix: &str) {
 ///
 /// Returns the path to the new binary.
 pub fn perform_upgrade() -> Result<PathBuf> {
-    let check = check_for_update()?;
+    perform_upgrade_with_telemetry(None)
+}
+
+/// Download and install the latest version of needle with telemetry.
+///
+/// Returns the path to the new binary.
+pub fn perform_upgrade_with_telemetry(telemetry: Option<&Telemetry>) -> Result<PathBuf> {
+    perform_upgrade_internal(telemetry)
+}
+
+/// Internal implementation of perform_upgrade.
+fn perform_upgrade_internal(telemetry: Option<&Telemetry>) -> Result<PathBuf> {
+    let check = check_for_update_with_telemetry(telemetry)?;
 
     if !check.update_available {
         println!("Already up to date (version {})", check.current_version);
