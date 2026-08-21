@@ -15,11 +15,11 @@
 use std::collections::HashSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 // Needed for `.instrument()` — attaches a span to a future instead of holding an
@@ -350,6 +350,57 @@ const HANDLING_WATCHDOG_TIMEOUT_SECS: u64 = 120;
 /// This signals the supervisor to relaunch with the new binary.
 const EXIT_CODE_STALE_BINARY: i32 = 72;
 
+/// The metadata used to detect changes to the global configuration file.
+///
+/// The mtime is useful for ordinary edits, but it is not sufficient by itself:
+/// an in-place rewrite can preserve it. The content hash is therefore checked
+/// on every interval-gated poll as part of the fingerprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigFileFingerprint {
+    mtime: Option<SystemTime>,
+    content_hash: Option<String>,
+}
+
+/// Resolve the same global config path used by [`ConfigLoader`].
+fn global_config_path() -> PathBuf {
+    crate::config::get_home_env()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".config/needle/config.yaml")
+}
+
+/// Read the global config file fingerprint without exposing its contents.
+fn read_config_file_fingerprint(path: &Path) -> Result<ConfigFileFingerprint> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ConfigFileFingerprint {
+                mtime: None,
+                content_hash: None,
+            });
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to inspect config file: {}", path.display()));
+        }
+    };
+
+    let mtime = metadata
+        .modified()
+        .with_context(|| format!("failed to read config mtime: {}", path.display()))?;
+    let content_hash = upgrade::file_hash(path)
+        .with_context(|| format!("failed to hash config file: {}", path.display()))?;
+
+    Ok(ConfigFileFingerprint {
+        mtime: Some(mtime),
+        content_hash: Some(content_hash),
+    })
+}
+
+fn config_file_changed(previous: &ConfigFileFingerprint, current: &ConfigFileFingerprint) -> bool {
+    previous != current
+}
+
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
     config: Config,
@@ -425,6 +476,11 @@ pub struct Worker {
     /// Whether we've already warned about a stale binary.
     /// Prevents spamming warnings on every dispatch cycle when stale.
     stale_binary_warned: bool,
+    /// Timestamp when the last configuration reload check was performed.
+    last_config_reload_check: Option<Instant>,
+    /// Fingerprint of the global configuration file observed by the last
+    /// completed configuration reload check.
+    config_reload_fingerprint: Option<ConfigFileFingerprint>,
     /// The current bead lifecycle span. Created when a bead is claimed and
     /// instrumented onto each state-handler future until the lifecycle ends.
     ///
@@ -641,6 +697,25 @@ impl Worker {
 
         let default_workspace = config.workspace.default.clone();
 
+        // Capture the boot-time config fingerprint only when polling is enabled.
+        // This makes the first interval-gated check compare against the config
+        // that the worker started with, while keeping the disabled path free of
+        // filesystem work.
+        let config_reload_fingerprint = if config.worker.config_reload_check_interval_secs == 0 {
+            None
+        } else {
+            match read_config_file_fingerprint(&global_config_path()) {
+                Ok(fingerprint) => Some(fingerprint),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "failed to capture initial config fingerprint; the first reload check will establish a baseline"
+                    );
+                    None
+                }
+            }
+        };
+
         // Create the watchdog trigger flag before creating the Worker.
         let watchdog_triggered = Arc::new(AtomicBool::new(false));
 
@@ -691,6 +766,8 @@ impl Worker {
             spawn_path_metadata: None,
             last_freshness_check: None,
             stale_binary_warned: false,
+            last_config_reload_check: None,
+            config_reload_fingerprint,
         };
 
         // Warn if both budget thresholds are disabled (0.0 = no cap).
@@ -1019,6 +1096,16 @@ impl Worker {
                     // If check_hot_reload() detected a new binary and successfully
                     // re-execed, we won't reach here (the process is replaced).
                     // On re-exec failure, we continue normally.
+
+                    // Check for a changed global config only at the cycle
+                    // boundary. The check is interval-gated and non-fatal: a
+                    // transient filesystem error must not stop a worker.
+                    if let Err(e) = self.check_config_reload().await {
+                        tracing::warn!(
+                            error = %e,
+                            "configuration reload check failed, continuing with current config"
+                        );
+                    }
 
                     // After hot-reload check, perform the periodic freshness check.
                     // This runs at the configured interval (worker.freshness_check_interval_secs)
@@ -3461,6 +3548,54 @@ impl Worker {
         }
     }
 
+    /// Check for a changed global configuration file at the cycle boundary.
+    ///
+    /// This check is deliberately polled instead of signal-driven. SIGHUP is
+    /// already a shutdown signal so a killed tmux session can release its bead
+    /// and emit `worker.stopped`; using it for reload would turn teardown into a
+    /// reload request.
+    ///
+    /// The check is gated by `worker.config_reload_check_interval_secs`. A zero
+    /// interval disables it. Both the file mtime and its SHA-256 content hash
+    /// are compared so an in-place rewrite that preserves mtime is detected.
+    /// Detection is reported here; validation and application are handled by
+    /// the subsequent config-reload stages.
+    async fn check_config_reload(&mut self) -> Result<()> {
+        let interval_secs = self.config.worker.config_reload_check_interval_secs;
+        if interval_secs == 0 {
+            return Ok(());
+        }
+
+        let now = Instant::now();
+        let interval = Duration::from_secs(interval_secs);
+        if let Some(last_check) = self.last_config_reload_check {
+            if now.duration_since(last_check) < interval {
+                return Ok(());
+            }
+        }
+        self.last_config_reload_check = Some(now);
+
+        let path = global_config_path();
+        let current = read_config_file_fingerprint(&path)?;
+        let changed = self
+            .config_reload_fingerprint
+            .as_ref()
+            .map(|previous| config_file_changed(previous, &current))
+            .unwrap_or(false);
+
+        self.config_reload_fingerprint = Some(current);
+
+        if changed {
+            tracing::info!(
+                path = %path.display(),
+                "global configuration change detected at cycle boundary"
+            );
+            self.telemetry.emit(EventKind::ConfigReloadDetected)?;
+        }
+
+        Ok(())
+    }
+
     /// Check whether the running binary is stale compared to the latest needle-stable.
     ///
     /// This check runs between dispatch cycles (never mid-claim) at the interval
@@ -4085,8 +4220,13 @@ impl Worker {
         // Must be done before emitting the event since we need the from value.
         if to == WorkerState::Handling {
             self.handling_state_entered_at = Some(std::time::Instant::now());
+            tracing::debug!(
+                timestamp = ?self.handling_state_entered_at,
+                "captured HANDLING state entry timestamp for watchdog"
+            );
         } else if from == WorkerState::Handling {
             self.handling_state_entered_at = None;
+            tracing::debug!("cleared HANDLING state timestamp on exit");
         }
 
         // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
@@ -4561,6 +4701,62 @@ mod tests {
         // Test truncating within a Unicode string
         let unicode = "helloworld";
         assert_eq!(truncate_for_display(unicode, 5), "hello");
+    }
+
+    #[test]
+    fn config_file_change_detects_hash_change_with_unchanged_mtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.yaml");
+        std::fs::write(&path, "worker:\n  max_workers: 1\n").unwrap();
+        let previous = read_config_file_fingerprint(&path).unwrap();
+
+        std::fs::write(&path, "worker:\n  max_workers: 2\n").unwrap();
+        let current = read_config_file_fingerprint(&path).unwrap();
+        let current_with_previous_mtime = ConfigFileFingerprint {
+            mtime: previous.mtime,
+            content_hash: current.content_hash.clone(),
+        };
+
+        assert_ne!(previous.content_hash, current.content_hash);
+        assert!(config_file_changed(&previous, &current_with_previous_mtime));
+    }
+
+    #[test]
+    fn config_file_change_ignores_identical_fingerprint() {
+        let fingerprint = ConfigFileFingerprint {
+            mtime: Some(SystemTime::UNIX_EPOCH),
+            content_hash: Some("same-hash".to_string()),
+        };
+
+        assert!(!config_file_changed(&fingerprint, &fingerprint));
+    }
+
+    #[tokio::test]
+    async fn config_reload_check_is_disabled_when_interval_is_zero() {
+        let mut worker = make_worker(Arc::new(MockStore::empty()));
+
+        worker.check_config_reload().await.unwrap();
+
+        assert!(worker.last_config_reload_check.is_none());
+    }
+
+    #[tokio::test]
+    async fn config_reload_check_is_interval_gated() {
+        let mut config = valid_test_config();
+        config.worker.config_reload_check_interval_secs = 60;
+        let mut worker = Worker::new(
+            config,
+            "config-reload-interval".to_string(),
+            Arc::new(MockStore::empty()),
+        );
+
+        worker.check_config_reload().await.unwrap();
+        let first_check = worker.last_config_reload_check;
+
+        worker.check_config_reload().await.unwrap();
+
+        assert!(first_check.is_some());
+        assert_eq!(worker.last_config_reload_check, first_check);
     }
 
     #[derive(Clone, Default)]
