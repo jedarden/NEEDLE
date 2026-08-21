@@ -5604,6 +5604,168 @@ mod tests {
     }
 
     #[test]
+    fn invalid_config_reload_keeps_worker_running_and_emits_rejection() {
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", home.path());
+
+        let config_path = home.path().join(".config/needle/config.yaml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        let mut config = valid_test_config();
+        config.agent.default = "old-agent".to_string();
+        config.agent.adapters_dir = home.path().join("adapters");
+        config.worker.config_reload_check_interval_secs = 1;
+        config.worker.idle_action = IdleAction::Wait;
+        config.worker.idle_backoff_min = 1;
+        config.worker.idle_backoff_max = 1;
+        config.worker.enforce_shipped_work = false;
+        config.workspace.home = home.path().join(".needle");
+        config.workspace.default = workspace.path().to_path_buf();
+        config.self_modification.hot_reload = false;
+        config.strands.explore.enabled = false;
+        config.strands.explore.workspace_root = workspace.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
+
+        std::fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+
+        let dispatch_started = workspace.path().join("dispatch-started");
+        let release_dispatch = workspace.path().join("release-dispatch");
+        let mut environment = HashMap::new();
+        environment.insert(
+            "NEEDLE_TEST_DISPATCH_STARTED".to_string(),
+            dispatch_started.display().to_string(),
+        );
+        environment.insert(
+            "NEEDLE_TEST_RELEASE_DISPATCH".to_string(),
+            release_dispatch.display().to_string(),
+        );
+        let adapter = crate::dispatch::AgentAdapter {
+            name: "old-agent".to_string(),
+            description: None,
+            agent_cli: "bash".to_string(),
+            version_command: None,
+            input_method: crate::types::InputMethod::Stdin,
+            invoke_template: concat!(
+                "touch \"$NEEDLE_TEST_DISPATCH_STARTED\"; ",
+                "while [ ! -e \"$NEEDLE_TEST_RELEASE_DISPATCH\" ]; do sleep 0.01; done; ",
+                "printf old-config"
+            )
+            .to_string(),
+            environment,
+            timeout_secs: 10,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            provider: None,
+            model: None,
+            token_extraction: crate::dispatch::TokenExtraction::None,
+            output_transform: None,
+            harness: None,
+            harness_version: None,
+        };
+        let mut adapters = HashMap::new();
+        adapters.insert(adapter.name.clone(), adapter);
+
+        let mut bead = make_test_bead("needle-invalid-reload");
+        bead.workspace = workspace.path().to_path_buf();
+        let store = Arc::new(MockStore::new(vec![bead.clone()]));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (helper, mut worker) = runtime.block_on(async {
+            let helper = crate::telemetry::test_utils::TestHelper::new("invalid-reload-test");
+            let worker = Worker::new_with_telemetry(
+                config.clone(),
+                "invalid-reload".to_string(),
+                store.clone(),
+                helper.telemetry().clone(),
+            );
+            (helper, worker)
+        });
+        worker.dispatcher =
+            Dispatcher::with_adapters(adapters, helper.telemetry().clone(), config.agent.timeout);
+        worker.boot().unwrap();
+
+        let running_max_workers = worker.config.worker.max_workers;
+        let shutdown = worker.shutdown.clone();
+        let worker_finished = Arc::new(AtomicBool::new(false));
+        let worker_finished_for_run = worker_finished.clone();
+
+        let result = runtime.block_on(async {
+            let request_invalid_reload = async {
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !dispatch_started.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("old-config dispatch did not start");
+
+                std::fs::write(&config_path, "worker:\n  max_workers: 0\n").unwrap();
+                helper.sync().await;
+
+                assert_eq!(helper.events_by_type("agent.dispatched").len(), 1);
+                helper.assert_event_not_emitted("config.reload.rejected");
+
+                {
+                    let mut beads = store.beads.lock().unwrap();
+                    let claimed = beads
+                        .iter_mut()
+                        .find(|stored| stored.id == bead.id)
+                        .expect("claimed test bead should remain in the mock store");
+                    claimed.status = BeadStatus::Closed;
+                }
+
+                std::fs::write(&release_dispatch, b"").unwrap();
+
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while helper.events_by_type("config.reload.rejected").is_empty() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("invalid candidate was not rejected");
+
+                assert!(
+                    !worker_finished.load(Ordering::SeqCst),
+                    "invalid config reload must not terminate the worker"
+                );
+                shutdown.store(true, Ordering::SeqCst);
+            };
+
+            let run_worker = async {
+                let result = worker.run_state_machine().await;
+                worker_finished_for_run.store(true, Ordering::SeqCst);
+                result
+            };
+
+            tokio::join!(run_worker, request_invalid_reload).0
+        });
+        let terminal_state =
+            result.expect("invalid config reload must not stop the worker with an error");
+        runtime.block_on(helper.sync());
+
+        assert_eq!(terminal_state, WorkerState::Stopped);
+        assert_eq!(worker.config.worker.max_workers, running_max_workers);
+        helper.assert_event_count("config.reload.rejected", 1);
+        helper.assert_event_not_emitted("config.reload.applied");
+        helper.assert_event_not_emitted("worker.errored");
+
+        let rejected = helper
+            .events_by_type("config.reload.rejected")
+            .into_iter()
+            .next()
+            .expect("rejection event should be emitted");
+        assert!(rejected.data["validation_errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("max_workers")));
+    }
+
+    #[test]
     fn tier_c_config_reload_emits_restart_required_event() {
         let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
