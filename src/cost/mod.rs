@@ -140,6 +140,8 @@ pub struct EffortData {
     pub agent_name: String,
     /// Model identifier (from adapter config).
     pub model: Option<String>,
+    /// Provider name (e.g., "anthropic", "openai").
+    pub provider: Option<String>,
     /// Extracted token usage from agent output.
     pub tokens: TokenUsage,
     /// Estimated cost in USD (None if pricing not configured for this model).

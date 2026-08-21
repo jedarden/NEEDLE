@@ -2026,6 +2026,7 @@ impl Worker {
                     cycle_start: Instant::now(),
                     agent_name: String::new(),
                     model: None,
+                    provider: None,
                     tokens: dispatch::TokenUsage::default(),
                     estimated_cost_usd: None,
                 });
@@ -2706,6 +2707,7 @@ impl Worker {
         if let Some(ref mut effort) = self.last_effort {
             effort.agent_name = adapter.name.clone();
             effort.model = adapter.model.clone();
+            effort.provider = adapter.provider.clone();
             effort.tokens = tokens;
             effort.estimated_cost_usd = estimated_cost;
         }
@@ -3425,6 +3427,7 @@ impl Worker {
                 elapsed_ms,
                 agent_name: effort.agent_name.clone(),
                 model: effort.model.clone(),
+                provider: effort.provider.clone(),
                 tokens_in: effort.tokens.input_tokens,
                 tokens_out: effort.tokens.output_tokens,
                 estimated_cost_usd: effort.estimated_cost_usd,
@@ -7714,6 +7717,7 @@ mod tests {
             cycle_start: Instant::now(),
             agent_name: "test".to_string(),
             model: None,
+            provider: None,
             tokens: dispatch::TokenUsage::default(),
             estimated_cost_usd: None,
         });
