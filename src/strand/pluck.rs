@@ -270,6 +270,30 @@ impl PluckStrand {
     }
 }
 
+/// Sanitize a workspace path for use in a dedup label.
+///
+/// Converts workspace paths to safe label identifiers by extracting
+/// the workspace name and removing special characters.
+/// Examples:
+/// - "/home/coding/NEEDLE" → "NEEDLE"
+/// - "/home/coding/my-project" → "my-project"
+/// - "/home/user/repo_name" → "repo_name"
+fn sanitize_workspace_name(workspace_path: &str) -> String {
+    workspace_path
+        .rsplit('/')
+        .next()
+        .unwrap_or("unknown")
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl super::Strand for PluckStrand {
     fn name(&self) -> &str {
@@ -583,6 +607,86 @@ impl super::Strand for PluckStrand {
                     tracing::warn!(
                         error = %e,
                         "Failed to write persistent starvation record"
+                    );
+                }
+            }
+
+            // Create or update a starvation alert bead with deduplication.
+            // This prevents creating duplicate starvation beads for the same workspace.
+            // Uses a stable dedup label format: alert:starvation:<workspace>
+            let dedup_label = format!(
+                "alert:starvation:{}",
+                sanitize_workspace_name(&workspace_path)
+            );
+
+            // Check if an open starvation bead already exists for this workspace.
+            let existing_starvation_bead = if let Ok(all_beads) = store.list_all().await {
+                all_beads
+                    .iter()
+                    .filter(|b| {
+                        b.status == crate::types::BeadStatus::Open
+                            && b.labels.iter().any(|l| l == &dedup_label)
+                    })
+                    .min_by_key(|b| &b.created_at)
+                    .map(|b| b.id.clone())
+            } else {
+                None
+            };
+
+            let body = format!(
+                "Pluck found no candidates but open beads exist.\n\n\
+                 **Workspace:** {}\n\
+                 **Open beads:** {}\n\
+                 **Excluded beads:** {}\n\
+                 **Exclusion reasons:** {}\n\n\
+                 **Timestamp:** {}",
+                workspace_path,
+                stats.open_count,
+                stats.excluded_count,
+                stats.exclusion_reasons.join(", "),
+                Utc::now().to_rfc3339()
+            );
+
+            if let Some(existing_id) = existing_starvation_bead {
+                // Update existing bead by adding a comment with the new stats.
+                let comment = format!(
+                    "Starvation recurred at {}: {} open, {} excluded",
+                    Utc::now().to_rfc3339(),
+                    stats.open_count,
+                    stats.excluded_count
+                );
+                // Note: BeadStore doesn't have a add_comment method, so we emit telemetry instead.
+                tracing::info!(
+                    bead_id = %existing_id,
+                    workspace = %workspace_path,
+                    "Starvation recurred - would update existing bead with comment: {}",
+                    comment
+                );
+            } else {
+                // Create a new starvation alert bead with the dedup label.
+                let title = format!(
+                    "Starvation alert: beads invisible in {}",
+                    workspace_path.rsplit('/').next().unwrap_or("workspace")
+                );
+                let labels: Vec<&str> = vec![
+                    "starvation-alert",
+                    &dedup_label,
+                    "human", // Requires human review
+                ];
+
+                if let Err(e) = store.create_bead(&title, &body, &labels).await {
+                    tracing::warn!(
+                        error = %e,
+                        workspace = %workspace_path,
+                        "Failed to create starvation alert bead"
+                    );
+                } else {
+                    tracing::info!(
+                        workspace = %workspace_path,
+                        open_count = stats.open_count,
+                        excluded_count = stats.excluded_count,
+                        "Created starvation alert bead with dedup label: {}",
+                        dedup_label
                     );
                 }
             }
@@ -2335,5 +2439,35 @@ mod tests {
 
         // Verify telemetry was still emitted (event went to telemetry, not workspace)
         helper.assert_event_emitted("strand.pluck.starvation_detected");
+    }
+
+    #[test]
+    fn sanitize_workspace_name_handles_various_paths() {
+        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE"), "NEEDLE");
+        assert_eq!(
+            sanitize_workspace_name("/home/coding/my-project"),
+            "my-project"
+        );
+        assert_eq!(sanitize_workspace_name("/home/user/repo_name"), "repo_name");
+        assert_eq!(
+            sanitize_workspace_name("/var/data/test.workspace"),
+            "test_workspace"
+        );
+        assert_eq!(
+            sanitize_workspace_name("/absolute/path/with/slashes"),
+            "slashes"
+        );
+        assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+        assert_eq!(sanitize_workspace_name(""), "unknown");
+    }
+
+    #[test]
+    fn sanitize_workspace_name_replaces_special_chars() {
+        assert_eq!(
+            sanitize_workspace_name("/home/user/project@v1.0"),
+            "project_v1_0"
+        );
+        assert_eq!(sanitize_workspace_name("/home/user/test#123"), "test_123");
+        assert_eq!(sanitize_workspace_name("/home/user/$special"), "_special");
     }
 }
