@@ -193,3 +193,7 @@ fabric:
 supervisor:
   heartbeat_path: null
   socket_path: null
+  # Whether to automatically check for GitHub releases and download to :testing channel
+  auto_upgrade_check: false
+  # Interval (seconds) between automatic update checks (default: 21600 = 6 hours)
+  update_check_interval_secs: 21600
