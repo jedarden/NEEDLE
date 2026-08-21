@@ -33,11 +33,13 @@ pub trait ConfigTier {
 }
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::cost::{BudgetConfig, PricingConfig};
 use crate::types::{IdentifierScheme, IdleAction};
@@ -5616,6 +5618,140 @@ impl Config {
                 variant.content_file = expand_tilde(&variant.content_file);
             }
         }
+    }
+
+    /// Compute per-section content hashes for selective component rebuilding.
+    ///
+    /// Returns a map where each key is a config section name (e.g., "agent", "telemetry")
+    /// and each value is a SHA-256 hash of that section's serialized content.
+    ///
+    /// This enables the config reload mechanism to detect which sections changed
+    /// and rebuild only the components whose config subtree changed (§18.2, 18.4).
+    ///
+    /// # Section Mapping
+    ///
+    /// The sections correspond to the top-level fields in Config and map to
+    /// the tier-B components that must be rebuilt when that section changes:
+    ///
+    /// - `agent` → AgentConfig (Tier A: live swap, no rebuild needed)
+    /// - `worker` → WorkerConfig (Tier A: live swap, no rebuild needed)
+    /// - `strands` → StrandsConfig (Tier A: live swap, no rebuild needed)
+    /// - `telemetry` → TelemetryConfig (Tier B: rebuild Telemetry component)
+    /// - `prompt` → PromptConfig (Tier B: rebuild PromptBuilder)
+    /// - `limits` → LimitsConfig (Tier B: rebuild RateLimiter)
+    /// - `gates` → Vec<GateConfig> (Tier B: rebuild OutcomeHandler)
+    /// - `validation` → ValidationConfig (Tier B: rebuild OutcomeHandler)
+    /// - `workspace` → WorkspaceConfig (Tier C: restart required)
+    /// - `bead_cli` → BeadCliConfig (Tier C: restart required)
+    /// - `health` → HealthConfig (Tier C: restart required)
+    /// - `self_modification` → SelfModificationConfig (Tier C: restart required)
+    /// - `supervisor` → SupervisorConfig (Tier C: restart required)
+    /// - `outcome` → OutcomeConfig (Tier A: live swap, no rebuild needed)
+    /// - `budget` → BudgetConfig (Tier A: live swap, no rebuild needed)
+    /// - `pricing` → PricingConfig (Tier A: live swap, no rebuild needed)
+    /// - `tsnet` → TsnetConfig (Tier C: restart required)
+    ///
+    /// # Hash Stability
+    ///
+    /// Hashes are computed from the canonical JSON serialization of each section.
+    /// This ensures that semantically equivalent configs produce the same hash
+    /// regardless of YAML formatting differences.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use needle::config::Config;
+    ///
+    /// let config = Config::default();
+    /// let hashes = config.section_hashes();
+    /// // hashes = {
+    /// //   "agent": "a1b2c3d4...",
+    /// //   "telemetry": "e5f6g7h8...",
+    /// //   ...
+    /// // }
+    /// ```
+    pub fn section_hashes(&self) -> HashMap<String, String> {
+        let mut hashes = HashMap::new();
+
+        // Helper to hash a serializable value
+        fn hash_section<T: Serialize>(section: &T) -> String {
+            match serde_json::to_string(section) {
+                Ok(json) => {
+                    let mut hasher = Sha256::new();
+                    hasher.update(json.as_bytes());
+                    format!("{:x}", hasher.finalize())
+                }
+                Err(_) => {
+                    // Serialization failed - use a sentinel value
+                    // This should never happen with valid config structs
+                    "serialize_failed".to_string()
+                }
+            }
+        }
+
+        // Tier A sections (live swap - included for completeness but not used for rebuilds)
+        hashes.insert("agent".to_string(), hash_section(&self.agent));
+        hashes.insert("worker".to_string(), hash_section(&self.worker));
+        hashes.insert("strands".to_string(), hash_section(&self.strands));
+        hashes.insert("outcome".to_string(), hash_section(&self.outcome));
+        hashes.insert("budget".to_string(), hash_section(&self.budget));
+        hashes.insert("pricing".to_string(), hash_section(&self.pricing));
+
+        // Tier B sections (component rebuild)
+        hashes.insert("telemetry".to_string(), hash_section(&self.telemetry));
+        hashes.insert("prompt".to_string(), hash_section(&self.prompt));
+        hashes.insert("limits".to_string(), hash_section(&self.limits));
+        hashes.insert("gates".to_string(), hash_section(&self.gates));
+        hashes.insert("validation".to_string(), hash_section(&self.validation));
+
+        // Tier C sections (restart required - included for change detection)
+        hashes.insert("workspace".to_string(), hash_section(&self.workspace));
+        hashes.insert("bead_cli".to_string(), hash_section(&self.bead_cli));
+        hashes.insert("health".to_string(), hash_section(&self.health));
+        hashes.insert(
+            "self_modification".to_string(),
+            hash_section(&self.self_modification),
+        );
+        hashes.insert("supervisor".to_string(), hash_section(&self.supervisor));
+        hashes.insert("tsnet".to_string(), hash_section(&self.tsnet));
+
+        // Legacy fields
+        hashes.insert("verification".to_string(), hash_section(&self.verification));
+        hashes.insert("fabric".to_string(), hash_section(&self.fabric));
+
+        hashes
+    }
+
+    /// Compare this config's section hashes with another config's hashes.
+    ///
+    /// Returns a set of section names that differ between the two configs.
+    /// This is used to determine which components need to be rebuilt when
+    /// config is reloaded.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use needle::config::Config;
+    ///
+    /// let old_config = Config::default();
+    /// let new_config = /* modified config */;
+    ///
+    /// let changed_sections = old_config.changed_sections(&new_config);
+    /// // If changed_sections contains "telemetry", rebuild the Telemetry component
+    /// ```
+    pub fn changed_sections(&self, other: &Config) -> Vec<String> {
+        let old_hashes = self.section_hashes();
+        let new_hashes = other.section_hashes();
+
+        old_hashes
+            .iter()
+            .filter(|(section, old_hash)| {
+                new_hashes
+                    .get(*section)
+                    .map_or(true, |new_hash| new_hash != *old_hash)
+            })
+            .map(|(section, _)| section.clone())
+            .collect()
     }
 }
 
@@ -11369,5 +11505,219 @@ path: null
             );
             assert_eq!(decoded.path, None, "path should remain None");
         }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Per-section hashing tests (§18.2, 18.4)
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn section_hashes_returns_all_expected_sections() {
+        let config = Config::default();
+        let hashes = config.section_hashes();
+
+        // Verify all expected sections are present
+        let expected_sections = [
+            "agent",
+            "worker",
+            "strands",
+            "telemetry",
+            "prompt",
+            "limits",
+            "gates",
+            "validation",
+            "workspace",
+            "bead_cli",
+            "health",
+            "self_modification",
+            "supervisor",
+            "outcome",
+            "budget",
+            "pricing",
+            "tsnet",
+            "verification",
+            "fabric",
+        ];
+
+        for section in expected_sections {
+            assert!(
+                hashes.contains_key(&section.to_string()),
+                "expected section '{}' to be in hashes",
+                section
+            );
+        }
+
+        // Verify hashes are non-empty and hex-formatted
+        for (section, hash) in &hashes {
+            assert!(
+                !hash.is_empty(),
+                "hash for '{}' should not be empty",
+                section
+            );
+            assert!(
+                hash.len() == 64, // SHA-256 produces 64 hex chars
+                "hash for '{}' should be 64 chars, got {}",
+                section,
+                hash.len()
+            );
+            assert!(
+                hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "hash for '{}' should be hex-encoded",
+                section
+            );
+        }
+    }
+
+    #[test]
+    fn section_hashes_are_stable_across_calls() {
+        let config = Config::default();
+
+        let hashes1 = config.section_hashes();
+        let hashes2 = config.section_hashes();
+
+        assert_eq!(hashes1, hashes2, "hashes should be stable across calls");
+    }
+
+    #[test]
+    fn section_hashes_detect_changes() {
+        let mut config1 = Config::default();
+        let mut config2 = Config::default();
+
+        // Modify agent section
+        config2.agent.timeout = 999;
+
+        let hashes1 = config1.section_hashes();
+        let hashes2 = config2.section_hashes();
+
+        // Agent hash should differ
+        assert_ne!(
+            hashes1.get("agent"),
+            hashes2.get("agent"),
+            "agent hash should change when timeout is modified"
+        );
+
+        // Other sections should be unchanged
+        assert_eq!(
+            hashes1.get("telemetry"),
+            hashes2.get("telemetry"),
+            "telemetry hash should not change when agent is modified"
+        );
+    }
+
+    #[test]
+    fn changed_sections_returns_empty_when_identical() {
+        let config1 = Config::default();
+        let config2 = Config::default();
+
+        let changed = config1.changed_sections(&config2);
+        assert!(
+            changed.is_empty(),
+            "no sections should be reported as changed for identical configs"
+        );
+    }
+
+    #[test]
+    fn changed_sections_detects_single_section_change() {
+        let config1 = Config::default();
+        let mut config2 = Config::default();
+
+        // Modify telemetry section
+        config2.telemetry.file_sink.enabled = false;
+
+        let changed = config1.changed_sections(&config2);
+
+        assert_eq!(
+            changed.len(),
+            1,
+            "should detect exactly one changed section"
+        );
+        assert!(
+            changed.contains(&"telemetry".to_string()),
+            "changed sections should include 'telemetry'"
+        );
+    }
+
+    #[test]
+    fn changed_sections_detects_multiple_section_changes() {
+        let config1 = Config::default();
+        let mut config2 = Config::default();
+
+        // Modify multiple sections
+        config2.agent.timeout = 999;
+        config2.telemetry.file_sink.enabled = false;
+        config2.limits.providers.clear();
+
+        let changed = config1.changed_sections(&config2);
+
+        assert!(
+            changed.len() >= 3,
+            "should detect at least 3 changed sections"
+        );
+        assert!(
+            changed.contains(&"agent".to_string()),
+            "changed sections should include 'agent'"
+        );
+        assert!(
+            changed.contains(&"telemetry".to_string()),
+            "changed sections should include 'telemetry'"
+        );
+        assert!(
+            changed.contains(&"limits".to_string()),
+            "changed sections should include 'limits'"
+        );
+    }
+
+    #[test]
+    fn section_hashes_ignore_yaml_formatting_differences() {
+        use serde_yaml;
+
+        // Create equivalent configs from different YAML representations
+        let yaml_compact = r#"
+agent:
+  default: claude
+  timeout: 600
+"#;
+
+        let yaml_verbose = r#"
+agent:
+  default: claude
+  timeout: 600
+  # Comments don't affect hash
+"#;
+
+        let config1: Config = serde_yaml::from_str(yaml_compact).unwrap();
+        let config2: Config = serde_yaml::from_str(yaml_verbose).unwrap();
+
+        let hashes1 = config1.section_hashes();
+        let hashes2 = config2.section_hashes();
+
+        // Hashes should be identical despite YAML formatting differences
+        assert_eq!(
+            hashes1.get("agent"),
+            hashes2.get("agent"),
+            "agent hash should be stable despite YAML formatting differences"
+        );
+    }
+
+    #[test]
+    fn section_hashes_are_deterministic_for_same_content() {
+        let mut config = Config::default();
+        config.agent.timeout = 12345;
+
+        let hashes1 = config.section_hashes();
+        let hashes2 = config.section_hashes();
+
+        assert_eq!(
+            hashes1.get("agent"),
+            hashes2.get("agent"),
+            "hash should be deterministic for same content"
+        );
+
+        // The actual hash value should be what we expect
+        let agent_hash = hashes1.get("agent").unwrap();
+        assert!(
+            agent_hash.len() == 64,
+            "SHA-256 hash should be 64 hex characters"
+        );
     }
 }
