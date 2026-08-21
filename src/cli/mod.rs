@@ -5237,8 +5237,8 @@ fn cmd_upgrade(check_only: bool) -> Result<()> {
         return Ok(());
     }
 
-    // For full upgrade, perform_upgrade will handle its own telemetry
-    crate::upgrade::perform_upgrade()?;
+    // For full upgrade, use the telemetry version so we emit events
+    crate::upgrade::perform_upgrade_with_telemetry(Some(&tel))?;
     Ok(())
 }
 
