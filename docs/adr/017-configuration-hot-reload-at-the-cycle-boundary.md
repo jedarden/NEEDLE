@@ -43,11 +43,25 @@ responding to:
    workspace `.needle.yaml` is parsed, warned to a log nobody reads, and
    dropped. The fleet ran for days with a config file that looked correct.
 
-The seam this needs already exists and is already proven. `check_hot_reload()`
-runs after the `LOGGING` state, described in-code as running "between dispatch
-cycles, never mid-claim, ensuring no bead is left in_progress." Binary
-hot-reload has used that boundary safely for months. Configuration reload is the
+The seam this needs already exists: `check_hot_reload()` runs after the
+`LOGGING` state, described in-code as running "between dispatch cycles, never
+mid-claim, ensuring no bead is left in_progress." Configuration reload is the
 same problem with a smaller blast radius.
+
+**But that seam's own history is a warning, not a reassurance.**
+`check_hot_reload` carried `#[allow(dead_code)]` and had **no call site
+anywhere** from its introduction on 2026-03-21 until it was wired in around
+2026-08-16 (`needle-eea03800`) — for five months, while its doc comment stated
+it was "called between LOGGING and SELECTING." Every deploy in that window was
+a manual kill-and-relaunch that people believed was a hot-reload. It is
+genuinely live now (21 `binary.freshness.exit` events as of 2026-08-21), so the
+boundary is real and exercised — but it has days of production evidence, not
+months.
+
+The lesson transfers directly: a reload mechanism that is *documented* to run is
+not a reload mechanism that runs. Phase 18 must prove the config check actually
+executes, with a test that fails if the call site disappears — not inherit the
+assumption that wiring it once means it stays wired.
 
 ## Decision
 

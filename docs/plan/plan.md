@@ -4703,7 +4703,9 @@ The runtime is built to make this impossible today, in three distinct ways:
 2. **The tracing subscriber is a one-shot global.** `init_tracing_subscriber` installs the OTLP layer via `tracing_subscriber::registry()....try_init()`. A process that booted without a reload handle can never acquire one.
 3. **Unapplicable config is discarded silently.** `telemetry` is in `NON_OVERRIDABLE_KEYS`, so a workspace `.needle.yaml` enabling OTLP is parsed, warned once, and dropped. The fleet ran for days on a config file that read as correct.
 
-The safe seam already exists and is already proven: `check_hot_reload()` runs after `LOGGING`, "between dispatch cycles, never mid-claim, ensuring no bead is left in_progress." Binary hot-reload has used it for months. Config reload is the same problem with a smaller blast radius.
+The safe seam already exists: `check_hot_reload()` runs after `LOGGING`, "between dispatch cycles, never mid-claim, ensuring no bead is left in_progress." Config reload is the same problem with a smaller blast radius.
+
+**That seam's history is itself a requirement.** `check_hot_reload` was `#[allow(dead_code)]` with no call site anywhere from 2026-03-21 until ~2026-08-16 (`needle-eea03800`) — five months during which its doc comment claimed it ran between LOGGING and SELECTING, and every "hot-reload" deploy was really a manual kill-and-relaunch. It is live now (21 `binary.freshness.exit` events as of 2026-08-21), but that is days of evidence, not months. A reload mechanism that is *documented* to run is not one that runs: Phase 18 must assert the config check actually executes, and fail if the call site is ever dropped.
 
 ## Decisions locked
 
@@ -4759,6 +4761,7 @@ An implementer will hit each of these forks; the plan decides them so no mid-bui
 - OTLP toggles false→true and true→false on a running worker, asserted at the transport seam (per the ADR-016 rule: assert on what the exporter is handed, not on a builder's return value).
 - A Tier-C key change reports and does not silently no-op.
 - A rebuild whose `env:` header is absent keeps the previous exporter.
+- **The reload check actually executes.** A test that fails if `check_config_reload()` loses its call site or is never reached from the state machine — the `needle-eea03800` failure mode, where a documented-as-running mechanism was dead code for five months.
 
 ## Exit criteria
 - `telemetry.otlp_sink.enabled` can be flipped on a running worker and traces appear at the collector without the process restarting.
