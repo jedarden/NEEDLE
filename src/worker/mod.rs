@@ -430,6 +430,64 @@ fn replace_config_value<T: Clone + serde::Serialize>(running: &mut T, candidate:
     }
 }
 
+/// Result of rebuilding the non-telemetry Tier-B components for one candidate.
+///
+/// Successful components are installed immediately, while failures retain the
+/// previous instance. Keeping both lists lets the cycle-boundary caller report
+/// partial success without turning a single rebuild error into a worker error.
+#[derive(Debug, Default)]
+struct TierBReloadReport {
+    applied_keys: Vec<String>,
+    rebuilt_components: Vec<&'static str>,
+    failures: Vec<TierBRebuildFailure>,
+}
+
+impl TierBReloadReport {
+    fn failed(&self, component: &str) -> bool {
+        self.failures
+            .iter()
+            .any(|failure| failure.component == component)
+    }
+}
+
+#[derive(Debug)]
+struct TierBRebuildFailure {
+    component: &'static str,
+    error: String,
+}
+
+/// Install a rebuilt component only after its constructor has succeeded.
+///
+/// This is the isolation seam shared by all five Tier-B components. The slot
+/// is never moved out of, so an error cannot leave the worker without its
+/// previously working instance.
+fn install_rebuilt_component<T>(
+    slot: &mut T,
+    component: &'static str,
+    rebuilt: Result<T>,
+    report: &mut TierBReloadReport,
+) -> bool {
+    match rebuilt {
+        Ok(rebuilt) => {
+            *slot = rebuilt;
+            report.rebuilt_components.push(component);
+            true
+        }
+        Err(error) => {
+            tracing::warn!(
+                component,
+                error = %error,
+                "Tier-B component rebuild failed; keeping the previous instance"
+            );
+            report.failures.push(TierBRebuildFailure {
+                component,
+                error: format!("{error:#}"),
+            });
+            false
+        }
+    }
+}
+
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
     config: Config,
@@ -3660,9 +3718,39 @@ impl Worker {
                 let restart_required_keys = self.config.changed_restart_required_keys(&candidate);
                 report_restart_required_config(&self.telemetry, restart_required_keys);
 
-                let changed_keys = self.apply_tier_a_config(candidate);
+                let tier_b = self.rebuild_tier_b_components(&candidate);
+                if !tier_b.failures.is_empty() {
+                    self.reject_config_reload(
+                        tier_b
+                            .failures
+                            .iter()
+                            .map(|failure| {
+                                format!(
+                                    "{} rebuild failed; previous instance retained: {}",
+                                    failure.component, failure.error
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+
+                // These two components own snapshots of fields otherwise
+                // classified live. If their rebuild failed, retain those
+                // running values too so config and component cannot diverge.
+                let mut live_candidate = candidate;
+                if tier_b.failed("StrandRunner") {
+                    live_candidate.strands = self.config.strands.clone();
+                }
+                if tier_b.failed("OutcomeHandler") {
+                    live_candidate.outcome = self.config.outcome.clone();
+                }
+
+                let mut changed_keys = tier_b.applied_keys;
+                changed_keys.extend(self.apply_tier_a_config(&live_candidate));
+                changed_keys.sort();
+                changed_keys.dedup();
                 if !changed_keys.is_empty() {
-                    tracing::info!(changed_keys = ?changed_keys, "applied Tier-A configuration at cycle boundary");
+                    tracing::info!(changed_keys = ?changed_keys, "applied configuration at cycle boundary");
                     if let Err(error) =
                         self.telemetry
                             .emit_try_lock(EventKind::ConfigReloadApplied {
@@ -3733,6 +3821,142 @@ impl Worker {
         }
     }
 
+    /// Rebuild the five non-telemetry Tier-B components whose owned config
+    /// subtree changed.
+    ///
+    /// Every constructor produces a `Result` and every installation is
+    /// independent. A failure therefore leaves that slot and its corresponding
+    /// running config unchanged while later components still get a chance to
+    /// rebuild. Candidate Tier-C values are never passed through accidentally:
+    /// each constructor starts from the running snapshot and receives only the
+    /// subtree it owns.
+    fn rebuild_tier_b_components(&mut self, candidate: &Config) -> TierBReloadReport {
+        let mut report = TierBReloadReport::default();
+
+        // StrandRunner owns the complete strand waterfall snapshot. Although
+        // a few strand thresholds are classified live, rebuilding on any
+        // `strands` change keeps every strand's cached config coherent.
+        if config_values_differ(&self.config.strands, &candidate.strands) {
+            let mut component_config = self.config.clone();
+            component_config.strands = candidate.strands.clone();
+            let worker_id = self.qualified_id();
+            let registry = Registry::default_location(&component_config.workspace.home);
+            let rebuilt = Ok(StrandRunner::from_config(
+                &component_config,
+                &worker_id,
+                registry,
+                self.telemetry.clone(),
+            ));
+
+            if install_rebuilt_component(&mut self.strands, "StrandRunner", rebuilt, &mut report) {
+                self.config.strands = candidate.strands.clone();
+                report.applied_keys.push("strands".to_string());
+            }
+        }
+
+        if config_values_differ(&self.config.prompt, &candidate.prompt) {
+            let rebuilt =
+                PromptBuilder::with_workspace(&candidate.prompt, &self.config.workspace.default)
+                    .map(|builder| {
+                        builder
+                            .with_cross_workspace_skills(
+                                &self.config.strands.explore.workspaces,
+                                &self.config.workspace.labels,
+                            )
+                            .with_global_learnings(
+                                &self.config.strands.learning.global_learnings_file,
+                            )
+                    })
+                    .and_then(|builder| {
+                        builder.validate()?;
+                        Ok(builder)
+                    });
+
+            if install_rebuilt_component(
+                &mut self.prompt_builder,
+                "PromptBuilder",
+                rebuilt,
+                &mut report,
+            ) {
+                self.config.prompt = candidate.prompt.clone();
+                report.applied_keys.push("prompt".to_string());
+            }
+        }
+
+        // Only adapters_dir is Tier B within AgentConfig. Other agent fields
+        // remain live and must not cause adapter files to be re-read.
+        if config_values_differ(
+            &self.config.agent.adapters_dir,
+            &candidate.agent.adapters_dir,
+        ) {
+            let mut component_config = self.config.clone();
+            component_config.agent.adapters_dir = candidate.agent.adapters_dir.clone();
+            let rebuilt = Dispatcher::new(&component_config, self.telemetry.clone());
+
+            if install_rebuilt_component(&mut self.dispatcher, "Dispatcher", rebuilt, &mut report) {
+                self.config.agent.adapters_dir = candidate.agent.adapters_dir.clone();
+                report.applied_keys.push("agent.adapters_dir".to_string());
+            }
+        }
+
+        if config_values_differ(&self.config.limits, &candidate.limits) {
+            let rebuilt = Ok(RateLimiter::new(
+                candidate.limits.clone(),
+                &self.config.workspace.home.join("state"),
+            ));
+
+            if install_rebuilt_component(
+                &mut self.rate_limiter,
+                "RateLimiter",
+                rebuilt,
+                &mut report,
+            ) {
+                self.config.limits = candidate.limits.clone();
+                report.applied_keys.push("limits".to_string());
+            }
+        }
+
+        let outcome_changed = config_values_differ(&self.config.gates, &candidate.gates)
+            || config_values_differ(&self.config.verification, &candidate.verification)
+            || config_values_differ(&self.config.validation, &candidate.validation)
+            || config_values_differ(&self.config.outcome, &candidate.outcome);
+        if outcome_changed {
+            let mut component_config = self.config.clone();
+            component_config.gates = candidate.gates.clone();
+            component_config.verification = candidate.verification.clone();
+            component_config.validation = candidate.validation.clone();
+            component_config.outcome = candidate.outcome.clone();
+            let rebuilt = Ok(OutcomeHandler::new(
+                component_config,
+                self.telemetry.clone(),
+            ));
+
+            if install_rebuilt_component(
+                &mut self.outcome_handler,
+                "OutcomeHandler",
+                rebuilt,
+                &mut report,
+            ) {
+                if config_values_differ(&self.config.gates, &candidate.gates) {
+                    report.applied_keys.push("gates".to_string());
+                }
+                if config_values_differ(&self.config.verification, &candidate.verification) {
+                    report.applied_keys.push("verification".to_string());
+                }
+                if config_values_differ(&self.config.validation, &candidate.validation) {
+                    report.applied_keys.push("validation".to_string());
+                }
+                self.config.gates = candidate.gates.clone();
+                self.config.verification = candidate.verification.clone();
+                self.config.validation = candidate.validation.clone();
+                // `outcome` remains Tier A and is copied immediately after
+                // this function by apply_tier_a_config.
+            }
+        }
+
+        report
+    }
+
     /// Apply the declared Tier-A fields from a validated candidate.
     ///
     /// The running config is never edited in place. Every live field is first
@@ -3744,7 +3968,7 @@ impl Worker {
     /// Tier-B and Tier-C fields deliberately remain from the running snapshot;
     /// their component rebuild and restart-required handling belong to later
     /// reload stages.
-    fn apply_tier_a_config(&mut self, candidate: Config) -> Vec<String> {
+    fn apply_tier_a_config(&mut self, candidate: &Config) -> Vec<String> {
         let mut next = self.config.clone();
         let mut changed_keys = Vec::new();
 
@@ -5320,7 +5544,7 @@ mod tests {
         candidate.workspace.home = PathBuf::from("/tmp/reloaded-home");
         candidate.telemetry.file_sink.enabled = !running_telemetry_enabled;
 
-        let changed_keys = worker.apply_tier_a_config(candidate);
+        let changed_keys = worker.apply_tier_a_config(&candidate);
 
         assert_eq!(worker.config.agent.timeout, running_agent_timeout + 1);
         assert_eq!(worker.config.worker.idle_timeout, running_idle_timeout + 1);
@@ -5335,6 +5559,165 @@ mod tests {
             worker.config.telemetry.file_sink.enabled,
             running_telemetry_enabled
         );
+    }
+
+    #[test]
+    fn tier_b_rebuilds_only_changed_component_subtrees() {
+        let mut worker = make_worker(Arc::new(MockStore::empty()));
+        let adapter_dir = tempfile::tempdir().unwrap();
+        let mut candidate = worker.config.clone();
+
+        candidate.strands.explore.enabled = !candidate.strands.explore.enabled;
+        candidate.prompt.instructions = Some("reloaded prompt instructions".to_string());
+        candidate.agent.adapters_dir = adapter_dir.path().to_path_buf();
+        candidate.limits.providers.insert(
+            "anthropic".to_string(),
+            crate::config::ProviderLimits {
+                max_concurrent: Some(7),
+                requests_per_minute: None,
+            },
+        );
+        candidate.validation.outcome_timeout_seconds += 1;
+
+        let report = worker.rebuild_tier_b_components(&candidate);
+
+        assert!(report.failures.is_empty());
+        assert_eq!(
+            report.rebuilt_components,
+            vec![
+                "StrandRunner",
+                "PromptBuilder",
+                "Dispatcher",
+                "RateLimiter",
+                "OutcomeHandler",
+            ]
+        );
+        assert_eq!(
+            worker.config.strands.explore.enabled,
+            candidate.strands.explore.enabled
+        );
+        assert_eq!(
+            worker.config.prompt.instructions,
+            candidate.prompt.instructions
+        );
+        assert_eq!(
+            worker.config.agent.adapters_dir,
+            candidate.agent.adapters_dir
+        );
+        assert!(worker.config.limits.providers.contains_key("anthropic"));
+        assert_eq!(
+            worker.config.validation.outcome_timeout_seconds,
+            candidate.validation.outcome_timeout_seconds
+        );
+
+        let unchanged_candidate = worker.config.clone();
+        let unchanged = worker.rebuild_tier_b_components(&unchanged_candidate);
+        assert!(unchanged.rebuilt_components.is_empty());
+        assert!(unchanged.applied_keys.is_empty());
+        assert!(unchanged.failures.is_empty());
+    }
+
+    #[test]
+    fn failed_dispatcher_rebuild_keeps_previous_instance_and_does_not_block_later_rebuilds() {
+        let mut worker = make_worker(Arc::new(MockStore::empty()));
+        let previous_adapters_dir = worker.config.agent.adapters_dir.clone();
+        let mut previous_adapters = worker
+            .dispatcher
+            .adapter_names()
+            .into_iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        previous_adapters.sort_unstable();
+
+        let adapter_dir = tempfile::tempdir().unwrap();
+        std::fs::write(adapter_dir.path().join("broken.yaml"), "name: [").unwrap();
+
+        let mut candidate = worker.config.clone();
+        candidate.prompt.instructions = Some("still applies".to_string());
+        candidate.agent.adapters_dir = adapter_dir.path().to_path_buf();
+        candidate.limits.providers.insert(
+            "anthropic".to_string(),
+            crate::config::ProviderLimits {
+                max_concurrent: Some(3),
+                requests_per_minute: None,
+            },
+        );
+        candidate.validation.outcome_timeout_seconds += 1;
+
+        let report = worker.rebuild_tier_b_components(&candidate);
+
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].component, "Dispatcher");
+        assert!(report.failures[0].error.contains("invalid YAML"));
+        assert_eq!(
+            report.rebuilt_components,
+            vec!["PromptBuilder", "RateLimiter", "OutcomeHandler"]
+        );
+        assert_eq!(worker.config.agent.adapters_dir, previous_adapters_dir);
+        let mut retained_adapters = worker
+            .dispatcher
+            .adapter_names()
+            .into_iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        retained_adapters.sort_unstable();
+        assert_eq!(retained_adapters, previous_adapters);
+
+        assert_eq!(
+            worker.config.prompt.instructions,
+            candidate.prompt.instructions
+        );
+        assert!(worker.config.limits.providers.contains_key("anthropic"));
+        assert_eq!(
+            worker.config.validation.outcome_timeout_seconds,
+            candidate.validation.outcome_timeout_seconds
+        );
+    }
+
+    #[test]
+    fn failed_prompt_rebuild_keeps_previous_builder_while_dispatcher_reloads() {
+        let mut worker = make_worker(Arc::new(MockStore::empty()));
+        let previous_prompt = serde_json::to_value(&worker.config.prompt).unwrap();
+        let adapter_dir = tempfile::tempdir().unwrap();
+        let mut candidate = worker.config.clone();
+        candidate.prompt.templates.insert(
+            "pluck".to_string(),
+            "invalid reload variable: {not_a_prompt_variable}".to_string(),
+        );
+        candidate.agent.adapters_dir = adapter_dir.path().to_path_buf();
+
+        let report = worker.rebuild_tier_b_components(&candidate);
+
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].component, "PromptBuilder");
+        assert!(report.failures[0].error.contains("unknown variable"));
+        assert_eq!(report.rebuilt_components, vec!["Dispatcher"]);
+        assert_eq!(
+            serde_json::to_value(&worker.config.prompt).unwrap(),
+            previous_prompt
+        );
+        assert_eq!(
+            worker.config.agent.adapters_dir,
+            candidate.agent.adapters_dir
+        );
+    }
+
+    #[test]
+    fn isolated_rebuild_helper_never_moves_out_the_previous_value_on_error() {
+        let mut current = String::from("previous");
+        let mut report = TierBReloadReport::default();
+
+        let installed = install_rebuilt_component(
+            &mut current,
+            "test-component",
+            Err(anyhow::anyhow!("rebuild failed")),
+            &mut report,
+        );
+
+        assert!(!installed);
+        assert_eq!(current, "previous");
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.rebuilt_components.is_empty());
     }
 
     #[test]
