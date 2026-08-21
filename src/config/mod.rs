@@ -11110,4 +11110,66 @@ resource_attributes:
             "error should have clear message about unknown worker field"
         );
     }
+
+    #[test]
+    fn test_otlp_config_matches_plan_md() {
+        // This is the EXACT config from plan.md lines 1965-1985
+        // Tests that the schema documented in plan.md actually loads correctly
+        // Regression test for bead needle-f78eebbb
+        let yaml = r#"
+telemetry:
+  otlp:
+    enabled: true
+    endpoint: "http://otel-collector.tailnet:4317"
+    protocol: grpc
+    headers:
+      - "authorization: Bearer ${OTEL_TOKEN}"
+    timeout_ms: 5000
+    compression: gzip
+    tls:
+      insecure: false
+      ca_file: ""
+    signals:
+      traces: true
+      metrics: true
+      logs: true
+    resource_attributes:
+      - "deployment.environment=production"
+      - "service.namespace=needle-fleet"
+"#;
+
+        // This should deserialize without error
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+
+        assert!(
+            result.is_ok(),
+            "plan.md config should load successfully: {:?}",
+            result.err()
+        );
+
+        let config = result.unwrap();
+        let otlp = &config.telemetry.otlp_sink;
+
+        // Verify all values match what plan.md specifies
+        assert!(otlp.enabled);
+        assert_eq!(otlp.endpoint, "http://otel-collector.tailnet:4317");
+        assert_eq!(otlp.protocol, "grpc");
+        assert_eq!(
+            otlp.timeout_ms, 5000,
+            "timeout_ms should be 5000 as specified in plan.md"
+        );
+        assert_eq!(otlp.compression, "gzip");
+        assert!(!otlp.tls.insecure, "tls.insecure should be false");
+        assert_eq!(otlp.tls.ca_file, "", "tls.ca_file should be empty string");
+        assert!(otlp.signals.traces, "signals.traces should be true");
+        assert!(otlp.signals.metrics, "signals.metrics should be true");
+        assert!(otlp.signals.logs, "signals.logs should be true");
+        assert_eq!(otlp.headers.len(), 1, "should have 1 header");
+        assert_eq!(otlp.headers[0], "authorization: Bearer ${OTEL_TOKEN}");
+        assert_eq!(
+            otlp.resource_attributes.len(),
+            2,
+            "should have 2 resource attributes"
+        );
+    }
 }
