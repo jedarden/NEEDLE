@@ -867,6 +867,19 @@ fn worker_telemetry_identity(config: &Config) -> telemetry::TelemetryIdentity {
     }
 }
 
+/// The subscriber shape beneath the reloadable OTLP layer.
+///
+/// Keeping the layer boxed gives OTLP-enabled and OTLP-disabled boots the same
+/// type, so the reload seam is present in both cases. The no-op `Identity`
+/// layer is replaced with the real OpenTelemetry layer when the sink is
+/// enabled at boot.
+pub type OtlpLayerSubscriber =
+    tracing_subscriber::layer::Layered<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;
+pub type ReloadableOtlpLayer =
+    Box<dyn tracing_subscriber::Layer<OtlpLayerSubscriber> + Send + Sync>;
+pub type OtlpReloadHandle =
+    tracing_subscriber::reload::Handle<ReloadableOtlpLayer, OtlpLayerSubscriber>;
+
 /// This must be called before any tracing spans are created so that the OTLP
 /// layer can export them to the configured collector.
 ///
@@ -876,72 +889,75 @@ pub fn init_tracing_subscriber(
     worker_id: String,
     session_id: String,
     config: &crate::config::Config,
-) -> Result<()> {
+) -> Result<OtlpReloadHandle> {
     use opentelemetry::trace::TracerProvider;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let (writer, use_ansi) = worker_log_writer(config, &worker_id);
 
-    // Check if OTLP is enabled
-    if !config.telemetry.otlp_sink.enabled {
-        // No OTLP - just initialize with fmt layer
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_writer(writer)
-            .with_ansi(use_ansi);
-        tracing_subscriber::registry()
-            .with(worker_log_filter())
-            .with(fmt_layer)
-            .try_init()
-            .context("failed to initialize tracing subscriber")?;
-        return Ok(());
-    }
+    let otlp_layer: ReloadableOtlpLayer = if !config.telemetry.otlp_sink.enabled {
+        // The reload seam must exist even when OTLP starts disabled. `try_init`
+        // installs a one-shot global subscriber, so adding the seam only in
+        // the enabled branch would make a later false -> true reload require
+        // a process restart.
+        Box::new(tracing_subscriber::layer::Identity::new())
+    } else {
+        let otlp_config = &config.telemetry.otlp_sink;
+        let identity = worker_telemetry_identity(config);
 
-    // OTLP is enabled - create the OTLP layer inline
-    // We create it inline to avoid type erasure issues with boxed layers
-    let otlp_config = &config.telemetry.otlp_sink;
-    let identity = worker_telemetry_identity(config);
+        // Build resource attributes
+        let resource = crate::telemetry::otlp::OtlpSink::build_resource(
+            &worker_id,
+            &session_id,
+            otlp_config,
+            identity.agent.as_deref(),
+            identity.model.as_deref(),
+            identity.provider.as_deref(),
+            identity.workspace.as_deref().and_then(Path::to_str),
+        )
+        .context("failed to build OTel resource")?;
 
-    // Build resource attributes
-    let resource = crate::telemetry::otlp::OtlpSink::build_resource(
-        &worker_id,
-        &session_id,
-        otlp_config,
-        identity.agent.as_deref(),
-        identity.model.as_deref(),
-        identity.provider.as_deref(),
-        identity.workspace.as_deref().and_then(Path::to_str),
-    )
-    .context("failed to build OTel resource")?;
+        // Create drop channel for tracing layer
+        let (drop_tx, mut drop_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::telemetry::otlp::DropEvent>();
+        tokio::spawn(async move {
+            while let Some(drop) = drop_rx.recv().await {
+                tracing::warn!(
+                    signal = drop.signal.as_str(),
+                    dropped_count = drop.dropped_count,
+                    "OTLP tracing layer export failure"
+                );
+            }
+        });
 
-    // Create drop channel for tracing layer
-    let (drop_tx, mut drop_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::telemetry::otlp::DropEvent>();
-    tokio::spawn(async move {
-        while let Some(drop) = drop_rx.recv().await {
-            tracing::warn!(
-                signal = drop.signal.as_str(),
-                dropped_count = drop.dropped_count,
-                "OTLP tracing layer export failure"
-            );
-        }
-    });
+        // Build exporters and tracer provider based on protocol
+        let (tracer_provider, ..) = match otlp_config.protocol.as_str() {
+            "grpc" => crate::telemetry::otlp::OtlpSink::build_grpc_providers(
+                otlp_config,
+                &resource,
+                drop_tx,
+            )?,
+            "http" | "http/protobuf" => crate::telemetry::otlp::OtlpSink::build_http_providers(
+                otlp_config,
+                &resource,
+                drop_tx,
+            )?,
+            other => anyhow::bail!("invalid OTLP protocol: {other}, must be 'grpc' or 'http'"),
+        };
 
-    // Build exporters and tracer provider based on protocol
-    let (tracer_provider, ..) = match otlp_config.protocol.as_str() {
-        "grpc" => {
-            crate::telemetry::otlp::OtlpSink::build_grpc_providers(otlp_config, &resource, drop_tx)?
-        }
-        "http" | "http/protobuf" => {
-            crate::telemetry::otlp::OtlpSink::build_http_providers(otlp_config, &resource, drop_tx)?
-        }
-        other => anyhow::bail!("invalid OTLP protocol: {other}, must be 'grpc' or 'http'"),
+        Box::new(
+            tracing_opentelemetry::layer::<OtlpLayerSubscriber>()
+                .with_tracer(tracer_provider.tracer("needle")),
+        )
     };
 
-    // Create the OpenTelemetry tracing layer
-    let otlp_layer = tracing_opentelemetry::layer().with_tracer(tracer_provider.tracer("needle"));
+    // Install the reloadable layer regardless of the initial OTLP setting.
+    // The handle is intentionally created at boot so the later cycle-boundary
+    // config reload can replace the no-op layer with a live exporter (or turn
+    // an exporter off) without reinstalling the global subscriber.
+    let (otlp_layer, otlp_reload_handle) = tracing_subscriber::reload::Layer::new(otlp_layer);
 
-    // Create a fmt layer that works with any subscriber implementing LookupSpan
-    // We build this after the OTLP layer to ensure proper type compatibility
+    // Create a fmt layer that works with any subscriber implementing LookupSpan.
     let subscriber = tracing_subscriber::registry()
         .with(worker_log_filter())
         .with(otlp_layer)
@@ -953,9 +969,9 @@ pub fn init_tracing_subscriber(
 
     subscriber
         .try_init()
-        .context("failed to initialize tracing subscriber with OTLP")?;
+        .context("failed to initialize tracing subscriber")?;
 
-    Ok(())
+    Ok(otlp_reload_handle)
 }
 
 /// No-op tracing initialization when OTLP feature is disabled.
@@ -964,14 +980,19 @@ fn init_tracing_subscriber(
     worker_id: String,
     _session_id: String,
     config: &crate::config::Config,
-) -> Result<()> {
+) -> Result<OtlpReloadHandle> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let (writer, use_ansi) = worker_log_writer(config, &worker_id);
 
-    // Initialize with just the stdout layer when OTLP is disabled
+    // Keep the same reloadable layer shape as the OTLP build. `reload` is part
+    // of tracing-subscriber itself, not the optional OTLP feature.
+    let otlp_layer: ReloadableOtlpLayer = Box::new(tracing_subscriber::layer::Identity::new());
+    let (otlp_layer, otlp_reload_handle) = tracing_subscriber::reload::Layer::new(otlp_layer);
+
     tracing_subscriber::registry()
         .with(worker_log_filter())
+        .with(otlp_layer)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(writer)
@@ -980,7 +1001,7 @@ fn init_tracing_subscriber(
         .try_init()
         .context("failed to initialize tracing subscriber")?;
 
-    Ok(())
+    Ok(otlp_reload_handle)
 }
 
 /// Helper function to determine ANSI support (non-Android platforms).
@@ -1028,7 +1049,8 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
 
     eprintln!("NEEDLE worker boot: initializing tracing subscriber...");
     let session_id = generate_session_id_for_worker();
-    init_tracing_subscriber(qualified_id.clone(), session_id.clone(), &config)?;
+    let _otlp_reload_handle =
+        init_tracing_subscriber(qualified_id.clone(), session_id.clone(), &config)?;
     eprintln!("NEEDLE worker boot: tracing subscriber initialized");
 
     eprintln!("NEEDLE worker boot: creating telemetry...");
