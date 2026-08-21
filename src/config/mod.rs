@@ -11172,4 +11172,88 @@ telemetry:
             "should have 2 resource attributes"
         );
     }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // BeadCliConfig tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn bead_cli_config_default_returns_auto_backend_and_none_path() {
+        let config = BeadCliConfig::default();
+        assert_eq!(
+            config.backend,
+            BeadBackend::Auto,
+            "default backend should be Auto"
+        );
+        assert_eq!(config.path, None, "default path should be None");
+    }
+
+    #[test]
+    fn bead_cli_config_construction_with_explicit_values() {
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(PathBuf::from("/usr/local/bin/bead")),
+        };
+        assert_eq!(config.backend, BeadBackend::Bead);
+        assert_eq!(config.path, Some(PathBuf::from("/usr/local/bin/bead")));
+    }
+
+    #[test]
+    fn bead_cli_config_serde_serialization_preserves_values() {
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bf,
+            path: Some(PathBuf::from("/opt/bf/bin/bf")),
+        };
+
+        // Test YAML serialization
+        let yaml = serde_yaml::to_string(&config).expect("YAML serialization should succeed");
+        let decoded: BeadCliConfig =
+            serde_yaml::from_str(&yaml).expect("YAML deserialization should succeed");
+
+        assert_eq!(decoded.backend, BeadBackend::Bf);
+        assert_eq!(decoded.path, Some(PathBuf::from("/opt/bf/bin/bf")));
+    }
+
+    #[test]
+    fn bead_cli_config_serde_deserialization_handles_none_path() {
+        let yaml = r#"
+backend: bead-rs
+path: null
+"#;
+
+        let config: BeadCliConfig =
+            serde_yaml::from_str(yaml).expect("YAML deserialization should succeed");
+
+        assert_eq!(config.backend, BeadBackend::Bead);
+        assert_eq!(config.path, None);
+    }
+
+    #[test]
+    fn bead_cli_config_serde_roundtrip_with_all_backends() {
+        let backends = vec![
+            BeadBackend::Auto,
+            BeadBackend::Bf,
+            BeadBackend::Br,
+            BeadBackend::Bead,
+        ];
+
+        for backend in backends {
+            let config = BeadCliConfig {
+                backend: backend.clone(),
+                path: None,
+            };
+
+            let yaml = serde_yaml::to_string(&config)
+                .unwrap_or_else(|_| panic!("YAML serialization should succeed for {:?}", backend));
+            let decoded: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap_or_else(|_| {
+                panic!("YAML deserialization should succeed for {:?}", backend)
+            });
+
+            assert_eq!(
+                decoded.backend, backend,
+                "backend should round-trip correctly"
+            );
+            assert_eq!(decoded.path, None, "path should remain None");
+        }
+    }
 }
