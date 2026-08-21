@@ -401,6 +401,35 @@ fn config_file_changed(previous: &ConfigFileFingerprint, current: &ConfigFileFin
     previous != current
 }
 
+/// Compare two serializable config values without relying on their concrete
+/// config types implementing `PartialEq`.
+///
+/// Config structs are all serializable, and comparing their JSON values also
+/// gives maps a stable semantic comparison rather than depending on a
+/// `HashMap`'s iteration order (as used by pricing configuration).
+fn config_values_differ<T: serde::Serialize>(running: &T, candidate: &T) -> bool {
+    match (
+        serde_json::to_value(running),
+        serde_json::to_value(candidate),
+    ) {
+        (Ok(running), Ok(candidate)) => running != candidate,
+        // All current config values are serializable. Treat an unexpected
+        // serialization failure as a change so the caller never silently
+        // keeps a stale value.
+        _ => true,
+    }
+}
+
+/// Replace one config value in a pending Tier-A snapshot.
+fn replace_config_value<T: Clone + serde::Serialize>(running: &mut T, candidate: &T) -> bool {
+    if config_values_differ(running, candidate) {
+        *running = candidate.clone();
+        true
+    } else {
+        false
+    }
+}
+
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
     config: Config,
@@ -3614,7 +3643,20 @@ impl Worker {
             // malformed edit must not become a worker error: polling makes a
             // bad edit visible to every worker, so fail-closed behaviour here
             // would turn one operator mistake into a fleet-wide outage.
-            let _candidate = self.load_validated_config_candidate(&path);
+            if let Some(candidate) = self.load_validated_config_candidate(&path) {
+                let changed_keys = self.apply_tier_a_config(candidate);
+                if !changed_keys.is_empty() {
+                    tracing::info!(changed_keys = ?changed_keys, "applied Tier-A configuration at cycle boundary");
+                    if let Err(error) =
+                        self.telemetry
+                            .emit_try_lock(EventKind::ConfigReloadApplied {
+                                changed_keys: changed_keys.clone(),
+                            })
+                    {
+                        tracing::warn!(error = %error, "failed to emit config.reload.applied");
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -3673,6 +3715,272 @@ impl Worker {
         {
             tracing::warn!(error = %error, "failed to emit config.reload.rejected");
         }
+    }
+
+    /// Apply the declared Tier-A fields from a validated candidate.
+    ///
+    /// The running config is never edited in place. Every live field is first
+    /// copied into a clone, and the completed snapshot replaces `self.config`
+    /// in one assignment. This keeps a reload from exposing a partially
+    /// applied configuration if a future field copy becomes fallible or gains
+    /// additional processing.
+    ///
+    /// Tier-B and Tier-C fields deliberately remain from the running snapshot;
+    /// their component rebuild and restart-required handling belong to later
+    /// reload stages.
+    fn apply_tier_a_config(&mut self, candidate: Config) -> Vec<String> {
+        let mut next = self.config.clone();
+        let mut changed_keys = Vec::new();
+
+        macro_rules! replace {
+            ($key:literal, $running:expr, $candidate:expr) => {
+                if replace_config_value(&mut $running, &$candidate) {
+                    changed_keys.push($key.to_string());
+                }
+            };
+        }
+
+        // Agent fields declared Tier A. `adapters_dir` is Tier B and is kept
+        // in the running snapshot until Dispatcher is rebuilt.
+        replace!("agent.default", next.agent.default, candidate.agent.default);
+        replace!("agent.args", next.agent.args, candidate.agent.args);
+        replace!("agent.timeout", next.agent.timeout, candidate.agent.timeout);
+        replace!("agent.routing", next.agent.routing, candidate.agent.routing);
+
+        // Worker fields declared Tier A. Identity, launch, and reload-poller
+        // settings are Tier C and therefore intentionally excluded.
+        replace!(
+            "worker.idle_timeout",
+            next.worker.idle_timeout,
+            candidate.worker.idle_timeout
+        );
+        replace!(
+            "worker.idle_action",
+            next.worker.idle_action,
+            candidate.worker.idle_action
+        );
+        replace!(
+            "worker.max_claim_retries",
+            next.worker.max_claim_retries,
+            candidate.worker.max_claim_retries
+        );
+        replace!(
+            "worker.claim_race_lost_skip",
+            next.worker.claim_race_lost_skip,
+            candidate.worker.claim_race_lost_skip
+        );
+        replace!(
+            "worker.cpu_load_warn",
+            next.worker.cpu_load_warn,
+            candidate.worker.cpu_load_warn
+        );
+        replace!(
+            "worker.memory_free_warn_mb",
+            next.worker.memory_free_warn_mb,
+            candidate.worker.memory_free_warn_mb
+        );
+        replace!(
+            "worker.enforce_shipped_work",
+            next.worker.enforce_shipped_work,
+            candidate.worker.enforce_shipped_work
+        );
+        replace!(
+            "worker.adaptive_stagger_max_wait_secs",
+            next.worker.adaptive_stagger_max_wait_secs,
+            candidate.worker.adaptive_stagger_max_wait_secs
+        );
+        replace!(
+            "worker.adaptive_stagger_check_interval_secs",
+            next.worker.adaptive_stagger_check_interval_secs,
+            candidate.worker.adaptive_stagger_check_interval_secs
+        );
+        replace!(
+            "worker.building_timeout",
+            next.worker.building_timeout,
+            candidate.worker.building_timeout
+        );
+        replace!(
+            "worker.idle_backoff_min",
+            next.worker.idle_backoff_min,
+            candidate.worker.idle_backoff_min
+        );
+        replace!(
+            "worker.idle_backoff_max",
+            next.worker.idle_backoff_max,
+            candidate.worker.idle_backoff_max
+        );
+        replace!(
+            "worker.short_retry_backoff",
+            next.worker.short_retry_backoff,
+            candidate.worker.short_retry_backoff
+        );
+        replace!(
+            "worker.freshness_check_interval_secs",
+            next.worker.freshness_check_interval_secs,
+            candidate.worker.freshness_check_interval_secs
+        );
+
+        // Live strand thresholds. Fields that shape a StrandRunner or affect
+        // workspace/process ownership remain for the Tier-B/C stages.
+        replace!(
+            "strands.pluck.exclude_labels",
+            next.strands.pluck.exclude_labels,
+            candidate.strands.pluck.exclude_labels
+        );
+        replace!(
+            "strands.mend.stuck_threshold_secs",
+            next.strands.mend.stuck_threshold_secs,
+            candidate.strands.mend.stuck_threshold_secs
+        );
+        replace!(
+            "strands.mend.lock_ttl_secs",
+            next.strands.mend.lock_ttl_secs,
+            candidate.strands.mend.lock_ttl_secs
+        );
+        replace!(
+            "strands.explore.workspaces",
+            next.strands.explore.workspaces,
+            candidate.strands.explore.workspaces
+        );
+        replace!(
+            "strands.weave.max_beads_per_run",
+            next.strands.weave.max_beads_per_run,
+            candidate.strands.weave.max_beads_per_run
+        );
+        replace!(
+            "strands.weave.cooldown_hours",
+            next.strands.weave.cooldown_hours,
+            candidate.strands.weave.cooldown_hours
+        );
+        replace!(
+            "strands.unravel.max_beads_per_run",
+            next.strands.unravel.max_beads_per_run,
+            candidate.strands.unravel.max_beads_per_run
+        );
+        replace!(
+            "strands.unravel.cooldown_hours",
+            next.strands.unravel.cooldown_hours,
+            candidate.strands.unravel.cooldown_hours
+        );
+        replace!(
+            "strands.pulse.max_beads_per_run",
+            next.strands.pulse.max_beads_per_run,
+            candidate.strands.pulse.max_beads_per_run
+        );
+        replace!(
+            "strands.pulse.cooldown_hours",
+            next.strands.pulse.cooldown_hours,
+            candidate.strands.pulse.cooldown_hours
+        );
+        replace!(
+            "strands.pulse.severity_threshold",
+            next.strands.pulse.severity_threshold,
+            candidate.strands.pulse.severity_threshold
+        );
+        replace!(
+            "strands.reflect.min_beads_since_last",
+            next.strands.reflect.min_beads_since_last,
+            candidate.strands.reflect.min_beads_since_last
+        );
+        replace!(
+            "strands.reflect.cooldown_hours",
+            next.strands.reflect.cooldown_hours,
+            candidate.strands.reflect.cooldown_hours
+        );
+        replace!(
+            "strands.reflect.max_learnings_per_run",
+            next.strands.reflect.max_learnings_per_run,
+            candidate.strands.reflect.max_learnings_per_run
+        );
+        replace!(
+            "strands.reflect.max_skills_per_run",
+            next.strands.reflect.max_skills_per_run,
+            candidate.strands.reflect.max_skills_per_run
+        );
+        replace!(
+            "strands.reflect.learning_retention_days",
+            next.strands.reflect.learning_retention_days,
+            candidate.strands.reflect.learning_retention_days
+        );
+        replace!(
+            "strands.reflect.max_learnings",
+            next.strands.reflect.max_learnings,
+            candidate.strands.reflect.max_learnings
+        );
+        replace!(
+            "strands.splice.stale_threshold_secs",
+            next.strands.splice.stale_threshold_secs,
+            candidate.strands.splice.stale_threshold_secs
+        );
+        replace!(
+            "strands.splice.detect_live_loops",
+            next.strands.splice.detect_live_loops,
+            candidate.strands.splice.detect_live_loops
+        );
+        replace!(
+            "strands.splice.live_loop_scan_events",
+            next.strands.splice.live_loop_scan_events,
+            candidate.strands.splice.live_loop_scan_events
+        );
+        replace!(
+            "strands.splice.claim_churn_threshold",
+            next.strands.splice.claim_churn_threshold,
+            candidate.strands.splice.claim_churn_threshold
+        );
+        replace!(
+            "strands.splice.log_runaway_bytes",
+            next.strands.splice.log_runaway_bytes,
+            candidate.strands.splice.log_runaway_bytes
+        );
+        replace!(
+            "strands.splice.live_loop_window_secs",
+            next.strands.splice.live_loop_window_secs,
+            candidate.strands.splice.live_loop_window_secs
+        );
+        replace!(
+            "strands.knot.alert_cooldown_minutes",
+            next.strands.knot.alert_cooldown_minutes,
+            candidate.strands.knot.alert_cooldown_minutes
+        );
+        replace!(
+            "strands.knot.exhaustion_threshold",
+            next.strands.knot.exhaustion_threshold,
+            candidate.strands.knot.exhaustion_threshold
+        );
+        replace!(
+            "strands.mitosis.enabled",
+            next.strands.mitosis.enabled,
+            candidate.strands.mitosis.enabled
+        );
+        replace!(
+            "strands.mitosis.first_failure_only",
+            next.strands.mitosis.first_failure_only,
+            candidate.strands.mitosis.first_failure_only
+        );
+
+        // These top-level sections are entirely Tier A.
+        replace!(
+            "outcome.quarantine_after_failures",
+            next.outcome.quarantine_after_failures,
+            candidate.outcome.quarantine_after_failures
+        );
+        replace!(
+            "budget.warn_usd",
+            next.budget.warn_usd,
+            candidate.budget.warn_usd
+        );
+        replace!(
+            "budget.stop_usd",
+            next.budget.stop_usd,
+            candidate.budget.stop_usd
+        );
+        replace!("pricing", next.pricing, candidate.pricing);
+
+        if !changed_keys.is_empty() {
+            self.config = next;
+        }
+
+        changed_keys
     }
 
     /// Check whether the running binary is stale compared to the latest needle-stable.
@@ -4864,6 +5172,42 @@ mod tests {
 
         assert_eq!(candidate.worker.max_workers, 2);
         assert_eq!(worker.config.worker.max_workers, running_max_workers);
+    }
+
+    #[test]
+    fn tier_a_config_swap_is_atomic_and_preserves_non_live_fields() {
+        let mut worker = make_worker(Arc::new(MockStore::empty()));
+        let running_agent_timeout = worker.config.agent.timeout;
+        let running_idle_timeout = worker.config.worker.idle_timeout;
+        let running_adapters_dir = worker.config.agent.adapters_dir.clone();
+        let running_max_workers = worker.config.worker.max_workers;
+        let running_workspace_home = worker.config.workspace.home.clone();
+        let running_telemetry_enabled = worker.config.telemetry.file_sink.enabled;
+
+        let mut candidate = worker.config.clone();
+        candidate.agent.timeout += 1;
+        candidate.worker.idle_timeout += 1;
+        candidate.budget.warn_usd = 10.0;
+        candidate.agent.adapters_dir = PathBuf::from("/tmp/reloaded-adapters");
+        candidate.worker.max_workers = running_max_workers + 1;
+        candidate.workspace.home = PathBuf::from("/tmp/reloaded-home");
+        candidate.telemetry.file_sink.enabled = !running_telemetry_enabled;
+
+        let changed_keys = worker.apply_tier_a_config(candidate);
+
+        assert_eq!(worker.config.agent.timeout, running_agent_timeout + 1);
+        assert_eq!(worker.config.worker.idle_timeout, running_idle_timeout + 1);
+        assert_eq!(worker.config.budget.warn_usd, 10.0);
+        assert!(changed_keys.contains(&"agent.timeout".to_string()));
+        assert!(changed_keys.contains(&"worker.idle_timeout".to_string()));
+        assert!(changed_keys.contains(&"budget.warn_usd".to_string()));
+        assert_eq!(worker.config.agent.adapters_dir, running_adapters_dir);
+        assert_eq!(worker.config.worker.max_workers, running_max_workers);
+        assert_eq!(worker.config.workspace.home, running_workspace_home);
+        assert_eq!(
+            worker.config.telemetry.file_sink.enabled,
+            running_telemetry_enabled
+        );
     }
 
     #[test]
