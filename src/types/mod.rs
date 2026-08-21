@@ -1385,10 +1385,13 @@ mod tests {
 
     #[test]
     fn bead_action_display() {
+        assert_eq!(BeadAction::Closed.to_string(), "closed");
         assert_eq!(BeadAction::Released.to_string(), "released");
         assert_eq!(BeadAction::Deferred.to_string(), "deferred");
         assert_eq!(BeadAction::Alerted.to_string(), "alerted");
-        assert_eq!(BeadAction::None.to_string(), "none");
+        assert_eq!(BeadAction::Quarantined.to_string(), "quarantined");
+        assert_eq!(BeadAction::Interrupted.to_string(), "interrupted");
+        assert_eq!(BeadAction::Errored.to_string(), "errored");
     }
 
     #[test]
@@ -3071,9 +3074,17 @@ pub enum IdleAction {
 // BeadAction
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Action taken on a bead by the outcome handler.
+/// Terminal action produced by the outcome handler for a claimed bead.
+///
+/// There is deliberately no `None` variant: once dispatch reaches outcome
+/// handling, the bead must be closed, released, quarantined, interrupted, or
+/// routed through explicit error recovery.  The worker consumes this value at
+/// the state-machine boundary and verifies that the bead is no longer held.
+#[must_use = "a BeadAction must be applied before the dispatch cycle can advance"]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BeadAction {
+    /// The agent closed the bead and the handler confirmed the closed state.
+    Closed,
     /// Bead was released back to open status.
     Released,
     /// Bead was deferred (e.g., timeout with deferred label).
@@ -3083,18 +3094,22 @@ pub enum BeadAction {
     /// Bead was quarantined (status=blocked, labeled `cycling`) after
     /// exceeding the consecutive-failure threshold.
     Quarantined,
-    /// No action taken (e.g., success with bead already closed).
-    None,
+    /// Bead was released because the worker was interrupted and must stop.
+    Interrupted,
+    /// Normal outcome handling failed; the worker must run release recovery.
+    Errored,
 }
 
 impl fmt::Display for BeadAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            BeadAction::Closed => write!(f, "closed"),
             BeadAction::Released => write!(f, "released"),
             BeadAction::Deferred => write!(f, "deferred"),
             BeadAction::Alerted => write!(f, "alerted"),
             BeadAction::Quarantined => write!(f, "quarantined"),
-            BeadAction::None => write!(f, "none"),
+            BeadAction::Interrupted => write!(f, "interrupted"),
+            BeadAction::Errored => write!(f, "errored"),
         }
     }
 }
@@ -3104,6 +3119,7 @@ impl fmt::Display for BeadAction {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Result of handling an agent outcome.
+#[must_use = "the handler result contains a BeadAction that must be applied"]
 #[derive(Debug)]
 pub struct HandlerResult {
     /// The classified outcome.

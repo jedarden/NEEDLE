@@ -375,11 +375,12 @@ impl OutcomeHandler {
                 bead_id = %bead.id,
                 "outcome handler cancelled before starting, returning early"
             );
-            // Return a default HandlerResult to allow the worker to recover.
-            // Verification never ran, so conservatively treat as unverified.
+            // Return an explicit error action so the worker's action applier
+            // performs release recovery. Verification never ran, so
+            // conservatively treat the outcome as unverified.
             return Ok(HandlerResult {
                 outcome: classify(output.exit_code, was_interrupted, false),
-                bead_action: BeadAction::None,
+                bead_action: BeadAction::Errored,
                 telemetry_events: vec![],
             });
         }
@@ -426,16 +427,13 @@ impl OutcomeHandler {
                     operation: "handle".to_string(),
                     error: format!("timeout after {}s", timeout_secs),
                 });
-                // Return a default HandlerResult to allow the worker to recover.
-                // The worker's 60-second timeout wrapper will handle best-effort release.
+                // Return an explicit error action. The worker must apply it,
+                // which runs release recovery before the cycle can advance.
                 // Verification never ran, so conservatively treat as unverified.
                 Ok(HandlerResult {
                     outcome: classify(output.exit_code, was_interrupted, false),
-                    bead_action: BeadAction::Released,
-                    telemetry_events: vec![EventKind::BeadReleased {
-                        bead_id,
-                        reason: "handler_timeout".to_string(),
-                    }],
+                    bead_action: BeadAction::Errored,
+                    telemetry_events: vec![],
                 })
             }
         }
@@ -659,7 +657,7 @@ impl OutcomeHandler {
             }
         }
 
-        Ok((BeadAction::None, events))
+        Ok((BeadAction::Closed, events))
     }
 
     /// Handle gate failure: reopen the bead if it was closed, then release it.
@@ -1035,7 +1033,7 @@ impl OutcomeHandler {
         tracing::info!(bead_id = %bead.id, "agent interrupted — releasing bead for clean shutdown");
 
         let events = self.release_bead(store, bead).await?;
-        Ok((BeadAction::Released, events))
+        Ok((BeadAction::Interrupted, events))
     }
 
     /// Increment the failure count label on a bead.
@@ -1628,7 +1626,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Success);
-        assert_eq!(result.bead_action, BeadAction::None);
+        assert_eq!(result.bead_action, BeadAction::Closed);
         assert!(!result.telemetry_events.is_empty());
         let actions = store.actions();
         assert!(
@@ -1952,7 +1950,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Interrupted);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert_eq!(result.bead_action, BeadAction::Interrupted);
 
         let actions = store.actions();
         assert!(
@@ -2017,7 +2015,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Success);
-        assert_eq!(result.bead_action, BeadAction::None);
+        assert_eq!(result.bead_action, BeadAction::Closed);
     }
 
     #[tokio::test]
@@ -2033,7 +2031,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Success);
-        assert_eq!(result.bead_action, BeadAction::None);
+        assert_eq!(result.bead_action, BeadAction::Closed);
         assert!(result
             .telemetry_events
             .iter()
@@ -2372,7 +2370,7 @@ mod tests {
 
         // Should return a default result without calling the store.
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(result.bead_action, BeadAction::None);
+        assert_eq!(result.bead_action, BeadAction::Errored);
         assert!(result.telemetry_events.is_empty());
     }
 
@@ -2525,10 +2523,8 @@ mod tests {
              2s show() or its own 30s inner timeout, took {:?}",
             elapsed
         );
-        assert_eq!(result.bead_action, BeadAction::Released);
-        assert!(result.telemetry_events.iter().any(
-            |e| matches!(e, EventKind::BeadReleased { reason, .. } if reason == "handler_timeout")
-        ));
+        assert_eq!(result.bead_action, BeadAction::Errored);
+        assert!(result.telemetry_events.is_empty());
     }
 
     #[tokio::test]
@@ -2573,10 +2569,8 @@ mod tests {
             "expected the ~1s configured timeout to cut off the 3s gate command, took {:?}",
             elapsed
         );
-        assert_eq!(result.bead_action, BeadAction::Released);
-        assert!(result.telemetry_events.iter().any(
-            |e| matches!(e, EventKind::BeadReleased { reason, .. } if reason == "handler_timeout")
-        ));
+        assert_eq!(result.bead_action, BeadAction::Errored);
+        assert!(result.telemetry_events.is_empty());
 
         // Give any straggling kill signal a moment to land, then confirm the
         // gate command was actually killed, not left running in the

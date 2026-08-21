@@ -10,6 +10,8 @@
 //! Depends on: `strand`, `claim`, `prompt`, `dispatch`, `outcome`,
 //!             `bead_store`, `telemetry`, `health`, `config`, `types`.
 
+#![deny(unused_must_use)]
+
 use std::collections::HashSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -43,7 +45,10 @@ use crate::registry::{Registry, WorkerEntry};
 use crate::routing;
 use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{AgentOutcome, Bead, BeadId, ClaimResult, IdleAction, Outcome, WorkerState};
+use crate::types::{
+    AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult, IdleAction, Outcome,
+    WorkerState,
+};
 use crate::upgrade::{self, HotReloadCheck};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -977,7 +982,8 @@ impl Worker {
                     self.do_execute().instrument(lifecycle_span.clone()).await?
                 }
                 WorkerState::Handling => {
-                    self.do_handle().instrument(lifecycle_span.clone()).await?
+                    let action = self.do_handle().instrument(lifecycle_span.clone()).await?;
+                    self.apply_bead_action(action).await?;
                 }
                 WorkerState::Logging => {
                     lifecycle_span.in_scope(|| self.do_log())?;
@@ -2515,8 +2521,13 @@ impl Worker {
         Ok(())
     }
 
-    /// HANDLING: classify outcome and route to handler.
-    async fn do_handle(&mut self) -> Result<()> {
+    /// HANDLING: classify the outcome and produce one mandatory terminal action.
+    ///
+    /// This method deliberately does not advance the worker state. Its caller
+    /// must consume the returned [`BeadAction`] through
+    /// [`apply_bead_action`](Self::apply_bead_action), which verifies that the
+    /// claim is no longer held before leaving HANDLING.
+    async fn do_handle(&mut self) -> Result<BeadAction> {
         let bead = match self.current_bead {
             Some(ref b) => b.clone(),
             None => {
@@ -2581,10 +2592,9 @@ impl Worker {
             }
         });
 
-        // Clone values needed for error handling before creating the async block.
+        // Clone values needed for error telemetry before creating the async block.
         // This avoids borrowing issues with the async block that captures `self`.
         let bead_id_clone = bead.id.clone();
-        let store_clone = self.store.clone();
         let telemetry_clone = self.telemetry.clone();
 
         // Wrap the entire HANDLING state in a timeout to prevent indefinite hangs.
@@ -2643,11 +2653,12 @@ impl Worker {
                     Ok(result)
                 }
                 Ok(Err(e)) => {
-                    // Handler returned an error - attempt best-effort release and recover.
+                    // Handler returned an error. Return an explicit recovery
+                    // action; the state-machine caller must apply it.
                     tracing::error!(
                         bead_id = %bead.id,
                         error = %e,
-                        "outcome handler failed, attempting best-effort release and transitioning to LOGGING"
+                        "outcome handler failed, routing through explicit error recovery"
                     );
                     // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
                     cancelled.store(true, Ordering::Release);
@@ -2660,21 +2671,14 @@ impl Worker {
                         operation: "handle".to_string(),
                         error: e.to_string(),
                     });
-                    // Attempt best-effort release with timeout.
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        store_clone.release(&bead_id_clone),
-                    )
-                    .await;
-                    // Explicitly transition to LOGGING to recover.
-                    self.set_state(WorkerState::Logging)?;
                     Err(anyhow::anyhow!("handler failed: {}", e))
                 }
                 Err(_) => {
-                    // Timeout after 60 seconds - attempt best-effort release and transition to LOGGING.
+                    // Timeout after 60 seconds. Return an explicit recovery
+                    // action; the state-machine caller must apply it.
                     tracing::error!(
                         bead_id = %bead.id,
-                        "outcome handler timed out after 60s, attempting best-effort release and transitioning to LOGGING"
+                        "outcome handler timed out after 60s, routing through explicit error recovery"
                     );
                     // Set cancellation flag to stop heartbeat and abort any in-flight br calls.
                     cancelled.store(true, Ordering::Release);
@@ -2687,14 +2691,6 @@ impl Worker {
                         operation: "handle".to_string(),
                         error: "timeout after 60s".to_string(),
                     });
-                    // Attempt best-effort release with timeout.
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        store_clone.release(&bead_id_clone),
-                    )
-                    .await;
-                    // Explicitly transition to LOGGING to recover.
-                    self.set_state(WorkerState::Logging)?;
                     Err(anyhow::anyhow!("handler timed out after 60s"))
                 }
             }
@@ -2720,9 +2716,10 @@ impl Worker {
                         result
                     }
                     Err(_) => {
-                        // HANDLING failed but recovered - stop heartbeat and continue to LOGGING.
+                        // HANDLING failed. The explicit error action is applied
+                        // by the state-machine caller before the cycle advances.
                         heartbeat_task.abort();
-                        return Ok(());
+                        return Ok(BeadAction::Errored);
                     }
                 }
             }
@@ -2742,15 +2739,7 @@ impl Worker {
                     operation: "handling_state".to_string(),
                     error: "critical timeout after 90s".to_string(),
                 });
-                // Attempt best-effort release with timeout.
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    store_clone.release(&bead_id_clone),
-                )
-                .await;
-                // Force transition to LOGGING to recover.
-                self.set_state(WorkerState::Logging)?;
-                return Ok(());
+                return Ok(BeadAction::Errored);
             }
         };
 
@@ -2777,12 +2766,19 @@ impl Worker {
                         HANDLING_WATCHDOG_TIMEOUT_SECS
                     ),
                 });
-            // Force transition to LOGGING to recover.
-            self.set_state(WorkerState::Logging)?;
             // Stop the heartbeat task.
             cancelled.store(true, Ordering::Release);
             heartbeat_task.abort();
-            return Ok(());
+            return Ok(BeadAction::Errored);
+        }
+
+        // Cancellation and internal handler timeouts are represented as an
+        // explicit error action. Do not run post-handler work that assumes the
+        // bead was already released; the caller applies recovery immediately.
+        if handler_result.bead_action == BeadAction::Errored {
+            cancelled.store(true, Ordering::Release);
+            heartbeat_task.abort();
+            return Ok(BeadAction::Errored);
         }
 
         // HOOP Hook 2 (event tap): emit the outcome as a single terminal
@@ -3053,18 +3049,99 @@ impl Worker {
             }
         }
 
-        if was_interrupted {
-            // After handling interrupted outcome, stop the worker.
-            self.set_state(WorkerState::Stopped)?;
-        } else {
-            self.set_state(WorkerState::Logging)?;
-        }
-
         // Set cancellation flag and abort the heartbeat task since handling is complete.
         cancelled.store(true, Ordering::Release);
         heartbeat_task.abort();
 
-        Ok(())
+        Ok(handler_result.bead_action)
+    }
+
+    /// Consume a terminal action and enforce the dispatch postcondition.
+    ///
+    /// Outcome handlers perform their normal transition first. This single
+    /// state-machine boundary then verifies that the bead is no longer held;
+    /// if handling was cancelled, timed out, errored, or reported a transition
+    /// that did not stick, it releases the claim before advancing. Because
+    /// [`BeadAction`] has no empty variant and is `must_use`, a HANDLING branch
+    /// cannot silently return `()` and leave the claim behind.
+    async fn apply_bead_action(&mut self, action: BeadAction) -> Result<()> {
+        let bead = self
+            .current_bead
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("applying bead action without current_bead"))?;
+
+        let claim_is_held =
+            match tokio::time::timeout(Duration::from_secs(30), self.store.show(&bead.id)).await {
+                Ok(Ok(current)) => match current.status {
+                    BeadStatus::Open => current.assignee.is_some(),
+                    BeadStatus::InProgress => true,
+                    BeadStatus::Done
+                    | BeadStatus::Closed
+                    | BeadStatus::Blocked
+                    | BeadStatus::Deferred => false,
+                },
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        action = %action,
+                        error = %error,
+                        "could not verify dispatch postcondition; forcing release"
+                    );
+                    true
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        action = %action,
+                        "dispatch postcondition verification timed out; forcing release"
+                    );
+                    true
+                }
+            };
+
+        if claim_is_held {
+            match tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await
+            {
+                Ok(Ok(())) => {
+                    self.telemetry.emit(EventKind::BeadReleased {
+                        bead_id: bead.id.clone(),
+                        reason: format!("postcondition_recovery:{action}"),
+                    })?;
+                }
+                Ok(Err(error)) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to apply {action} action: bead {} is still held",
+                            bead.id
+                        )
+                    });
+                }
+                Err(_) => {
+                    bail!(
+                        "timed out applying {action} action: bead {} is still held",
+                        bead.id
+                    );
+                }
+            }
+        }
+
+        tracing::debug!(
+            bead_id = %bead.id,
+            action = %action,
+            recovered_held_claim = claim_is_held,
+            "applied terminal bead action"
+        );
+
+        match action {
+            BeadAction::Interrupted => self.set_state(WorkerState::Stopped),
+            BeadAction::Closed
+            | BeadAction::Released
+            | BeadAction::Deferred
+            | BeadAction::Alerted
+            | BeadAction::Quarantined
+            | BeadAction::Errored => self.set_state(WorkerState::Logging),
+        }
     }
 
     /// LOGGING: record effort telemetry, check budget, update registry, and
@@ -4417,16 +4494,36 @@ mod tests {
                 anyhow::bail!("bead not found: {id}")
             }
         }
-        async fn release(&self, _id: &BeadId) -> Result<()> {
+        async fn release(&self, id: &BeadId) -> Result<()> {
+            let mut beads = self.beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|bead| bead.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            bead.status = BeadStatus::Open;
+            bead.assignee = None;
             Ok(())
         }
-        async fn block(&self, _id: &BeadId) -> Result<()> {
+        async fn block(&self, id: &BeadId) -> Result<()> {
+            let mut beads = self.beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|bead| bead.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            bead.status = BeadStatus::Blocked;
             Ok(())
         }
         async fn flush(&self) -> Result<()> {
             Ok(())
         }
-        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+        async fn reopen(&self, id: &BeadId) -> Result<()> {
+            let mut beads = self.beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|bead| bead.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            bead.status = BeadStatus::Open;
+            bead.assignee = None;
             Ok(())
         }
         async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
@@ -4472,7 +4569,13 @@ mod tests {
         ) -> Result<()> {
             Ok(())
         }
-        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+        async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+            let mut beads = self.beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|bead| bead.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            bead.assignee = None;
             Ok(())
         }
 
@@ -5516,6 +5619,66 @@ mod tests {
         let result = worker.do_handle().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("invariant"));
+    }
+
+    #[tokio::test]
+    async fn apply_bead_action_recovers_a_still_held_claim() {
+        let mut bead = make_test_bead("needle-action-error");
+        bead.status = BeadStatus::InProgress;
+        bead.assignee = Some("test-worker".to_string());
+        let store = Arc::new(MockStore::new(vec![bead.clone()]));
+        let mut worker = make_worker(store.clone());
+        worker.boot().unwrap();
+        worker.state = WorkerState::Handling;
+        worker.current_bead = Some(bead.clone());
+
+        worker.apply_bead_action(BeadAction::Errored).await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Logging);
+        let current = store.show(&bead.id).await.unwrap();
+        assert_eq!(current.status, BeadStatus::Open);
+        assert_eq!(current.assignee, None);
+    }
+
+    #[tokio::test]
+    async fn apply_bead_action_accepts_closed_and_stops_after_interruption() {
+        let mut closed = make_test_bead("needle-action-closed");
+        closed.status = BeadStatus::Closed;
+        let closed_store = Arc::new(MockStore::new(vec![closed.clone()]));
+        let mut closed_worker = make_worker(closed_store.clone());
+        closed_worker.boot().unwrap();
+        closed_worker.state = WorkerState::Handling;
+        closed_worker.current_bead = Some(closed.clone());
+
+        closed_worker
+            .apply_bead_action(BeadAction::Closed)
+            .await
+            .unwrap();
+
+        assert_eq!(*closed_worker.state(), WorkerState::Logging);
+        assert_eq!(
+            closed_store.show(&closed.id).await.unwrap().status,
+            BeadStatus::Closed
+        );
+
+        let mut interrupted = make_test_bead("needle-action-interrupted");
+        interrupted.status = BeadStatus::InProgress;
+        interrupted.assignee = Some("test-worker".to_string());
+        let interrupted_store = Arc::new(MockStore::new(vec![interrupted.clone()]));
+        let mut interrupted_worker = make_worker(interrupted_store.clone());
+        interrupted_worker.boot().unwrap();
+        interrupted_worker.state = WorkerState::Handling;
+        interrupted_worker.current_bead = Some(interrupted.clone());
+
+        interrupted_worker
+            .apply_bead_action(BeadAction::Interrupted)
+            .await
+            .unwrap();
+
+        assert_eq!(*interrupted_worker.state(), WorkerState::Stopped);
+        let current = interrupted_store.show(&interrupted.id).await.unwrap();
+        assert_eq!(current.status, BeadStatus::Open);
+        assert_eq!(current.assignee, None);
     }
 
     // ── request_shutdown API ──
