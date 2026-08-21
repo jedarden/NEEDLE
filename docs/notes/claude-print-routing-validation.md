@@ -12,8 +12,10 @@ End-to-end validation of model-based adapter routing (bf-2xi) on this host, ensu
 **Verification**:
 - ✓ `claude-print-sonnet.yaml` adapter configuration exists
 - ✓ Adapter configured to use `claude-print` binary
-- ✓ `claude-print` binary exists and is executable (v0.2.0 wrapping claude 2.1.235)
+- ✓ `claude-print` binary exists and is executable (v0.2.0 wrapping claude 2.1.238)
 - ✓ Routing rules in `.needle.yaml` correctly match Anthropic models
+- ✓ If needle binary is available, validates actual adapter invocation via trace files
+- ✓ Verifies stream-json output format when available
 
 ### Scenario 2: glm-4.7 Models → claude-code-glm-4.7 (Negative Control)
 **Validates**: Non-Anthropic models (e.g., `glm-4.7`) route to their configured adapters.
@@ -22,6 +24,7 @@ End-to-end validation of model-based adapter routing (bf-2xi) on this host, ensu
 - ✓ `claude-code-glm-4.7.yaml` adapter configuration exists
 - ✓ Adapter configured for `glm-4.7` model
 - ✓ Routing rules provide correct default adapter fallback
+- ✓ If needle binary is available, validates actual adapter invocation via trace files
 
 ### Scenario 3: Routing Decision Telemetry Events
 **Validates**: Routing telemetry events are properly emitted for observability.
@@ -63,7 +66,7 @@ agent:
 
 Expected output: All 4 scenarios pass with green checkmarks.
 
-## Test Results (2026-08-20)
+## Test Results (2026-08-21)
 
 **Status**: ✓ ALL TESTS PASSED
 
@@ -72,7 +75,7 @@ Expected output: All 4 scenarios pass with green checkmarks.
 - Scenario 3: Routing telemetry system properly configured
 - Scenario 4: Missing binary causes expected failure (no silent fallback)
 
-**claude-print version**: 0.2.0 (wrapping claude 2.1.235)
+**claude-print version**: 0.2.0 (wrapping claude 2.1.238)
 **Binary location**: `/home/coding/.local/bin/claude-print`
 
 ## Implementation Notes
@@ -118,6 +121,23 @@ Key features:
 - `--timeout 3600` matches fleet's 1h max-runtime ceiling
 - `--output-format stream-json` for JSONL event stream
 
+## Test Enhancements (2026-08-21)
+
+The integration test was enhanced to provide more comprehensive validation:
+
+1. **Enhanced Worker Execution**: When the needle binary is available, the test now runs actual worker execution and validates:
+   - Adapter invocation via trace metadata files
+   - Stream-json output format verification
+   - Routing telemetry event emission
+
+2. **Improved Telemetry Verification**: Better checking for routing decision events in both:
+   - `.beads/events.jsonl` for global event stream
+   - `.beads/traces/<bead_id>/metadata.json` for bead-specific events
+
+3. **Graceful Degradation**: The test works correctly even when the needle binary is not available, focusing on static validation of configuration and binary availability.
+
+4. **Better Output Verification**: Added checks for stream-json format in stdout traces when available.
+
 ## Acceptance Criteria
 
 All four scenarios pass as documented above, confirming that:
@@ -129,5 +149,6 @@ All four scenarios pass as documented above, confirming that:
 ---
 
 **Test Created**: 2026-08-20
+**Enhanced**: 2026-08-21
 **Bead ID**: needle-4ddfbf70
 **Test File**: `tests/integration/test_claude_print_routing.sh`
