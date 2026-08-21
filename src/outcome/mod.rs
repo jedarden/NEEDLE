@@ -1637,10 +1637,10 @@ mod tests {
 
     #[tokio::test]
     async fn handle_success_bead_still_open_is_failure_not_orphaned() {
-        // An agent process exiting successfully is not a successful dispatch
-        // when verification fails. This is the inversion of the old test,
-        // which expected Success plus BeadOrphaned and thereby locked in the
-        // leaked in_progress claim.
+        // needle-97397df2 inverts the old leak assertion: an agent process
+        // exiting successfully is not a successful dispatch when verification fails.
+        // The old test expected Success plus BeadOrphaned and thereby locked in
+        // the leaked in_progress claim.
         let handler = test_handler_with_verification(vec!["false".to_string()]);
         let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
