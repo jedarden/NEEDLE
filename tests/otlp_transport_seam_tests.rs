@@ -105,6 +105,35 @@ struct IsolatedTest {
     _runtime: tokio::runtime::Runtime,
 }
 
+struct EnvironmentVariableGuard {
+    name: String,
+    previous: Option<OsString>,
+}
+
+impl EnvironmentVariableGuard {
+    fn set(name: &str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self {
+            name: name.to_string(),
+            previous,
+        }
+    }
+
+    fn remove(&self) {
+        std::env::remove_var(&self.name);
+    }
+}
+
+impl Drop for EnvironmentVariableGuard {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => std::env::set_var(&self.name, value),
+            None => std::env::remove_var(&self.name),
+        }
+    }
+}
+
 impl IsolatedTest {
     fn new() -> Self {
         let lock = TEST_ENV_LOCK.get_or_init(|| Mutex::new(()));
@@ -262,14 +291,11 @@ impl RunningOtlpWorker {
     }
 
     /// Apply a telemetry config at the point a real worker would finish a
-    /// cycle. Enabling builds a fresh provider through the transport seam;
-    /// disabling removes the live provider before the next cycle.
+    /// cycle. An enabled config always builds a candidate through the
+    /// transport seam before replacing the live provider, so a failed rebuild
+    /// leaves the previous exporter installed. Disabling removes the live
+    /// provider before the next cycle.
     fn apply_config_at_cycle_boundary(&mut self, config: OtlpSinkConfig) -> anyhow::Result<()> {
-        if config.enabled == self.config.enabled {
-            self.config = config;
-            return Ok(());
-        }
-
         if config.enabled {
             let span_exporter = CapturingSpanHistoryExporter {
                 resources: self.span_resources.clone(),
@@ -285,7 +311,10 @@ impl RunningOtlpWorker {
                 span_exporter,
                 log_exporter,
             )?;
-            self.providers = Some(providers);
+
+            if let Some(previous) = self.providers.replace(providers) {
+                shutdown_providers(previous.0, previous.1, previous.2);
+            }
         } else if let Some((tracer, meter, logger)) = self.providers.take() {
             shutdown_providers(tracer, meter, logger);
         }
@@ -306,6 +335,10 @@ impl RunningOtlpWorker {
             .lock()
             .expect("log resources mutex poisoned")
             .len()
+    }
+
+    fn has_live_providers(&self) -> bool {
+        self.providers.is_some()
     }
 
     fn wait_for_history(
@@ -506,4 +539,52 @@ fn running_worker_toggles_otlp_both_directions_at_transport_seam() {
     worker.assert_transport_received_current_resource(2);
     assert_eq!(worker.span_resource_count(), 2);
     assert_eq!(worker.log_resource_count(), 2);
+}
+
+/// A failed Tier-B telemetry rebuild must leave the current exporter live.
+/// Header resolution happens while building the candidate, so removing the
+/// environment variable must reject only that candidate, not tear down the
+/// provider that is already serving the worker.
+#[test]
+fn running_worker_preserves_otlp_on_missing_env_header_rebuild() {
+    let isolated = IsolatedTest::new();
+    isolated.assert_explore_isolated();
+    let _runtime_guard = isolated._runtime.enter();
+
+    let variable = "NEEDLE_TEST_OTLP_RELOAD_MISSING_7BBD6249";
+    let mut enabled_config = test_config("http");
+    enabled_config.headers = vec![format!("Authorization: env:{variable}")];
+
+    let mut disabled_config = enabled_config.clone();
+    disabled_config.enabled = false;
+    let mut worker = RunningOtlpWorker::start(disabled_config);
+
+    let header = EnvironmentVariableGuard::set(variable, "Bearer working-value");
+    worker
+        .apply_config_at_cycle_boundary(enabled_config.clone())
+        .expect("initial exporter should build while the header environment is present");
+    worker.assert_transport_received_current_resource(1);
+    assert!(worker.has_live_providers());
+
+    header.remove();
+    let rebuild = worker.apply_config_at_cycle_boundary(enabled_config);
+
+    assert!(
+        rebuild.is_err(),
+        "a rebuild with an absent env header must reject its candidate"
+    );
+    assert!(
+        worker.has_live_providers(),
+        "the previous exporter must remain installed after a failed rebuild"
+    );
+    assert_eq!(
+        worker.span_resource_count(),
+        1,
+        "a failed rebuild must not hand a replacement exporter a resource"
+    );
+    assert_eq!(
+        worker.log_resource_count(),
+        1,
+        "a failed rebuild must not hand a replacement exporter a resource"
+    );
 }
