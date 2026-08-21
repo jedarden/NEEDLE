@@ -643,6 +643,29 @@ pub enum EventKind {
         was_deleted: bool,
     },
 
+    // ── Configuration reload ──
+    /// A change to the resolved configuration was detected.
+    ///
+    /// This event deliberately carries no configuration content.
+    ConfigReloadDetected,
+    /// A valid configuration change was applied at the cycle boundary.
+    ConfigReloadApplied {
+        /// Dot-separated key paths that changed. Values are deliberately omitted.
+        changed_keys: Vec<String>,
+    },
+    /// A candidate configuration failed validation and was not applied.
+    ConfigReloadRejected {
+        /// Secret-free validation diagnostics. Raw configuration values and
+        /// resolved header values must never be included.
+        validation_errors: Vec<String>,
+    },
+    /// Configuration changes were detected that require a process restart.
+    ConfigReloadRestartRequired {
+        /// Dot-separated key paths that cannot be applied live. Values are
+        /// deliberately omitted.
+        keys: Vec<String>,
+    },
+
     // ── Upgrade checks ──
     /// Emitted when an upgrade check begins
     UpgradeCheckStarted {
@@ -979,6 +1002,10 @@ impl EventKind {
             EventKind::UpgradeCompleted { .. } => "worker.upgrade.completed",
             EventKind::RollbackCompleted { .. } => "rollback.completed",
             EventKind::BinaryFreshnessExit { .. } => "worker.binary_freshness_exit",
+            EventKind::ConfigReloadDetected => "config.reload.detected",
+            EventKind::ConfigReloadApplied { .. } => "config.reload.applied",
+            EventKind::ConfigReloadRejected { .. } => "config.reload.rejected",
+            EventKind::ConfigReloadRestartRequired { .. } => "config.reload.restart_required",
             EventKind::UpgradeCheckStarted { .. } => "upgrade_check.started",
             EventKind::UpgradeCheckCompleted { .. } => "upgrade_check.completed",
             EventKind::UpgradeCheckFailed { .. } => "upgrade_check.failed",
@@ -1131,6 +1158,10 @@ impl EventKind {
             | EventKind::UpgradeCompleted { .. }
             | EventKind::RollbackCompleted { .. }
             | EventKind::BinaryFreshnessExit { .. }
+            | EventKind::ConfigReloadDetected
+            | EventKind::ConfigReloadApplied { .. }
+            | EventKind::ConfigReloadRejected { .. }
+            | EventKind::ConfigReloadRestartRequired { .. }
             | EventKind::CanaryStarted { .. }
             | EventKind::CanarySuiteCompleted { .. }
             | EventKind::CanaryPromoted { .. }
@@ -1764,6 +1795,16 @@ impl EventKind {
                     "new_hash": new_hash,
                     "was_deleted": was_deleted,
                 })
+            }
+            EventKind::ConfigReloadDetected => serde_json::json!({}),
+            EventKind::ConfigReloadApplied { changed_keys } => {
+                serde_json::json!({ "changed_keys": changed_keys })
+            }
+            EventKind::ConfigReloadRejected { validation_errors } => {
+                serde_json::json!({ "validation_errors": validation_errors })
+            }
+            EventKind::ConfigReloadRestartRequired { keys } => {
+                serde_json::json!({ "keys": keys })
             }
             EventKind::UpgradeCheckStarted { source } => {
                 serde_json::json!({ "source": source })
@@ -2450,6 +2491,10 @@ impl EventKind {
             | EventKind::UpgradeCompleted { .. }
             | EventKind::RollbackCompleted { .. }
             | EventKind::BinaryFreshnessExit { .. }
+            | EventKind::ConfigReloadDetected
+            | EventKind::ConfigReloadApplied { .. }
+            | EventKind::ConfigReloadRejected { .. }
+            | EventKind::ConfigReloadRestartRequired { .. }
             | EventKind::UpgradeCheckStarted { .. }
             | EventKind::UpgradeCheckCompleted { .. }
             | EventKind::UpgradeCheckFailed { .. }
@@ -4699,6 +4744,57 @@ mod tests {
             }
             .event_type(),
             "outcome.handled"
+        );
+    }
+
+    #[test]
+    fn config_reload_event_types_and_payloads_are_stable_and_value_free() {
+        let detected = EventKind::ConfigReloadDetected;
+        assert_eq!(detected.event_type(), "config.reload.detected");
+        assert_eq!(detected.to_data(), serde_json::json!({}));
+
+        let applied = EventKind::ConfigReloadApplied {
+            changed_keys: vec![
+                "agent.timeout".to_string(),
+                "telemetry.otlp_sink.headers".to_string(),
+            ],
+        };
+        assert_eq!(applied.event_type(), "config.reload.applied");
+        assert_eq!(
+            applied.to_data(),
+            serde_json::json!({
+                "changed_keys": ["agent.timeout", "telemetry.otlp_sink.headers"]
+            })
+        );
+
+        let rejected = EventKind::ConfigReloadRejected {
+            validation_errors: vec![
+                "worker.max_workers: must be at least 1".to_string(),
+                "telemetry.otlp_sink.headers: referenced environment variable is unavailable"
+                    .to_string(),
+            ],
+        };
+        assert_eq!(rejected.event_type(), "config.reload.rejected");
+        assert_eq!(
+            rejected.to_data(),
+            serde_json::json!({
+                "validation_errors": [
+                    "worker.max_workers: must be at least 1",
+                    "telemetry.otlp_sink.headers: referenced environment variable is unavailable"
+                ]
+            })
+        );
+
+        let restart_required = EventKind::ConfigReloadRestartRequired {
+            keys: vec!["workspace.home".to_string(), "bead_cli.backend".to_string()],
+        };
+        assert_eq!(
+            restart_required.event_type(),
+            "config.reload.restart_required"
+        );
+        assert_eq!(
+            restart_required.to_data(),
+            serde_json::json!({ "keys": ["workspace.home", "bead_cli.backend"] })
         );
     }
 
