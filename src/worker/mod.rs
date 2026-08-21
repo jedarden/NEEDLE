@@ -4955,6 +4955,95 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn regression_2026_08_17_exit_zero_without_close_cannot_loop() {
+        // Exact incident fixture (needle-3386daef / needle-55ec0193):
+        //   02:52 claim -> 02:58 success (6m), worker needle-otlp-test
+        //   04:49 claim -> 04:59 timeout (10m), worker seam-2
+        //   05:04 claim -> 05:35 success (32m), worker luna-needle
+        //   05:35 re-claimed by luna-needle in the SAME SECOND as success
+        // That was ~48 minutes across three workers, zero commits referencing
+        // the bead, and the bead never left in_progress.
+        let workspace = tempfile::tempdir().unwrap();
+        let mut incident = make_test_bead("needle-55ec0193");
+        incident.title =
+            "handle_success leaks the claim when the agent exits 0 without closing the bead"
+                .to_string();
+        incident.body = Some(
+            "2026-08-17: three dispatches (needle-otlp-test, seam-2, luna-needle); \
+             luna-needle re-claimed at 05:35 in the same second as its success; \
+             ~48 agent-minutes and zero commits"
+                .to_string(),
+        );
+        incident.workspace = workspace.path().to_path_buf();
+
+        let store = Arc::new(MockStore::new(vec![incident.clone()]));
+        let mut config = valid_test_config();
+        config.verification = vec!["false".to_string()];
+        config.self_modification.hot_reload = false;
+        config.strands.explore.enabled = false;
+        config.strands.explore.workspace_root = workspace.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
+        let mut worker = Worker::new(config, "luna-needle".to_string(), store.clone());
+        worker.boot().unwrap();
+        worker.do_select().await.unwrap();
+
+        let claimed = store.show(&incident.id).await.unwrap();
+        assert_eq!(claimed.status, BeadStatus::InProgress);
+        assert_eq!(
+            claimed.assignee.as_deref(),
+            Some(worker.qualified_id().as_str())
+        );
+
+        // Reproduce the agent process exiting 0 without closing the bead. The
+        // failing definition-of-done gate must classify this as Failure and
+        // produce a mandatory release action, never Success/BeadOrphaned.
+        worker.state = WorkerState::Handling;
+        worker.exec_output = Some((
+            AgentOutcome {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            false,
+        ));
+        let action = worker.do_handle().await.unwrap();
+
+        assert_eq!(worker.last_outcome.as_deref(), Some("failure"));
+        assert_eq!(action, BeadAction::Released);
+        let released = store.show(&incident.id).await.unwrap();
+        assert_eq!(released.status, BeadStatus::Open);
+        assert_eq!(released.assignee, None);
+
+        // The state-machine boundary must consume the action before advancing.
+        worker.apply_bead_action(action).await.unwrap();
+        assert_eq!(*worker.state(), WorkerState::Logging);
+
+        // Defense in depth: recreate the historical leaked state and attempt
+        // the same-worker, same-bead re-dispatch. Single-claim enforcement must
+        // reject the selection and release the stale claim before any new claim
+        // can occur; the bead is never dispatchable while it remains held.
+        let actor = worker.qualified_id();
+        let leaked = match store.claim(&incident.id, &actor).await.unwrap() {
+            ClaimResult::Claimed(bead) => bead,
+            other => panic!("incident fixture could not recreate held claim: {other:?}"),
+        };
+        worker.current_bead = Some(leaked);
+        worker.state = WorkerState::Selecting;
+
+        let redispatch_error = worker.do_select().await.unwrap_err();
+        assert!(
+            redispatch_error
+                .to_string()
+                .contains("single-claim invariant"),
+            "held bead was not rejected before re-dispatch: {redispatch_error:#}"
+        );
+        assert!(worker.current_bead.is_none());
+        let recovered = store.show(&incident.id).await.unwrap();
+        assert_eq!(recovered.status, BeadStatus::Open);
+        assert_eq!(recovered.assignee, None);
+    }
+
     // ── Specialized mock stores for claim tests ──
 
     /// A store that always returns RaceLost on claim.

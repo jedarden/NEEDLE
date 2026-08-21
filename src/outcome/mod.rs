@@ -1636,8 +1636,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_success_bead_still_open_releases_to_prevent_leak() {
-        let handler = test_handler();
+    async fn handle_success_bead_still_open_is_failure_not_orphaned() {
+        // An agent process exiting successfully is not a successful dispatch
+        // when verification fails. This is the inversion of the old test,
+        // which expected Success plus BeadOrphaned and thereby locked in the
+        // leaked in_progress claim.
+        let handler = test_handler_with_verification(vec!["false".to_string()]);
         let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
 
@@ -1646,27 +1650,27 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.outcome, Outcome::Failure);
         assert_eq!(
             result.bead_action,
             BeadAction::Released,
-            "bead still open after success must be released to enforce postcondition"
+            "exit 0 without verified closure must release the claim"
         );
         let actions = store.actions();
         assert!(
             actions.iter().any(|a| matches!(a, StoreAction::Show(_))),
-            "success should check bead status"
+            "verification failure should check whether the bead needs reopening"
         );
         assert!(
-            result
+            !result
                 .telemetry_events
                 .iter()
                 .any(|e| matches!(e, EventKind::BeadOrphaned { .. })),
-            "orphan event should be emitted even though bead is released"
+            "an unverified exit must never enter the success/orphan path"
         );
         assert!(
             actions.iter().any(|a| matches!(a, StoreAction::Release(_))),
-            "bead must be released when still open after success"
+            "the bead must not remain in_progress after an unverified exit"
         );
     }
 
@@ -2579,51 +2583,6 @@ mod tests {
         assert!(
             !marker_path.exists(),
             "gate command was not actually killed — it ran to completion in the background"
-        );
-    }
-
-    // ── Regression tests for needle-3386daef: dispatch postcondition ──
-
-    #[tokio::test]
-    async fn regression_2026_08_17_orphan_loop_bead_released_not_leaked() {
-        // Regression test for the 2026-08-17 loop where needle-55ec0193 was worked
-        // THREE times and leaked every time. Each worker exited with success but the
-        // bead remained in_progress, allowing re-claim in the same second as the
-        // success. This test verifies that an agent exiting 0 without closing the
-        // bead now releases it back to open, preventing the leak.
-        let handler = test_handler();
-        let store = test_store(BeadStatus::InProgress);
-        let bead = test_bead(BeadStatus::InProgress);
-
-        // Simulate agent exiting 0 without closing the bead
-        let result = handler
-            .handle(&store, &bead, &test_output(0), false)
-            .await
-            .unwrap();
-
-        // Postcondition: bead must be released, not left in_progress
-        assert_eq!(
-            result.bead_action,
-            BeadAction::Released,
-            "agent exit 0 without closure must release bead to prevent claim leak"
-        );
-
-        // Verify the release was actually performed
-        let actions = store.actions();
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
-            "bead must be released to open/unassigned state"
-        );
-
-        // Verify BeadOrphaned event was emitted for observability
-        assert!(
-            result
-                .telemetry_events
-                .iter()
-                .any(|e| matches!(e, EventKind::BeadOrphaned { .. })),
-            "orphan event must be emitted even though bead is released"
         );
     }
 }
