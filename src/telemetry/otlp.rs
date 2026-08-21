@@ -31,8 +31,12 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 /// Resolve configured OTLP headers without writing secrets into NEEDLE's YAML.
-/// A value beginning with `env:` names an environment variable read when the
-/// exporter is initialized, for example `Authorization: env:OTLP_AUTH`.
+/// A value beginning with `env:` names an environment variable read whenever a
+/// provider candidate is built, for example `Authorization: env:OTLP_AUTH`.
+///
+/// This deliberately does not cache resolved values. A Tier-B telemetry rebuild
+/// must observe the process environment at rebuild time, while a failed
+/// resolution leaves the caller's existing exporter candidate untouched.
 fn resolve_headers(headers: &[String]) -> Result<Vec<(String, String)>> {
     headers
         .iter()
@@ -50,8 +54,11 @@ fn resolve_headers(headers: &[String]) -> Result<Vec<(String, String)>> {
                 if variable.is_empty() {
                     anyhow::bail!("invalid OTLP header environment reference");
                 }
+                // Do not include the variable name or resolved value in the
+                // error. The caller may forward this diagnostic to a log or a
+                // reload event, and header material must never appear there.
                 std::env::var(variable).map_err(|_| {
-                    anyhow::anyhow!("OTLP header environment variable '{variable}' is not set")
+                    anyhow::anyhow!("OTLP header references an unavailable environment variable")
                 })?
             } else {
                 raw_value.to_string()
@@ -507,6 +514,11 @@ impl OtlpSink {
     ///
     /// The `file_sink` parameter is used to emit shutdown timeout events
     /// when the flush takes longer than 5 seconds.
+    ///
+    /// This constructs an independent candidate. Callers performing a live
+    /// rebuild must retain the current sink until this returns successfully;
+    /// header resolution happens during candidate construction and never
+    /// mutates the already-running exporter.
     ///
     /// The `agent`, `model`, `provider`, and `workspace` parameters are optional resource
     /// attributes for OpenTelemetry semantic conventions.
@@ -1898,7 +1910,64 @@ mod tests {
         std::env::remove_var(variable);
         let error = resolve_headers(&[format!("Authorization: env:{variable}")])
             .expect_err("missing secret must fail exporter initialization");
-        assert!(error.to_string().contains(variable));
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            "OTLP header references an unavailable environment variable"
+        );
+        assert!(
+            !message.contains(variable),
+            "environment variable names must not be forwarded in diagnostics"
+        );
+    }
+
+    #[test]
+    fn rebuild_resolves_otlp_header_environment_at_build_time() {
+        let variable = "NEEDLE_TEST_OTLP_REBUILD_AUTH_7BBD6249";
+        let mut config = make_test_config();
+        config.headers = vec![format!("Authorization: env:{variable}")];
+
+        std::env::set_var(variable, "Bearer first-value");
+        let first =
+            OtlpSink::build_http_headers(&config).expect("first environment value should resolve");
+
+        std::env::set_var(variable, "Bearer second-value");
+        let second = OtlpSink::build_http_headers(&config).expect("rebuilt value should resolve");
+
+        std::env::remove_var(variable);
+
+        assert_eq!(
+            first.get("Authorization").map(String::as_str),
+            Some("Bearer first-value")
+        );
+        assert_eq!(
+            second.get("Authorization").map(String::as_str),
+            Some("Bearer second-value")
+        );
+    }
+
+    #[test]
+    fn missing_rebuild_header_leaves_previous_resolved_headers_untouched() {
+        let variable = "NEEDLE_TEST_OTLP_REBUILD_MISSING_7BBD6249";
+        let mut config = make_test_config();
+        config.headers = vec![format!("Authorization: env:{variable}")];
+
+        std::env::set_var(variable, "Bearer working-value");
+        let previous =
+            OtlpSink::build_http_headers(&config).expect("existing exporter should resolve");
+
+        std::env::remove_var(variable);
+        let rebuild = OtlpSink::build_http_headers(&config);
+
+        assert!(
+            rebuild.is_err(),
+            "missing rebuild header must reject candidate"
+        );
+        assert_eq!(
+            previous.get("Authorization").map(String::as_str),
+            Some("Bearer working-value"),
+            "the previous resolved exporter headers remain available to the caller"
+        );
     }
 
     #[test]
