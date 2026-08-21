@@ -1241,4 +1241,326 @@ mod tests {
             ["list", "--ready", "--json", "--limit", "999999"]
         );
     }
+
+    // ─── Template rendering tests ────────────────────────────────────────────────
+
+    #[test]
+    fn render_operation_substitutes_single_placeholder() {
+        use crate::bead_store::backend::builtin_bead_backends;
+
+        let bead_rs = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_binary = temp_dir.path().join("fake-bead");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bead 0.1.3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_binary).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_binary, perms).unwrap();
+        }
+
+        let store = CliBeadStore::new(
+            bead_rs,
+            fake_binary,
+            temp_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test single placeholder substitution
+        let values = HashMap::from([("id", "bf-123".to_string())]);
+        let result = store.render_operation("show", &values).unwrap();
+        assert_eq!(result, vec!["show", "bf-123", "--json"]);
+    }
+
+    #[test]
+    fn render_operation_substitutes_multiple_placeholders() {
+        use crate::bead_store::backend::builtin_bead_backends;
+
+        let bead_rs = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_binary = temp_dir.path().join("fake-bead");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bead 0.1.3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_binary).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_binary, perms).unwrap();
+        }
+
+        let store = CliBeadStore::new(
+            bead_rs,
+            fake_binary,
+            temp_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test multiple placeholders in one argument
+        let values = HashMap::from([
+            ("blocked", "bf-parent".to_string()),
+            ("blocker", "bf-child".to_string()),
+        ]);
+        let result = store.render_operation("dep_add", &values).unwrap();
+        assert_eq!(
+            result,
+            vec!["dep", "add", "bf-parent", "bf-child", "--kind", "blocks"]
+        );
+    }
+
+    #[test]
+    fn render_operation_omits_optional_placeholder_when_empty() {
+        use crate::bead_store::backend::builtin_bead_backends;
+
+        let bead_rs = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_binary = temp_dir.path().join("fake-bead");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bead 0.1.3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_binary).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_binary, perms).unwrap();
+        }
+
+        let store = CliBeadStore::new(
+            bead_rs,
+            fake_binary,
+            temp_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test that optional {limit} is omitted when not provided
+        let values = HashMap::new();
+        let result = store.render_operation("ready", &values).unwrap();
+        // {limit} is optional and not provided, so --limit flag should be omitted entirely
+        assert!(!result.contains(&"--limit".to_string()));
+    }
+
+    #[test]
+    fn render_operation_errors_on_missing_required_placeholder() {
+        use crate::bead_store::backend::builtin_bead_backends;
+
+        let bead_rs = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_binary = temp_dir.path().join("fake-bead");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bead 0.1.3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_binary).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_binary, perms).unwrap();
+        }
+
+        let store = CliBeadStore::new(
+            bead_rs,
+            fake_binary,
+            temp_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test that missing required placeholder errors
+        let values = HashMap::new(); // Missing required {id}
+        let result = store.render_operation("show", &values);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("requires placeholder"));
+        assert!(err_msg.contains("{id}"));
+    }
+
+    #[test]
+    fn render_operation_substitutes_implicit_values() {
+        use crate::bead_store::backend::builtin_bead_backends;
+
+        // Use bead-forge since it uses model/harness placeholders in claim_auto
+        let bead_forge = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-forge")
+            .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_binary = temp_dir.path().join("fake-bf");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bf 0.4.1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_binary).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_binary, perms).unwrap();
+        }
+
+        let store = CliBeadStore::new(
+            bead_forge,
+            fake_binary,
+            temp_dir.path().to_path_buf(),
+            Some("gpt-4".to_string()),
+            Some("claude-code".to_string()),
+            Some("1.0.0".to_string()),
+        )
+        .unwrap();
+
+        // Test that implicit values (model, harness, harness_version) are substituted
+        let values = HashMap::from([("actor", "worker-1".to_string())]);
+        let result = store.render_operation("claim_auto", &values).unwrap();
+        assert!(result.contains(&"gpt-4".to_string()));
+        assert!(result.contains(&"claude-code".to_string()));
+        assert!(result.contains(&"1.0.0".to_string()));
+        assert!(result.contains(&"worker-1".to_string()));
+    }
+
+    #[test]
+    fn render_operation_handles_special_characters_in_values() {
+        use crate::bead_store::backend::builtin_bead_backends;
+
+        let bead_rs = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_binary = temp_dir.path().join("fake-bead");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bead 0.1.3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_binary).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_binary, perms).unwrap();
+        }
+
+        let store = CliBeadStore::new(
+            bead_rs,
+            fake_binary,
+            temp_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test special characters in placeholder values
+        let title_with_special = "Fix: bug in 'feature' (urgent) #123";
+        let body_with_special = "Description with \"quotes\" and \\backslashes\\";
+        let values = HashMap::from([
+            ("title", title_with_special.to_string()),
+            ("body", body_with_special.to_string()),
+        ]);
+        let result = store.render_operation("create", &values).unwrap();
+        assert!(result.contains(&title_with_special.to_string()));
+        assert!(result.contains(&body_with_special.to_string()));
+    }
+
+    #[test]
+    fn render_operation_handles_empty_string_values() {
+        use crate::bead_store::backend::builtin_bead_backends;
+
+        // Use bead-forge since it uses model/harness placeholders in claim_auto
+        let bead_forge = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-forge")
+            .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_binary = temp_dir.path().join("fake-bf");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bf 0.4.1\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_binary).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_binary, perms).unwrap();
+        }
+
+        let store = CliBeadStore::new(
+            bead_forge,
+            fake_binary,
+            temp_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test empty string values for optional placeholders
+        let values = HashMap::from([
+            ("actor", "worker-1".to_string()),
+            ("model", "".to_string()),
+            ("harness", "".to_string()),
+            ("harness_version", "".to_string()),
+        ]);
+        let result = store.render_operation("claim_auto", &values).unwrap();
+        // Empty model/harness values should omit the flags entirely
+        assert!(!result.iter().any(|arg| arg == "--model"));
+        assert!(!result.iter().any(|arg| arg == "--harness"));
+        assert!(!result.iter().any(|arg| arg == "--harness-version"));
+        // But actor should still be present
+        assert!(result.iter().any(|arg| arg == "worker-1"));
+    }
+
+    #[test]
+    fn render_operation_preserves_static_arguments() {
+        use crate::bead_store::backend::builtin_bead_backends;
+
+        let bead_rs = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_binary = temp_dir.path().join("fake-bead");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bead 0.1.3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&fake_binary).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&fake_binary, perms).unwrap();
+        }
+
+        let store = CliBeadStore::new(
+            bead_rs,
+            fake_binary,
+            temp_dir.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test that static arguments (no placeholders) are preserved
+        let values = HashMap::from([("id", "bf-123".to_string())]);
+        let result = store.render_operation("show", &values).unwrap();
+        assert!(result.contains(&"--json".to_string()));
+        assert!(result.contains(&"show".to_string()));
+    }
 }

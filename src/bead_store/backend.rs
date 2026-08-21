@@ -967,4 +967,141 @@ mod tests {
         let caps = first_word_pattern.captures(stdout);
         assert_eq!(caps.unwrap().get(1).unwrap().as_str(), "bf");
     }
+
+    // ─── Placeholder validation tests ────────────────────────────────────────────
+
+    #[test]
+    fn allowed_placeholders_returns_correct_sets_for_operations() {
+        // Test operations with different placeholder sets
+        assert_eq!(allowed_placeholders("ready"), &["limit", "assignee"][..]);
+        assert_eq!(allowed_placeholders("show"), &["id"][..]);
+        assert_eq!(allowed_placeholders("claim"), &["id", "actor"][..]);
+        assert_eq!(
+            allowed_placeholders("claim_auto"),
+            &["actor", "model", "harness", "harness_version"][..]
+        );
+        assert_eq!(
+            allowed_placeholders("create"),
+            &[
+                "title",
+                "body",
+                "priority",
+                "assignee",
+                "issue_type",
+                "labels"
+            ][..]
+        );
+        assert_eq!(allowed_placeholders("dep_add"), &["blocked", "blocker"][..]);
+        assert_eq!(allowed_placeholders("close"), &["id", "reason"][..]);
+    }
+
+    #[test]
+    fn validate_placeholders_accepts_all_allowed_placeholders() {
+        let source = PathBuf::from("<test>");
+        let operation = "show";
+
+        // Valid: {id} is allowed for "show"
+        let argv = vec!["show".to_string(), "{id}".to_string()];
+        assert!(validate_placeholders(&source, operation, &argv).is_ok());
+
+        // Valid: multiple placeholders in one arg
+        let argv = vec!["{id}".to_string()];
+        assert!(validate_placeholders(&source, operation, &argv).is_ok());
+    }
+
+    #[test]
+    fn validate_placeholders_rejects_disallowed_placeholders() {
+        let source = PathBuf::from("<test>");
+        let operation = "show";
+
+        // Invalid: {title} is not allowed for "show"
+        let argv = vec!["show".to_string(), "{title}".to_string()];
+        let result = validate_placeholders(&source, operation, &argv);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("unresolvable placeholder"));
+        assert!(err_msg.contains("{title}"));
+    }
+
+    #[test]
+    fn validate_placeholders_rejects_malformed_placeholders() {
+        let source = PathBuf::from("<test>");
+        let operation = "show";
+
+        // Malformed: unclosed brace
+        let argv = vec!["{id".to_string()];
+        let result = validate_placeholders(&source, operation, &argv);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("malformed placeholder"));
+
+        // Malformed: unmatched closing brace
+        let argv = vec!["id}".to_string()];
+        let result = validate_placeholders(&source, operation, &argv);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("malformed placeholder"));
+    }
+
+    #[test]
+    fn validate_placeholders_handles_empty_argv() {
+        let source = PathBuf::from("<test>");
+        let operation = "flush";
+
+        // Valid: empty argv (no placeholders to validate)
+        let argv: Vec<String> = vec![];
+        assert!(validate_placeholders(&source, operation, &argv).is_ok());
+    }
+
+    #[test]
+    fn validate_placeholders_handles_placeholders_with_special_chars() {
+        let source = PathBuf::from("<test>");
+        let operation = "show";
+
+        // Valid: placeholders alongside other text
+        let argv = vec!["show-{id}".to_string()];
+        assert!(validate_placeholders(&source, operation, &argv).is_ok());
+
+        // Invalid: unknown placeholder alongside other text
+        let argv = vec!["prefix-{unknown}-suffix".to_string()];
+        let result = validate_placeholders(&source, operation, &argv);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("unresolvable placeholder"));
+        assert!(err_msg.contains("{unknown}"));
+    }
+
+    #[test]
+    fn validate_placeholders_allows_duplicate_placeholders_in_same_arg() {
+        let source = PathBuf::from("<test>");
+        let operation = "show";
+
+        // Valid: same placeholder can appear multiple times
+        let argv = vec!["{id}-{id}".to_string()];
+        assert!(validate_placeholders(&source, operation, &argv).is_ok());
+    }
+
+    #[test]
+    fn builtin_backends_validate_all_placeholders() {
+        // Verify that all built-in backend descriptors have valid placeholders
+        let backends = builtin_bead_backends();
+        let source = PathBuf::from("<builtin>");
+
+        for backend in &backends {
+            for (operation, spec) in &backend.operations {
+                let result = validate_placeholders(&source, operation, &spec.argv);
+                assert!(
+                    result.is_ok(),
+                    "backend '{}' operation '{}' has invalid placeholders: {}",
+                    backend.name,
+                    operation,
+                    result.unwrap_err()
+                );
+            }
+        }
+    }
 }
