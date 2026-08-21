@@ -5426,6 +5426,58 @@ mod tests {
     }
 
     #[test]
+    fn state_machine_reaches_config_reload_check_at_cycle_boundary() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", home.path());
+
+        let config_path = home.path().join(".config/needle/config.yaml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        let mut config = valid_test_config();
+        config.worker.config_reload_check_interval_secs = 60;
+        config.worker.idle_action = IdleAction::Exit;
+        config.worker.enforce_shipped_work = false;
+        config.workspace.home = home.path().join(".needle");
+        config.workspace.default = workspace.path().to_path_buf();
+        config.self_modification.hot_reload = false;
+        config.strands.explore.enabled = false;
+        config.strands.explore.workspace_root = workspace.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
+
+        // Constructing the worker records this baseline fingerprint. The
+        // subsequent edit must therefore be observed by the state machine,
+        // rather than becoming its first fingerprint.
+        std::fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+        let mut worker = Worker::new(
+            config.clone(),
+            "config-reload-call-site".to_string(),
+            Arc::new(MockStore::empty()),
+        );
+        worker.boot().unwrap();
+
+        let mut candidate = config;
+        candidate.worker.max_claim_retries += 1;
+        std::fs::write(&config_path, serde_yaml::to_string(&candidate).unwrap()).unwrap();
+
+        // This intentionally exercises the production state-machine arm. Do
+        // not replace this with a direct check_config_reload() call: the
+        // regression is a missing call site, not a broken helper.
+        worker.state = WorkerState::Logging;
+        let terminal_state = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(worker.run_state_machine())
+            .unwrap();
+
+        assert_eq!(terminal_state, WorkerState::Stopped);
+        assert_eq!(
+            worker.config.worker.max_claim_retries, candidate.worker.max_claim_retries,
+            "the cycle-boundary state-machine path must apply the changed config"
+        );
+    }
+
+    #[test]
     fn config_reload_requested_mid_dispatch_waits_for_cycle_boundary() {
         use std::collections::HashMap;
 
