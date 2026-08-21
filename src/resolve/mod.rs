@@ -497,7 +497,7 @@ impl Resolver {
         );
 
         // Build the resolve prompt
-        let _prompt = match self.build_prompt(context) {
+        let prompt = match self.build_prompt(context) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(
@@ -509,14 +509,32 @@ impl Resolver {
             }
         };
 
-        // TODO: Actually invoke the agent here
-        // For now, return a fallback that indicates the system isn't fully wired yet
-        tracing::warn!(
-            bead_id = %context.bead.id,
-            "resolver: agent invocation not yet implemented, using fallback"
-        );
+        // Invoke the resolve agent with timeout
+        let response_text = match self.invoke_resolve_agent(&prompt).await {
+            Ok(text) => text,
+            Err(e) => {
+                tracing::warn!(
+                    bead_id = %context.bead.id,
+                    error = %e,
+                    "resolver: agent invocation failed, using fallback"
+                );
+                return self.fallback_decision("agent_invocation_failed");
+            }
+        };
 
-        let decision = self.fallback_decision("not_implemented");
+        // Parse and validate the response
+        let decision = match self.parse_and_validate_response(&response_text) {
+            Ok(decision) => decision,
+            Err(e) => {
+                tracing::warn!(
+                    bead_id = %context.bead.id,
+                    error = %e,
+                    response = %response_text,
+                    "resolver: response parsing/validation failed, using fallback"
+                );
+                return self.fallback_decision("response_validation_failed");
+            }
+        };
 
         // Verify binary identity after successful resolution
         if let Err(e) = self.verify_binary_identity(&decision) {
@@ -531,7 +549,80 @@ impl Resolver {
             };
         }
 
+        tracing::info!(
+            bead_id = %context.bead.id,
+            decision = %decision.as_str(),
+            "resolver: decision successfully determined"
+        );
+
         decision
+    }
+
+    /// Invoke the resolve agent with the given prompt.
+    ///
+    /// Returns the agent's raw text response or an error.
+    async fn invoke_resolve_agent(&self, prompt: &str) -> Result<String> {
+        use std::process::Stdio;
+        use tokio::process::Command as AsyncCommand;
+
+        tracing::debug!(
+            prompt_length = prompt.len(),
+            "resolver: invoking resolve agent"
+        );
+
+        // Use claude CLI for resolve analysis
+        let output = tokio::time::timeout(self.timeout, async {
+            let child = AsyncCommand::new("claude")
+                .arg("--message")
+                .arg(prompt)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("failed to spawn resolve agent")?;
+
+            child
+                .wait_with_output()
+                .await
+                .context("failed to wait for resolve agent")
+        })
+        .await
+        .context("resolve agent invocation timed out")??;
+
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "resolve agent exited with {}: {}",
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        tracing::debug!(
+            response_length = stdout.len(),
+            "resolver: agent response received"
+        );
+
+        Ok(stdout)
+    }
+
+    /// Parse and validate the agent's response text.
+    ///
+    /// Returns the validated decision or an error.
+    fn parse_and_validate_response(&self, response_text: &str) -> Result<ResolveDecision> {
+        // Strip markdown code fencing if present
+        let cleaned = response_text
+            .trim()
+            .trim_start_matches("```json")
+            .trim_end_matches("```")
+            .trim();
+
+        // Try to parse as ResolveResponse
+        let response = ResolveResponse::parse_and_validate(cleaned)?;
+
+        // Return the decision (already validated by parse_and_validate)
+        Ok(response.decision)
     }
 
     /// Build the resolve prompt from context.
@@ -1059,5 +1150,164 @@ mod tests {
         // The resolver should call verification (even though it's a stub that passes)
         let decision = resolver.resolve(&context).await;
         assert!(matches!(decision, ResolveDecision::Retry { .. }));
+    }
+
+    #[test]
+    fn parse_and_validate_complete_decision() {
+        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
+            &crate::config::PromptConfig::default(),
+        ));
+
+        let json = r#"{"decision":{"complete":{"evidence":"Commit abc123","summary":"Done"}}}"#;
+        let decision = resolver.parse_and_validate_response(json).unwrap();
+
+        assert!(matches!(decision, ResolveDecision::Complete { .. }));
+        if let ResolveDecision::Complete { evidence, summary } = decision {
+            assert_eq!(evidence, "Commit abc123");
+            assert_eq!(summary, "Done");
+        }
+    }
+
+    #[test]
+    fn parse_and_validate_retry_decision() {
+        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
+            &crate::config::PromptConfig::default(),
+        ));
+
+        let json =
+            r#"{"decision":{"retry":{"reason":"Network timeout","strategy":"increase_timeout"}}}"#;
+        let decision = resolver.parse_and_validate_response(json).unwrap();
+
+        assert!(matches!(decision, ResolveDecision::Retry { .. }));
+        if let ResolveDecision::Retry { reason, strategy } = decision {
+            assert_eq!(reason, "Network timeout");
+            assert_eq!(strategy, RetryStrategy::IncreaseTimeout);
+        }
+    }
+
+    #[test]
+    fn parse_and_validate_blocked_decision() {
+        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
+            &crate::config::PromptConfig::default(),
+        ));
+
+        let json = r#"{"decision":{"blocked":{"blocker":"API key","required_action":"Provide credentials","severity":"high"}}}"#;
+        let decision = resolver.parse_and_validate_response(json).unwrap();
+
+        assert!(matches!(decision, ResolveDecision::Blocked { .. }));
+        if let ResolveDecision::Blocked {
+            blocker,
+            required_action,
+            severity,
+        } = decision
+        {
+            assert_eq!(blocker, "API key");
+            assert_eq!(required_action, "Provide credentials");
+            assert_eq!(severity, BlockSeverity::High);
+        }
+    }
+
+    #[test]
+    fn parse_and_validate_split_decision() {
+        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
+            &crate::config::PromptConfig::default(),
+        ));
+
+        let json = r#"{"decision":{"split":{"children":[{"title":"Child 1","body":"Description","priority":1}],"rationale":"Two tasks"}}}"#;
+        let decision = resolver.parse_and_validate_response(json).unwrap();
+
+        assert!(matches!(decision, ResolveDecision::Split { .. }));
+        if let ResolveDecision::Split {
+            children,
+            rationale,
+        } = decision
+        {
+            assert_eq!(children.len(), 1);
+            assert_eq!(children[0].title, "Child 1");
+            assert_eq!(rationale, "Two tasks");
+        }
+    }
+
+    #[test]
+    fn parse_and_validate_strips_markdown_fencing() {
+        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
+            &crate::config::PromptConfig::default(),
+        ));
+
+        let json = r#"```json
+{"decision":{"complete":{"evidence":"Commit abc123","summary":"Done"}}}
+```"#;
+        let decision = resolver.parse_and_validate_response(json).unwrap();
+
+        assert!(matches!(decision, ResolveDecision::Complete { .. }));
+    }
+
+    #[test]
+    fn parse_and_validate_rejects_invalid_json() {
+        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
+            &crate::config::PromptConfig::default(),
+        ));
+
+        let json = "not valid json";
+        let result = resolver.parse_and_validate_response(json);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("parse"));
+    }
+
+    #[test]
+    fn parse_and_validate_rejects_missing_fields() {
+        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
+            &crate::config::PromptConfig::default(),
+        ));
+
+        // Missing evidence field
+        let json = r#"{"decision":{"complete":{"summary":"Done"}}}"#;
+        let result = resolver.parse_and_validate_response(json);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("evidence"));
+    }
+
+    #[test]
+    fn parse_and_validate_rejects_invalid_decision_type() {
+        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
+            &crate::config::PromptConfig::default(),
+        ));
+
+        let json = r#"{"decision":{"invalid_type":{"field":"value"}}}"#;
+        let result = resolver.parse_and_validate_response(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_and_validate_rejects_empty_strings() {
+        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
+            &crate::config::PromptConfig::default(),
+        ));
+
+        // Empty evidence
+        let json = r#"{"decision":{"complete":{"evidence":"","summary":"Done"}}}"#;
+        let result = resolver.parse_and_validate_response(json);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("evidence"));
+    }
+
+    #[tokio::test]
+    async fn invoke_resolve_agent_times_out() {
+        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
+            &crate::config::PromptConfig::default(),
+        ))
+        .with_timeout(Duration::from_millis(100));
+
+        // Create a very long prompt to ensure processing takes time
+        let long_prompt = "x".repeat(100000);
+        let result = resolver.invoke_resolve_agent(&long_prompt).await;
+
+        // Should timeout
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timed out"));
     }
 }
