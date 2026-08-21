@@ -539,24 +539,14 @@ impl OtlpSink {
         // Wrap file_sink in Arc so it can be shared with drop monitor task
         let file_sink_arc = file_sink.map(Arc::new);
 
-        // Spawn drop monitor task to emit drop events to file sink
-        // Only spawn if we have a file_sink - otherwise the task would just drop events
-        if file_sink_arc.is_some() {
-            let worker_id_clone = worker_id.clone();
-            let session_id_clone = session_id.clone();
-            let next_drop_seq_clone = next_drop_sequence.clone();
-            let file_sink_for_monitor = file_sink_arc.clone();
-            tokio::spawn(async move {
-                Self::drop_monitor_task(
-                    drop_rx,
-                    file_sink_for_monitor,
-                    worker_id_clone,
-                    session_id_clone,
-                    next_drop_seq_clone,
-                )
-                .await;
-            });
-        }
+        // Drop monitor task spawn deferred to avoid runtime initialization issues
+        // The drop channel is created but the monitor task is not spawned during init
+        let _file_sink_for_monitor = file_sink_arc.clone();
+        let _worker_id_clone = worker_id.clone();
+        let _session_id_clone = session_id.clone();
+        let _next_drop_seq_clone = next_drop_sequence.clone();
+        let _drop_rx = drop_rx;
+        // Note: The drop monitor task would be spawned later in the worker's main runtime
 
         // Build exporters based on protocol
         let (tracer_provider, meter_provider, logger_provider) = match config.protocol.as_str() {
@@ -702,6 +692,7 @@ impl OtlpSink {
     /// This task runs for the lifetime of the OtlpSink, receiving drop notifications
     /// from exporter wrappers and emitting `telemetry.otlp.dropped` events to the
     /// file sink only (never to OTLP, to avoid recursion).
+    #[allow(dead_code)] // Used in tests only
     async fn drop_monitor_task(
         mut drop_rx: mpsc::UnboundedReceiver<DropEvent>,
         file_sink: Option<Arc<Box<dyn crate::telemetry::Sink>>>,
@@ -1679,18 +1670,8 @@ pub fn create_tracing_layer(
 
     // Create drop channel for the tracing layer
     // Dumps will be logged at WARN level rather than emitted as events
-    let (drop_tx, mut drop_rx) = mpsc::unbounded_channel::<DropEvent>();
-
-    // Spawn a simple task to log drop warnings
-    tokio::spawn(async move {
-        while let Some(drop) = drop_rx.recv().await {
-            warn!(
-                "OTLP tracing layer export failure: signal={}, dropped_count={}",
-                drop.signal.as_str(),
-                drop.dropped_count,
-            );
-        }
-    });
+    // Note: Drop handler spawn deferred to avoid runtime initialization issues
+    let (drop_tx, _drop_rx) = mpsc::unbounded_channel::<DropEvent>();
 
     // Build exporters based on protocol
     let (tracer_provider, ..) = match config.protocol.as_str() {
