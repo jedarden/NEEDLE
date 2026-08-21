@@ -4690,3 +4690,80 @@ Three independent defects stack:
 - `Repo` changes when a roaming worker claims a bead in a different repository, and never shows a full filesystem path.
 - Operator-supplied `telemetry.otlp.resource_attributes` entries reach the collector — currently none of them do.
 - A test fails if any resilient exporter wrapper stops forwarding the Resource.
+
+# Phase 18: Configuration Hot-Reload at the Cycle Boundary
+
+**Status:** proposed (ADR-017).
+
+**Goal:** make a configuration change take effect on a running worker without a restart, at the boundary where it is already safe to change things. Driven by the 2026-08-21 fleet-wide OTLP migration: flipping one boolean (`telemetry.otlp_sink.enabled`) required draining and relaunching all fifteen ex44 workers — ~55 minutes of wall clock, bounded by whatever each worker's in-flight dispatch happened to be doing, with every drained worker releasing its claimed bead. Full evidence and rationale in [ADR-017](../adr/017-configuration-hot-reload-at-the-cycle-boundary.md).
+
+The runtime is built to make this impossible today, in three distinct ways:
+
+1. **Config is a boot-time snapshot.** `Config`'s own doc comment says "Loaded once at boot, immutable during a session." `Worker::new` builds `Telemetry`, `StrandRunner`, `PromptBuilder`, `Dispatcher`, `OutcomeHandler`, `HealthMonitor`, and `RateLimiter` from that snapshot and holds them for the process lifetime.
+2. **The tracing subscriber is a one-shot global.** `init_tracing_subscriber` installs the OTLP layer via `tracing_subscriber::registry()....try_init()`. A process that booted without a reload handle can never acquire one.
+3. **Unapplicable config is discarded silently.** `telemetry` is in `NON_OVERRIDABLE_KEYS`, so a workspace `.needle.yaml` enabling OTLP is parsed, warned once, and dropped. The fleet ran for days on a config file that read as correct.
+
+The safe seam already exists and is already proven: `check_hot_reload()` runs after `LOGGING`, "between dispatch cycles, never mid-claim, ensuring no bead is left in_progress." Binary hot-reload has used it for months. Config reload is the same problem with a smaller blast radius.
+
+## Decisions locked
+
+An implementer will hit each of these forks; the plan decides them so no mid-build ADR is needed.
+
+- **Trigger = polled mtime+hash at the cycle boundary**, gated by `worker.config_reload_check_interval_secs` (`0` = disabled, and is the default until the feature has fleet time). *Because* it mirrors `check_hot_reload`'s existing binary-hash check and adds no dependency. *Rejected:* a `notify` file watcher (new dep, new async task, and it must defer to the boundary anyway). *Enforced by* 18.2.
+- **SIGHUP must NOT be the trigger.** *Because* `install_unix_signal_handlers` already registers `SIGTERM`/`SIGINT`/`SIGHUP` onto the shutdown flag, deliberately — a killed tmux session delivers SIGHUP, and the handler exists so the worker can release its bead and emit `worker.stopped` rather than die silently. Repurposing it turns every tmux teardown into a reload. *Revisit if* the shutdown handler ever stops covering SIGHUP.
+- **Reload applies only between dispatch cycles.** *Because* a worker in `Building`/`Dispatching`/`Executing`/`Handling` holds a bead, and changing `agent.timeout` or an adapter under a running dispatch produces an outcome attributable to neither config. *Enforced by* 18.2 + the test in 18.8.
+- **Three declared tiers, written as a table in code, not inferred.** *Because* an untiered atomic swap reads as though everything is reloadable and would silently no-op for immutable keys — recreating the `NON_OVERRIDABLE_KEYS` failure that caused this work. *Enforced by* 18.1.
+- **Validate before swap; a reload may never fail closed.** *Because* polled reload reaches every worker within one interval, so a bad edit is fleet-wide and simultaneous — strictly worse than the restart-only status quo unless validation is a hard gate. A config problem must degrade telemetry, never remove a worker. *Enforced by* 18.3.
+- **The `reload::Layer` seam is installed unconditionally at boot, including when OTLP is off.** *Because* `try_init()` is one-shot; installing the seam only when OTLP is already enabled means turning OTLP *on* still needs a restart — the exact situation this phase exists to remove, undiscoverable until tried on a live fleet. *Enforced by* 18.5.
+- **A reload never tears down a working exporter.** *Because* a reload cannot introduce a new environment variable into a running process, so a rebuild needing an absent `env:` header must keep the old exporter and report. *Enforced by* 18.5.
+
+## Changes
+
+### 18.1 Declare a reload tier for every config key
+- A table in `src/config/` mapping each key path to **Tier A (live)**, **Tier B (rebuild)**, or **Tier C (restart-required)**.
+- Tier A: `worker.idle_*`, `worker.max_claim_retries`, `agent.timeout`, `budget.*`, strand thresholds — read live off `self.config`, effective next cycle with no rebuild.
+- Tier B: `telemetry.*`, `strands.*`, `prompt.*`, `agent.adapters_dir`, `limits.*`, gates/verification — owned by a component built in `Worker::new`.
+- Tier C: worker identity/`qualified_id`, `workspace.home`, `bead_cli.backend`, tokio runtime, tracing-stack shape.
+- **Normative rule:** a new config key must be assigned a tier in the same change that introduces it. An unclassified key is a compile-time failure, not a runtime surprise.
+
+### 18.2 Cycle-boundary reload check
+- `check_config_reload()` alongside `check_hot_reload()` after `do_log()`, gated by `worker.config_reload_check_interval_secs`.
+- Detect via mtime plus content hash of the resolved global config path (mtime alone is not sufficient — an editor that rewrites in place with a preserved mtime would be missed).
+- Per-section hashing so 18.4 can rebuild only the components whose own subtree changed.
+
+### 18.3 Validate-before-swap, and never fail closed
+- Run `ConfigLoader::validate` against the candidate before any swap.
+- On error: keep the running config, emit `config.reload.rejected` with the errors, WARN, continue. Never propagate a reload error into the worker's `Result` path — that is how a config problem becomes a dead worker.
+- The swap itself is all-or-nothing: no half-applied configuration is ever observable.
+
+### 18.4 Rebuild Tier-B components
+- Reconstruct only components whose config subtree changed: `StrandRunner`, `PromptBuilder`, `Dispatcher` (adapter reload), `RateLimiter`, `OutcomeHandler`.
+- Each rebuild is fallible and isolated: a component that fails to rebuild keeps its previous instance and reports, rather than leaving the worker with a missing component.
+
+### 18.5 Reload-safe telemetry
+- Wrap the OTLP tracing layer in `tracing_subscriber::reload::Layer` at boot **unconditionally**, wrapping a no-op layer when OTLP is disabled. `reload` is not feature-gated in the pinned `tracing-subscriber` 0.3.23 — no new dependency.
+- Make the telemetry writer thread's sink set swappable. The thread currently owns `Vec<Box<dyn Sink>>` for its lifetime (`PendingWriter`); add a control message on the existing channel so sinks can be replaced without tearing down the writer or losing queued events.
+- Re-resolve `env:`-prefixed header values from the process environment on rebuild. If a required header is absent, keep the existing exporter and emit `config.reload.restart_required` — never replace a working exporter with a dead one. Header values never reach a log, event, or error message.
+
+### 18.6 Report what cannot be applied
+- A Tier-C key change emits `config.reload.restart_required` naming the keys, plus a WARN.
+- The same treatment for a workspace `.needle.yaml` carrying a `NON_OVERRIDABLE_KEYS` section — currently a single WARN into a log nobody reads.
+
+### 18.7 Observability
+- Events: `config.reload.detected`, `config.reload.applied` (with the changed key paths), `config.reload.rejected`, `config.reload.restart_required`.
+- `needle config --dump --show-source` must reflect the **live** config of a running worker, including a reload generation counter, so an operator can confirm what a worker is actually running rather than what the file says.
+
+### 18.8 Tests
+- A reload requested mid-dispatch is not applied until the cycle boundary; a dispatch launched under the old config completes under it.
+- An invalid candidate config leaves the worker running on the previous config and emits `config.reload.rejected` — the worker must still be alive at the end of the test.
+- OTLP toggles false→true and true→false on a running worker, asserted at the transport seam (per the ADR-016 rule: assert on what the exporter is handed, not on a builder's return value).
+- A Tier-C key change reports and does not silently no-op.
+- A rebuild whose `env:` header is absent keeps the previous exporter.
+
+## Exit criteria
+- `telemetry.otlp_sink.enabled` can be flipped on a running worker and traces appear at the collector without the process restarting.
+- No reload is ever applied while a bead is claimed; no bead is released by a reload.
+- An invalid config edit leaves every worker running, with `config.reload.rejected` emitted — verified by editing the live fleet config to something invalid and observing zero worker exits.
+- Changing a Tier-C key produces a named `config.reload.restart_required` rather than silence.
+- `needle config --dump --show-source` against a running worker reflects a post-reload value, not the boot-time snapshot.
+- The 2026-08-21 migration is reproducible as a config edit: enabling OTLP fleet-wide costs one interval, not a fifteen-worker drain.
