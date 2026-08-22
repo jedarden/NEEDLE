@@ -53,6 +53,7 @@ Not all configuration changes are equal. Changes take effect at three different 
 **Keys in this tier:**
 - `worker.config_reload_check_interval_secs` — The reload mechanism itself cannot be enabled/disabled or reconfigured from within a running worker (a worker started with `0` cannot discover a change that turns it on).
 - `worker.identifier_scheme` — Worker identity naming (NATO, custom) — locked into `qualified_id` at boot.
+- `worker.scratch_sweep.*` — Host-local cleanup runs once at startup, before claiming.
 - `workspace.home` — State directory path — heartbeats, logs, and registry paths are resolved once at startup.
 - `bead_cli.backend` — Bead store binding — changing mid-session would break in-progress claims and strand state.
 - `tokio runtime` configuration (if exposed) — Runtime shape is process-global.
@@ -125,6 +126,33 @@ worker:
   idle_timeout: 60            # Seconds to wait between queue polls when idle (default: 60)
   launch_stagger_seconds: 2   # Delay between worker launches (default: 2)
 ```
+
+### Disposable Scratch Checkout Sweep
+
+At startup, before opening the bead store or claiming work, each worker tries
+to sweep stale disposable fleet clones from `$HOME/scratch`. A host-local lock
+ensures that only one concurrently starting worker performs the sweep.
+
+```yaml
+# ~/.config/needle/config.yaml (host-level; not a workspace override)
+worker:
+  scratch_sweep:
+    enabled: true
+    ttl_hours: 48
+```
+
+Removal is intentionally fail-closed. An entry must be older than the TTL,
+match a known fleet-output prefix (`rota-`, `armor-`, `needle-`, `seam-`,
+`tg-pitr-`, `icg-`, or `claude-print-`), and be an independent Git clone with
+an `origin`, no stash, and no commits absent from remote refs. Git worktrees,
+similarly named non-repositories, and reference checkouts such as
+`esphome-source`, `tcb-bisect`, and `openbao-source.*` are not eligible.
+
+The worker checks `/proc` both before auditing and immediately before removal.
+It preserves a candidate if any same-user process has a working directory
+inside it, if a running `cargo` or `rustc` command references it, or if process
+inspection is inconclusive. Structured `scratch_sweep` log events include each
+removed path and the total allocated bytes reclaimed.
 
 ### Configuration Hot-Reload Check
 
@@ -513,6 +541,9 @@ worker:
   max_workers: 4
   idle_timeout: 60
   launch_stagger_seconds: 2
+  scratch_sweep:
+    enabled: true
+    ttl_hours: 48
   worker_binary_path: /opt/needle/bin/needle  # Override only if needed
 
 agent:

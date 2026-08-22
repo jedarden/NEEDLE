@@ -52,6 +52,7 @@ pub mod registry;
 pub mod resolve;
 pub mod routing;
 pub mod sanitize;
+pub mod scratch_sweep;
 pub mod skill;
 pub mod span;
 pub mod spawn_path;
