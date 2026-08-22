@@ -35,6 +35,19 @@ source, prompts, scripts, tests, or documentation.
   decomposing and dependency-ordering beads so the same unit of work is never
   independently claimable twice — see the target repo's own `AGENTS.md` for
   repo-specific guidance.
+- **A disposable clone under `~/scratch` is the same thing as a worktree for
+  this purpose, and the rule above covers it.** `git clone` into a
+  `mktemp -d` is the usual way this rule gets routed around: it satisfies the
+  letter (no `git worktree`) while costing the identical disk. On 2026-08-21
+  there were **241** of them on ex44 — `~/scratch` at 95G, each a full clone
+  plus a Rust `target/` — and the root filesystem reached 100%, which fails
+  writes with `ENOSPC` for every agent on the box, not just the one that
+  filled it. Work in the shared checkout. If a disposable checkout is
+  genuinely warranted, the thing that creates it owns removing it: `mktemp -d`
+  with a `trap` that cleans on success and deliberately leaves the tree on
+  failure for diagnosis. Do not file cleanup as its own bead — fleet workers
+  share no filesystem, so a cleanup bead can be claimed by a worker that
+  cannot see the directory. A startup sweep is the backstop (`needle-f40a5de7`).
 - Do not use destructive Git operations (`reset --hard`, forced checkout,
   forced push) to resolve unrelated changes.
 - Forgejo (`git.ardenone.com`) is the authoritative remote. GitHub is a mirror.
