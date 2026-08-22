@@ -1,0 +1,9 @@
+Implemented and shipped Tier-B hot-reload rebuilding in [src/worker/mod.rs](/home/coding/NEEDLE/src/worker/mod.rs).
+
+- Selectively rebuilds all five requested components.
+- Failed rebuilds retain the previous instance, report the error, and do not block later rebuilds.
+- Added success, no-op, Dispatcher-failure, and PromptBuilder-failure tests.
+- 8 rebuild-related tests passed.
+- `scripts/definition-of-done.sh --fast` passed all checks.
+- Commit `2e0048b` pushed to Forgejo `main`.
+- Bead `needle-49b6f85b` closed and checkpoint flushed.

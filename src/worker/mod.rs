@@ -568,6 +568,11 @@ pub struct Worker {
     /// Fingerprint of the global configuration file observed by the last
     /// completed configuration reload check.
     config_reload_fingerprint: Option<ConfigFileFingerprint>,
+    /// Number of times the configuration has been successfully reloaded since boot.
+    /// Incremented each time a validated configuration is applied at the cycle boundary.
+    /// This counter is exposed via `needle config --dump --live` so operators can
+    /// confirm what a running worker is actually using rather than what the file says.
+    config_reload_generation: u64,
     /// The current bead lifecycle span. Created when a bead is claimed and
     /// instrumented onto each state-handler future until the lifecycle ends.
     ///
@@ -868,6 +873,7 @@ impl Worker {
             stale_binary_warned: false,
             last_config_reload_check: None,
             config_reload_fingerprint,
+            config_reload_generation: 0,
         };
 
         // Warn if both budget thresholds are disabled (0.0 = no cap).
@@ -1316,6 +1322,7 @@ impl Worker {
             provider: self.resolve_provider(),
             started_at: chrono::Utc::now(),
             beads_processed: 0,
+            config_reload_generation: self.config_reload_generation,
         };
         if let Err(e) = self.registry.register(entry.clone()) {
             // Log to both tracing and stderr for visibility
@@ -3753,7 +3760,12 @@ impl Worker {
                 changed_keys.sort();
                 changed_keys.dedup();
                 if !changed_keys.is_empty() {
-                    tracing::info!(changed_keys = ?changed_keys, "applied configuration at cycle boundary");
+                    self.config_reload_generation += 1;
+                    tracing::info!(
+                        changed_keys = ?changed_keys,
+                        reload_generation = self.config_reload_generation,
+                        "applied configuration at cycle boundary"
+                    );
                     if let Err(error) =
                         self.telemetry
                             .emit_try_lock(EventKind::ConfigReloadApplied {
@@ -3761,6 +3773,10 @@ impl Worker {
                             })
                     {
                         tracing::warn!(error = %error, "failed to emit config.reload.applied");
+                    }
+                    // Update registry to reflect new reload generation
+                    if let Err(e) = self.update_registry_entry() {
+                        tracing::warn!(error = %e, "failed to update registry after config reload");
                     }
                 }
             }
@@ -4810,6 +4826,26 @@ impl Worker {
     /// collisions when workers from different adapter pools share a NATO name.
     fn qualified_id(&self) -> String {
         format!("{}-{}", self.config.agent.default, self.worker_name)
+    }
+
+    /// Update the worker's registry entry after state changes (e.g., config reload).
+    ///
+    /// This is called after a successful config reload to update the
+    /// `config_reload_generation` field in the registry, so external tools
+    /// like `needle config --dump --live` can see the current reload generation.
+    fn update_registry_entry(&self) -> Result<()> {
+        let entry = crate::registry::WorkerEntry {
+            id: self.qualified_id(),
+            pid: std::process::id(),
+            workspace: self.config.workspace.default.clone(),
+            agent: self.config.agent.default.clone(),
+            model: None,
+            provider: self.resolve_provider(),
+            started_at: chrono::Utc::now(),
+            beads_processed: self.beads_processed,
+            config_reload_generation: self.config_reload_generation,
+        };
+        self.registry.register(entry)
     }
 
     /// Build the current exclusion set, pruning expired race-lost entries.

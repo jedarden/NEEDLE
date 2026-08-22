@@ -2112,6 +2112,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -2164,6 +2165,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 1,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -2239,6 +2241,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -2305,6 +2308,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(7200),
                 beads_processed: 10,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -2365,6 +2369,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 1,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -2445,6 +2450,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 5,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -2519,6 +2525,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 10,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -2617,6 +2624,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
         registry
@@ -2629,6 +2637,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 100,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -2692,6 +2701,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 342,
+                config_reload_generation: 0,
             })
             .unwrap();
         registry
@@ -2704,6 +2714,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -3218,6 +3229,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 5,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -3362,6 +3374,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -3411,6 +3424,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 10,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -3524,6 +3538,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -3726,6 +3741,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 5,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -3783,6 +3799,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 10,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -3834,6 +3851,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -3886,6 +3904,7 @@ mod tests {
                     provider: None,
                     started_at: Utc::now(),
                     beads_processed: i as u64,
+                    config_reload_generation: 0,
                 })
                 .unwrap();
         }
@@ -3901,6 +3920,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 100,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -4202,6 +4222,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(300), // 5 minutes ago
             beads_processed: 0,
+            config_reload_generation: 0,
         };
         registry.register(idle_entry).unwrap();
 
@@ -4251,6 +4272,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(300),
             beads_processed: 10,
+            config_reload_generation: 0,
         };
         registry.register(active_entry).unwrap();
 
@@ -4300,6 +4322,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(30), // 30 seconds ago
             beads_processed: 0,
+            config_reload_generation: 0,
         };
         registry.register(recent_entry).unwrap();
 
@@ -4350,6 +4373,7 @@ mod tests {
                 provider: Some("anthropic".to_string()),
                 started_at: Utc::now() - chrono::Duration::seconds(300),
                 beads_processed: 0,
+                config_reload_generation: 0,
             };
             registry.register(entry).unwrap();
         }
@@ -4400,6 +4424,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(300),
             beads_processed: 10,
+            config_reload_generation: 0,
         };
         registry.register(active_entry).unwrap();
 
@@ -4413,6 +4438,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(30),
             beads_processed: 0,
+            config_reload_generation: 0,
         };
         registry.register(recent_entry).unwrap();
 
@@ -4426,6 +4452,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(300),
             beads_processed: 0,
+            config_reload_generation: 0,
         };
         registry.register(idle_entry).unwrap();
 
@@ -4512,6 +4539,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() + chrono::Duration::seconds(300), // 5 minutes in the future
             beads_processed: 0,
+            config_reload_generation: 0,
         };
         registry.register(future_entry).unwrap();
 
@@ -4564,6 +4592,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(300), // 5 minutes ago
             beads_processed: 0,
+            config_reload_generation: 0,
         };
         registry.register(idle_entry).unwrap();
 
@@ -5480,6 +5509,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(600),
                 beads_processed: 5,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -5526,6 +5556,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(60),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -5572,6 +5603,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(600),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -5618,6 +5650,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() + chrono::Duration::seconds(60),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -5664,6 +5697,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(600),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 
@@ -5721,6 +5755,7 @@ mod tests {
             provider: None,
             started_at: Utc::now() - chrono::Duration::seconds(60), // Exactly at timeout
             beads_processed: 0,
+            config_reload_generation: 0,
         };
         registry.register(entry).unwrap();
 
@@ -5812,6 +5847,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(300),
                 beads_processed: 0,
+                config_reload_generation: 0,
             };
             registry.register(entry).unwrap();
         }
@@ -6522,6 +6558,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at,
             beads_processed,
+            config_reload_generation: 0,
         }
     }
 

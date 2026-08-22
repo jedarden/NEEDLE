@@ -1,0 +1,11 @@
+Implemented and shipped.
+
+- Validates reload candidates with `ConfigLoader::validate` before application.
+- Rejects invalid/malformed candidates with `config.reload.rejected` and WARN.
+- Preserves the running config; reload errors remain non-fatal.
+- Added regression tests.
+
+Verification: fast gate passed; `cargo test --lib reload` — 13 passed.
+
+Committed and pushed: `4a4ae70`  
+Bead `needle-f6c10ef6` closed.

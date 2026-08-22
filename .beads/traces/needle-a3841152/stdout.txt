@@ -1,0 +1,18 @@
+Fixed and pushed to `main`.
+
+Root cause: the legacy fixture used retired `br` setup and lacked an authoritative `.needle.yaml` backend binding. Explore correctly skipped the unbound store; candidate filtering and Explore behavior were not at fault.
+
+Updated [p2_integration_tests.rs](/home/coding/NEEDLE/tests/p2_integration_tests.rs:1392) to:
+
+- Use native bead-rs with explicit backend binding.
+- Isolate HOME, Explore root, registry, telemetry, and workspaces.
+- Assert the exact remote bead and workspace.
+
+Verification:
+
+- Named test passed three consecutive clean-tree runs.
+- Full p2 target passed: 27/27.
+- `scripts/definition-of-done.sh --fast` passed.
+- Bead `needle-a3841152` closed.
+
+Pushed commits: `cfcc798`, `c08b9a3`.

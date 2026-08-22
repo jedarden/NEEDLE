@@ -229,6 +229,14 @@ pub enum CliCommand {
         /// Show source annotations (requires --dump).
         #[arg(long)]
         show_source: bool,
+
+        /// Show live config from running workers (requires --dump).
+        ///
+        /// When enabled, displays the actual configuration in use by running workers,
+        /// including the reload generation counter. This allows operators to confirm
+        /// what workers are actually running rather than what the config files say.
+        #[arg(long)]
+        live: bool,
     },
 
     /// Check system health and repair.
@@ -450,7 +458,8 @@ pub fn run() -> Result<()> {
             set,
             dump,
             show_source,
-        } => cmd_config(get, set, dump, show_source),
+            live,
+        } => cmd_config(get, set, dump, show_source, live),
         CliCommand::Doctor { repair, workspace } => cmd_doctor(repair, workspace),
         CliCommand::Init => cmd_init(),
         CliCommand::Version => {
@@ -3217,9 +3226,13 @@ fn cmd_config(
     set: Option<Vec<String>>,
     dump: bool,
     show_source: bool,
+    live: bool,
 ) -> Result<()> {
     if show_source && !dump {
         bail!("--show-source requires --dump");
+    }
+    if live && !dump {
+        bail!("--live requires --dump");
     }
 
     let workspace_root = std::env::current_dir().unwrap_or_default();
@@ -3240,6 +3253,11 @@ fn cmd_config(
     }
 
     if dump {
+        // Handle --live flag: show config from running workers
+        if live {
+            return dump_live_config(&workspace_root, show_source);
+        }
+
         if show_source {
             let lines = ConfigLoader::dump_with_sources(&config, &sources);
             for line in &lines {
@@ -3337,6 +3355,93 @@ fn handle_config_set_stub(set_args: Vec<String>) -> Result<()> {
     }
 
     println!("\nset not yet implemented");
+    Ok(())
+}
+
+/// Dump live config from running workers with reload generation counter.
+///
+/// Reads the worker registry to find all running workers and displays:
+/// - Worker identity (adapter + name)
+/// - Current config_reload_generation (number of reloads since boot)
+/// - Whether the worker is alive (PID check)
+/// - The actual config values each worker is using
+///
+/// This allows operators to confirm what workers are actually running rather
+/// than what the config files say.
+fn dump_live_config(workspace_root: &Path, show_source: bool) -> Result<()> {
+    use crate::registry::Registry;
+
+    // Load config to get the needle home path
+    let (config, sources) = ConfigLoader::load_resolved(workspace_root, CliOverrides::default())?;
+    let needle_home = &config.workspace.home;
+    let registry = Registry::default_location(needle_home);
+
+    let workers = match registry.list() {
+        Ok(workers) => workers,
+        Err(e) => {
+            println!(
+                "# No worker registry found ({}): no running workers to inspect",
+                e
+            );
+            println!("# The registry is created when workers start. Run 'needle status' to see active workers.");
+            return Ok(());
+        }
+    };
+
+    if workers.is_empty() {
+        println!("# No workers registered (registry is empty): no running workers to inspect");
+        println!("# Workers register when they start. Run 'needle status' to verify fleet state.");
+        return Ok(());
+    }
+
+    println!(
+        "# Live configuration from {} running worker(s):",
+        workers.len()
+    );
+    println!("#");
+
+    // Show worker metadata with reload generation
+    for worker in &workers {
+        println!("# Worker: {} (PID: {}) — ALIVE", worker.id, worker.pid);
+        println!(
+            "#   Started: {}",
+            worker.started_at.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+        println!("#   Agent: {}", worker.agent);
+        if let Some(provider) = &worker.provider {
+            println!("#   Provider: {}", provider);
+        }
+        if let Some(model) = &worker.model {
+            println!("#   Model: {}", model);
+        }
+        println!("#   Workspace: {}", worker.workspace.display());
+        println!("#   Beads processed: {}", worker.beads_processed);
+        println!(
+            "#   Config reload generation: {}",
+            worker.config_reload_generation
+        );
+        println!("#");
+    }
+
+    println!("# Configuration values (current on-disk):");
+    println!("#");
+
+    // Show actual config values
+    if show_source {
+        let lines = ConfigLoader::dump_with_sources(&config, &sources);
+        for line in &lines {
+            println!("{line}");
+        }
+    } else {
+        let lines = config_dump(&config);
+        for line in &lines {
+            println!("{line}");
+        }
+    }
+
+    println!("#");
+    println!("# Tip: Use \"needle status\" for a formatted fleet overview, or run \"needle config --dump\" without --live to see file-based config.");
+
     Ok(())
 }
 

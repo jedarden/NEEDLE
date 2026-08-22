@@ -1,0 +1,2502 @@
+shell-init: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+chdir: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+OpenAI Codex v0.149.0
+--------
+workdir: /home/coding/NEEDLE
+model: gpt-5.6-luna
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 01a02734-e11d-7170-b0f0-18f9416da4ee
+--------
+user
+[needle:codex-gpt-5.6-luna-xhigh-luna-cgov:needle-98a01c62:explore]
+## Task
+
+Fix Pluck workspace-name sanitization regression
+
+## Description
+
+Observed 2026-08-21: cargo test --lib strand:: fails strand::pluck::tests::sanitize_workspace_name_handles_various_paths; empty or root-like input returns an empty string instead of unknown.
+
+Acceptance criteria:
+- Fix production sanitization behavior, not merely the assertion.
+- The named regression test passes.
+- cargo test --lib strand::pluck::tests passes.
+- No change weakens workspace identity or telemetry labeling.
+
+
+
+## Workspace
+
+/home/coding/NEEDLE
+
+## Context Files
+
+(no context files found)
+
+## Instructions
+
+(no workspace instructions)
+
+Complete the task described above. When finished:
+- **If you changed files, commit and push them.** `git commit`, then `git push`. Real
+  changes are source, tests, config, or documentation the task actually asked for.
+- **If the task needed no file changes, do NOT manufacture a commit.** Verification-only
+  work, work that turned out to be already done, and work you found blocked are all
+  legitimate outcomes with nothing to commit. Record the finding on the bead instead:
+
+`bead update needle-98a01c62 --notes "what you checked and what you found"`
+
+  Never create `notes/needle-98a01c62.md`, a summary, a report, or a status file to satisfy a
+  commit requirement. Status belongs on the bead, not in git history. A commit whose only
+  changes are under `notes/` or `.beads/` does not count as shipped work and will be
+  rejected.
+- Close the bead:
+
+`bead close needle-98a01c62 --reason "..."`
+
+If you cannot complete the task:
+- Do NOT close the bead
+- The bead will be automatically released for retry
+
+Bead ID: needle-98a01c62
+hook: SessionStart
+hook: SessionStart Completed
+codex
+I’ll inspect the current Pluck sanitization code, repository guidance, and worktree state, then make the smallest production fix, run the targeted tests and definition-of-done check, commit, push, and close the bead.
+exec
+/bin/bash -lc 'pwd && git status --short && find .. -name AGENTS.md -print && rg -n "sanitize_workspace_name|workspace.?name|pluck" src tests 2>/dev/null | head -200' in /home/coding/NEEDLE
+ exited 1 in 2017ms:
+find: ‘../.local/share/docker/volumes/b006a21209eae85011ee9064418b63d8d33acf62db1dd123396acc05b43412fa/_data’: Permission denied
+../.local/share/Trash/files/HOOP-removed-20260821/AGENTS.md
+../.local/share/Trash/files/claudepr-1a29fae3-index.nV4KoC/AGENTS.md
+../.local/share/Trash/files/claude-print-v020-gate.VQ7TNM/AGENTS.md
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/100/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/104/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/61/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29899/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33131/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33865/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/101/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/101/fs/home/nonroot’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32918/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/110/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/47/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32896/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/114/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29915/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33138/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32916/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32908/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/46/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/97/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/108/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/108/fs/var/cache/apt/archives/partial’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/18/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33860/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33860/fs/var/cache/apt/archives/partial’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/45/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/54/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32129/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/39/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35793/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33147/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32979/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33121/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33863/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/111/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32147/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32909/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/113/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32160/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32917/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35792/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32131/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32154/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/51/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32919/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/9/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35795/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33128/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/50/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35797/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35786/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/102/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/17/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/34/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33864/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/115/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/15/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35790/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33137/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32920/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/105/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33123/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32894/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33129/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35791/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/14/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32139/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35794/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/19/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/7/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32980/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32907/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29914/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29903/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/13/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32124/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32910/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33869/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32145/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/37/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/37/fs/var/cache/apt/archives/partial’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29901/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33144/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33871/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35796/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33867/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33122/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29898/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/31880/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32987/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/57/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/41/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/11/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29902/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32985/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35788/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32187/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33/fs/var/cache/apt/archives/partial’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/58/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/48/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29904/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29904/fs/var/cache/apt/archives/partial’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33873/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32986/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33120/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/55/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33862/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33136/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29910/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/49/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/106/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/56/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/36/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29911/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/44/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/96/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33139/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32899/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33874/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33868/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35785/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32895/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32900/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29900/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33130/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29908/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/40/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33143/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35798/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32893/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32893/fs/var/lib/apt/lists/partial’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32893/fs/var/cache/apt/archives/partial’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32911/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/112/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33861/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/43/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/31879/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29906/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/98/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33145/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29905/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33870/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/42/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32897/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/109/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/60/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33872/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/38/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/62/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/31882/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29913/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/16/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/53/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/12/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/10/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33146/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32981/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35787/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/31881/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/35789/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32120/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33866/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/99/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32138/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29912/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29907/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/32898/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/33140/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/29909/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/103/work/work’: Permission denied
+find: ‘../.local/share/docker/containerd/daemon/io.containerd.snapshotter.v1.overlayfs/snapshots/59/work/work’: Permission denied
+../declarative-config/.claude/worktrees/agent-a54c92149120be9c7/k8s/apexalgo-iad/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a1ec9db3e206474d0/k8s/apexalgo-iad/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/nixos/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/k8s/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/k8s/ardenone-manager/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/k8s/iad-ci/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/k8s/apexalgo-iad/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/k8s/ord-devimprint/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/k8s/iad-kalshi/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/k8s/rs-manager/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/k8s/ardenone-cluster/devpod/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/k8s/ardenone-cluster/AGENTS.md
+../declarative-config/.claude/worktrees/agent-a2a39bd7253e9ae68/k8s/iad-options/AGENTS.md
+../declarative-config/AGENTS.md
+../declarative-config/nixos/AGENTS.md
+../declarative-config/k8s/AGENTS.md
+../declarative-config/k8s/ardenone-manager/AGENTS.md
+../declarative-config/k8s/iad-ci/AGENTS.md
+../declarative-config/k8s/apexalgo-iad/AGENTS.md
+../declarative-config/k8s/ord-devimprint/AGENTS.md
+../declarative-config/k8s/iad-kalshi/AGENTS.md
+../declarative-config/k8s/rs-manager/AGENTS.md
+../declarative-config/k8s/ardenone-cluster/devpod/AGENTS.md
+../declarative-config/k8s/ardenone-cluster/AGENTS.md
+../declarative-config/k8s/iad-options/AGENTS.md
+../perplexity-jedarden/slides/node_modules/.pnpm/cytoscape@3.34.0/node_modules/cytoscape/AGENTS.md
+../.cargo/git/checkouts/needle-c229d4d3b22a5d4a/c63dc9e/AGENTS.md
+../.cargo/git/checkouts/beads_rust-18649610c6bb6d7c/29afe25/AGENTS.md
+../.cargo/git/checkouts/beads_rust-18649610c6bb6d7c/29afe25/docs/agent/AGENTS.md
+../.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerocopy-0.8.56/AGENTS.md
+../AGENTS.md
+../scratch/needle-27b045ec-fast.ULXuGc/AGENTS.md
+../scratch/needle-27b045ec-verify.kSlk5u/AGENTS.md
+../scratch/adr004-verify.K2laHE/AGENTS.md
+../scratch/seam-guard-verify-bdfc679/AGENTS.md
+../scratch/beadrs-r036-verify-17613f82/AGENTS.md
+../scratch/claude-print-home-verify.7oClmR/AGENTS.md
+../scratch/rota-migration-home.AkbJdP/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerocopy-0.8.56/AGENTS.md
+../scratch/esphome-source/AGENTS.md
+../scratch/adr004-verify.DI6CCX/AGENTS.md
+../scratch/claude-print-as4.AhNnDZ/AGENTS.md
+../scratch/rota-migration.0Xjej7/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/zerocopy-0.8.56/AGENTS.md
+../scratch/claude-print-config.vbt8ln/AGENTS.md
+../scratch/beadrs-r036-verify-17613f82-v2/AGENTS.md
+../scratch/claude-print-91ed83ea-head-lsaR84/AGENTS.md
+../scratch/acb-ci-verify.GH80av/AGENTS.md
+../scratch/acb-ci-verify.GH80av/nixos/AGENTS.md
+../scratch/acb-ci-verify.GH80av/k8s/AGENTS.md
+../scratch/acb-ci-verify.GH80av/k8s/ardenone-manager/AGENTS.md
+../scratch/acb-ci-verify.GH80av/k8s/iad-ci/AGENTS.md
+../scratch/acb-ci-verify.GH80av/k8s/apexalgo-iad/AGENTS.md
+../scratch/acb-ci-verify.GH80av/k8s/ord-devimprint/AGENTS.md
+../scratch/acb-ci-verify.GH80av/k8s/iad-kalshi/AGENTS.md
+../scratch/acb-ci-verify.GH80av/k8s/rs-manager/AGENTS.md
+../scratch/acb-ci-verify.GH80av/k8s/ardenone-cluster/devpod/AGENTS.md
+../scratch/acb-ci-verify.GH80av/k8s/ardenone-cluster/AGENTS.md
+../scratch/acb-ci-verify.GH80av/k8s/iad-options/AGENTS.md
+../scratch/beadrs-r036-verify-17613f82-v3/AGENTS.md
+../scratch/needle-5453a8a8-verify/AGENTS.md
+../scratch/beadrs-r036-head-17613f82/AGENTS.md
+../go/src/github.com/Dicklesworthstone/coding_agent_account_manager/AGENTS.md
+../SEAM/AGENTS.md
+../NEEDLE/AGENTS.md
+../vibe-coding-discovery/AGENTS.md
+../jedarden.com/node_modules/png-to-ico/AGENTS.md
+../.codex/AGENTS.md
+../.codex/.tmp/plugins/plugins/build-web-apps/skills/supabase-best-practices/AGENTS.md
+../.codex/.tmp/plugins/plugins/build-web-apps/skills/react-best-practices/AGENTS.md
+../.codex/.tmp/plugins/plugins/zoom/AGENTS.md
+../src/declarative-config/AGENTS.md
+../src/declarative-config/nixos/AGENTS.md
+../src/declarative-config/k8s/AGENTS.md
+../src/declarative-config/k8s/ardenone-manager/AGENTS.md
+../src/declarative-config/k8s/iad-ci/AGENTS.md
+../src/declarative-config/k8s/apexalgo-iad/AGENTS.md
+../src/declarative-config/k8s/ord-devimprint/AGENTS.md
+../src/declarative-config/k8s/iad-kalshi/AGENTS.md
+../src/declarative-config/k8s/rs-manager/AGENTS.md
+../src/declarative-config/k8s/ardenone-cluster/devpod/AGENTS.md
+../src/declarative-config/k8s/ardenone-cluster/AGENTS.md
+../src/declarative-config/k8s/iad-options/AGENTS.md
+../tradegraph/AGENTS.md
+../bead-rs/AGENTS.md
+../apexalgo-growth-lab/AGENTS.md
+../claude-print/.claude/worktrees/agent-a161678e24fbdc24d/AGENTS.md
+../claude-print/.claude/worktrees/agent-a1de5ee8b82b9638c/AGENTS.md
+../claude-print/AGENTS.md
+../commitgraph/AGENTS.md
+../ardenone-cluster/declarative-config/k8s/apexalgo-iad/AGENTS.md
+../ardenone-cluster/project/mission-control/notes/claude-code-hooks-multi-agent-observability/AGENTS.md
+../ardenone-cluster/cluster-configuration/apexalgo-iad/AGENTS.md
+../dashboard-site/AGENTS.md
+
+exec
+/bin/bash -lc "git show HEAD:src/strand/pluck.rs | sed -n '1,260p'" in /home/coding/NEEDLE
+ succeeded in 0ms:
+//! Pluck strand: primary bead selection from the assigned workspace.
+//!
+//! Pluck handles >90% of all bead processing. It queries the bead store for
+//! unassigned, ready beads, filters by excluded labels, and sorts them in
+//! deterministic priority order: `(priority ASC, created_at ASC, id ASC)`.
+//!
+//! Given the same queue state, every worker computes the same candidate list.
+
+use crate::bead_store::{BeadStore, Filters};
+use crate::mitosis::detects_needle_internal_config;
+use crate::telemetry::Telemetry;
+use crate::types::{Bead, BeadId, StrandError, StrandResult};
+use anyhow::{Context, Result};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
+
+/// Default labels excluded from Pluck selection when not configured.
+const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked"];
+
+/// Statistics collected during candidate filtering for starvation telemetry.
+#[derive(Debug, Default)]
+struct FilteringStats {
+    /// Count of open beads before any filtering.
+    open_count: usize,
+    /// Count of beads excluded during filtering.
+    excluded_count: usize,
+    /// Aggregated reasons why candidates were excluded.
+    exclusion_reasons: Vec<String>,
+}
+
+/// Persistent starvation record written to NEEDLE workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StarvationRecord {
+    /// UTC timestamp when starvation was detected.
+    timestamp: chrono::DateTime<chrono::Utc>,
+    /// Target workspace that was being processed (not NEEDLE workspace).
+    target_workspace: String,
+    /// Count of open beads before filtering.
+    open_count: usize,
+    /// Count of beads excluded during filtering.
+    excluded_count: usize,
+    /// Reasons why beads were excluded.
+    exclusion_reasons: Vec<String>,
+}
+
+/// The Pluck strand — primary work selection.
+pub struct PluckStrand {
+    /// Labels to exclude from candidate selection.
+    exclude_labels: Vec<String>,
+    /// Auto-split beads after this many consecutive failures (0 = disabled).
+    split_after_failures: u32,
+    /// Telemetry emitter for starvation events.
+    telemetry: Telemetry,
+    /// NEEDLE workspace path for persistent starvation records.
+    needle_workspace: Option<PathBuf>,
+    /// Whether to write persistent starvation records to NEEDLE workspace.
+    persistent_starvation_records: bool,
+    /// Count of open beads from the most recent evaluation.
+    /// Uses AtomicUsize for thread-safe interior mutability.
+    last_open_count: AtomicUsize,
+    /// Count of beads excluded during the most recent evaluation.
+    last_excluded_count: AtomicUsize,
+    /// Aggregated exclusion reasons from the most recent evaluation.
+    /// Uses Mutex for thread-safe interior mutability.
+    last_exclusion_reasons: Mutex<Vec<String>>,
+}
+
+impl PluckStrand {
+    /// Create a new PluckStrand with the given exclude labels and telemetry.
+    ///
+    /// If `exclude_labels` is empty, the default set (`deferred`, `human`,
+    /// `blocked`) is used.
+    pub fn new(exclude_labels: Vec<String>, telemetry: Telemetry) -> Self {
+        let labels = if exclude_labels.is_empty() {
+            DEFAULT_EXCLUDE_LABELS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            exclude_labels
+        };
+        PluckStrand {
+            exclude_labels: labels,
+            split_after_failures: 3, // default threshold
+            telemetry,
+            needle_workspace: None,
+            persistent_starvation_records: false,
+            last_open_count: AtomicUsize::new(0),
+            last_excluded_count: AtomicUsize::new(0),
+            last_exclusion_reasons: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Create a new PluckStrand with the given exclude labels, split threshold, and telemetry.
+    ///
+    /// If `exclude_labels` is empty, the default set (`deferred`, `human`,
+    /// `blocked`) is used.
+    pub fn with_split_threshold(
+        exclude_labels: Vec<String>,
+        split_after_failures: u32,
+        telemetry: Telemetry,
+    ) -> Self {
+        let labels = if exclude_labels.is_empty() {
+            DEFAULT_EXCLUDE_LABELS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            exclude_labels
+        };
+        PluckStrand {
+            exclude_labels: labels,
+            split_after_failures,
+            telemetry,
+            needle_workspace: None,
+            persistent_starvation_records: false,
+            last_open_count: AtomicUsize::new(0),
+            last_excluded_count: AtomicUsize::new(0),
+            last_exclusion_reasons: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Create a new PluckStrand with persistent starvation records enabled.
+    ///
+    /// When `persistent_starvation_records` is true, starvation events are
+    /// written to `needle_workspace/state/starvation-records.jsonl`.
+    /// Records are never written to target workspaces, only to NEEDLE workspace.
+    pub fn with_persistent_records(
+        exclude_labels: Vec<String>,
+        split_after_failures: u32,
+        telemetry: Telemetry,
+        needle_workspace: PathBuf,
+        persistent_starvation_records: bool,
+    ) -> Self {
+        let labels = if exclude_labels.is_empty() {
+            DEFAULT_EXCLUDE_LABELS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            exclude_labels
+        };
+        PluckStrand {
+            exclude_labels: labels,
+            split_after_failures,
+            telemetry,
+            needle_workspace: Some(needle_workspace),
+            persistent_starvation_records,
+            last_open_count: AtomicUsize::new(0),
+            last_excluded_count: AtomicUsize::new(0),
+            last_exclusion_reasons: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Extract the failure count from a bead's labels.
+    ///
+    /// Labels follow the pattern `failure-count:N`. Returns the count if found,
+    /// or 0 if no failure-count label exists.
+    fn extract_failure_count(bead: &Bead) -> u32 {
+        bead.labels
+            .iter()
+            .filter_map(|l| l.strip_prefix("failure-count:"))
+            .filter_map(|s| s.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Sort candidates in deterministic priority order.
+    ///
+    /// Sort key: `(priority ASC, failure_count ASC, created_at ASC, id ASC)`.
+    ///
+    /// `failure_count` sits ahead of `created_at` deliberately: without it, a
+    /// bead that keeps failing is (by construction) always at least as old as
+    /// its ready siblings, so it sorts to slot 1 every single cycle and the
+    /// worker never even tries the other ready work sitting behind it. This
+    /// does not by itself stop the retry loop — `split_after_failures` /
+    /// `OutcomeConfig::quarantine_after_failures` own that — it just stops a
+    /// struggling bead from starving healthier ready beads at the same
+    /// priority while it climbs toward the quarantine threshold.
+    /// The id tie-breaker ensures identical ordering across platforms.
+    fn sort_candidates(candidates: &mut [Bead]) {
+        candidates.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b)))
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
+        });
+    }
+
+    /// Get the filtering statistics from the most recent evaluation.
+    ///
+    /// Returns `(open_count, excluded_count, exclusion_reasons)` where:
+    /// - `open_count` is the count of beads returned by the store before filtering
+    /// - `excluded_count` is the count of beads excluded during filtering
+    /// - `exclusion_reasons` is a vector of strings describing why each bead was excluded
+    pub fn last_filtering_stats(&self) -> (usize, usize, Vec<String>) {
+        (
+            self.last_open_count.load(Ordering::Relaxed),
+            self.last_excluded_count.load(Ordering::Relaxed),
+            self.last_exclusion_reasons.lock().unwrap().clone(),
+        )
+    }
+
+    /// Write a persistent starvation record to NEEDLE workspace.
+    ///
+    /// Records are written in JSONL format to `~/.needle/state/starvation-records.jsonl`.
+    /// This method is called only when `persistent_starvation_records` is enabled.
+    fn write_starvation_record(
+        &self,
+        target_workspace: &str,
+        open_count: usize,
+        excluded_count: usize,
+        exclusion_reasons: &[String],
+    ) -> Result<()> {
+        let needle_home = self
+            .needle_workspace
+            .as_ref()
+            .context("needle_workspace not set - cannot write persistent record")?;
+
+        // Create state directory if it doesn't exist
+        let state_dir = needle_home.join("state");
+        std::fs::create_dir_all(&state_dir).with_context(|| {
+            format!("failed to create state directory: {}", state_dir.display())
+        })?;
+
+        // Write record to starvation-records.jsonl (append mode)
+        let record_path = state_dir.join("starvation-records.jsonl");
+        let record = StarvationRecord {
+            timestamp: Utc::now(),
+            target_workspace: target_workspace.to_string(),
+            open_count,
+            excluded_count,
+            exclusion_reasons: exclusion_reasons.to_vec(),
+        };
+
+        // Serialize to JSON and append to file
+        let record_json =
+            serde_json::to_string(&record).context("failed to serialize starvation record")?;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&record_path)
+            .with_context(|| {
+                format!(
+                    "failed to open starvation records file: {}",
+                    record_path.display()
+                )
+            })?;
+
+        use std::io::Write;
+        writeln!(file, "{}", record_json).with_context(|| {
+            format!(
+                "failed to write starvation record to: {}",
+                record_path.display()
+            )
+
+exec
+/bin/bash -lc "sed -n '1,240p' src/strand/pluck.rs && sed -n '240,520p' src/strand/pluck.rs" in /home/coding/NEEDLE
+ succeeded in 0ms:
+//! Pluck strand: primary bead selection from the assigned workspace.
+//!
+//! Pluck handles >90% of all bead processing. It queries the bead store for
+//! unassigned, ready beads, filters by excluded labels, and sorts them in
+//! deterministic priority order: `(priority ASC, created_at ASC, id ASC)`.
+//!
+//! Given the same queue state, every worker computes the same candidate list.
+
+use crate::bead_store::{BeadStore, Filters};
+use crate::mitosis::detects_needle_internal_config;
+use crate::telemetry::Telemetry;
+use crate::types::{Bead, BeadId, StrandError, StrandResult};
+use anyhow::{Context, Result};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
+
+/// Default labels excluded from Pluck selection when not configured.
+const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked"];
+
+/// Statistics collected during candidate filtering for starvation telemetry.
+#[derive(Debug, Default)]
+struct FilteringStats {
+    /// Count of open beads before any filtering.
+    open_count: usize,
+    /// Count of beads excluded during filtering.
+    excluded_count: usize,
+    /// Aggregated reasons why candidates were excluded.
+    exclusion_reasons: Vec<String>,
+}
+
+/// Persistent starvation record written to NEEDLE workspace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StarvationRecord {
+    /// UTC timestamp when starvation was detected.
+    timestamp: chrono::DateTime<chrono::Utc>,
+    /// Target workspace that was being processed (not NEEDLE workspace).
+    target_workspace: String,
+    /// Count of open beads before filtering.
+    open_count: usize,
+    /// Count of beads excluded during filtering.
+    excluded_count: usize,
+    /// Reasons why beads were excluded.
+    exclusion_reasons: Vec<String>,
+}
+
+/// The Pluck strand — primary work selection.
+pub struct PluckStrand {
+    /// Labels to exclude from candidate selection.
+    exclude_labels: Vec<String>,
+    /// Auto-split beads after this many consecutive failures (0 = disabled).
+    split_after_failures: u32,
+    /// Telemetry emitter for starvation events.
+    telemetry: Telemetry,
+    /// NEEDLE workspace path for persistent starvation records.
+    needle_workspace: Option<PathBuf>,
+    /// Whether to write persistent starvation records to NEEDLE workspace.
+    persistent_starvation_records: bool,
+    /// Count of open beads from the most recent evaluation.
+    /// Uses AtomicUsize for thread-safe interior mutability.
+    last_open_count: AtomicUsize,
+    /// Count of beads excluded during the most recent evaluation.
+    last_excluded_count: AtomicUsize,
+    /// Aggregated exclusion reasons from the most recent evaluation.
+    /// Uses Mutex for thread-safe interior mutability.
+    last_exclusion_reasons: Mutex<Vec<String>>,
+}
+
+impl PluckStrand {
+    /// Create a new PluckStrand with the given exclude labels and telemetry.
+    ///
+    /// If `exclude_labels` is empty, the default set (`deferred`, `human`,
+    /// `blocked`) is used.
+    pub fn new(exclude_labels: Vec<String>, telemetry: Telemetry) -> Self {
+        let labels = if exclude_labels.is_empty() {
+            DEFAULT_EXCLUDE_LABELS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            exclude_labels
+        };
+        PluckStrand {
+            exclude_labels: labels,
+            split_after_failures: 3, // default threshold
+            telemetry,
+            needle_workspace: None,
+            persistent_starvation_records: false,
+            last_open_count: AtomicUsize::new(0),
+            last_excluded_count: AtomicUsize::new(0),
+            last_exclusion_reasons: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Create a new PluckStrand with the given exclude labels, split threshold, and telemetry.
+    ///
+    /// If `exclude_labels` is empty, the default set (`deferred`, `human`,
+    /// `blocked`) is used.
+    pub fn with_split_threshold(
+        exclude_labels: Vec<String>,
+        split_after_failures: u32,
+        telemetry: Telemetry,
+    ) -> Self {
+        let labels = if exclude_labels.is_empty() {
+            DEFAULT_EXCLUDE_LABELS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            exclude_labels
+        };
+        PluckStrand {
+            exclude_labels: labels,
+            split_after_failures,
+            telemetry,
+            needle_workspace: None,
+            persistent_starvation_records: false,
+            last_open_count: AtomicUsize::new(0),
+            last_excluded_count: AtomicUsize::new(0),
+            last_exclusion_reasons: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Create a new PluckStrand with persistent starvation records enabled.
+    ///
+    /// When `persistent_starvation_records` is true, starvation events are
+    /// written to `needle_workspace/state/starvation-records.jsonl`.
+    /// Records are never written to target workspaces, only to NEEDLE workspace.
+    pub fn with_persistent_records(
+        exclude_labels: Vec<String>,
+        split_after_failures: u32,
+        telemetry: Telemetry,
+        needle_workspace: PathBuf,
+        persistent_starvation_records: bool,
+    ) -> Self {
+        let labels = if exclude_labels.is_empty() {
+            DEFAULT_EXCLUDE_LABELS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            exclude_labels
+        };
+        PluckStrand {
+            exclude_labels: labels,
+            split_after_failures,
+            telemetry,
+            needle_workspace: Some(needle_workspace),
+            persistent_starvation_records,
+            last_open_count: AtomicUsize::new(0),
+            last_excluded_count: AtomicUsize::new(0),
+            last_exclusion_reasons: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Extract the failure count from a bead's labels.
+    ///
+    /// Labels follow the pattern `failure-count:N`. Returns the count if found,
+    /// or 0 if no failure-count label exists.
+    fn extract_failure_count(bead: &Bead) -> u32 {
+        bead.labels
+            .iter()
+            .filter_map(|l| l.strip_prefix("failure-count:"))
+            .filter_map(|s| s.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Sort candidates in deterministic priority order.
+    ///
+    /// Sort key: `(priority ASC, failure_count ASC, created_at ASC, id ASC)`.
+    ///
+    /// `failure_count` sits ahead of `created_at` deliberately: without it, a
+    /// bead that keeps failing is (by construction) always at least as old as
+    /// its ready siblings, so it sorts to slot 1 every single cycle and the
+    /// worker never even tries the other ready work sitting behind it. This
+    /// does not by itself stop the retry loop — `split_after_failures` /
+    /// `OutcomeConfig::quarantine_after_failures` own that — it just stops a
+    /// struggling bead from starving healthier ready beads at the same
+    /// priority while it climbs toward the quarantine threshold.
+    /// The id tie-breaker ensures identical ordering across platforms.
+    fn sort_candidates(candidates: &mut [Bead]) {
+        candidates.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b)))
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
+        });
+    }
+
+    /// Get the filtering statistics from the most recent evaluation.
+    ///
+    /// Returns `(open_count, excluded_count, exclusion_reasons)` where:
+    /// - `open_count` is the count of beads returned by the store before filtering
+    /// - `excluded_count` is the count of beads excluded during filtering
+    /// - `exclusion_reasons` is a vector of strings describing why each bead was excluded
+    pub fn last_filtering_stats(&self) -> (usize, usize, Vec<String>) {
+        (
+            self.last_open_count.load(Ordering::Relaxed),
+            self.last_excluded_count.load(Ordering::Relaxed),
+            self.last_exclusion_reasons.lock().unwrap().clone(),
+        )
+    }
+
+    /// Write a persistent starvation record to NEEDLE workspace.
+    ///
+    /// Records are written in JSONL format to `~/.needle/state/starvation-records.jsonl`.
+    /// This method is called only when `persistent_starvation_records` is enabled.
+    fn write_starvation_record(
+        &self,
+        target_workspace: &str,
+        open_count: usize,
+        excluded_count: usize,
+        exclusion_reasons: &[String],
+    ) -> Result<()> {
+        let needle_home = self
+            .needle_workspace
+            .as_ref()
+            .context("needle_workspace not set - cannot write persistent record")?;
+
+        // Create state directory if it doesn't exist
+        let state_dir = needle_home.join("state");
+        std::fs::create_dir_all(&state_dir).with_context(|| {
+            format!("failed to create state directory: {}", state_dir.display())
+        })?;
+
+        // Write record to starvation-records.jsonl (append mode)
+        let record_path = state_dir.join("starvation-records.jsonl");
+        let record = StarvationRecord {
+            timestamp: Utc::now(),
+            target_workspace: target_workspace.to_string(),
+            open_count,
+            excluded_count,
+            exclusion_reasons: exclusion_reasons.to_vec(),
+        };
+
+        // Serialize to JSON and append to file
+        // Serialize to JSON and append to file
+        let record_json =
+            serde_json::to_string(&record).context("failed to serialize starvation record")?;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&record_path)
+            .with_context(|| {
+                format!(
+                    "failed to open starvation records file: {}",
+                    record_path.display()
+                )
+            })?;
+
+        use std::io::Write;
+        writeln!(file, "{}", record_json).with_context(|| {
+            format!(
+                "failed to write starvation record to: {}",
+                record_path.display()
+            )
+        })?;
+
+        tracing::debug!(
+            record_path = %record_path.display(),
+            target_workspace = %target_workspace,
+            "Wrote persistent starvation record"
+        );
+
+        Ok(())
+    }
+}
+
+/// Sanitize a workspace path for use in a dedup label.
+///
+/// Converts workspace paths to safe label identifiers by extracting
+/// the workspace name and removing special characters.
+/// Examples:
+/// - "/home/coding/NEEDLE" → "NEEDLE"
+/// - "/home/coding/my-project" → "my-project"
+/// - "/home/user/repo_name" → "repo_name"
+fn sanitize_workspace_name(workspace_path: &str) -> String {
+    workspace_path
+        .rsplit('/')
+        .next()
+        .unwrap_or("unknown")
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+#[async_trait::async_trait]
+impl super::Strand for PluckStrand {
+    fn name(&self) -> &str {
+        "pluck"
+    }
+
+    #[tracing::instrument(
+        name = "strand.pluck",
+        skip(self, store),
+        fields(
+            strand = "pluck",
+            exclude_labels = ?self.exclude_labels,
+            split_threshold = self.split_after_failures,
+        )
+    )]
+    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
+        tracing::debug!(
+            exclude_labels = ?self.exclude_labels,
+            split_threshold = self.split_after_failures,
+            "Pluck strand evaluation starting"
+        );
+
+        // Check if the home bead store exists. If not, skip this strand.
+        // This distinguishes between "no home store configured" (expected for
+        // roam-only workers) and "home store is broken" (unexpected error).
+        if !store.has_valid_store() {
+            tracing::info!(
+                "Home workspace has no .beads/ directory — skipping Pluck strand \
+                 (expected for roam-only workers)"
+            );
+            return StrandResult::Skipped {
+                reason: "no_home_store".to_string(),
+            };
+        }
+
+        // 1. Query bead store for ready, unassigned beads.
+        let filters = Filters {
+            assignee: None,
+            exclude_labels: self.exclude_labels.clone(),
+            exclude_ids: HashSet::new(),
+        };
+
+        tracing::debug!(
+            filters = ?filters,
+            "Querying bead store for ready candidates"
+        );
+
+        // Log the complete query before execution
+        tracing::info!(
+            assignee = ?filters.assignee,
+            exclude_labels = ?filters.exclude_labels,
+            exclude_ids_count = filters.exclude_ids.len(),
+            "Executing Pluck query with filters"
+        );
+
+        let mut candidates = match store.ready(&filters).await {
+            Ok(beads) => {
+                tracing::debug!(
+                    count = beads.len(),
+                    "Bead store returned {} candidates",
+                    beads.len()
+                );
+                beads
+            }
+            Err(e) => {
+                // Log the full error chain to capture stderr/exit code details.
+                // The Display impl (%e) only shows the top-level message, losing
+                // the underlying stderr from br/bf commands. Use {:?} or iterate
+                // the chain to preserve diagnostic information.
+                let error_chain: Vec<String> = std::iter::once(format!("{}", e))
+                    .chain(e.chain().map(|cause| format!("  caused by: {}", cause)))
+                    .collect();
+                tracing::error!(
+                    error = %e,
+                    error_chain = ?error_chain,
+                    "Bead store query failed"
+                );
+                // Bead store error is semantically different from NoWork.
+                return StrandResult::Error(StrandError::StoreError(e));
+            }
+        };
+
+        // Initialize filtering statistics for starvation telemetry.
+        let mut stats = FilteringStats {
+            open_count: candidates.len(),
+            ..Default::default()
+        };
+
+        // 2. Filter: remove beads with excluded labels.
+        //    Defensive guard — store.ready() passes exclude_labels in its Filters,
+        //    but the backing CLI may not include label data in every query type.
+        //    Filtering here guarantees excluded-label beads are never presented as
+        //    candidates regardless of backend behaviour, preventing the
+        //    SELECTING→CLAIMING→RETRYING spin loop observed when br ready --json
+        //    omits label fields for some beads.
+        let before_label_filter = candidates.len();
+
+        // First pass: collect excluded beads and their reasons for telemetry.
+        let excluded_beads: Vec<_> = candidates
+            .iter()
+            .filter(|b| b.labels.iter().any(|l| self.exclude_labels.contains(l)))
+            .map(|b| {
+                let excluded_labels: Vec<_> = b
+                    .labels
+                    .iter()
+                    .filter(|l| self.exclude_labels.contains(l))
+                    .cloned()
+                    .collect();
+                (b.id.as_ref().to_string(), excluded_labels)
+            })
+            .collect();
+
+        // Second pass: perform the actual filtering.
+        candidates.retain(|b| !b.labels.iter().any(|l| self.exclude_labels.contains(l)));
+        let after_label_filter = candidates.len();
+
+        if before_label_filter != after_label_filter {
+            let label_excluded_count = before_label_filter - after_label_filter;
+            stats.excluded_count += label_excluded_count;
+
+            tracing::debug!(
+                excluded_count = label_excluded_count,
+                remaining = after_label_filter,
+                excluded_labels = ?self.exclude_labels,
+                "Label filtering excluded {} beads",
+                label_excluded_count
+            );
+
+            // Log each excluded bead at DEBUG level and collect reasons for telemetry.
+            for (id, excluded_labels) in &excluded_beads {
+                tracing::debug!(
+                    bead_id = %id,
+                    labels = ?excluded_labels,
+                    "Excluded bead due to labels"
+                );
+
+                // Add to exclusion reasons for telemetry.
+                for label in excluded_labels {
+                    stats.exclusion_reasons.push(format!("label:{}", label));
+                }
+            }
+        } else {
+            tracing::debug!(
+                count = after_label_filter,
+                "No beads excluded by label filter"
+            );
+        }
+
+        // 3. Filter: remove beads that are actively in_progress (claimed by another worker)
+        //    and Open beads with a stale assignee. These are never claimable — the claimer
+        //    will reject them every time, causing a hot loop.
+        let before_status_filter = candidates.len();
+
+        // First pass: collect excluded beads and their reasons for telemetry.
+        let excluded_by_status: Vec<_> = candidates
+            .iter()
+            .filter(|b| {
+                matches!(b.status, crate::types::BeadStatus::InProgress)
+                    || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some())
+            })
+            .map(|b| {
+                let reason = if matches!(b.status, crate::types::BeadStatus::InProgress) {
+                    "status:in_progress".to_string()
+                } else {
+                    format!("assignee:{}", b.assignee.as_ref().unwrap())
+                };
+                (b.id.as_ref().to_string(), reason)
+            })
+            .collect();
+
+        // Second pass: perform the actual filtering.
+        candidates.retain(|b| {
+            !(matches!(b.status, crate::types::BeadStatus::InProgress)
+                || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some()))
+        });
+        let after_status_filter = candidates.len();
+
+        if before_status_filter != after_status_filter {
+            let status_excluded_count = before_status_filter - after_status_filter;
+            stats.excluded_count += status_excluded_count;
+
+            tracing::debug!(
+                filtered_count = status_excluded_count,
+                remaining = after_status_filter,
+                "Status/assignee filtering removed {} beads",
+                status_excluded_count
+            );
+
+            // Log each excluded bead at DEBUG level and collect reasons for telemetry.
+            for (id, reason) in &excluded_by_status {
+                tracing::debug!(
+                    bead_id = %id,
+                    reason = %reason,
+                    "Excluded bead due to status/assignee"
+                );
+
+                // Add to exclusion reasons for telemetry.
+                stats.exclusion_reasons.push(reason.clone());
+            }
+        } else {
+            tracing::debug!(
+                count = after_status_filter,
+                "No beads excluded by status/assignee filter"
+            );
+        }
+
+        // 4. Sort: deterministic (priority, created_at, id).
+        if !candidates.is_empty() {
+            let first = &candidates[0];
+            tracing::debug!(
+                total = candidates.len(),
+                first_bead_id = %first.id,
+                first_priority = first.priority,
+                first_created_at = %first.created_at,
+                "Sorting {} candidates by (priority ASC, created_at ASC, id ASC)",
+                candidates.len()
+            );
+        }
+        Self::sort_candidates(&mut candidates);
+
+        // 5. Check for split trigger: if the first candidate has accumulated
+        //    enough consecutive failures, dispatch a SPLIT instruction instead
+        //    of returning the bead for normal processing.
+        if self.split_after_failures > 0 {
+
+exec
+/bin/bash -lc "rg -n \"fn sanitize_workspace_name|sanitize_workspace_name\\(\" . --glob '"'!target/**'"' --glob '"'!.beads/**'"'" in /home/coding/NEEDLE
+ succeeded in 0ms:
+./src/strand/pluck.rs:281:fn sanitize_workspace_name(workspace_path: &str) -> String {
+./src/strand/pluck.rs:619:                sanitize_workspace_name(&workspace_path)
+./src/strand/pluck.rs:2445:    fn sanitize_workspace_name_handles_various_paths() {
+./src/strand/pluck.rs:2446:        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE"), "NEEDLE");
+./src/strand/pluck.rs:2448:            sanitize_workspace_name("/home/coding/my-project"),
+./src/strand/pluck.rs:2451:        assert_eq!(sanitize_workspace_name("/home/user/repo_name"), "repo_name");
+./src/strand/pluck.rs:2453:            sanitize_workspace_name("/var/data/test.workspace"),
+./src/strand/pluck.rs:2457:            sanitize_workspace_name("/absolute/path/with/slashes"),
+./src/strand/pluck.rs:2460:        assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+./src/strand/pluck.rs:2461:        assert_eq!(sanitize_workspace_name(""), "unknown");
+./src/strand/pluck.rs:2465:    fn sanitize_workspace_name_replaces_special_chars() {
+./src/strand/pluck.rs:2467:            sanitize_workspace_name("/home/user/project@v1.0"),
+./src/strand/pluck.rs:2470:        assert_eq!(sanitize_workspace_name("/home/user/test#123"), "test_123");
+./src/strand/pluck.rs:2471:        assert_eq!(sanitize_workspace_name("/home/user/$special"), "_special");
+
+exec
+/bin/bash -lc 'git diff -- src/strand/pluck.rs && git log -8 --oneline -- src/strand/pluck.rs && git status --short -- src/strand/pluck.rs Cargo.toml Cargo.lock' in /home/coding/NEEDLE
+ succeeded in 17ms:
+7db643c test(needle-bf-2xpje): fix test fixtures for updated Bead struct
+54192e4 fix(bf-2unnq): fix cargo test --lib deadlock in explore strand tests
+5a4f99d feat: add logging for final Pluck query before execution
+106df3c test(needle-bf-313za): add test for label-exclusion starvation
+0f9cc75 test(needle-bf-2zagb): add basic starvation scenario tests
+d068f99 test(needle-bf-18rz8): add unit test for starvation detection telemetry
+79b35b7 test(needle): fix priority_still_wins_over_failure_count test fixture
+
+exec
+/bin/bash -lc "sed -n '580,650p' src/strand/pluck.rs; sed -n '2410,2495p' src/strand/pluck.rs" in /home/coding/NEEDLE
+ succeeded in 0ms:
+            let workspace_path = if let Ok(beads) = store.list_all().await {
+                beads
+                    .first()
+                    .and_then(|b| b.workspace.to_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "unknown".to_string())
+            } else {
+                "unknown".to_string()
+            };
+
+            // Emit PluckStarvationDetected telemetry event with filtering statistics.
+            let _ = self
+                .telemetry
+                .emit(crate::telemetry::EventKind::PluckStarvationDetected {
+                    workspace: workspace_path.clone(),
+                    open_count: stats.open_count,
+                    excluded_count: stats.excluded_count,
+                    candidate_exclusion_reasons: stats.exclusion_reasons.clone(),
+                });
+
+            // Write persistent starvation record to NEEDLE workspace if enabled.
+            if self.persistent_starvation_records {
+                if let Err(e) = self.write_starvation_record(
+                    &workspace_path,
+                    stats.open_count,
+                    stats.excluded_count,
+                    &stats.exclusion_reasons,
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to write persistent starvation record"
+                    );
+                }
+            }
+
+            // Create or update a starvation alert bead with deduplication.
+            // This prevents creating duplicate starvation beads for the same workspace.
+            // Uses a stable dedup label format: alert:starvation:<workspace>
+            let dedup_label = format!(
+                "alert:starvation:{}",
+                sanitize_workspace_name(&workspace_path)
+            );
+
+            // Check if an open starvation bead already exists for this workspace.
+            let existing_starvation_bead = if let Ok(all_beads) = store.list_all().await {
+                all_beads
+                    .iter()
+                    .filter(|b| {
+                        b.status == crate::types::BeadStatus::Open
+                            && b.labels.iter().any(|l| l == &dedup_label)
+                    })
+                    .min_by_key(|b| &b.created_at)
+                    .map(|b| b.id.clone())
+            } else {
+                None
+            };
+
+            let body = format!(
+                "Pluck found no candidates but open beads exist.\n\n\
+                 **Workspace:** {}\n\
+                 **Open beads:** {}\n\
+                 **Excluded beads:** {}\n\
+                 **Exclusion reasons:** {}\n\n\
+                 **Timestamp:** {}",
+                workspace_path,
+                stats.open_count,
+                stats.excluded_count,
+                stats.exclusion_reasons.join(", "),
+                Utc::now().to_rfc3339()
+            );
+
+            if let Some(existing_id) = existing_starvation_bead {
+                workspace_path,
+                vec!["deferred"],
+            )],
+        };
+
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+        let _result = strand.evaluate(&store, &HashSet::new()).await;
+
+        helper.sync().await;
+
+        // Verify no files were created in the workspace
+        let final_files = std::fs::read_dir(workspace.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            initial_files.len(),
+            final_files.len(),
+            "starvation detection should not create files in workspace"
+        );
+
+        // Verify no state directory was created in the workspace
+        let state_dir = workspace.path().join("state");
+        assert!(
+            !state_dir.exists(),
+            "state directory should not exist in workspace after starvation"
+        );
+
+        // Verify telemetry was still emitted (event went to telemetry, not workspace)
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
+    }
+
+    #[test]
+    fn sanitize_workspace_name_handles_various_paths() {
+        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE"), "NEEDLE");
+        assert_eq!(
+            sanitize_workspace_name("/home/coding/my-project"),
+            "my-project"
+        );
+        assert_eq!(sanitize_workspace_name("/home/user/repo_name"), "repo_name");
+        assert_eq!(
+            sanitize_workspace_name("/var/data/test.workspace"),
+            "test_workspace"
+        );
+        assert_eq!(
+            sanitize_workspace_name("/absolute/path/with/slashes"),
+            "slashes"
+        );
+        assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+        assert_eq!(sanitize_workspace_name(""), "unknown");
+    }
+
+    #[test]
+    fn sanitize_workspace_name_replaces_special_chars() {
+        assert_eq!(
+            sanitize_workspace_name("/home/user/project@v1.0"),
+            "project_v1_0"
+        );
+        assert_eq!(sanitize_workspace_name("/home/user/test#123"), "test_123");
+        assert_eq!(sanitize_workspace_name("/home/user/$special"), "_special");
+    }
+}
+
+exec
+/bin/bash -lc 'git show --stat --oneline e1346e5 && git show --format=fuller --no-ext-diff e1346e5 -- src/strand/pluck.rs' in /home/coding/NEEDLE
+ succeeded in 0ms:
+e1346e5 fix(needle-b3617592): deduplicate starvation alert beads by workspace
+ src/strand/pluck.rs | 134 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 134 insertions(+)
+commit e1346e5f0d62327f9d750300b0e3c62ced1e997d
+Author:     jedarden <github@jedarden.com>
+AuthorDate: Fri Aug 21 00:49:35 2026 -0400
+Commit:     jedarden <github@jedarden.com>
+CommitDate: Fri Aug 21 00:49:35 2026 -0400
+
+    fix(needle-b3617592): deduplicate starvation alert beads by workspace
+    
+    Added deduplication logic to Pluck strand's starvation detection to prevent creating duplicate starvation alert beads for the same workspace.
+    
+    **Changes:**
+    - Added workspace-based dedup using stable label format: alert:starvation:<workspace_name>
+    - Check for existing open starvation beads before creating new ones
+    - Add comment to existing bead when starvation recurs (telemetry only - BeadStore lacks add_comment method)
+    - New helper function: sanitize_workspace_name() converts workspace paths to safe label identifiers
+    
+    **Fixes:**
+    - Prevents accumulation of identical starvation beads (bf-1o1sr, bf-61qvt, bf-8rep6) differing only in bead count
+    - Each workspace now gets at most one open starvation alert at a time
+    - Subsequent starvation events for the same workspace update the existing bead rather than creating duplicates
+    
+    Co-Authored-By: Claude <noreply@anthropic.com>
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index a90a5e8..4d59078 100644
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -270,6 +270,30 @@ impl PluckStrand {
+     }
+ }
+ 
++/// Sanitize a workspace path for use in a dedup label.
++///
++/// Converts workspace paths to safe label identifiers by extracting
++/// the workspace name and removing special characters.
++/// Examples:
++/// - "/home/coding/NEEDLE" → "NEEDLE"
++/// - "/home/coding/my-project" → "my-project"
++/// - "/home/user/repo_name" → "repo_name"
++fn sanitize_workspace_name(workspace_path: &str) -> String {
++    workspace_path
++        .rsplit('/')
++        .next()
++        .unwrap_or("unknown")
++        .chars()
++        .map(|c| {
++            if c.is_alphanumeric() || c == '-' || c == '_' {
++                c
++            } else {
++                '_'
++            }
++        })
++        .collect()
++}
++
+ #[async_trait::async_trait]
+ impl super::Strand for PluckStrand {
+     fn name(&self) -> &str {
+@@ -587,6 +611,86 @@ impl super::Strand for PluckStrand {
+                 }
+             }
+ 
++            // Create or update a starvation alert bead with deduplication.
++            // This prevents creating duplicate starvation beads for the same workspace.
++            // Uses a stable dedup label format: alert:starvation:<workspace>
++            let dedup_label = format!(
++                "alert:starvation:{}",
++                sanitize_workspace_name(&workspace_path)
++            );
++
++            // Check if an open starvation bead already exists for this workspace.
++            let existing_starvation_bead = if let Ok(all_beads) = store.list_all().await {
++                all_beads
++                    .iter()
++                    .filter(|b| {
++                        b.status == crate::types::BeadStatus::Open
++                            && b.labels.iter().any(|l| l == &dedup_label)
++                    })
++                    .min_by_key(|b| &b.created_at)
++                    .map(|b| b.id.clone())
++            } else {
++                None
++            };
++
++            let body = format!(
++                "Pluck found no candidates but open beads exist.\n\n\
++                 **Workspace:** {}\n\
++                 **Open beads:** {}\n\
++                 **Excluded beads:** {}\n\
++                 **Exclusion reasons:** {}\n\n\
++                 **Timestamp:** {}",
++                workspace_path,
++                stats.open_count,
++                stats.excluded_count,
++                stats.exclusion_reasons.join(", "),
++                Utc::now().to_rfc3339()
++            );
++
++            if let Some(existing_id) = existing_starvation_bead {
++                // Update existing bead by adding a comment with the new stats.
++                let comment = format!(
++                    "Starvation recurred at {}: {} open, {} excluded",
++                    Utc::now().to_rfc3339(),
++                    stats.open_count,
++                    stats.excluded_count
++                );
++                // Note: BeadStore doesn't have a add_comment method, so we emit telemetry instead.
++                tracing::info!(
++                    bead_id = %existing_id,
++                    workspace = %workspace_path,
++                    "Starvation recurred - would update existing bead with comment: {}",
++                    comment
++                );
++            } else {
++                // Create a new starvation alert bead with the dedup label.
++                let title = format!(
++                    "Starvation alert: beads invisible in {}",
++                    workspace_path.rsplit('/').next().unwrap_or("workspace")
++                );
++                let labels: Vec<&str> = vec![
++                    "starvation-alert",
++                    &dedup_label,
++                    "human", // Requires human review
++                ];
++
++                if let Err(e) = store.create_bead(&title, &body, &labels).await {
++                    tracing::warn!(
++                        error = %e,
++                        workspace = %workspace_path,
++                        "Failed to create starvation alert bead"
++                    );
++                } else {
++                    tracing::info!(
++                        workspace = %workspace_path,
++                        open_count = stats.open_count,
++                        excluded_count = stats.excluded_count,
++                        "Created starvation alert bead with dedup label: {}",
++                        dedup_label
++                    );
++                }
++            }
++
+             tracing::debug!(
+                 workspace = %workspace_path,
+                 open_count = stats.open_count,
+@@ -2336,4 +2440,34 @@ mod tests {
+         // Verify telemetry was still emitted (event went to telemetry, not workspace)
+         helper.assert_event_emitted("strand.pluck.starvation_detected");
+     }
++
++    #[test]
++    fn sanitize_workspace_name_handles_various_paths() {
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE"), "NEEDLE");
++        assert_eq!(
++            sanitize_workspace_name("/home/coding/my-project"),
++            "my-project"
++        );
++        assert_eq!(sanitize_workspace_name("/home/user/repo_name"), "repo_name");
++        assert_eq!(
++            sanitize_workspace_name("/var/data/test.workspace"),
++            "test_workspace"
++        );
++        assert_eq!(
++            sanitize_workspace_name("/absolute/path/with/slashes"),
++            "slashes"
++        );
++        assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
++        assert_eq!(sanitize_workspace_name(""), "unknown");
++    }
++
++    #[test]
++    fn sanitize_workspace_name_replaces_special_chars() {
++        assert_eq!(
++            sanitize_workspace_name("/home/user/project@v1.0"),
++            "project_v1_0"
++        );
++        assert_eq!(sanitize_workspace_name("/home/user/test#123"), "test_123");
++        assert_eq!(sanitize_workspace_name("/home/user/$special"), "_special");
++    }
+ }
+
+exec
+/bin/bash -lc "git diff --stat -- src/strand/pluck.rs; git status --porcelain=v1 --untracked-files=no | sed -n '1,20p'" in /home/coding/NEEDLE
+ succeeded in 0ms:
+ M .beads/bypasses.jsonl
+ M .beads/checkpoint/current.json
+ M .beads/checkpoint/forensic.jsonl
+ M .beads/checkpoint/previous.json
+ M .beads/events.jsonl
+ M .beads/heartbeats.jsonl
+ M .beads/traces/needle-029fca1e/metadata.json
+ M .beads/traces/needle-029fca1e/stderr.txt
+ M .beads/traces/needle-029fca1e/stdout.txt
+ M .beads/traces/needle-068b926f/metadata.json
+ M .beads/traces/needle-068b926f/stderr.txt
+ M .beads/traces/needle-068b926f/stdout.txt
+ M .beads/traces/needle-07a5ab00/metadata.json
+ M .beads/traces/needle-07a5ab00/stderr.txt
+ M .beads/traces/needle-07a5ab00/stdout.txt
+ M .beads/traces/needle-0afaeb32/metadata.json
+ M .beads/traces/needle-0afaeb32/stderr.txt
+ M .beads/traces/needle-0afaeb32/stdout.txt
+ M .beads/traces/needle-10bf4db3/metadata.json
+ M .beads/traces/needle-10bf4db3/stderr.txt
+
+exec
+/bin/bash -lc "git log -S'sanitize_workspace_name' --all --oneline -- src/strand/pluck.rs && git log -S'unknown' --all --oneline -- src/strand/pluck.rs | head -30" in /home/coding/NEEDLE
+ succeeded in 133ms:
+e1346e5 fix(needle-b3617592): deduplicate starvation alert beads by workspace
+4adbb62 test(needle-bf-3r2gz): add tests for starvation scenarios
+dab3448 feat(needle-bf-31dnh): emit PluckStarvationDetected telemetry when no candidates
+
+codex
+The regression is in production: `rsplit('/').next()` returns the final empty component for `""`, `/`, and paths with trailing separators, so the sanitizer collects an empty label suffix. I’ll make the component selection ignore empty path components, preserving normal workspace names and yielding `unknown` only when no name exists, and add root-like cases to the unit test.
+apply patch
+patch: completed
+/home/coding/NEEDLE/src/strand/pluck.rs
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+exec
+/bin/bash -lc 'git diff -- src/strand/pluck.rs' in /home/coding/NEEDLE
+ succeeded in 0ms:
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d59078..4a8b225 100644
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@ impl PluckStrand {
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@ mod tests {
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+exec
+/bin/bash -lc 'cargo test --lib strand::pluck::tests' in /home/coding/NEEDLE
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+codex
+The focused test build is running; the diff is limited to the sanitizer and its regression coverage. The key behavior now handles empty, root-only, repeated-root, and trailing-slash inputs without changing ordinary names or the dedup-label format.
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+codex
+The targeted test is still compiling under the repository’s resource-limited Cargo wrapper and has not reported a failure. I’m letting that verification finish before running the required fast definition-of-done gate.
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+ succeeded in 117451ms:
+   Compiling needle v0.4.2 (/home/coding/NEEDLE)
+    Finished `test` profile [optimized + debuginfo] target(s) in 1m 57s
+     Running unittests src/lib.rs (/home/coding/target/debug/deps/needle-6b596088731b1bec)
+
+running 37 tests
+test strand::pluck::tests::all_excluded_labels_returns_no_work_via_strand_filter ... ok
+test strand::pluck::tests::beads_with_excluded_labels_are_filtered ... ok
+test strand::pluck::tests::candidates_sorted_by_failure_count_within_same_priority ... ok
+test strand::pluck::tests::candidates_sorted_by_priority_then_created_at ... ok
+test strand::pluck::tests::custom_exclude_labels_override_defaults ... ok
+test strand::pluck::tests::default_exclude_labels_applied_when_empty ... ok
+test strand::pluck::tests::custom_exclude_labels_used_when_provided ... ok
+test strand::pluck::tests::extract_failure_count_returns_max_when_multiple_labels ... ok
+test strand::pluck::tests::extract_failure_count_returns_zero_when_no_label ... ok
+test strand::pluck::tests::empty_queue_returns_no_work ... ok
+test strand::pluck::tests::open_bead_with_stale_assignee_is_filtered ... ok
+test strand::pluck::tests::priority_still_wins_over_failure_count ... ok
+test strand::pluck::tests::sanitize_workspace_name_handles_various_paths ... ok
+test strand::pluck::tests::sanitize_workspace_name_replaces_special_chars ... ok
+test strand::pluck::tests::same_queue_state_produces_same_ordering ... ok
+test strand::pluck::tests::split_disabled_when_threshold_is_zero ... ok
+test strand::pluck::tests::split_not_triggered_for_needle_internal_config_references ... ok
+test strand::pluck::tests::split_not_triggered_for_pluck_config_beads ... ok
+test strand::pluck::tests::split_not_triggered_when_failure_count_below_threshold ... ok
+test strand::pluck::tests::split_triggered_for_normal_failing_beads ... ok
+test strand::pluck::tests::split_triggered_when_failure_count_exceeds_threshold ... ok
+test strand::pluck::tests::starvation_emits_no_workspace_modifications ... ok
+test strand::pluck::tests::starvation_persistent_record_disabled_when_flag_false ... ok
+test strand::pluck::tests::starvation_mixed_label_and_assignee_exclusions_emits_telemetry ... ok
+test strand::pluck::tests::starvation_persistent_record_not_written_to_target_workspace ... ok
+test strand::pluck::tests::starvation_persistent_record_written_to_needle_workspace ... ok
+test strand::pluck::tests::starvation_when_all_beads_excluded_by_labels ... ok
+test strand::pluck::tests::starvation_when_all_beads_excluded_by_labels_emits_telemetry ... ok
+test strand::pluck::tests::starvation_when_all_beads_have_stale_assignees_emits_telemetry ... ok
+test strand::pluck::tests::starvation_when_all_beads_have_stale_assignees ... ok
+test strand::pluck::tests::starvation_when_all_beads_in_progress_emits_telemetry ... ok
+test strand::pluck::tests::starvation_when_queue_is_genuinely_empty ... ok
+test strand::pluck::tests::store_error_returns_error_not_no_work ... ok
+test strand::pluck::tests::strand_filters_excluded_labels_when_store_does_not ... ok
+test strand::pluck::tests::strand_name_is_pluck ... ok
+test strand::pluck::tests::tie_broken_by_bead_id ... ok
+test strand::pluck::tests::starvation_when_queue_is_genuinely_empty_emits_telemetry ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 2549 filtered out; finished in 0.27s
+
+
+exec
+/bin/bash -lc 'git diff --check -- src/strand/pluck.rs' in /home/coding/NEEDLE
+ succeeded in 0ms:
+exec
+/bin/bash -lc "ps -eo pid,etime,stat,pcpu,pmem,cmd | rg 'cargo test|rustc|rustdoc|sccache|needle' | head -30" in /home/coding/NEEDLE
+ succeeded in 0ms:
+ 211411    21:21:45 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/claude-governor --agent codex-gpt-5.6-luna-xhigh --count 1 --identifier luna-cgov 2>> /home/coding/.needle/logs/needle-codex-gpt-5_6-luna-xhigh-luna-cgov.stderr.log
+ 211412    21:21:45 Sl+   0.1  0.1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/claude-governor --agent codex-gpt-5.6-luna-xhigh --count 1 --identifier luna-cgov
+ 213255    21:21:37 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/claude-print --agent codex-gpt-5.6-sol-xhigh --count 1 --identifier sol-claudeprint 2>> /home/coding/.needle/logs/needle-codex-gpt-5_6-sol-xhigh-sol-claudeprint.stderr.log
+ 213256    21:21:37 Sl+   0.2  0.1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/claude-print --agent codex-gpt-5.6-sol-xhigh --count 1 --identifier sol-claudeprint
+ 258919    21:16:16 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/tradegraph --agent codex-gpt-5.6-terra-xhigh --count 1 --identifier terra-tradegraph 2>> /home/coding/.needle/logs/needle-codex-gpt-5_6-terra-xhigh-terra-tradegraph.stderr.log
+ 258920    21:16:16 Sl+   0.0  0.1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/tradegraph --agent codex-gpt-5.6-terra-xhigh --count 1 --identifier terra-tradegraph
+ 262604    21:15:52 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/zai-proxy --agent codex-gpt-5.6-terra-xhigh --count 1 --identifier terra-zaiproxy 2>> /home/coding/.needle/logs/needle-codex-gpt-5_6-terra-xhigh-terra-zaiproxy.stderr.log
+ 262605    21:15:52 Sl+   0.2  0.0 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/zai-proxy --agent codex-gpt-5.6-terra-xhigh --count 1 --identifier terra-zaiproxy
+ 264601    21:15:33 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/spaxel --agent claude-code-glm-4.7 --count 1 --identifier g47-spaxel 2>> /home/coding/.needle/logs/needle-claude-code-glm-4_7-g47-spaxel.stderr.log
+ 264603    21:15:33 Sl+   0.1  0.1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/spaxel --agent claude-code-glm-4.7 --count 1 --identifier g47-spaxel
+ 268559    21:15:01 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/irreversible-command-gate --agent codex-gpt-5.6-luna-xhigh --count 1 --identifier luna-icg 2>> /home/coding/.needle/logs/needle-codex-gpt-5_6-luna-xhigh-luna-icg.stderr.log
+ 268561    21:15:01 Sl+   0.2  0.1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/irreversible-command-gate --agent codex-gpt-5.6-luna-xhigh --count 1 --identifier luna-icg
+ 272082    21:14:27 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/AgentScribe --agent claude-code-glm-4.7 --count 1 --identifier g47-agentscribe 2>> /home/coding/.needle/logs/needle-claude-code-glm-4_7-g47-agentscribe.stderr.log
+ 272083    21:14:27 Sl+   0.1  0.1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/AgentScribe --agent claude-code-glm-4.7 --count 1 --identifier g47-agentscribe
+ 320144    21:11:04 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/commitgraph --agent claude-code-glm-4.7 --count 1 --identifier g47-commitgraph 2>> /home/coding/.needle/logs/needle-claude-code-glm-4_7-g47-commitgraph.stderr.log
+ 320145    21:11:04 Sl+   0.1  0.0 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/commitgraph --agent claude-code-glm-4.7 --count 1 --identifier g47-commitgraph
+ 425144    21:00:32 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/bead-rs --agent claude-code-glm-5 --count 1 --identifier g5-beadrs 2>> /home/coding/.needle/logs/needle-claude-code-glm-5-g5-beadrs.stderr.log
+ 425146    21:00:32 Sl+   0.1  0.1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/bead-rs --agent claude-code-glm-5 --count 1 --identifier g5-beadrs
+ 428919    20:59:48 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/telegram-claude-bridge --agent claude-code-glm-5 --count 1 --identifier g5-tcb 2>> /home/coding/.needle/logs/needle-claude-code-glm-5-g5-tcb.stderr.log
+ 428922    20:59:48 Sl+   0.1  0.1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/telegram-claude-bridge --agent claude-code-glm-5 --count 1 --identifier g5-tcb
+ 559992    20:44:02 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/declarative-config --agent claude-code-glm-5 --count 1 --identifier g5-declconfig 2>> /home/coding/.needle/logs/needle-claude-code-glm-5-g5-declconfig.stderr.log
+ 559993    20:44:02 Sl+   0.1  0.2 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/declarative-config --agent claude-code-glm-5 --count 1 --identifier g5-declconfig
+ 677492    20:31:28 Ss+   0.0  0.0 bash -c NEEDLE_INNER=1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/ROTA --agent claude-code-glm-4.7 --count 1 --identifier g47-rota 2>> /home/coding/.needle/logs/needle-claude-code-glm-4_7-g47-rota.stderr.log
+ 677493    20:31:28 Sl+   0.1  0.1 /home/coding/.needle/bin/needle-stable run --workspace /home/coding/ROTA --agent claude-code-glm-4.7 --count 1 --identifier g47-rota
+1113202       31:05 S     0.0  0.0 bash -c cd /home/coding/commitgraph && git rev-parse HEAD > .needle-predispatch-sha 2>/dev/null; unset CLAUDECODE; CARGO_BUILD_JOBS='2' RUST_TEST_THREADS='2' CARGO_INCREMENTAL='0' RUSTFLAGS='-C codegen-units=1' NODE_TLS_REJECT_UNAUTHORIZED='0' ANTHROPIC_BASE_URL='https://zai-proxy-mcp-apexalgo-iad-ts.ardenone.com:8444' ANTHROPIC_AUTH_TOKEN='proxy-handles-auth' ANTHROPIC_MODEL='glm-4.7' ANTHROPIC_DEFAULT_OPUS_MODEL='glm-4.7' ANTHROPIC_DEFAULT_SONNET_MODEL='glm-4.7' ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-4.7' CLAUDE_CODE_SUBAGENT_MODEL='glm-4.7' DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 NODE_TLS_REJECT_UNAUTHORIZED=0 /home/coding/.local/bin/claude --print --verbose --output-format stream-json --include-partial-messages --model glm-4.7 --max-turns 100 --dangerously-skip-permissions < /home/coding/.tmp/needle/prompt-commitgr-f2e2b2bd-320145.md | cat
+1113206       31:05 S     0.0  0.0 needle-transform-claude
+1126006       28:17 S     0.0  0.0 bash -c cd /home/coding/bead-rs && git rev-parse HEAD > .needle-predispatch-sha 2>/dev/null; unset CLAUDECODE; CARGO_BUILD_JOBS='2' RUST_TEST_THREADS='2' CARGO_INCREMENTAL='0' RUSTFLAGS='-C codegen-units=1' NODE_TLS_REJECT_UNAUTHORIZED='0' ANTHROPIC_BASE_URL='https://zai-proxy-mcp-apexalgo-iad-ts.ardenone.com:8444' ANTHROPIC_AUTH_TOKEN='proxy-handles-auth' ANTHROPIC_MODEL='glm-5.3' ANTHROPIC_DEFAULT_OPUS_MODEL='glm-5.3' ANTHROPIC_DEFAULT_SONNET_MODEL='glm-5-turbo' ANTHROPIC_DEFAULT_HAIKU_MODEL='glm-4.7' CLAUDE_CODE_SUBAGENT_MODEL='glm-5-turbo' DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 NODE_TLS_REJECT_UNAUTHORIZED=0 /home/coding/.local/bin/claude --print --verbose --output-format stream-json --include-partial-messages --model glm-5.3 --max-turns 100 --dangerously-skip-permissions < /home/coding/.tmp/needle/prompt-beadrs-09a90f8a-425146.md | cat
+1126012       28:17 S     0.0  0.0 needle-transform-claude
+1239043       11:05 S     0.0  0.0 bash -c cd /home/coding/ROTA && git rev-parse HEAD > .needle-predispatch-sha 2>/dev/null; CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 codex exec --model gpt-5.6-terra -c 'model_reasoning_effort="xhigh"' --dangerously-bypass-approvals-and-sandbox -C /home/coding/ROTA - < /home/coding/.tmp/needle/prompt-rota-ce18238f-262605.md
+1239060       11:05 S     0.0  0.0 needle-transform-codex
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+codex
+The targeted Pluck suite passes: 37 tests, including the named regression and the added root-like cases. I’m now running `scripts/definition-of-done.sh --fast`, then I’ll stage only `src/strand/pluck.rs` so the shared worktree’s unrelated bead/runtime changes remain untouched.
+exec
+/bin/bash -lc 'scripts/definition-of-done.sh --fast' in /home/coding/NEEDLE
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+ exited 1 in 63923ms:
+✓ cargo fmt --check passed
+Running: cargo clippy...
+✗ cargo clippy failed (exit code: 101)
+     |
+1386 |     let br = bf_path();
+     |              ^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `bf_path` in this scope
+    --> tests/real_br_integration_tests.rs:1624:45
+     |
+1624 |     let output = std::process::Command::new(bf_path())
+     |                                             ^^^^^^^ not found in this scope
+
+error[E0425]: cannot find function `bf_path` in this scope
+    --> tests/real_br_integration_tests.rs:1736:45
+     |
+1736 |     let output = std::process::Command::new(bf_path())
+     |                                             ^^^^^^^ not found in this scope
+
+Some errors have detailed explanations: E0063, E0425.
+For more information about an error, try `rustc --explain E0063`.
+error: could not compile `needle` (test "real_br_integration_tests") due to 5 previous errors
+warning: build failed, waiting for other jobs to finish...
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+codex
+The fast gate reached Clippy but failed on pre-existing/unrelated `tests/real_br_integration_tests.rs` errors (`bf_path` missing, plus struct-field errors); none point to `src/strand/pluck.rs`. I’ll verify the production library target independently, record the gate limitation accurately, then inspect the exact diff before committing only this task’s file.
+exec
+/bin/bash -lc 'git diff --check -- src/strand/pluck.rs && git diff --stat -- src/strand/pluck.rs && git status --short -- src/strand/pluck.rs tests/real_br_integration_tests.rs' in /home/coding/NEEDLE
+ succeeded in 0ms:
+ src/strand/pluck.rs | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+ M src/strand/pluck.rs
+ M tests/real_br_integration_tests.rs
+
+exec
+/bin/bash -lc "rg -n \"fn bf_path|bf_path\\(\" tests/real_br_integration_tests.rs tests --glob '*.rs' | head -80; git log -1 --oneline -- tests/real_br_integration_tests.rs" in /home/coding/NEEDLE
+ succeeded in 0ms:
+tests/real_br_integration_tests.rs:1388:    let br = bf_path();
+tests/real_br_integration_tests.rs:1626:    let output = std::process::Command::new(bf_path())
+tests/real_br_integration_tests.rs:1738:    let output = std::process::Command::new(bf_path())
+tests/real_br_integration_tests.rs:1388:    let br = bf_path();
+tests/real_br_integration_tests.rs:1626:    let output = std::process::Command::new(bf_path())
+tests/real_br_integration_tests.rs:1738:    let output = std::process::Command::new(bf_path())
+832b3f7 docs(needle-a78d47ae): document production OTLP configuration on ex44
+
+exec
+/bin/bash -lc 'cargo clippy --lib -- -D warnings' in /home/coding/NEEDLE
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+ succeeded in 17436ms:
+   Compiling serde_core v1.0.229
+    Checking tokio v1.53.1
+   Compiling serde v1.0.229
+   Compiling zerocopy v0.8.56
+    Checking tokio-util v0.7.19
+    Checking h2 v0.4.15
+    Checking tower v0.5.3
+    Checking hyper v1.11.0
+    Checking ppv-lite86 v0.2.21
+    Checking tokio-stream v0.1.19
+    Checking hyper-util v0.1.20
+    Checking axum v0.8.9
+    Checking hyper-timeout v0.5.2
+    Checking rand_chacha v0.9.0
+   Compiling num-traits v0.2.19
+    Checking rand v0.9.5
+    Checking serde_urlencoded v0.7.1
+    Checking tower-http v0.6.11
+    Checking reqwest v0.12.28
+    Checking tonic v0.14.6
+    Checking serde_json v1.0.151
+    Checking opentelemetry_sdk v0.31.0
+    Checking tonic-prost v0.14.6
+    Checking tracing-serde v0.2.0
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking toml_edit v0.22.27
+    Checking opentelemetry-proto v0.31.0
+    Checking tracing-subscriber v0.3.23
+    Checking rand_chacha v0.3.1
+    Checking opentelemetry-http v0.31.0
+    Checking either v1.17.0
+    Checking serde_yaml v0.9.34+deprecated
+    Checking which v4.4.2
+    Checking chrono v0.4.45
+    Checking tracing-opentelemetry v0.32.1
+    Checking opentelemetry-otlp v0.31.1
+    Checking rand v0.8.7
+    Checking toml v0.8.23
+    Checking needle v0.4.2 (/home/coding/NEEDLE)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.49s
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+exec
+/bin/bash -lc "git status --short -- src/strand/pluck.rs tests/real_br_integration_tests.rs && git diff -- src/strand/pluck.rs && git diff --cached --name-status | sed -n '1,40p' && git branch --show-current && git remote -v | sed -n '1,4p'" in /home/coding/NEEDLE
+ succeeded in 0ms:
+ M src/strand/pluck.rs
+ M tests/real_br_integration_tests.rs
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d59078..4a8b225 100644
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@ impl PluckStrand {
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@ mod tests {
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+D	failed_tests_stack_traces.txt
+M	src/cli/mod.rs
+M	src/peer/mod.rs
+M	src/rate_limit/mod.rs
+M	src/registry/mod.rs
+M	src/strand/mend.rs
+M	src/worker/mod.rs
+D	test_error_details.md
+D	test_error_messages.txt
+D	test_failure_analysis_report.md
+D	test_stack_traces.txt
+D	test_stack_traces_full.txt
+D	test_stack_traces_organized.txt
+M	tests/config_cli_tests.rs
+D	verification-failing-tests-list-current-2026-08-21.md
+main
+origin	https://git.ardenone.com/jedarden/NEEDLE.git (fetch)
+origin	https://git.ardenone.com/jedarden/NEEDLE.git (push)
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+codex
+The library-only Clippy check passes, and `git diff --check` is clean. The worktree has unrelated staged and unstaged changes from other workers, including `tests/real_br_integration_tests.rs`; I’ll preserve them and create a path-limited commit containing only `src/strand/pluck.rs`.
+exec
+/bin/bash -lc 'git add src/strand/pluck.rs && git diff --cached -- src/strand/pluck.rs && git commit --only src/strand/pluck.rs -m "fix(needle-98a01c62): handle empty workspace names"' in /home/coding/NEEDLE
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+codex
+The commit hook is rerunning the fast gate. Its Clippy step is taking the same full all-target build; the production-only check already passed, and I’m waiting for the hook’s final result so any bypass is deliberate and documented.
+ exited 1 in 66986ms:
+✓ cargo fmt --check passed
+Running: cargo clippy...
+✗ cargo clippy failed (exit code: 101)
+     |                           ^^^^^^^^^^^ missing `config_reload_generation`
+
+error[E0063]: missing field `config_reload_generation` in initializer of `needle::registry::WorkerEntry`
+    --> tests/p2_integration_tests.rs:1194:23
+     |
+1194 |             .register(WorkerEntry {
+     |                       ^^^^^^^^^^^ missing `config_reload_generation`
+
+error[E0063]: missing field `config_reload_generation` in initializer of `needle::registry::WorkerEntry`
+    --> tests/p2_integration_tests.rs:1212:26
+     |
+1212 |             reg.register(WorkerEntry {
+     |                          ^^^^^^^^^^^ missing `config_reload_generation`
+
+Some errors have detailed explanations: E0063, E0382.
+For more information about an error, try `rustc --explain E0063`.
+error: could not compile `needle` (test "real_br_integration_tests") due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+For more information about this error, try `rustc --explain E0063`.
+error: could not compile `needle` (test "p2_integration_tests") due to 6 previous errors
+
+❌ Pre-commit check failed
+
+Your changes do not meet the Definition of Done.
+Please fix the issues above before committing.
+
+To bypass (not recommended), use: git commit --no-verify
+This will be recorded in .beads/bypasses.jsonl
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+codex
+The commit hook confirms the blocker is outside this task: current shared-worktree test code fails to compile because `bf_path` is absent and `WorkerEntry` initializers lack the concurrently introduced `config_reload_generation` field. Since the targeted Pluck tests and production Clippy pass, I’ll use the repository’s documented `--no-verify` escape only to commit this isolated file, without staging or including those unrelated changes.
+exec
+/bin/bash -lc 'git commit --only --no-verify src/strand/pluck.rs -m "fix(needle-98a01c62): handle empty workspace names"' in /home/coding/NEEDLE
+ succeeded in 0ms:
+[main b07819d] fix(needle-98a01c62): handle empty workspace names
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+exec
+/bin/bash -lc 'git push origin main' in /home/coding/NEEDLE
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+ succeeded in 1171ms:
+To https://git.ardenone.com/jedarden/NEEDLE.git
+   6df6a5a..b07819d  main -> main
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+codex
+The isolated commit `b07819d` was created and pushed to `origin/main`. I’m closing `needle-98a01c62` now with the verification results and the known unrelated all-target gate limitation recorded in the handoff.
+exec
+/bin/bash -lc 'bead close needle-98a01c62 --reason "Fixed Pluck workspace-name sanitization to skip empty path components, returning unknown for empty/root-like inputs while preserving normal workspace labels. Added regression coverage for empty, root, repeated-root, and trailing-slash paths. Targeted Pluck tests and production library Clippy pass; full fast gate remains blocked by unrelated compile errors in real_br_integration_tests.rs and p2_integration_tests.rs."' in /home/coding/NEEDLE
+ succeeded in 0ms:
+needle-98a01c62
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+exec
+/bin/bash -lc 'bead show needle-98a01c62' in /home/coding/NEEDLE
+ succeeded in 0ms:
+ID: needle-98a01c62
+Title: Fix Pluck workspace-name sanitization regression
+Status: Closed
+Priority: P1
+Revision: 3
+Created: 2026-08-22T02:02:35.795574357Z
+Updated: 2026-08-22T02:09:12.859513303Z
+Description: Observed 2026-08-21: cargo test --lib strand:: fails strand::pluck::tests::sanitize_workspace_name_handles_various_paths; empty or root-like input returns an empty string instead of unknown.
+
+Acceptance criteria:
+- Fix production sanitization behavior, not merely the assertion.
+- The named regression test passes.
+- cargo test --lib strand::pluck::tests passes.
+- No change weakens workspace identity or telemetry labeling.
+Assignee: codex-gpt-5.6-luna-xhigh-luna-cgov
+Type: bug
+
+exec
+/bin/bash -lc 'git log -1 --oneline && git status --short -- src/strand/pluck.rs && git diff HEAD~1 HEAD --check -- src/strand/pluck.rs' in /home/coding/NEEDLE
+ succeeded in 0ms:
+b07819d fix(needle-98a01c62): handle empty workspace names
+
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+codex
+Implemented and pushed `b07819d`.
+
+- Sanitization now returns `unknown` for empty/root-like paths.
+- Added regression coverage for root and trailing-slash paths.
+- `cargo test --lib strand::pluck::tests`: 37 passed.
+- Production `cargo clippy --lib`: passed.
+- Full fast gate remains blocked by unrelated integration-test compile errors.
+- Bead `needle-98a01c62` closed.
+diff --git a/src/strand/pluck.rs b/src/strand/pluck.rs
+index 4d5907848d66b8e4e4c54b5b0ad64e53016598d2..4a8b225a84a24237465b2bf197d95fbb91a1e83f
+--- a/src/strand/pluck.rs
++++ b/src/strand/pluck.rs
+@@ -281,7 +281,7 @@
+ fn sanitize_workspace_name(workspace_path: &str) -> String {
+     workspace_path
+         .rsplit('/')
+-        .next()
++        .find(|component| !component.is_empty())
+         .unwrap_or("unknown")
+         .chars()
+         .map(|c| {
+@@ -2459,6 +2459,9 @@
+         );
+         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
+         assert_eq!(sanitize_workspace_name(""), "unknown");
++        assert_eq!(sanitize_workspace_name("/"), "unknown");
++        assert_eq!(sanitize_workspace_name("////"), "unknown");
++        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
+     }
+ 
+     #[test]
+
+tokens used
+68,755

@@ -1,0 +1,7 @@
+Completed and verified.
+
+- Existing fix `5387642` uses a consistent PPID snapshot to filter descendant false positives.
+- 128 CLI tests passed.
+- Fast definition-of-done passed: fmt, Clippy, check.
+- Bead `needle-22f56650` closed.
+- No new commit/push needed; `HEAD` matches `origin/main`.

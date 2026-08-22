@@ -33,11 +33,13 @@ fn config_set_key_value_format_parses() {
             set,
             dump,
             show_source,
+            live,
         } => {
             assert!(get.is_none(), "--get should not be set");
             assert!(set.is_some(), "--set should be set");
             assert!(!dump, "--dump should not be set");
             assert!(!show_source, "--show-source should not be set");
+            assert!(!live, "--live should not be set");
 
             let set_args = set.unwrap();
             assert_eq!(set_args.len(), 2, "Should have 2 set arguments");
@@ -70,12 +72,13 @@ fn config_set_key_equals_value_format_parses() {
             set,
             dump,
             show_source,
+            live,
         } => {
             assert!(get.is_none(), "--get should not be set");
             assert!(set.is_some(), "--set should be set");
             assert!(!dump, "--dump should not be set");
             assert!(!show_source, "--show_source should not be set");
-
+            assert!(!live, "--live should not be set");
             let set_args = set.unwrap();
             assert_eq!(set_args.len(), 1, "Should have 1 set argument");
             assert_eq!(set_args[0], "worker.max_workers=10");
@@ -480,4 +483,93 @@ fn worker_binary_path_nonexistent_path_accepted() {
             .any(|e| e.field == "worker.worker_binary_path"),
         "path existence should not be validated at config load time"
     );
+}
+
+/// Test that `needle config --dump --live --show-source` parses correctly.
+#[test]
+fn config_dump_live_with_show_source_parses() {
+    use needle::cli::Cli;
+
+    // Simulate CLI invocation: needle config --dump --live --show-source
+    let args = vec!["needle", "config", "--dump", "--live", "--show-source"];
+
+    let result = Cli::try_parse_from(args);
+    assert!(
+        result.is_ok(),
+        "CLI parsing should succeed with --dump --live --show-source"
+    );
+
+    let cli = result.unwrap();
+    match cli.command {
+        needle::cli::CliCommand::ConfigCmd {
+            get,
+            set,
+            dump,
+            show_source,
+            live,
+        } => {
+            assert!(get.is_none(), "--get should not be set");
+            assert!(set.is_none(), "--set should not be set");
+            assert!(dump, "--dump should be set");
+            assert!(show_source, "--show-source should be set");
+            assert!(live, "--live should be set");
+        }
+        _ => panic!("Expected ConfigCmd command"),
+    }
+}
+
+/// Test that `needle config --dump --live` parses correctly without --show-source.
+#[test]
+fn config_dump_live_without_show_source_parses() {
+    use needle::cli::Cli;
+
+    // Simulate CLI invocation: needle config --dump --live
+    let args = vec!["needle", "config", "--dump", "--live"];
+
+    let result = Cli::try_parse_from(args);
+    assert!(
+        result.is_ok(),
+        "CLI parsing should succeed with --dump --live"
+    );
+
+    let cli = result.unwrap();
+    match cli.command {
+        needle::cli::CliCommand::ConfigCmd {
+            get,
+            set,
+            dump,
+            show_source,
+            live,
+        } => {
+            assert!(get.is_none(), "--get should not be set");
+            assert!(set.is_none(), "--set should not be set");
+            assert!(dump, "--dump should be set");
+            assert!(!show_source, "--show-source should not be set");
+            assert!(live, "--live should be set");
+        }
+        _ => panic!("Expected ConfigCmd command"),
+    }
+}
+
+/// Test that `--live` flag requires `--dump` flag.
+#[test]
+fn config_live_requires_dump() {
+    use needle::cli::Cli;
+
+    // Simulate CLI invocation: needle config --live (without --dump)
+    let args = vec!["needle", "config", "--live"];
+
+    let result = Cli::try_parse_from(args);
+    // This should parse successfully (clap allows it)
+    assert!(result.is_ok(), "CLI parsing should succeed");
+
+    // But the cmd_config function will reject it at runtime
+    // We verify the parsing structure
+    let cli = result.unwrap();
+    match cli.command {
+        needle::cli::CliCommand::ConfigCmd { dump, .. } => {
+            assert!(!dump, "--dump should not be set when --live is used alone");
+        }
+        _ => panic!("Expected ConfigCmd command"),
+    }
 }

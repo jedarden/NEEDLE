@@ -1,0 +1,11 @@
+Implemented and pushed commit `25fab56`.
+
+Added a state-machine regression test in [src/worker/mod.rs](/home/coding/NEEDLE/src/worker/mod.rs:5429) proving config reload is reached and applied at the cycle boundary.
+
+Verification passed:
+
+- Focused test
+- `scripts/definition-of-done.sh --fast`
+- Commit pushed to `origin/main`
+
+Bead `needle-159a844f` is closed.

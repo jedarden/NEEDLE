@@ -1,0 +1,2 @@
+{"schema_version":1,"ts":1787332202.977115,"type":"agent_message","role":"assistant","content":"API Error: 499 Client Closed Request"}
+{"schema_version":1,"ts":1787332202.9771268,"type":"error","message":"success","recoverable":false,"code":"success"}

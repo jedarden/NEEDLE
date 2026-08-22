@@ -1,0 +1,10 @@
+Implemented, pushed, and closed `needle-795bcbea`.
+
+- Removed `BeadAction::None`; added explicit `Closed`, `Interrupted`, and `Errored` transitions.
+- `do_handle` now returns `Result<BeadAction>`.
+- Must-use enforcement and exhaustive caller-side application prevent silently skipped actions.
+- The applier verifies the live bead state and releases any claim still held.
+- 33 outcome tests and 2 action-application tests passed.
+- `scripts/definition-of-done.sh --fast` passed all checks.
+
+Commit: `63978b0` on `origin/main`.

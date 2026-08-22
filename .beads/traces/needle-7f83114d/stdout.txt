@@ -1,0 +1,11 @@
+Implemented, committed, pushed, and closed `needle-7f83114d`.
+
+- Migrated [p3_integration_tests.rs](/home/coding/NEEDLE/tests/p3_integration_tests.rs) and [real_br_integration_tests.rs](/home/coding/NEEDLE/tests/real_br_integration_tests.rs) to native bead-rs.
+- Isolated CLI `HOME`, telemetry logs, and Explore roots.
+- Gated unsupported transactional-batch coverage.
+- Phase 3: 22/22 passed.
+- Real backend: 23/23 passed.
+- Clean exact-patch fast gate passed: fmt, Clippy, check.
+- Commit `bf20b24` pushed to `origin/main`.
+
+The shared checkout’s unrelated staged changes were preserved.

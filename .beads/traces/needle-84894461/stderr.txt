@@ -1,0 +1,1530 @@
+shell-init: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+chdir: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory
+OpenAI Codex v0.149.0
+--------
+workdir: /home/coding/NEEDLE
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 01a02581-5159-7fc2-b5ac-d774d50f14c5
+--------
+user
+[needle:codex-gpt-5.6-sol-xhigh-sol-claudeprint:needle-84894461:explore]
+## Task
+
+Add ProcessGuard wrapper to dispatch/mod.rs wait() calls
+
+## Description
+
+## Work
+Replace the 5 direct child.wait() calls in dispatch/mod.rs (lines 1388, 1419, 1452, 1522, 1538) with ProcessGuard method calls.
+
+This file has the most complex usage pattern - some are in async/await contexts, some in timeout blocks. Carefully preserve all existing behavior while wrapping Child instances with ProcessGuard.
+
+## Acceptance criteria
+- ProcessGuard struct added to dispatch/mod.rs or imported from shared module
+- All 5 child.wait() calls replaced with guard.wait() or equivalent
+- Child instances properly wrapped with ProcessGuard before wait() calls
+- Existing async/timeout behavior preserved
+- Code compiles without errors
+
+## Notes
+Depends on child 1 (bf-1zyh3) for site analysis. May need to coordinate with other beads if a shared ProcessGuard module is created.
+
+
+
+## Workspace
+
+/home/coding/NEEDLE
+
+## Context Files
+
+(no context files found)
+
+## Instructions
+
+(no workspace instructions)
+
+Complete the task described above. When finished:
+- **If you changed files, commit and push them.** `git commit`, then `git push`. Real
+  changes are source, tests, config, or documentation the task actually asked for.
+- **If the task needed no file changes, do NOT manufacture a commit.** Verification-only
+  work, work that turned out to be already done, and work you found blocked are all
+  legitimate outcomes with nothing to commit. Record the finding on the bead instead:
+
+`bead update needle-84894461 --notes "what you checked and what you found"`
+
+  Never create `notes/needle-84894461.md`, a summary, a report, or a status file to satisfy a
+  commit requirement. Status belongs on the bead, not in git history. A commit whose only
+  changes are under `notes/` or `.beads/` does not count as shipped work and will be
+  rejected.
+- Close the bead:
+
+`bead close needle-84894461 --reason "..."`
+
+If you cannot complete the task:
+- Do NOT close the bead
+- The bead will be automatically released for retry
+
+Bead ID: needle-84894461
+hook: SessionStart
+hook: SessionStart Completed
+codex
+I’ll inspect the current dispatch implementation and any existing `ProcessGuard`, then make the narrow wrapper change, run the repository’s fast definition-of-done check, commit, push, and close the bead if verification passes.
+exec
+/bin/bash -lc "git status --short && rg --files -g 'AGENTS.md' -g '.needle.yaml' -g '*.rs' | sed -n '1,160p' && rg -n \"ProcessGuard|child\\.wait\\(\\)\" src tests || true" in /home/coding/NEEDLE
+ succeeded in 0ms:
+ M .beads/bypasses.jsonl
+ M .beads/checkpoint/current.json
+ M .beads/checkpoint/forensic.jsonl
+ M .beads/checkpoint/previous.json
+ M .beads/events.jsonl
+ M .beads/heartbeats.jsonl
+ M .beads/traces/needle-068b926f/metadata.json
+ M .beads/traces/needle-068b926f/stderr.txt
+ M .beads/traces/needle-068b926f/stdout.txt
+ M .beads/traces/needle-208840e4/metadata.json
+ M .beads/traces/needle-208840e4/stderr.txt
+ M .beads/traces/needle-208840e4/stdout.txt
+ M .beads/traces/needle-24e42694/metadata.json
+ M .beads/traces/needle-24e42694/stderr.txt
+ M .beads/traces/needle-24e42694/stdout.txt
+ M .beads/traces/needle-44a0f603/metadata.json
+ M .beads/traces/needle-44a0f603/stderr.txt
+ M .beads/traces/needle-44a0f603/stdout.txt
+ M .beads/traces/needle-4c48325a/metadata.json
+ M .beads/traces/needle-4c48325a/stderr.txt
+ M .beads/traces/needle-4c48325a/stdout.txt
+ M .beads/traces/needle-5c826b55/metadata.json
+ M .beads/traces/needle-5c826b55/stderr.txt
+ M .beads/traces/needle-5c826b55/stdout.txt
+ M .beads/traces/needle-5ec767a9/metadata.json
+ M .beads/traces/needle-5ec767a9/stderr.txt
+ M .beads/traces/needle-5ec767a9/stdout.txt
+ M .beads/traces/needle-677fcad2/metadata.json
+ M .beads/traces/needle-677fcad2/stderr.txt
+ M .beads/traces/needle-677fcad2/stdout.txt
+ M .beads/traces/needle-6b4aabcf/metadata.json
+ M .beads/traces/needle-6b4aabcf/stderr.txt
+ M .beads/traces/needle-6b4aabcf/stdout.txt
+ M .beads/traces/needle-6f50ee12/metadata.json
+ M .beads/traces/needle-6f50ee12/stderr.txt
+ M .beads/traces/needle-6f50ee12/stdout.txt
+ M .beads/traces/needle-99c51a9d/metadata.json
+ M .beads/traces/needle-99c51a9d/stderr.txt
+ M .beads/traces/needle-99c51a9d/stdout.txt
+ M .beads/traces/needle-c0464426/metadata.json
+ M .beads/traces/needle-c0464426/stderr.txt
+ M .beads/traces/needle-c0464426/stdout.txt
+ M .beads/traces/needle-c8c008be/metadata.json
+ M .beads/traces/needle-c8c008be/stderr.txt
+ M .beads/traces/needle-c8c008be/stdout.txt
+ M .beads/traces/needle-ceea8c53/metadata.json
+ M .beads/traces/needle-ceea8c53/stderr.txt
+ M .beads/traces/needle-ceea8c53/stdout.txt
+ M .beads/traces/needle-ea26063c/metadata.json
+ M .beads/traces/needle-ea26063c/stderr.txt
+ M .beads/traces/needle-ea26063c/stdout.txt
+ M .beads/traces/needle-f78eebbb/metadata.json
+ M .beads/traces/needle-f78eebbb/stderr.txt
+ M .beads/traces/needle-f78eebbb/stdout.txt
+ M .needle-predispatch-sha
+ M test_stack_traces.txt
+?? .beads/checkpoint/objects/gen-031c4119ece5446d0f4ec9a17394d129.jsonl
+?? .beads/checkpoint/objects/gen-17e7d1feb8a5fb2240cfaf09ce238a95.jsonl
+?? .beads/checkpoint/objects/gen-22c2c624047719c34c57363eb957f8cd.jsonl
+?? .beads/checkpoint/objects/gen-2636ffddc3faaf4bfee5fe7ca2798ae9.jsonl
+?? .beads/checkpoint/objects/gen-2d4ea11ee0c11293529eb1abd782827d.jsonl
+?? .beads/checkpoint/objects/gen-3a9e117b29098f62184ce1d4b5cd6ebe.jsonl
+?? .beads/checkpoint/objects/gen-3e465df99be30ee31820879d5c58b99f.jsonl
+?? .beads/checkpoint/objects/gen-4e3fa4c6566b5c61d78dd0bffe859a24.jsonl
+?? .beads/checkpoint/objects/gen-70914f21c8f051b4b3179efba1d022b7.jsonl
+?? .beads/checkpoint/objects/gen-83591704eff3ad9948815a2467ceaab1.jsonl
+?? .beads/checkpoint/objects/gen-8e6e41b8a07d4e421cf9a34f6ed1f62e.jsonl
+?? .beads/checkpoint/objects/gen-b3fd64293ca9a598eceb05249883b8ef.jsonl
+?? .beads/checkpoint/objects/gen-b53e5315ce7f4098aabcd8f0ddfaf586.jsonl
+?? .beads/checkpoint/objects/gen-b720ec116a9d4023b0a94cb03f23f634.jsonl
+?? .beads/checkpoint/objects/gen-c0110061a4ceedcb94ebf5f1d3d6463b.jsonl
+?? .beads/checkpoint/objects/gen-e5e23f89c699ee0a0607cb95145b6d38.jsonl
+?? .beads/checkpoint/objects/gen-eae0f20a1eaf611b13a7310b180fa8cb.jsonl
+?? .beads/checkpoint/objects/gen-ec0b3d6eeae6a363f94152c738e786d9.jsonl
+?? .beads/checkpoint/objects/gen-edf255f09391fdbab1b9a7deac995ff0.jsonl
+?? .beads/checkpoint/objects/gen-f4406b0bd5f179c783fccee474e865cc.jsonl
+?? .beads/traces/needle-018e29a7/
+?? .beads/traces/needle-068b926f/trace.jsonl
+?? .beads/traces/needle-092b40ea/
+?? .beads/traces/needle-0ec120b3/
+?? .beads/traces/needle-12433d46/trace.jsonl
+?? .beads/traces/needle-159a844f/
+?? .beads/traces/needle-161e49b7/
+?? .beads/traces/needle-1ebcce08/
+?? .beads/traces/needle-1ef0ec6e/trace.jsonl
+?? .beads/traces/needle-208840e4/trace.jsonl
+?? .beads/traces/needle-22f56650/
+?? .beads/traces/needle-24e42694/trace.jsonl
+?? .beads/traces/needle-25774c75/
+?? .beads/traces/needle-27b045ec/
+?? .beads/traces/needle-3386daef/trace.jsonl
+?? .beads/traces/needle-3a6e1ecd/trace.jsonl
+?? .beads/traces/needle-3bd9d945/
+?? .beads/traces/needle-44a0f603/trace.jsonl
+?? .beads/traces/needle-48923964/
+?? .beads/traces/needle-48adb04c/
+?? .beads/traces/needle-49b6f85b/
+?? .beads/traces/needle-4b602eed/trace.jsonl
+?? .beads/traces/needle-4c48325a/trace.jsonl
+?? .beads/traces/needle-4ddfbf70/
+?? .beads/traces/needle-4f5c0143/
+?? .beads/traces/needle-51084068/trace.jsonl
+?? .beads/traces/needle-5453a8a8/
+?? .beads/traces/needle-58d9752d/
+?? .beads/traces/needle-597972f3/trace.jsonl
+?? .beads/traces/needle-5c826b55/trace.jsonl
+?? .beads/traces/needle-615b57e9/trace.jsonl
+?? .beads/traces/needle-62e7d8c1/
+?? .beads/traces/needle-6769220f/
+?? .beads/traces/needle-677fcad2/trace.jsonl
+?? .beads/traces/needle-67f3bb56/trace.jsonl
+?? .beads/traces/needle-6b4aabcf/trace.jsonl
+?? .beads/traces/needle-6c24a6c5/
+?? .beads/traces/needle-6f242187/trace.jsonl
+?? .beads/traces/needle-6f50ee12/trace.jsonl
+?? .beads/traces/needle-791e962b/trace.jsonl
+?? .beads/traces/needle-795bcbea/
+?? .beads/traces/needle-7e9ea193/
+?? .beads/traces/needle-8cb71c7c/trace.jsonl
+?? .beads/traces/needle-924fa47e/
+?? .beads/traces/needle-93350d99/
+?? .beads/traces/needle-97397df2/
+?? .beads/traces/needle-99c51a9d/trace.jsonl
+?? .beads/traces/needle-9c8640b7/
+?? .beads/traces/needle-a5c4685b/
+?? .beads/traces/needle-a9178e87/
+?? .beads/traces/needle-aae5952f/
+?? .beads/traces/needle-b3617592/trace.jsonl
+?? .beads/traces/needle-b3dc9203/trace.jsonl
+?? .beads/traces/needle-b93a96bd/trace.jsonl
+?? .beads/traces/needle-c0464426/trace.jsonl
+?? .beads/traces/needle-c3e2cb9a/trace.jsonl
+?? .beads/traces/needle-c8c008be/trace.jsonl
+?? .beads/traces/needle-ceea8c53/trace.jsonl
+?? .beads/traces/needle-cfe0ad63/trace.jsonl
+?? .beads/traces/needle-d1b2ee0d/trace.jsonl
+?? .beads/traces/needle-d21ca6f9/
+?? .beads/traces/needle-dd697601/
+?? .beads/traces/needle-de6bb8ad/trace.jsonl
+?? .beads/traces/needle-df95d0c8/
+?? .beads/traces/needle-e9df85fc/trace.jsonl
+?? .beads/traces/needle-ea26063c/trace.jsonl
+?? .beads/traces/needle-ea87796e/trace.jsonl
+?? .beads/traces/needle-ebede907/trace.jsonl
+?? .beads/traces/needle-f6c10ef6/
+?? .beads/traces/needle-f7496b0e/
+?? .beads/traces/needle-f78eebbb/trace.jsonl
+?? .beads/traces/needle-f877338f/
+?? .needle-install/
+?? docs/explore-access-paths.md
+?? verification-failing-tests-list-2026-08-20.md
+build.rs
+AGENTS.md
+benches/sanitize.rs
+.needle.yaml
+examples/validate_p95_values.rs
+examples/test_p95_output.rs
+examples/extract_p95_from_criterion.rs
+examples/test_bf_list_error_output.rs
+examples/test_p95_simple.rs
+examples/test_trace_check.rs
+examples/test_compilation_error.rs
+examples/test_bf_list_concurrency.rs
+examples/test_bf_write_concurrency.rs
+examples/test_p95_simple_manual.rs
+examples/test_actual_bf_error_format.rs
+examples/test_benchmark_p95.rs
+examples/verify_p95_reporting.rs
+examples/verify_all_latency_metrics.rs
+examples/test_4390q_debug.rs
+src/agent_event.rs
+src/lib.rs
+src/process_guard.rs
+src/checkpoint_utils.rs
+src/util.rs
+src/span/mod.rs
+src/claim/mod.rs
+src/telemetry/file_sink.rs
+src/telemetry/otlp.rs
+src/telemetry/mod.rs
+src/telemetry/test_utils.rs
+src/prompt/mod.rs
+src/main.rs
+tests/verify_bash_wrapper_exclusion.rs
+tests/template_rendering_tests.rs
+src/skill/mod.rs
+tests/idle_timeout_tests.rs
+tests/verify_deleted_binary_hot_reload.rs
+tests/real_br_integration_tests.rs
+tests/file_sink_integration.rs
+tests/heartbeat_validation.rs
+tests/process_discovery_integration.rs
+tests/config_cli_tests.rs
+tests/test_mend_stale_assignee.rs
+tests/bf_cli_argv_assertions.rs
+tests/sanitize_latency_assertion.rs
+tests/backend_strategy_validation.rs
+src/peer/mod.rs
+tests/test_telemetry_write.rs
+tests/adapter_validation_tests.rs
+tests/benchmark_output_format.rs
+tests/mixed_backend_isolation.rs
+tests/stop_kills_process_tree.rs
+tests/p3_integration_tests.rs
+tests/property_tests.rs
+tests/otlp_transport_seam_tests.rs
+tests/verify_process_discovery.rs
+tests/hard_timeout_tests.rs
+tests/bead_backend_descriptors.rs
+tests/timeout_config_integration.rs
+src/integration_t/worker_construction_saturation.rs
+tests/needle_transform_claude.rs
+src/integration_t/supervise_auto_scale_gate.rs
+src/integration_t/batch_launch_rising_load.rs
+src/integration_t/mod.rs
+src/integration_t/load_simulation_example.rs
+tests/routing_matcher_baseline.rs
+src/decision/mod.rs
+src/rate_limit/mod.rs
+tests/placeholder_validation_tests.rs
+tests/integration_tests.rs
+tests/process_guard.rs
+tests/workspace_fixtures.rs
+tests/otlp_runtime_test.rs
+tests/compilation_error_detection.rs
+src/upgrade/mod.rs
+src/dispatch/mod.rs
+src/cli/mod.rs
+src/supervisor/mod.rs
+src/cost/mod.rs
+src/supervisor/binary_freshness.rs
+src/log_writer.rs
+src/bead_store/backend.rs
+src/learning/mod.rs
+src/bead_store/strategies.rs
+src/bead_store/mod.rs
+src/bead_store/cli_store.rs
+src/tsnet.rs
+src/transcript/mod.rs
+src/commit_hook.rs
+tests/starvation_tests.rs
+tests/label_import_strategies.rs
+tests/github_release_upgrade_regression.rs
+tests/verify_bf_4390q.rs
+src/health/mod.rs
+tests/cleanup_liveness_regression.rs
+tests/tmux_fixture.rs
+tests/telemetry_field_verification.rs
+src/spawn_path/mod.rs
+src/sanitize/mod.rs
+src/types/mod.rs
+src/hoop_hooks.rs
+src/strand/resolve.rs
+src/mitosis/timeout_context.rs
+src/strand/pluck.rs
+src/mitosis/mod.rs
+src/strand/splice.rs
+src/mitosis/timeout_eligibility.rs
+src/strand/pulse.rs
+src/strand/mod.rs
+src/strand/mend.rs
+src/strand/reflect.rs
+src/strand/knot.rs
+src/strand/unravel.rs
+src/strand/weave.rs
+src/strand/explore.rs
+src/drift/mod.rs
+src/trace/mod.rs
+src/workspace_equality.rs
+src/cargo_test.rs
+src/routing.rs
+src/validation/shipped_work.rs
+src/validation/predispatch.rs
+src/validation/mod.rs
+src/config/tiers.rs
+tests/test_helper_example.rs
+src/config/mod.rs
+tests/integration_spawn.rs
+src/build_metadata.rs
+tests/timeout_config_integration_tests.rs
+src/resolve/mod.rs
+tests/split_strategies.rs
+tests/workspace_equality_tests.rs
+src/claude_md_placement.rs
+tests/bead_rs_lifecycle.rs
+src/stats/mod.rs
+tests/sigterm_heartbeat_cleanup.rs
+src/test_output.rs
+tests/upgrade_check_integration.rs
+src/test_runner.rs
+tests/etxtbsy_retry.rs
+tests/otlp_integration.rs
+tests/checkpoint_roundtrip_fidelity.rs
+tests/claim_strategies.rs
+tests/p2_integration_tests.rs
+src/registry/mod.rs
+tests/test_telemetry_write_debug.rs
+tests/cli_bead_store_engine.rs
+tests/p95_correctness.rs
+tests/routing_integration.rs
+tests/p95_aggregation.rs
+tests/bead_rehydration_verification.rs
+src/tmux_socket.rs
+src/worker/logging.rs
+src/worker/mod.rs
+src/bin/needle_transform_codex.rs
+src/outcome/mod.rs
+src/bin/needle_transform_claude.rs
+src/canary/mod.rs
+tests/process_guard.rs:1://! Shared ProcessGuard test utility for child process cleanup.
+tests/process_guard.rs:3://! This module provides a reusable `ProcessGuard` struct that ensures proper
+tests/process_guard.rs:9://! use tests::process_guard::ProcessGuard;
+tests/process_guard.rs:19://!     let mut guard = ProcessGuard::new(child);
+tests/process_guard.rs:23://!     // ProcessGuard ensures cleanup on drop, even if test panics
+tests/process_guard.rs:33:/// `ProcessGuard` wraps a `std::process::Child` and provides:
+tests/process_guard.rs:50:pub struct ProcessGuard {
+tests/process_guard.rs:54:impl ProcessGuard {
+tests/process_guard.rs:55:    /// Create a new ProcessGuard from a child process.
+tests/process_guard.rs:63:    /// Returns a `ProcessGuard` that takes ownership of the child process.
+tests/process_guard.rs:69:    /// # use tests::process_guard::ProcessGuard;
+tests/process_guard.rs:71:    /// let guard = ProcessGuard::new(child);
+tests/process_guard.rs:90:    /// # use tests::process_guard::ProcessGuard;
+tests/process_guard.rs:91:    /// # let mut guard = ProcessGuard::new(unimplemented!());
+tests/process_guard.rs:119:    /// # use tests::process_guard::ProcessGuard;
+tests/process_guard.rs:120:    /// # let mut guard = ProcessGuard::new(unimplemented!());
+tests/process_guard.rs:144:    /// # use tests::process_guard::ProcessGuard;
+tests/process_guard.rs:145:    /// # let mut guard = ProcessGuard::new(unimplemented!());
+tests/process_guard.rs:151:            child.wait()
+tests/process_guard.rs:158:impl Drop for ProcessGuard {
+tests/process_guard.rs:182:        let guard = ProcessGuard::new(child);
+tests/process_guard.rs:205:        let mut guard = ProcessGuard::new(child);
+tests/process_guard.rs:221:        let mut guard = ProcessGuard::new(child);
+tests/process_guard.rs:242:        let mut guard = ProcessGuard::new(child);
+tests/adapter_validation_tests.rs:49://! Long-running adapter processes MUST be wrapped in [`ProcessGuard`] to ensure
+tests/adapter_validation_tests.rs:83:// Note: ProcessGuard is available in the tests/process_guard.rs module
+src/dispatch/mod.rs:24:use crate::process_guard::{ProcessGroupKillGuard, ProcessGuard};
+src/dispatch/mod.rs:1534:            let status = ProcessGuard::new(child)
+src/dispatch/mod.rs:1545:            // Wrap child in ProcessGuard for safe waiting and cleanup.
+src/dispatch/mod.rs:1546:            let mut guard = ProcessGuard::new(child);
+src/dispatch/mod.rs:1717:            let mut t_guard = ProcessGuard::new(t_child);
+tests/integration_tests.rs:18:// This section documents the ProcessGuard coverage analysis performed across
+tests/integration_tests.rs:19:// all integration tests. ProcessGuard is a test helper that ensures child
+tests/integration_tests.rs:26:// proper ProcessGuard wrapping. The analysis found:
+tests/integration_tests.rs:27:// - **Total sites needing ProcessGuard:** 0
+tests/integration_tests.rs:37://    - ProcessGuard: ✅ YES (lines 2277-2313)
+tests/integration_tests.rs:42://    - ProcessGuard: ✅ YES (lines 2720-2762)
+tests/integration_tests.rs:47://    - ProcessGuard: ✅ YES (lines 3410-3453)
+tests/integration_tests.rs:52://    - ProcessGuard: ✅ YES (lines 3600-3638) — 2 separate instances
+tests/integration_tests.rs:62://    - ProcessGuard: ❌ NO (Not needed — not a long-lived worker process)
+tests/integration_tests.rs:68:// All ProcessGuard implementations follow this pattern:
+tests/integration_tests.rs:71:// struct ProcessGuard {
+tests/integration_tests.rs:75:// impl ProcessGuard {
+tests/integration_tests.rs:78://             child.wait()  // Safe, wrapped in Drop
+tests/integration_tests.rs:85:// impl Drop for ProcessGuard {
+tests/integration_tests.rs:89://             let _ = child.wait();      // Reap to prevent zombies
+tests/integration_tests.rs:102:// 1. Extract ProcessGuard to a shared test helper module to reduce
+tests/integration_tests.rs:105:// 2. Consider adding a macro or builder pattern for common ProcessGuard
+tests/integration_tests.rs:116:// 1. Scanning all test files for `child.wait()` calls
+tests/integration_tests.rs:117:// 2. Cross-referencing each call site with ProcessGuard usage
+tests/integration_tests.rs:119:// 4. Verifying ProcessGuard implementations include Drop guards
+tests/integration_tests.rs:202:/// ProcessGuard ensures proper cleanup of child processes in tests.
+tests/integration_tests.rs:212:/// let guard = ProcessGuard::new(child, Some(pid));
+tests/integration_tests.rs:216:struct ProcessGuard {
+tests/integration_tests.rs:220:impl ProcessGuard {
+tests/integration_tests.rs:221:    /// Create a new ProcessGuard from a spawned child process.
+tests/integration_tests.rs:255:            child.wait()
+tests/integration_tests.rs:270:impl Drop for ProcessGuard {
+tests/integration_tests.rs:276:            let _ = child.wait();
+tests/integration_tests.rs:3356:    // ProcessGuard ensures cleanup if test panics
+tests/integration_tests.rs:3357:    let mut guard = ProcessGuard::new(child, Some(pid));
+tests/integration_tests.rs:3519:            child.wait()
+tests/integration_tests.rs:3762:    let mut child_guard = ProcessGuard::new(child, Some(worker_pid));
+tests/integration_tests.rs:3776:    // ProcessGuard ensures cleanup even if we panic here.
+tests/integration_tests.rs:3789:            "Heartbeat file not found after {:?} - worker failed to create heartbeat within timeout. ProcessGuard will clean up the process.",
+tests/integration_tests.rs:3871:                    // Worker didn't exit in time - ProcessGuard will handle cleanup
+tests/integration_tests.rs:3873:                        "Worker did not exit within {:?}, ProcessGuard will clean up",
+tests/integration_tests.rs:3884:                // ProcessGuard will handle cleanup when it drops
+tests/integration_tests.rs:6431:    // ProcessGuard ensures cleanup if test panics
+tests/integration_tests.rs:6432:    let mut child_guard = ProcessGuard::new(child, Some(worker_pid));
+tests/integration_tests.rs:6458:            "Heartbeat file not found after {:?} - worker failed to create heartbeat. ProcessGuard will clean up.",
+tests/integration_tests.rs:6492:                    // ProcessGuard will handle cleanup
+tests/integration_tests.rs:6494:                        "Worker did not exit naturally within {:?}, test failed. ProcessGuard will clean up.",
+tests/integration_tests.rs:6501:                // ProcessGuard will handle cleanup
+tests/integration_tests.rs:6653:    let mut child1_guard = ProcessGuard::new(child1, None);
+tests/integration_tests.rs:6730:    let mut child2_guard = ProcessGuard::new(child2, None);
+tests/integration_tests.rs:6897:    let mut guard = ProcessGuard::new(child, Some(pid));
+tests/process_discovery_integration.rs:145:    // ProcessGuard ensures cleanup if test panics
+tests/process_discovery_integration.rs:146:    struct ProcessGuard {
+tests/process_discovery_integration.rs:150:    impl ProcessGuard {
+tests/process_discovery_integration.rs:161:                child.wait()
+tests/process_discovery_integration.rs:168:    impl Drop for ProcessGuard {
+tests/process_discovery_integration.rs:177:    let mut worker_guard = ProcessGuard { inner: Some(child) };
+src/supervisor/mod.rs:1740:        // child.wait() here, that would reap it ourselves and defeat the test).
+src/supervisor/mod.rs:1772:        // our sweep, so explicitly forget rather than calling child.wait().
+src/process_guard.rs:8:// ProcessGuard
+src/process_guard.rs:15:pub struct ProcessGuard {
+src/process_guard.rs:20:impl ProcessGuard {
+src/process_guard.rs:21:    /// Create a new ProcessGuard from a spawned Child.
+src/process_guard.rs:44:            child.wait().await
+src/process_guard.rs:65:            child.wait().await
+src/process_guard.rs:72:impl Drop for ProcessGuard {
+src/bead_store/mod.rs:156:            let _ = child.wait();
+src/registry/mod.rs:634:        let _ = child.wait();
+src/test_runner.rs:510:                let _ = child.wait();
+tests/processguard_coverage_catalog.md:1:# ProcessGuard Coverage Catalog
+tests/processguard_coverage_catalog.md:5:**Purpose:** Cross-reference findings from child beads 1 and 2 to catalog tests with direct `child.wait()` calls lacking ProcessGuard coverage
+tests/processguard_coverage_catalog.md:11:All integration tests that spawn real child processes already have proper ProcessGuard wrapping. The only `child.wait()` calls without ProcessGuard are in mock/test infrastructure code that doesn't spawn real processes.
+tests/processguard_coverage_catalog.md:22:- **ProcessGuard Coverage:** ✅ YES (Lines 2277-2313)
+tests/processguard_coverage_catalog.md:24:  - Line 2299: Inside `ProcessGuard::wait()` method
+tests/processguard_coverage_catalog.md:25:  - Line 2302: Inside `ProcessGuard::Drop` implementation
+tests/processguard_coverage_catalog.md:26:- **Notes:** Test validates dead worker cleanup from registry. ProcessGuard ensures cleanup if test panics.
+tests/processguard_coverage_catalog.md:31:- **ProcessGuard Coverage:** ✅ YES (Lines 2720-2762)
+tests/processguard_coverage_catalog.md:33:  - Line 2748: Inside `ProcessGuard::wait()` method
+tests/processguard_coverage_catalog.md:34:  - Line 2759: Inside `ProcessGuard::Drop` implementation
+tests/processguard_coverage_catalog.md:35:- **Notes:** Test validates heartbeat cleanup on SIGTERM. Uses `ProcessGuard` with timeout handling and explicit error messages.
+tests/processguard_coverage_catalog.md:40:- **ProcessGuard Coverage:** ✅ YES (Lines 3410-3453)
+tests/processguard_coverage_catalog.md:42:  - Line 3439: Inside `ProcessGuard::wait()` method
+tests/processguard_coverage_catalog.md:43:  - Line 3450: Inside `ProcessGuard::Drop` implementation
+tests/processguard_coverage_catalog.md:44:- **Notes:** Test validates heartbeat cleanup on normal worker exit. ProcessGuard handles cleanup if test panics or times out.
+tests/processguard_coverage_catalog.md:49:- **ProcessGuard Coverage:** ✅ YES (Lines 3600-3638)
+tests/processguard_coverage_catalog.md:51:  - Line 3624: Inside `ProcessGuard::wait()` method
+tests/processguard_coverage_catalog.md:52:  - Line 3635: Inside `ProcessGuard::Drop` implementation
+tests/processguard_coverage_catalog.md:53:- **ProcessGuard Instances:**
+tests/processguard_coverage_catalog.md:54:  - Line 3719: `child1_guard = ProcessGuard { inner: Some(child1), ... }`
+tests/processguard_coverage_catalog.md:55:  - Line 3798: `child2_guard = ProcessGuard { inner: Some(child2), ... }`
+tests/processguard_coverage_catalog.md:56:- **Notes:** Tests multiple shutdown scenarios (normal exit, idle exit). Each child process has its own ProcessGuard.
+tests/processguard_coverage_catalog.md:65:- **ProcessGuard Coverage:** ❌ NO (Not needed - no real process)
+tests/processguard_coverage_catalog.md:71:          child.wait()  // <-- Line 2477
+tests/processguard_coverage_catalog.md:79:- **Notes:** This is a mock process wrapper for testing. When `inner` is `None`, it spawns a trivial `true` command that exits immediately. No ProcessGuard needed because it's not a long-lived worker process.
+tests/processguard_coverage_catalog.md:83:## ProcessGuard Pattern Analysis
+tests/processguard_coverage_catalog.md:85:All ProcessGuard implementations follow this consistent pattern:
+tests/processguard_coverage_catalog.md:88:struct ProcessGuard {
+tests/processguard_coverage_catalog.md:93:impl ProcessGuard {
+tests/processguard_coverage_catalog.md:96:            child.wait()  // <-- Safe, wrapped in Drop
+tests/processguard_coverage_catalog.md:111:impl Drop for ProcessGuard {
+tests/processguard_coverage_catalog.md:115:            let _ = child.wait();  // <-- Prevents zombies
+tests/processguard_coverage_catalog.md:127:- No ProcessGuard needed
+tests/processguard_coverage_catalog.md:131:- No ProcessGuard needed (trivial processes)
+tests/processguard_coverage_catalog.md:134:- ✅ `dead_worker_cleanup_integration` - ProcessGuard present
+tests/processguard_coverage_catalog.md:135:- ✅ `heartbeat_cleanup_on_signal_integration` - ProcessGuard present
+tests/processguard_coverage_catalog.md:136:- ✅ `heartbeat_cleanup_on_normal_exit_integration` - ProcessGuard present
+tests/processguard_coverage_catalog.md:139:- ✅ `heartbeat_cleanup_multiple_scenarios_integration` - ProcessGuard present (2 instances)
+tests/processguard_coverage_catalog.md:145:**NO TESTS REQUIRE ProcessGuard ADDITION**
+tests/processguard_coverage_catalog.md:147:All integration tests that spawn real child processes already implement proper ProcessGuard coverage. The codebase demonstrates excellent discipline in process lifecycle management:
+tests/processguard_coverage_catalog.md:149:1. **Coverage:** 100% of real child processes are wrapped in ProcessGuard
+tests/processguard_coverage_catalog.md:150:2. **Consistency:** All ProcessGuard implementations follow the same pattern
+tests/processguard_coverage_catalog.md:152:4. **Documentation:** Each ProcessGuard includes clear comments explaining its purpose
+tests/processguard_coverage_catalog.md:157:1. Verify existing ProcessGuard implementations are correct
+tests/processguard_coverage_catalog.md:159:3. Document the ProcessGuard pattern in test documentation
+tests/processguard_coverage_catalog.md:160:4. Consider extracting ProcessGuard to a shared test helper module to reduce code duplication
+tests/processguard_coverage_catalog.md:167:- **Files with `child.wait()` calls:** 1 (`integration_tests.rs`)
+tests/processguard_coverage_catalog.md:168:- **Files with ProcessGuard:** 1 (`integration_tests.rs`)
+tests/processguard_coverage_catalog.md:169:- **Total `child.wait()` calls:** 8
+tests/processguard_coverage_catalog.md:170:  - 6 inside ProcessGuard implementations (real processes)
+tests/processguard_coverage_catalog.md:172:  - 1 inside loop with ProcessGuard (already covered)
+
+codex
+The shared checkout is heavily dirty from active workers, so I’ll preserve all unrelated changes and stage only task-owned source plus the bead checkpoint publication later. A shared async `ProcessGuard` already exists, and `dispatch/mod.rs` appears partially migrated; I’m checking whether all five original wait paths are correctly covered or whether concurrent work left gaps.
+exec
+/bin/bash -lc "sed -n '1,130p' src/process_guard.rs && sed -n '1,90p' src/lib.rs && sed -n '1320,1585p' src/dispatch/mod.rs && sed -n '1670,1750p' src/dispatch/mod.rs && git log -8 --oneline --decorate -- src/dispatch/mod.rs src/process_guard.rs && git diff -- src/dispatch/mod.rs src/process_guard.rs src/lib.rs && bead show needle-84894461 && bead show bf-1zyh3" in /home/coding/NEEDLE
+ exited 3 in 0ms:
+//! Process-group kill guard for spawned agent subprocesses.
+//!
+//! Depends on: nothing (leaf module — only `libc`).
+
+use tokio::process::Child;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ProcessGuard
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Guard for a spawned child process that ensures cleanup on drop.
+///
+/// Wraps a `tokio::process::Child` and provides a `wait()` method. If dropped
+/// before `wait()` is called, the child process is killed to prevent orphaning.
+pub struct ProcessGuard {
+    child: Option<Child>,
+    pid: u32,
+}
+
+impl ProcessGuard {
+    /// Create a new ProcessGuard from a spawned Child.
+    ///
+    /// # Arguments
+    /// * `child` - The spawned child process to guard
+    pub fn new(child: Child) -> Self {
+        let pid = child.id().unwrap_or(0);
+        Self {
+            child: Some(child),
+            pid,
+        }
+    }
+
+    /// Get the process ID.
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
+    /// Wait for the child to exit and return its exit status.
+    ///
+    /// This consumes the guard and returns the exit status. After calling this,
+    /// the child is considered reaped and no cleanup will be performed on drop.
+    pub async fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
+        if let Some(mut child) = self.child.take() {
+            child.wait().await
+        } else {
+            Err(std::io::Error::other("child already reaped"))
+        }
+    }
+
+    /// Get a mutable reference to the inner child (for operations like start_kill).
+    pub fn get_mut(&mut self) -> Option<&mut Child> {
+        self.child.as_mut()
+    }
+
+    /// Create a future that waits for the child to exit without consuming the guard.
+    ///
+    /// This allows using the guard in select! branches where the guard needs to remain
+    /// available for other operations. The future will wait for the child to exit
+    /// and return the exit status, but the guard remains owned by the caller.
+    ///
+    /// After this future completes successfully, call `wait()` to consume the guard
+    /// and mark it as reaped, or drop the guard to trigger cleanup.
+    pub async fn wait_borrowed(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        if let Some(ref mut child) = self.child {
+            child.wait().await
+        } else {
+            Err(std::io::Error::other("child already reaped"))
+        }
+    }
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            // Child was not waited on - kill it to prevent orphaning.
+            // Best-effort: ignore errors if already dead.
+            let _ = child.start_kill();
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ProcessGroupKillGuard
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Kills a spawned process's group on drop unless [`disarm`](Self::disarm) was
+/// called first.
+///
+/// A `tokio::time::timeout` wrapped directly around a spawn-and-wait future
+/// (e.g. `Command::output()`) kills the child correctly when *that* timeout
+/// fires: the future resolves to `Err(Elapsed)` and the caller's own match
+/// arm can react. The gap is a timeout wrapping something *further up* the
+/// call stack — Worker's mitosis-evaluation step wraps a whole multi-step
+/// `evaluate()` call (prompt build, dispatch, response parse) in its own,
+/// shorter, `tokio::time::timeout`; the weave strand does the same around its
+/// whole `evaluate_internal()`. When that outer timeout fires first, it drops
+/// the in-flight future — including whatever spawn-and-wait future was
+/// nested inside it — before any inner match arm, kill logic, or cleanup code
+/// gets a chance to run. Dropping a future mid-`Child::wait()` does not kill
+/// the OS process; the child is simply orphaned, silently, indefinitely. This
+/// guard makes that outcome unreachable: however the future is torn down,
+/// `Drop` runs and reaps the process group. See bf-653n7.
+pub struct ProcessGroupKillGuard {
+    pid: i32,
+    armed: bool,
+}
+
+impl ProcessGroupKillGuard {
+    /// `pid` must be the direct child's PID *and* its process group ID —
+    /// i.e. the child must have been spawned with `setpgid(0, 0)` in a
+    /// `pre_exec` hook, so a group-wide kill here reaches subprocesses the
+    /// child itself forked (e.g. a shell exec'ing into a long-running CLI),
+    /// not just the direct child, without ever touching an unrelated group
+    /// (notably, the caller's own, if the child were left in the caller's
+    /// inherited group instead of its own).
+    pub fn new(pid: u32) -> Self {
+        Self {
+            pid: pid as i32,
+            armed: pid > 0,
+        }
+    }
+
+    /// Call once the process is confirmed reaped (normal exit, or after the
+    /// caller's own manual kill+wait) so `Drop` becomes a no-op instead of
+    /// signaling a process-group ID the kernel may since have reused.
+    pub fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+//! NEEDLE — Navigates Every Enqueued Deliverable, Logs Effort.
+//!
+//! Library crate exposing the public API for integration tests and embedding.
+
+pub mod agent_event;
+pub mod bead_store;
+pub mod build_metadata;
+pub mod canary;
+pub mod cargo_test;
+pub mod checkpoint_utils;
+pub mod claim;
+pub mod claude_md_placement;
+pub mod cli;
+pub mod commit_hook;
+pub mod config;
+pub mod cost;
+pub mod decision;
+pub mod dispatch;
+pub mod drift;
+pub mod health;
+pub mod hoop_hooks;
+/// Load-simulation harness for regression tests.
+///
+/// Gated off by default. As committed in `ea85a89` ("chore(lab): preserve local
+/// work before removing duplicate clone") this module does not compile as part
+/// of the library, which broke `cargo test`, `cargo clippy` and therefore the
+/// `rust-verify` CI gate for the whole repo. It was moved from `tests/` — where
+/// it was inert, since nothing declared `mod integration_t` — into `src/`
+/// without being adapted to build inside the crate.
+///
+/// Outstanding before this can be un-gated:
+/// - `use needle::…` paths must become `crate::…` (the crate cannot refer to
+///   itself by name from within `src/`)
+/// - `tempfile` is a dev-dependency and is not available to the library; it
+///   needs to become an optional dependency of this feature
+/// - `Telemetry::get_events()` is called in `supervise_auto_scale_gate.rs` but
+///   does not exist — this one needs whoever owns the telemetry API, it is not
+///   a mechanical fix
+///
+/// Enable with `--features integration-t` once the above are resolved.
+#[cfg(feature = "integration-t")]
+pub mod integration_t;
+pub mod learning;
+pub mod log_writer;
+pub mod mitosis;
+pub mod outcome;
+pub mod peer;
+pub mod process_guard;
+pub mod prompt;
+pub mod rate_limit;
+pub mod registry;
+pub mod resolve;
+pub mod routing;
+pub mod sanitize;
+pub mod skill;
+pub mod span;
+pub mod spawn_path;
+pub mod stats;
+pub mod strand;
+pub mod supervisor;
+pub mod telemetry;
+pub mod test_output;
+pub mod test_runner;
+pub mod tmux_socket;
+pub mod trace;
+pub mod transcript;
+pub mod tsnet;
+pub mod types;
+pub mod upgrade;
+pub mod util;
+pub mod validation;
+pub mod worker;
+pub mod workspace_equality;
+                            }
+                            .map_err(|e| {
+                                std::io::Error::other(format!("failed to spawn transform: {}", e))
+                            })
+                        }
+                    },
+                    5,  // max_attempts
+                    20, // backoff_ms
+                )
+                .await
+                {
+                    Ok(mut transform_child) => {
+                        match transform_child.stdin.take() {
+                            Some(transform_stdin) => {
+                                let transform_stdout = transform_child.stdout.take();
+
+                                // Bounded channel: capacity 64 lines.
+                                // try_send drops lines when the transform is
+                                // slower than the agent.
+                                let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
+                                let transform_start = Instant::now();
+
+                                // Feeder task: forwards channel lines to
+                                // transform stdin.  Dropping the writer closes
+                                // stdin → transform receives EOF.  The handle
+                                // is kept (not fire-and-forget) so the caller
+                                // can confirm the feeder actually finished
+                                // writing and closing stdin before deciding
+                                // whether the transform deserves a kill.
+                                let feeder_task = tokio::spawn(async move {
+                                    let mut writer = tokio::io::BufWriter::new(transform_stdin);
+                                    while let Some(line) = rx.recv().await {
+                                        if writer.write_all(line.as_bytes()).await.is_err() {
+                                            break;
+                                        }
+                                        if writer.write_all(b"\n").await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    let _ = writer.flush().await;
+                                    // writer drops → transform gets stdin EOF
+                                });
+
+                                // Compute per-bead log file path.
+                                let log_path = agent_log_path(self.telemetry.worker_id(), bead_id);
+
+                                // Log writer task: reads transform stdout and
+                                // writes normalized JSONL to the log file.
+                                // Returns number of lines written.
+                                let log_task =
+                                    tokio::spawn(write_transform_log(transform_stdout, log_path));
+
+                                (
+                                    Some(tx),
+                                    Some(transform_child),
+                                    Some(log_task),
+                                    Some(transform_start),
+                                    Some(feeder_task),
+                                )
+                            }
+                            None => {
+                                let _ = self.telemetry.emit(EventKind::TransformFailed {
+                                    bead_id: bead_id.clone(),
+                                    error: "failed to open transform stdin".to_string(),
+                                    exit_code: -1,
+                                });
+                                (None, None, None, None, None)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = self.telemetry.emit(EventKind::TransformFailed {
+                            bead_id: bead_id.clone(),
+                            error: e.to_string(),
+                            exit_code: -1,
+                        });
+                        (None, None, None, None, None)
+                    }
+                }
+            }
+        } else {
+            let _ = self.telemetry.emit(EventKind::TransformSkipped {
+                bead_id: bead_id.clone(),
+                reason: "not configured".to_string(),
+            });
+            (None, None, None, None, None)
+        };
+
+        // Activity tracking for idle timeout detection.
+        // We use a watch channel to broadcast activity timestamps to the
+        // main select loop, which resets the idle deadline on each update.
+        let (activity_tx, activity_rx) = watch::channel(Instant::now());
+
+        let stdout_task = tokio::spawn({
+            let activity_tx = activity_tx.clone();
+            async move {
+                let mut captured = String::new();
+                if let Some(pipe) = stdout_pipe {
+                    // Read stdout in chunks to detect activity on every byte,
+                    // not just at newlines. This ensures idle timeout resets
+                    // continuously on stdout output, before line parsing.
+                    let mut reader = tokio::io::BufReader::new(pipe);
+                    let mut chunk = [0u8; 8192];
+                    let mut line_buffer = Vec::new();
+
+                    while let Ok(n) = AsyncReadExt::read(&mut reader, &mut chunk).await {
+                        if n == 0 {
+                            break; // EOF
+                        }
+
+                        // Report activity on every chunk read (before any parsing).
+                        let _ = activity_tx.send(Instant::now());
+
+                        // Process bytes to extract lines for transform and capture.
+                        let chunk_bytes = &chunk[..n];
+                        captured.push_str(&String::from_utf8_lossy(chunk_bytes));
+
+                        // Extract complete lines and send to transform.
+                        // Partial lines stay in line_buffer for the next chunk.
+                        for byte in chunk_bytes.iter() {
+                            line_buffer.push(*byte);
+                            if *byte == b'\n' {
+                                if let Some(ref tx) = transform_tx {
+                                    // Convert line to String (without the newline for transform).
+                                    let line = String::from_utf8_lossy(&line_buffer)
+                                        .trim_end_matches('\n')
+                                        .to_string();
+                                    // Non-blocking: drop if channel is full rather than back-pressuring.
+                                    let _ = tx.try_send(line);
+                                }
+                                line_buffer.clear();
+                            }
+                        }
+                    }
+
+                    // Handle any remaining partial line at EOF (without trailing newline).
+                    if !line_buffer.is_empty() {
+                        if let Some(ref tx) = transform_tx {
+                            let line = String::from_utf8_lossy(&line_buffer).to_string();
+                            let _ = tx.try_send(line);
+                        }
+                    }
+                }
+                // Dropping transform_tx here closes the channel; the feeder task
+                // sees rx.recv() == None and shuts down the transform process.
+                drop(transform_tx);
+                drop(activity_tx);
+                captured
+            }
+        });
+
+        let stderr_task = tokio::spawn({
+            let activity_tx = activity_tx.clone();
+            async move {
+                let mut buf = Vec::new();
+                if let Some(pipe) = stderr_pipe {
+                    // Read stderr in chunks to detect activity on every byte,
+                    // not just at EOF. This ensures idle timeout resets
+                    // continuously on stderr output.
+                    let mut reader = tokio::io::BufReader::new(pipe);
+                    let mut chunk = [0u8; 8192];
+                    while let Ok(n) = AsyncReadExt::read(&mut reader, &mut chunk).await {
+                        if n == 0 {
+                            break; // EOF
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        // Report activity on every chunk read.
+                        let _ = activity_tx.send(Instant::now());
+                    }
+                }
+                drop(activity_tx);
+                String::from_utf8_lossy(&buf).into_owned()
+            }
+        });
+
+        // Compute timeout configuration based on adapter policy.
+        let (idle_dur, hard_dur, use_legacy) = match adapter.timeout_policy() {
+            TimeoutPolicy::Legacy => {
+                // Legacy mode: single timeout, treated as both idle and hard.
+                let legacy_dur = adapter.effective_timeout(self.global_timeout_secs);
+                (legacy_dur, legacy_dur, true)
+            }
+            TimeoutPolicy::New {
+                idle_enabled,
+                hard_enabled,
+            } => {
+                // New mode: separate idle and hard timeouts.
+                let idle = if idle_enabled {
+                    Duration::from_secs(adapter.idle_timeout_secs)
+                } else {
+                    Duration::ZERO
+                };
+                let hard = if hard_enabled {
+                    Duration::from_secs(adapter.hard_timeout_secs)
+                } else {
+                    Duration::ZERO
+                };
+                (idle, hard, false)
+            }
+            TimeoutPolicy::Global => {
+                // No adapter-specific timeout; fall back to global config.
+                let global_dur = Duration::from_secs(self.global_timeout_secs);
+                (global_dur, global_dur, global_dur.is_zero())
+            }
+        };
+
+        // Determine which deadlines are active.
+        let has_idle_deadline = !idle_dur.is_zero();
+        let has_hard_deadline = !hard_dur.is_zero();
+        let has_any_deadline = has_idle_deadline || has_hard_deadline;
+
+        // Exit code and optional timeout reason.
+        let (exit_code, timeout_reason) = if !has_any_deadline {
+            // No deadlines: wait indefinitely.
+            let status = ProcessGuard::new(child)
+                .wait()
+                .await
+                .context("failed to wait for agent process")?;
+            kill_guard.disarm();
+            (status.code().unwrap_or(-1), None)
+        } else {
+            // At least one deadline is active: use select! to concurrently
+            // observe child exit, idle deadline, hard deadline, and cancellation.
+            use tokio::select;
+
+            // Wrap child in ProcessGuard for safe waiting and cleanup.
+            let mut guard = ProcessGuard::new(child);
+
+            // Idle deadline state: resets on activity.
+            let mut idle_deadline = if has_idle_deadline {
+                Some(tokio::time::Instant::now() + idle_dur)
+            } else {
+                None
+            };
+
+            // Hard deadline state: never resets.
+            let hard_deadline = if has_hard_deadline {
+                Some(tokio::time::Instant::now() + hard_dur)
+            } else {
+                None
+            };
+
+            // Activity receiver for idle deadline resets.
+            let mut activity_rcv = activity_rx;
+
+            // Outcome: (exit_code, timeout_reason).
+            // We loop to handle idle deadline resets on activity.
+            let outcome: (i32, Option<TimeoutReason>) = loop {
+                // Determine the next deadline to wait for (if any).
+                let next_idle = idle_deadline;
+                let next_hard = hard_deadline;
+                let _next_deadline = match (next_idle, next_hard) {
+                    (Some(idle), Some(hard)) => Some(idle.min(hard)),
+                    (Some(idle), None) => Some(idle),
+                    (None, Some(hard)) => Some(hard),
+                    (None, None) => None,
+                };
+
+                select! {
+                    // Branch 1: child exited (natural or signaled)
+                    status = guard.wait_borrowed() => {
+                        let status = status.context("failed to wait for agent process")?;
+                        kill_guard.disarm();
+                        break (status.code().unwrap_or(-1), None);
+                    }
+
+        let stdout = stdout_task.await.unwrap_or_default();
+        let stderr = stderr_task.await.unwrap_or_default();
+
+        // Give the transform a fair chance to drain stdin and exit on its own
+        // before killing it. Two distinct grace periods on two distinct
+        // targets, not one blanket kill:
+        //   T1 (FEEDER_DRAIN_TIMEOUT) — await the feeder task's own
+        //       JoinHandle, confirming stdin was actually flushed and closed
+        //       by the forwarder, not just that the channel sender was
+        //       dropped (dropping the sender only *starts* that process).
+        //   T2 (TRANSFORM_EXIT_GRACE) — THEN await the transform child's own
+        //       exit, confirming it actually consumed the stdin EOF (which
+        //       includes the final line, e.g. codex's `turn.completed`) and
+        //       exited naturally, before any kill is even considered.
+        const FEEDER_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+        const TRANSFORM_EXIT_GRACE: Duration = Duration::from_secs(2);
+
+        if let Some(t_child) = transform_child_opt {
+            // T1: did the feeder actually finish forwarding and close stdin?
+            let feeder_drained = match transform_feeder_task {
+                Some(feeder) => tokio::time::timeout(FEEDER_DRAIN_TIMEOUT, feeder)
+                    .await
+                    .is_ok(),
+                // No feeder handle at all — can't confirm delivery.
+                None => false,
+            };
+
+            // Three-way outcome, not a binary natural-exit-vs-kill split:
+            //   NaturalExit      — the transform exited on its own within the
+            //                      grace window; use its real exit status.
+            //   KilledAfterDrain — input delivery was confirmed (T1 passed)
+            //                      but the transform itself hung past T2 and
+            //                      had to be killed. Data reached it; the
+            //                      process did not finish. This must NOT be
+            //                      reported as a clean success.
+            //   KilledNoDrain    — the feeder itself never confirmed finishing
+            //                      within T1, so input delivery is unconfirmed
+            //                      when the kill happens.
+            enum TransformOutcome {
+                NaturalExit(std::process::ExitStatus),
+                KilledAfterDrain,
+                KilledNoDrain,
+            }
+
+            // Keep the guard alive across the timeout so the killed child can
+            // still be reaped in the timeout/error path.
+            let t_pid = t_child.id();
+            let mut t_guard = ProcessGuard::new(t_child);
+            let outcome =
+                match tokio::time::timeout(TRANSFORM_EXIT_GRACE, t_guard.wait_borrowed()).await {
+                    Ok(Ok(status)) => TransformOutcome::NaturalExit(status),
+                    Ok(Err(_)) | Err(_) => {
+                        // wait() itself errored, or T2 elapsed with no exit. Kill the
+                        // transform's entire process group (it was spawned into its
+                        // own group above), not just the direct child — a plain
+                        // start_kill() leaves any subprocess it forked (e.g. a
+                        // `sleep` from a hung pipeline) alive as an orphan holding
+                        // the stdout pipe open, wedging the log-writer task's EOF
+                        // read forever. Mirrors the agent's own timeout-kill path.
+                        if let Some(pid) = t_pid {
+                            unsafe {
+                                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                            }
+                        }
+                        // Reap the killed transform before allowing its log
+                        // writer to finish and before returning from dispatch.
+                        let _ = t_guard.wait().await;
+                        if feeder_drained {
+                            TransformOutcome::KilledAfterDrain
+                        } else {
+                            TransformOutcome::KilledNoDrain
+                        }
+                    }
+                };
+
+            // Await log writer: flushes and closes the file before we return
+            // (i.e., before HANDLING state begins).
+            let events_written = if let Some(task) = transform_log_task {
+                task.await.unwrap_or(0)
+            } else {
+                0
+28f7496 feat(needle-0afaeb32): add ETXTBSY retry telemetry to util and dispatch retry loops
+33b16ad fix(needle-3653fee9): repair dispatch claim verification and unblock CI
+6ee2b09 feat(needle-2de52de0): implement hard deadline timeout mechanism
+784d50f feat(needle-5c826b55): add ProcessObservation struct with idle deadline field
+c033ff2 fix(needle-f8b72d19): reap transform after timeout kill
+3c02ba1 style(needle-a5996803): format verification modules
+a4010c1 fix(needle-a5996803): repair dispatch test match arms
+329e82e test(needle-ca04b489): add hard timeout test coverage
+ID: needle-84894461
+Title: Add ProcessGuard wrapper to dispatch/mod.rs wait() calls
+Status: InProgress
+Priority: P2
+Revision: 4
+Created: 2026-08-14T16:10:47.386544115Z
+Updated: 2026-08-21T18:07:06.762827751Z
+Description: ## Work
+Replace the 5 direct child.wait() calls in dispatch/mod.rs (lines 1388, 1419, 1452, 1522, 1538) with ProcessGuard method calls.
+
+This file has the most complex usage pattern - some are in async/await contexts, some in timeout blocks. Carefully preserve all existing behavior while wrapping Child instances with ProcessGuard.
+
+## Acceptance criteria
+- ProcessGuard struct added to dispatch/mod.rs or imported from shared module
+- All 5 child.wait() calls replaced with guard.wait() or equivalent
+- Child instances properly wrapped with ProcessGuard before wait() calls
+- Existing async/timeout behavior preserved
+- Code compiles without errors
+
+## Notes
+Depends on child 1 (bf-1zyh3) for site analysis. May need to coordinate with other beads if a shared ProcessGuard module is created.
+Assignee: codex-gpt-5.6-sol-xhigh-sol-claudeprint
+Type: task
+bead: Workspace error: Issue not found: bf-1zyh3
+
+exec
+/bin/bash -lc "sed -n '1450,1705p' src/dispatch/mod.rs && rg -n \"\\.wait\\(\\)\\.await|wait_borrowed|ProcessGuard::new|let mut child|let child\" src/dispatch/mod.rs && git blame -L 1525,1555 -- src/dispatch/mod.rs && git blame -L 1705,1745 -- src/dispatch/mod.rs && git log --all --oneline -- src/process_guard.rs | head -20 && git log --all -S'wait_borrowed' --oneline -- src/dispatch/mod.rs src/process_guard.rs" in /home/coding/NEEDLE
+ succeeded in 0ms:
+                                line_buffer.clear();
+                            }
+                        }
+                    }
+
+                    // Handle any remaining partial line at EOF (without trailing newline).
+                    if !line_buffer.is_empty() {
+                        if let Some(ref tx) = transform_tx {
+                            let line = String::from_utf8_lossy(&line_buffer).to_string();
+                            let _ = tx.try_send(line);
+                        }
+                    }
+                }
+                // Dropping transform_tx here closes the channel; the feeder task
+                // sees rx.recv() == None and shuts down the transform process.
+                drop(transform_tx);
+                drop(activity_tx);
+                captured
+            }
+        });
+
+        let stderr_task = tokio::spawn({
+            let activity_tx = activity_tx.clone();
+            async move {
+                let mut buf = Vec::new();
+                if let Some(pipe) = stderr_pipe {
+                    // Read stderr in chunks to detect activity on every byte,
+                    // not just at EOF. This ensures idle timeout resets
+                    // continuously on stderr output.
+                    let mut reader = tokio::io::BufReader::new(pipe);
+                    let mut chunk = [0u8; 8192];
+                    while let Ok(n) = AsyncReadExt::read(&mut reader, &mut chunk).await {
+                        if n == 0 {
+                            break; // EOF
+                        }
+                        buf.extend_from_slice(&chunk[..n]);
+                        // Report activity on every chunk read.
+                        let _ = activity_tx.send(Instant::now());
+                    }
+                }
+                drop(activity_tx);
+                String::from_utf8_lossy(&buf).into_owned()
+            }
+        });
+
+        // Compute timeout configuration based on adapter policy.
+        let (idle_dur, hard_dur, use_legacy) = match adapter.timeout_policy() {
+            TimeoutPolicy::Legacy => {
+                // Legacy mode: single timeout, treated as both idle and hard.
+                let legacy_dur = adapter.effective_timeout(self.global_timeout_secs);
+                (legacy_dur, legacy_dur, true)
+            }
+            TimeoutPolicy::New {
+                idle_enabled,
+                hard_enabled,
+            } => {
+                // New mode: separate idle and hard timeouts.
+                let idle = if idle_enabled {
+                    Duration::from_secs(adapter.idle_timeout_secs)
+                } else {
+                    Duration::ZERO
+                };
+                let hard = if hard_enabled {
+                    Duration::from_secs(adapter.hard_timeout_secs)
+                } else {
+                    Duration::ZERO
+                };
+                (idle, hard, false)
+            }
+            TimeoutPolicy::Global => {
+                // No adapter-specific timeout; fall back to global config.
+                let global_dur = Duration::from_secs(self.global_timeout_secs);
+                (global_dur, global_dur, global_dur.is_zero())
+            }
+        };
+
+        // Determine which deadlines are active.
+        let has_idle_deadline = !idle_dur.is_zero();
+        let has_hard_deadline = !hard_dur.is_zero();
+        let has_any_deadline = has_idle_deadline || has_hard_deadline;
+
+        // Exit code and optional timeout reason.
+        let (exit_code, timeout_reason) = if !has_any_deadline {
+            // No deadlines: wait indefinitely.
+            let status = ProcessGuard::new(child)
+                .wait()
+                .await
+                .context("failed to wait for agent process")?;
+            kill_guard.disarm();
+            (status.code().unwrap_or(-1), None)
+        } else {
+            // At least one deadline is active: use select! to concurrently
+            // observe child exit, idle deadline, hard deadline, and cancellation.
+            use tokio::select;
+
+            // Wrap child in ProcessGuard for safe waiting and cleanup.
+            let mut guard = ProcessGuard::new(child);
+
+            // Idle deadline state: resets on activity.
+            let mut idle_deadline = if has_idle_deadline {
+                Some(tokio::time::Instant::now() + idle_dur)
+            } else {
+                None
+            };
+
+            // Hard deadline state: never resets.
+            let hard_deadline = if has_hard_deadline {
+                Some(tokio::time::Instant::now() + hard_dur)
+            } else {
+                None
+            };
+
+            // Activity receiver for idle deadline resets.
+            let mut activity_rcv = activity_rx;
+
+            // Outcome: (exit_code, timeout_reason).
+            // We loop to handle idle deadline resets on activity.
+            let outcome: (i32, Option<TimeoutReason>) = loop {
+                // Determine the next deadline to wait for (if any).
+                let next_idle = idle_deadline;
+                let next_hard = hard_deadline;
+                let _next_deadline = match (next_idle, next_hard) {
+                    (Some(idle), Some(hard)) => Some(idle.min(hard)),
+                    (Some(idle), None) => Some(idle),
+                    (None, Some(hard)) => Some(hard),
+                    (None, None) => None,
+                };
+
+                select! {
+                    // Branch 1: child exited (natural or signaled)
+                    status = guard.wait_borrowed() => {
+                        let status = status.context("failed to wait for agent process")?;
+                        kill_guard.disarm();
+                        break (status.code().unwrap_or(-1), None);
+                    }
+
+                    // Branch 2: activity detected (stdout/stderr byte read)
+                    _result = activity_rcv.changed() => {
+                        // Reset idle deadline on activity (if active).
+                        if has_idle_deadline {
+                            idle_deadline = Some(tokio::time::Instant::now() + idle_dur);
+                        }
+                        // Continue the loop to re-evaluate deadlines.
+                        continue;
+                    }
+
+                    // Branch 3: idle deadline expired
+                    () = async {
+                        if let Some(deadline) = next_idle {
+                            tokio::time::sleep_until(deadline).await;
+                        } else {
+                            std::future::pending().await
+                        }
+                    }, if has_idle_deadline => {
+                        // Idle timeout: kill the process group.
+                        if pid > 0 {
+                            unsafe {
+                                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                            }
+                        }
+                        let _ = guard.get_mut().and_then(|c| c.start_kill().ok());
+                        let _ = guard.wait().await;
+                        kill_guard.disarm();
+
+                        // Compute last output age for telemetry.
+                        let last_output_age = activity_rcv.borrow().elapsed();
+                        let reason = if use_legacy {
+                            TimeoutReason::Legacy {
+                                timeout_secs: idle_dur.as_secs(),
+                            }
+                        } else {
+                            TimeoutReason::Idle {
+                                timeout_secs: idle_dur.as_secs(),
+                                last_output_age_secs: last_output_age.as_secs(),
+                            }
+                        };
+                        break (124, Some(reason));
+                    }
+
+                    // Branch 4: hard deadline expired
+                    () = async {
+                        if let Some(deadline) = next_hard {
+                            tokio::time::sleep_until(deadline).await;
+                        } else {
+                            std::future::pending().await
+                        }
+                    }, if has_hard_deadline => {
+                        // Hard timeout: kill the process group.
+                        if pid > 0 {
+                            unsafe {
+                                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                            }
+                        }
+                        let _ = guard.get_mut().and_then(|c| c.start_kill().ok());
+                        let _ = guard.wait().await;
+                        kill_guard.disarm();
+
+                        let reason = TimeoutReason::Hard {
+                            timeout_secs: hard_dur.as_secs(),
+                        };
+                        break (124, Some(reason));
+                    }
+                }
+            };
+
+            outcome
+        };
+
+        tracing::Span::current().record("needle.agent.exit_code", exit_code);
+
+        // Set span status: Ok for exit_code 0, Error otherwise
+        if exit_code != 0 {
+            tracing::Span::current().record("otel.status_code", 2u64);
+            tracing::Span::current()
+                .record("otel.status_description", format!("exit_code: {exit_code}"));
+        }
+
+        let elapsed = start.elapsed();
+        // Await stdout/stderr readers; dropping transform_tx here closes the
+        // feeder channel, causing the feeder task to close transform stdin.
+        let stdout = stdout_task.await.unwrap_or_default();
+        let stderr = stderr_task.await.unwrap_or_default();
+
+        // Give the transform a fair chance to drain stdin and exit on its own
+        // before killing it. Two distinct grace periods on two distinct
+        // targets, not one blanket kill:
+        //   T1 (FEEDER_DRAIN_TIMEOUT) — await the feeder task's own
+        //       JoinHandle, confirming stdin was actually flushed and closed
+        //       by the forwarder, not just that the channel sender was
+        //       dropped (dropping the sender only *starts* that process).
+        //   T2 (TRANSFORM_EXIT_GRACE) — THEN await the transform child's own
+        //       exit, confirming it actually consumed the stdin EOF (which
+        //       includes the final line, e.g. codex's `turn.completed`) and
+        //       exited naturally, before any kill is even considered.
+        const FEEDER_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+        const TRANSFORM_EXIT_GRACE: Duration = Duration::from_secs(2);
+
+        if let Some(t_child) = transform_child_opt {
+            // T1: did the feeder actually finish forwarding and close stdin?
+            let feeder_drained = match transform_feeder_task {
+                Some(feeder) => tokio::time::timeout(FEEDER_DRAIN_TIMEOUT, feeder)
+                    .await
+                    .is_ok(),
+                // No feeder handle at all — can't confirm delivery.
+                None => false,
+            };
+
+            // Three-way outcome, not a binary natural-exit-vs-kill split:
+            //   NaturalExit      — the transform exited on its own within the
+            //                      grace window; use its real exit status.
+            //   KilledAfterDrain — input delivery was confirmed (T1 passed)
+            //                      but the transform itself hung past T2 and
+            //                      had to be killed. Data reached it; the
+            //                      process did not finish. This must NOT be
+            //                      reported as a clean success.
+            //   KilledNoDrain    — the feeder itself never confirmed finishing
+1195:        let mut child_env = adapter.environment.clone();
+1206:        let child_env_clone = child_env.clone();
+1208:        let mut child = spawn_with_etxtbsy_retry_child(
+1211:                let child_env = child_env_clone.clone();
+1534:            let status = ProcessGuard::new(child)
+1546:            let mut guard = ProcessGuard::new(child);
+1580:                    status = guard.wait_borrowed() => {
+1611:                        let _ = guard.wait().await;
+1644:                        let _ = guard.wait().await;
+1717:            let mut t_guard = ProcessGuard::new(t_child);
+1719:                match tokio::time::timeout(TRANSFORM_EXIT_GRACE, t_guard.wait_borrowed()).await {
+1736:                        let _ = t_guard.wait().await;
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1525) 
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1526)         // Determine which deadlines are active.
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1527)         let has_idle_deadline = !idle_dur.is_zero();
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1528)         let has_hard_deadline = !hard_dur.is_zero();
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1529)         let has_any_deadline = has_idle_deadline || has_hard_deadline;
+09eb29a8 (jedarden 2026-03-21 02:17:36 -0400 1530) 
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1531)         // Exit code and optional timeout reason.
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1532)         let (exit_code, timeout_reason) = if !has_any_deadline {
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1533)             // No deadlines: wait indefinitely.
+9433776b (jedarden 2026-08-17 02:04:51 -0400 1534)             let status = ProcessGuard::new(child)
+09eb29a8 (jedarden 2026-03-21 02:17:36 -0400 1535)                 .wait()
+09eb29a8 (jedarden 2026-03-21 02:17:36 -0400 1536)                 .await
+09eb29a8 (jedarden 2026-03-21 02:17:36 -0400 1537)                 .context("failed to wait for agent process")?;
+6b25ec66 (jedarden 2026-07-30 22:06:53 -0400 1538)             kill_guard.disarm();
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1539)             (status.code().unwrap_or(-1), None)
+09eb29a8 (jedarden 2026-03-21 02:17:36 -0400 1540)         } else {
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1541)             // At least one deadline is active: use select! to concurrently
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1542)             // observe child exit, idle deadline, hard deadline, and cancellation.
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1543)             use tokio::select;
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1544) 
+9433776b (jedarden 2026-08-17 02:04:51 -0400 1545)             // Wrap child in ProcessGuard for safe waiting and cleanup.
+9433776b (jedarden 2026-08-17 02:04:51 -0400 1546)             let mut guard = ProcessGuard::new(child);
+9433776b (jedarden 2026-08-17 02:04:51 -0400 1547) 
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1548)             // Idle deadline state: resets on activity.
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1549)             let mut idle_deadline = if has_idle_deadline {
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1550)                 Some(tokio::time::Instant::now() + idle_dur)
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1551)             } else {
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1552)                 None
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1553)             };
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1554) 
+6e317e99 (jedarden 2026-08-12 06:16:29 -0400 1555)             // Hard deadline state: never resets.
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1705)             //   KilledNoDrain    — the feeder itself never confirmed finishing
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1706)             //                      within T1, so input delivery is unconfirmed
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1707)             //                      when the kill happens.
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1708)             enum TransformOutcome {
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1709)                 NaturalExit(std::process::ExitStatus),
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1710)                 KilledAfterDrain,
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1711)                 KilledNoDrain,
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1712)             }
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1713) 
+c033ff23 (jedarden   2026-08-17 04:27:46 -0400 1714)             // Keep the guard alive across the timeout so the killed child can
+c033ff23 (jedarden   2026-08-17 04:27:46 -0400 1715)             // still be reaped in the timeout/error path.
+2dafaea7 (jedarden   2026-08-15 07:12:23 -0400 1716)             let t_pid = t_child.id();
+c033ff23 (jedarden   2026-08-17 04:27:46 -0400 1717)             let mut t_guard = ProcessGuard::new(t_child);
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1718)             let outcome =
+c033ff23 (jedarden   2026-08-17 04:27:46 -0400 1719)                 match tokio::time::timeout(TRANSFORM_EXIT_GRACE, t_guard.wait_borrowed()).await {
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1720)                     Ok(Ok(status)) => TransformOutcome::NaturalExit(status),
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1721)                     Ok(Err(_)) | Err(_) => {
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1722)                         // wait() itself errored, or T2 elapsed with no exit. Kill the
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1723)                         // transform's entire process group (it was spawned into its
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1724)                         // own group above), not just the direct child — a plain
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1725)                         // start_kill() leaves any subprocess it forked (e.g. a
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1726)                         // `sleep` from a hung pipeline) alive as an orphan holding
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1727)                         // the stdout pipe open, wedging the log-writer task's EOF
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1728)                         // read forever. Mirrors the agent's own timeout-kill path.
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1729)                         if let Some(pid) = t_pid {
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1730)                             unsafe {
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1731)                                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1732)                             }
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1733)                         }
+c033ff23 (jedarden   2026-08-17 04:27:46 -0400 1734)                         // Reap the killed transform before allowing its log
+c033ff23 (jedarden   2026-08-17 04:27:46 -0400 1735)                         // writer to finish and before returning from dispatch.
+c033ff23 (jedarden   2026-08-17 04:27:46 -0400 1736)                         let _ = t_guard.wait().await;
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1737)                         if feeder_drained {
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1738)                             TransformOutcome::KilledAfterDrain
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1739)                         } else {
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1740)                             TransformOutcome::KilledNoDrain
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1741)                         }
+96e669e8 (Ryan Smith 2026-07-14 13:05:17 -0700 1742)                     }
+a95840ad (jedarden   2026-08-15 12:09:16 -0400 1743)                 };
+056ee9a9 (jedarden   2026-03-29 11:18:27 -0400 1744) 
+056ee9a9 (jedarden   2026-03-29 11:18:27 -0400 1745)             // Await log writer: flushes and closes the file before we return
+9433776 feat(needle-c3e2cb9a): replace wait() calls with ProcessGuard
+dd8d4fa feat(needle-c8c008be): add is_tilde_prefix helper function
+2e77f7f feat(needle-3a12e289): add p95 to benchmark output format
+6b25ec6 fix(needle): kill process group on outer-timeout cancellation of agent dispatch (GH #13)
+c033ff2 fix(needle-f8b72d19): reap transform after timeout kill
+9433776 feat(needle-c3e2cb9a): replace wait() calls with ProcessGuard
+
+codex
+The requested source change is already present in commit `9433776` (`feat(needle-c3e2cb9a): replace wait() calls with ProcessGuard`): all direct waits in `dispatch/mod.rs` now go through the shared guard, including `select!` and transform timeout paths. This bead is therefore a duplicate/no-code outcome; I’m running the required fast verification before recording and closing it.
+exec
+/bin/bash -lc './scripts/definition-of-done.sh --fast' in /home/coding/NEEDLE
+ succeeded in 1134ms:
+✓ cargo fmt --check passed
+Running: cargo clippy...
+✓ cargo clippy passed
+Running: cargo check...
+✓ cargo check passed
+
+=== Definition of Done Summary ===
+Lane: fast
+Checks run: 3
+Failures: 0
+✓ Definition of Done
+
+codex
+Fast verification passed all three checks (`fmt`, `clippy`, and `cargo check`). Since there is no new source change to ship, I’m following the task’s no-change path: recording the duplicate finding on the bead and closing it without creating an empty or bead-only commit.
+exec
+/bin/bash -lc 'bead update needle-84894461 --notes "No source changes needed: commit 9433776 (needle-c3e2cb9a) already added the shared async ProcessGuard and replaced dispatch/mod.rs direct child.wait() calls across indefinite wait, select!/deadline, timeout cleanup, and transform timeout paths. Confirmed no direct child.wait() remains in dispatch/mod.rs. ./scripts/definition-of-done.sh --fast passed (fmt, clippy, cargo check)." && bead close needle-84894461 --reason "Already completed by commit 9433776; verified all dispatch waits use ProcessGuard and the fast definition-of-done passes." && bead show needle-84894461 && git status --short -- src/dispatch/mod.rs src/process_guard.rs src/lib.rs' in /home/coding/NEEDLE
+ succeeded in 0ms:
+needle-84894461
+needle-84894461
+ID: needle-84894461
+Title: Add ProcessGuard wrapper to dispatch/mod.rs wait() calls
+Status: Closed
+Priority: P2
+Revision: 6
+Created: 2026-08-14T16:10:47.386544115Z
+Updated: 2026-08-21T18:07:51.654385122Z
+Description: ## Work
+Replace the 5 direct child.wait() calls in dispatch/mod.rs (lines 1388, 1419, 1452, 1522, 1538) with ProcessGuard method calls.
+
+This file has the most complex usage pattern - some are in async/await contexts, some in timeout blocks. Carefully preserve all existing behavior while wrapping Child instances with ProcessGuard.
+
+## Acceptance criteria
+- ProcessGuard struct added to dispatch/mod.rs or imported from shared module
+- All 5 child.wait() calls replaced with guard.wait() or equivalent
+- Child instances properly wrapped with ProcessGuard before wait() calls
+- Existing async/timeout behavior preserved
+- Code compiles without errors
+
+## Notes
+Depends on child 1 (bf-1zyh3) for site analysis. May need to coordinate with other beads if a shared ProcessGuard module is created.
+Assignee: codex-gpt-5.6-sol-xhigh-sol-claudeprint
+Type: task
+
+codex
+Already completed by commit `9433776` (`needle-c3e2cb9a`).
+
+- Confirmed all waits in [dispatch/mod.rs](/home/coding/NEEDLE/src/dispatch/mod.rs:1534) use the shared `ProcessGuard`.
+- `./scripts/definition-of-done.sh --fast` passed: fmt, Clippy, and cargo check.
+- Recorded the duplicate finding and closed `needle-84894461`.
+- No new commit or push was created because no source changes were needed.
+tokens used
+33,818

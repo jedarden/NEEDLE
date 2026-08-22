@@ -1,0 +1,7 @@
+Implemented and shipped in commit `e146078` (pushed to `origin/main`).
+
+- Tier-C changes now emit named `config.reload.restart_required` events and WARNs.
+- Workspace `NON_OVERRIDABLE_KEYS` are reported through telemetry.
+- Added regression tests.
+
+`definition-of-done.sh --fast` passed. Bead `needle-f7496b0e` closed.

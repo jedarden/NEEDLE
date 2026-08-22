@@ -1,0 +1,17 @@
+{
+  "bead_id": "needle-48923964",
+  "agent": "codex-gpt-5.6-terra-xhigh",
+  "provider": "openai",
+  "model": "gpt-5.6-terra",
+  "exit_code": 0,
+  "outcome": "success",
+  "duration_ms": 266944,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-08-21T17:24:31.302276439Z",
+  "trace_format": "openai_jsonl",
+  "pruned": false,
+  "template_version": null,
+  "timeout_reason": null
+}

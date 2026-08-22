@@ -125,6 +125,9 @@ pub struct WorkerEntry {
     pub started_at: DateTime<Utc>,
     /// Number of beads processed so far.
     pub beads_processed: u64,
+    /// Number of times the configuration has been reloaded since boot.
+    /// Used by `needle config --dump --live` to show the live config generation.
+    pub config_reload_generation: u64,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -373,6 +376,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now(),
             beads_processed: 0,
+            config_reload_generation: 0,
         }
     }
 

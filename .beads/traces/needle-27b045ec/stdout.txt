@@ -1,0 +1,8 @@
+Implemented and pushed as `0ffda67`.
+
+- Added bidirectional running-worker OTLP toggle coverage at the exporter transport seam.
+- Fixed resource precedence and Tokio runtime isolation in the seam tests.
+- Targeted suite: 4/4 passed; targeted Clippy passed.
+- Bead `needle-27b045ec` closed.
+
+The shared fast hook was blocked by unrelated formatting in another worker’s `src/config/tiers.rs`; this was recorded on the bead.

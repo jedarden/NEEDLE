@@ -1,0 +1,25 @@
+Completed and recorded on bead `needle-0608871e`, which is now closed.
+
+`cargo test` result: 2,566 passed, 3 failed, 15 ignored; duration 368.58s.
+
+Failures:
+
+- `config::config_tests::changed_sections_detects_multiple_section_changes`
+  - `src/config/mod.rs:11818`
+  - Expected at least 3 changed sections; only 2 changed because `limits.providers` is already empty.
+
+- `config::config_tests::test_otlp_config_matches_plan_md`
+  - `src/config/mod.rs:11560`
+  - `unknown field 'otlp', expected ... 'otlp_sink'`
+  - Documentation/test schema differs from the current config schema.
+
+- `strand::pluck::tests::sanitize_workspace_name_handles_various_paths`
+  - `src/strand/pluck.rs:2461`
+  - Expected `"unknown"`, received `""` for an empty path.
+
+Full output and backtraces:
+
+- [cargo-test log](/home/coding/scratch/needle-0608871e/cargo-test-20260821.log)
+- [backtraces](/home/coding/scratch/needle-0608871e/)
+
+No environment-specific failures were observed. The 60+ second worker wait test eventually passed; it reflects deterministic test latency from the default 60-second idle backoff. No source changes were made, so no commit or push was performed.

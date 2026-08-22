@@ -287,6 +287,7 @@ fn make_worker_entry(id: &str, provider: Option<&str>, model: Option<&str>) -> W
         provider: provider.map(|s| s.to_string()),
         started_at: Utc::now(),
         beads_processed: 0,
+        config_reload_generation: 0,
     }
 }
 
@@ -649,6 +650,7 @@ async fn mend_strand_cleans_zero_activity_worker_logs_immediately() {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now(),
             beads_processed: 0,
+            config_reload_generation: 0,
         })
         .unwrap();
 
@@ -715,6 +717,7 @@ async fn mend_strand_preserves_active_worker_logs() {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now(),
             beads_processed: 10,
+            config_reload_generation: 0,
         })
         .unwrap();
 
@@ -1160,6 +1163,7 @@ async fn registry_concurrent_registration_no_corruption() {
                     provider: Some("anthropic".to_string()),
                     started_at: Utc::now(),
                     beads_processed: 0,
+                    config_reload_generation: 0,
                 })
                 .unwrap();
         });
@@ -1200,6 +1204,7 @@ async fn registry_deregister_during_concurrent_registrations() {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
     }
@@ -1218,6 +1223,7 @@ async fn registry_deregister_during_concurrent_registrations() {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
         }));

@@ -1,0 +1,8 @@
+Completed and bead closed.
+
+- Root cause: missing explicit `bead-rs` binding in the remote fixture.
+- Fix shipped in `bf20b24` and pushed to `origin/main`.
+- Explore test: 3/3 passes; full real integration suite: 23/23; fast gate passes.
+- Unrelated shared changes were preserved.
+
+Note: an early diagnostic accidentally created and immediately closed production bead `needle-68a16117`; it was not committed.

@@ -1,0 +1,13 @@
+Implemented and shipped in commit `5a97c02`.
+
+- [src/outcome/mod.rs](/home/coding/NEEDLE/src/outcome/mod.rs:32) now requires verification before returning `Success`.
+- Exit `0` with failed verification returns `Failure`.
+- Updated the routing test to expect `Failure`; release and failure-count behavior is verified.
+
+Checks passed:
+
+- 4 classification tests
+- 3 verification-failure handling tests
+- `scripts/definition-of-done.sh --fast`
+
+Pushed to `origin/main`; bead `needle-7e9ea193` is closed.

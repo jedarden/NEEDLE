@@ -1,0 +1,10 @@
+Completed. The fix already exists in [install.sh](/home/coding/NEEDLE/install.sh:118) via commit `488de8f`: `curl` writes to a temporary file before `grep -m1`.
+
+Verified:
+
+- Version discovery returned `v0.4.2` without diagnostics.
+- Installer tests passed: 16/16.
+- Bead `needle-018e29a7` updated and closed.
+- No new commit or push was needed; `HEAD` matches `origin/main`.
+
+The full fast gate is blocked by an unrelated pre-existing Clippy error in `src/worker/mod.rs`.

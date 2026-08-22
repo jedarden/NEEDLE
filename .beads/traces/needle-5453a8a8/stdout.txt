@@ -1,0 +1,5 @@
+Implemented and pushed commit `02d93e9`.
+
+Added serialized transport-seam coverage ensuring a missing `env:` header rejects only the rebuild candidate and preserves the previous exporter. Focused test: 5/5 passed in a clean snapshot.
+
+The shared fast gate remains blocked by unrelated concurrent config changes. Bead `needle-5453a8a8` is closed.

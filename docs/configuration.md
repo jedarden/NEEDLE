@@ -295,17 +295,22 @@ telemetry:
 telemetry:
   otlp_sink:
     enabled: false               # Export to OTLP collector (default: false)
-    endpoint: "http://localhost:4317"  # gRPC endpoint
-    protocol: "grpc"            # grpc | http
-    timeout_secs: 10            # Request timeout (default: 10)
-    compression: "gzip"          # gzip | none | zstd
-    tls:                        # Canonical TLS configuration
-      insecure: false           # Disable TLS verification (not recommended for production)
-      ca_file: ""               # Path to custom CA certificate (empty = system trust store)
-    headers: []                 # e.g. ["Authorization: env:NEEDLE_OTLP_AUTHORIZATION"]
-    resource_attributes: []     # Format: "key=value"
-    metrics_interval_secs: 10   # Metrics export interval (default: 10)
-    service_namespace: "needle-fleet"
+    endpoint: "http://localhost:4317"  # gRPC endpoint (default: "http://localhost:4317")
+    protocol: "grpc"            # grpc | http (default: "grpc")
+    timeout_ms: 5000            # Request timeout in milliseconds (default: 5000)
+    compression: "gzip"          # gzip | none | zstd (default: "gzip")
+    tls:                        # TLS configuration
+      insecure: false           # Disable TLS verification (default: false)
+      ca_file: ""               # Path to custom CA certificate (default: system trust store)
+    headers: []                 # HTTP headers, format: "key: value" (default: [])
+    signals:                    # Signal export controls
+      traces: true              # Export tracing spans (default: true)
+      metrics: true             # Export metrics (default: true)
+      logs: true                # Export log records (default: true)
+    resource_attributes: []     # Resource attributes, format: "key=value" (default: [])
+    metrics_interval_secs: 10   # Metrics export interval in seconds (default: 10)
+    service_namespace: "needle-fleet"  # Service namespace for OTel semantic conventions
+    max_queue_size: 2048        # Maximum queue size for batch processors (default: 2048)
 ```
 
 The mapping above is the canonical representation in v0.3.1 and later. For

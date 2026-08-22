@@ -1,0 +1,10 @@
+Implemented and shipped the single-claim invariant.
+
+- Both claim paths now reject a second claim attempt and release any existing claim first: [worker/mod.rs](/home/coding/NEEDLE/src/worker/mod.rs:1354).
+- Added the 2026-08-17 incident regression test: [worker/mod.rs](/home/coding/NEEDLE/src/worker/mod.rs:4965).
+- Targeted regression: passed.
+- `scripts/definition-of-done.sh --fast`: all 3 checks passed.
+- Commit `3300970` pushed to `origin/main`.
+- Bead `needle-62e7d8c1` closed and checkpoint flushed.
+
+Unrelated concurrent modifications remain untouched in the working tree.

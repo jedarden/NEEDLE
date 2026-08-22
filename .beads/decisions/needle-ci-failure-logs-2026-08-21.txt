@@ -1,0 +1,48 @@
+time=2026-08-21T18:43:44.714Z level=INFO msg="waiting for signals" argo=true signalPath=/var/run/argo/ctr/main/signal
++ rm -rf /workspace/lost+found '/workspace/.[!.]*'
++ git clone --depth 1 --branch main https://git.ardenone.com/jedarden/NEEDLE.git /workspace
+Cloning into '/workspace'...
+Updating files:  60% (783/1294)Updating files:  61% (790/1294)Updating files:  62% (803/1294)Updating files:  63% (816/1294)Updating files:  64% (829/1294)Updating files:  65% (842/1294)Updating files:  66% (855/1294)Updating files:  67% (867/1294)Updating files:  68% (880/1294)Updating files:  69% (893/1294)Updating files:  70% (906/1294)Updating files:  71% (919/1294)Updating files:  72% (932/1294)Updating files:  73% (945/1294)Updating files:  74% (958/1294)Updating files:  75% (971/1294)Updating files:  76% (984/1294)Updating files:  77% (997/1294)Updating files:  78% (1010/1294)Updating files:  79% (1023/1294)Updating files:  80% (1036/1294)Updating files:  81% (1049/1294)Updating files:  82% (1062/1294)Updating files:  83% (1075/1294)Updating files:  84% (1087/1294)Updating files:  85% (1100/1294)Updating files:  86% (1113/1294)Updating files:  87% (1126/1294)Updating files:  88% (1139/1294)Updating files:  89% (1152/1294)Updating files:  90% (1165/1294)Updating files:  91% (1178/1294)Updating files:  92% (1191/1294)Updating files:  93% (1204/1294)Updating files:  94% (1217/1294)Updating files:  95% (1230/1294)Updating files:  96% (1243/1294)Updating files:  97% (1256/1294)Updating files:  98% (1269/1294)Updating files:  99% (1282/1294)Updating files: 100% (1294/1294)Updating files: 100% (1294/1294), done.
++ cd /workspace
++ rustc --version
+info: syncing channel updates for 1.95.0-x86_64-unknown-linux-gnu
+info: latest update on 2026-04-16 for version 1.95.0 (59807616e 2026-04-14)
+info: downloading 7 components
+rustc 1.95.0 (59807616e 2026-04-14)
++ echo '=== Running Definition of Done (all lanes) ==='
++ ./scripts/definition-of-done.sh --all
+=== Running Definition of Done (all lanes) ===
+NEEDLE_VERIFICATION_GATE: definition-of-done
+=== Fast Lane Checks ===
+Running: cargo fmt --check...
+✓ cargo fmt --check passed
+Running: cargo clippy...
+✓ cargo clippy passed
+Running: cargo check...
+✓ cargo check passed
+=== Slow Lane Checks ===
+Running: cargo test --lib...
+✗ cargo test --lib failed (exit code: 124)
+   Compiling tower-http v0.6.11
+   Compiling half v2.7.1
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling clap_lex v1.1.0
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling strsim v0.11.1
+   Compiling lazy_static v1.5.0
+   Compiling fastrand v2.5.0
+   Compiling tempfile v3.27.0
+   Compiling clap_builder v4.6.6
+   Compiling rustix v0.38.44
+   Compiling sharded-slab v0.1.7
+   Compiling rustls v0.23.43
+   Compiling ciborium-ll v0.2.2
+   Compiling plotters-svg v0.3.7
+   Compiling miniz_oxide v0.8.9
+   Compiling tonic-prost v0.14.6
+   Compiling reqwest v0.12.28
+time=2026-08-21T18:49:57.991Z level=INFO msg="file signal handler exiting due to context cancellation" argo=true
+time=2026-08-21T18:49:58.006Z level=INFO msg="sub-process exited" error="exit status 1" argo=true
+Error: exit status 1

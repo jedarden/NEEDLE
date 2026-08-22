@@ -1,0 +1,17 @@
+{
+  "bead_id": "needle-018e29a7",
+  "agent": "codex-gpt-5.6-luna-xhigh",
+  "provider": "openai",
+  "model": "gpt-5.6-luna",
+  "exit_code": 0,
+  "outcome": "success",
+  "duration_ms": 259794,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-08-21T09:33:55.562599461Z",
+  "trace_format": "openai_jsonl",
+  "pruned": false,
+  "template_version": null,
+  "timeout_reason": null
+}

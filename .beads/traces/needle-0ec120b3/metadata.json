@@ -1,0 +1,17 @@
+{
+  "bead_id": "needle-0ec120b3",
+  "agent": "codex-gpt-5.6-sol-xhigh",
+  "provider": "openai",
+  "model": "gpt-5.6-sol",
+  "exit_code": 0,
+  "outcome": "success",
+  "duration_ms": 121801,
+  "input_tokens": null,
+  "output_tokens": null,
+  "cost_usd": null,
+  "captured_at": "2026-08-21T17:56:40.624276316Z",
+  "trace_format": "openai_jsonl",
+  "pruned": false,
+  "template_version": null,
+  "timeout_reason": null
+}

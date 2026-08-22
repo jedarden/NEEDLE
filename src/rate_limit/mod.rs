@@ -662,6 +662,7 @@ mod tests {
             provider: provider.map(|s| s.to_string()),
             started_at: Utc::now(),
             beads_processed: 0,
+            config_reload_generation: 0,
         }
     }
 

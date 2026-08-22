@@ -592,6 +592,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                config_reload_generation: 0,
             })
             .unwrap();
 

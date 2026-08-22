@@ -2809,6 +2809,7 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
             provider: None,
             started_at: Utc::now(),
             beads_processed: 0,
+            config_reload_generation: 0,
         })
         .unwrap();
 
@@ -3204,6 +3205,7 @@ async fn idle_worker_flagging_detects_stuck_workers() {
         provider: Some("anthropic".to_string()),
         started_at: Utc::now() - chrono::Duration::seconds(300),
         beads_processed: 10,
+        config_reload_generation: 0,
     };
     registry.register(active_entry).unwrap();
 
@@ -3217,6 +3219,7 @@ async fn idle_worker_flagging_detects_stuck_workers() {
         provider: Some("anthropic".to_string()),
         started_at: Utc::now() - chrono::Duration::seconds(30),
         beads_processed: 0,
+        config_reload_generation: 0,
     };
     registry.register(recent_entry).unwrap();
 
@@ -3230,6 +3233,7 @@ async fn idle_worker_flagging_detects_stuck_workers() {
         provider: Some("anthropic".to_string()),
         started_at: Utc::now() - chrono::Duration::seconds(300),
         beads_processed: 0,
+        config_reload_generation: 0,
     };
     registry.register(idle_entry).unwrap();
 
@@ -3308,6 +3312,7 @@ async fn dead_worker_cleanup_integration() {
         provider: Some("anthropic".to_string()),
         started_at: Utc::now() - chrono::Duration::seconds(300),
         beads_processed: 10,
+        config_reload_generation: 0,
     };
     registry.register(live_entry.clone()).unwrap();
 
@@ -3321,6 +3326,7 @@ async fn dead_worker_cleanup_integration() {
         provider: Some("anthropic".to_string()),
         started_at: Utc::now() - chrono::Duration::seconds(300),
         beads_processed: 5,
+        config_reload_generation: 0,
     };
     registry.register(dead_entry).unwrap();
 
