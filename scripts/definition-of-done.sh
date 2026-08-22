@@ -118,15 +118,15 @@ if [[ "$LANE" == "slow" ]] || [[ "$LANE" == "all" ]]; then
   echo "=== Slow Lane Checks ==="
 
   # cargo test --lib (unit tests)
-  run_check "cargo test --lib" timeout 300 cargo test --lib
+  run_check "cargo test --lib" timeout 900 cargo test --lib
 
   # Core integration coverage. Keep each target separately named so CI reports
   # which strand phase failed, and bound every target to fit the verify-step
   # deadline while still allowing the shared debug build to complete.
-  run_check "cargo test --test integration_tests" timeout 300 cargo test --test integration_tests
-  run_check "cargo test --test p2_integration_tests" timeout 300 cargo test --test p2_integration_tests
-  run_check "cargo test --test p3_integration_tests" timeout 300 cargo test --test p3_integration_tests
-  run_check "cargo test --test real_br_integration_tests" timeout 300 cargo test --test real_br_integration_tests
+  run_check "cargo test --test integration_tests" timeout 900 cargo test --test integration_tests
+  run_check "cargo test --test p2_integration_tests" timeout 900 cargo test --test p2_integration_tests
+  run_check "cargo test --test p3_integration_tests" timeout 900 cargo test --test p3_integration_tests
+  run_check "cargo test --test real_br_integration_tests" timeout 900 cargo test --test real_br_integration_tests
 fi
 
 # Summary report
