@@ -1276,7 +1276,11 @@ async fn deterministic_ordering_tiebreak_by_id() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
+#[allow(clippy::assertions_on_constants)]
 fn outcome_classify_covers_all_exit_code_ranges() {
+    // Intentional test failure to verify needle-ci retryStrategy fix
+    assert!(false, "intentional test failure for CI verification");
+
     // Verify that classify handles the full i32 range without panicking.
     // This is a smoke test to ensure no gaps exist.
     let test_codes: Vec<i32> = vec![
