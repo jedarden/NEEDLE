@@ -9,7 +9,7 @@
 #
 # Lanes:
 #   - Fast: fmt, clippy, check (seconds, run locally under cgroup)
-#   - Slow: test suite (submitted to iad-ci when tree is clean)
+#   - Slow: unit and core strand integration targets
 #
 # Behavior: Aggregates all failures rather than aborting on first.
 # Returns non-zero if ANY check fails, with all failures reported.
@@ -87,9 +87,12 @@ run_check() {
     local exit_code=$?
     echo "✗ $name failed (exit code: $exit_code)"
     FAILURES+=("$name: exit code $exit_code")
-    # Show last 20 lines of output on failure
+    # Show the tail here while retaining the named failure for the summary.
+    echo "Failure details for $name (last 20 lines):"
     echo "$output" | tail -n 20
-    return 1
+    # Keep running so every check reports its result. The summary below returns
+    # the aggregate status after all requested checks have run.
+    return 0
   fi
 }
 
@@ -115,12 +118,15 @@ if [[ "$LANE" == "slow" ]] || [[ "$LANE" == "all" ]]; then
   echo "=== Slow Lane Checks ==="
 
   # cargo test --lib (unit tests)
-  run_check "cargo test --lib" timeout 120 cargo test --lib
+  run_check "cargo test --lib" timeout 300 cargo test --lib
 
-  # Integration tests (run a representative sample)
-  # NOTE: The full test suite is 54 files; CI runs all. The agent-facing
-  # fast lane skips tests entirely. This slow lane runs a sample.
-  run_check "cargo test --test integration_tests" timeout 120 cargo test --test integration_tests
+  # Core integration coverage. Keep each target separately named so CI reports
+  # which strand phase failed, and bound every target to fit the verify-step
+  # deadline while still allowing the shared debug build to complete.
+  run_check "cargo test --test integration_tests" timeout 300 cargo test --test integration_tests
+  run_check "cargo test --test p2_integration_tests" timeout 300 cargo test --test p2_integration_tests
+  run_check "cargo test --test p3_integration_tests" timeout 300 cargo test --test p3_integration_tests
+  run_check "cargo test --test real_br_integration_tests" timeout 300 cargo test --test real_br_integration_tests
 fi
 
 # Summary report

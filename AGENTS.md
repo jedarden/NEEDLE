@@ -123,7 +123,10 @@ The unified script splits checks by COST, not by tool:
 
 **Slow lane** (tests, may submit to iad-ci):
 - `cargo test --lib` (unit tests)
-- `cargo test --test integration_tests` (integration tests)
+- `cargo test --test integration_tests` (core integration tests)
+- `cargo test --test p2_integration_tests` (Pluck, Mend, Explore, and Knot)
+- `cargo test --test p3_integration_tests` (Weave, Unravel, and Pulse)
+- `cargo test --test real_br_integration_tests` (real bead-rs strand backend)
 
 **Full verification** (CI runs on push to main):
 - Both fast and slow lanes together
