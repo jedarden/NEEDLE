@@ -9,6 +9,7 @@
 //!
 //! Depends on: `config`, `types`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -127,7 +128,39 @@ pub struct WorkerEntry {
     pub beads_processed: u64,
     /// Number of times the configuration has been reloaded since boot.
     /// Used by `needle config --dump --live` to show the live config generation.
+    #[serde(default)]
     pub config_reload_generation: u64,
+}
+
+/// The user-facing configuration dump published by a running worker.
+///
+/// This intentionally stores the already-formatted dump rather than a full
+/// [`Config`].  The latter would copy resolved secrets (for example OTLP
+/// headers) into the shared state directory.  The CLI only needs the fields
+/// that `config --dump` exposes, with and without source annotations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LiveConfigSnapshot {
+    /// Values formatted without source annotations.
+    pub values: Vec<String>,
+    /// Values formatted for `needle config --dump --show-source`.
+    pub values_with_sources: Vec<String>,
+    /// Number of successful config reloads since the worker booted.
+    pub reload_generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LiveConfigFile {
+    snapshots: HashMap<String, LiveConfigSnapshot>,
+    updated_at: DateTime<Utc>,
+}
+
+impl Default for LiveConfigFile {
+    fn default() -> Self {
+        Self {
+            snapshots: HashMap::new(),
+            updated_at: Utc::now(),
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -199,7 +232,20 @@ impl Registry {
     pub fn deregister(&self, worker_id: &str) -> Result<()> {
         self.modify(|reg| {
             reg.workers.retain(|w| w.id != worker_id);
+        })?;
+        self.remove_live_config(worker_id)
+    }
+
+    /// Publish the configuration currently in use by a worker.
+    pub fn update_live_config(&self, worker_id: &str, snapshot: LiveConfigSnapshot) -> Result<()> {
+        self.modify_live_configs(|configs| {
+            configs.snapshots.insert(worker_id.to_string(), snapshot);
         })
+    }
+
+    /// Read a worker's most recently published live configuration.
+    pub fn live_config(&self, worker_id: &str) -> Result<Option<LiveConfigSnapshot>> {
+        Ok(self.read_live_configs()?.snapshots.get(worker_id).cloned())
     }
 
     /// Update a worker's beads_processed count.
@@ -272,6 +318,97 @@ impl Registry {
             format!("failed to rename temp registry to: {}", self.path.display())
         })?;
         Ok(())
+    }
+
+    fn live_config_path(&self) -> PathBuf {
+        self.path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("live-config.json")
+    }
+
+    fn read_live_configs(&self) -> Result<LiveConfigFile> {
+        let path = self.live_config_path();
+        if !path.exists() {
+            return Ok(LiveConfigFile::default());
+        }
+
+        let file = std::fs::File::open(&path)
+            .with_context(|| format!("failed to open live config: {}", path.display()))?;
+        FileExt::lock_shared(&file)
+            .with_context(|| format!("failed to acquire shared lock: {}", path.display()))?;
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read live config: {}", path.display()))?;
+        FileExt::unlock(&file)
+            .with_context(|| format!("failed to release lock: {}", path.display()))?;
+
+        if content.trim().is_empty() {
+            return Ok(LiveConfigFile::default());
+        }
+
+        serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse live config JSON: {}", path.display()))
+    }
+
+    fn modify_live_configs<F>(&self, mutator: F) -> Result<()>
+    where
+        F: FnOnce(&mut LiveConfigFile),
+    {
+        let path = self.live_config_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create live config directory: {}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("failed to open live config: {}", path.display()))?;
+        FileExt::lock_exclusive(&file)
+            .with_context(|| format!("failed to acquire exclusive lock: {}", path.display()))?;
+
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut configs: LiveConfigFile = if content.trim().is_empty() {
+            LiveConfigFile::default()
+        } else {
+            serde_json::from_str(&content).unwrap_or_default()
+        };
+        mutator(&mut configs);
+        configs.updated_at = Utc::now();
+
+        let tmp_path = path.with_extension("json.tmp");
+        let json =
+            serde_json::to_string_pretty(&configs).context("failed to serialize live config")?;
+        std::fs::write(&tmp_path, &json).with_context(|| {
+            format!(
+                "failed to write temporary live config: {}",
+                tmp_path.display()
+            )
+        })?;
+        std::fs::rename(&tmp_path, &path)
+            .with_context(|| format!("failed to replace live config: {}", path.display()))?;
+
+        FileExt::unlock(&file)
+            .with_context(|| format!("failed to release lock: {}", path.display()))?;
+        Ok(())
+    }
+
+    fn remove_live_config(&self, worker_id: &str) -> Result<()> {
+        let path = self.live_config_path();
+        if !path.exists() {
+            return Ok(());
+        }
+
+        self.modify_live_configs(|configs| {
+            configs.snapshots.remove(worker_id);
+        })
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -477,6 +614,24 @@ mod tests {
 
         let workers = reg.list().unwrap();
         assert!(workers.is_empty());
+    }
+
+    #[test]
+    fn live_config_snapshot_round_trips_and_is_removed_with_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        reg.register(make_entry("alpha")).unwrap();
+
+        let snapshot = LiveConfigSnapshot {
+            values: vec!["worker.max_workers: 4".to_string()],
+            values_with_sources: vec!["worker.max_workers: 4 (from: built-in default)".to_string()],
+            reload_generation: 2,
+        };
+        reg.update_live_config("alpha", snapshot.clone()).unwrap();
+
+        assert_eq!(reg.live_config("alpha").unwrap(), Some(snapshot));
+        reg.deregister("alpha").unwrap();
+        assert_eq!(reg.live_config("alpha").unwrap(), None);
     }
 
     #[test]
