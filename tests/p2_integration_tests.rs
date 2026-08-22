@@ -11,7 +11,7 @@
 //! 8. Registry concurrent access — no corruption
 //! 9. Heartbeat liveness — emitter writes and stop cleans up
 //! 10. Strand waterfall ordering with Mend
-//! 11. Explore discovers work in other workspaces (real br)
+//! 11. Explore discovers work in other workspaces (real bead-rs)
 //! 12. Mitosis splits multi-task bead, creates children
 //! 13. Duplicate mitosis on same parent: zero new children
 //! 14. Two workers mitosis on same parent: flock serializes
@@ -1383,26 +1383,67 @@ async fn strand_waterfall_pluck_mend_explore_knot() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Test 11: Explore discovers work in other workspaces (real br)
+// Test 11: Explore discovers work in other workspaces (real bead-rs)
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
 async fn explore_discovers_work_in_other_workspace() {
-    // Create a real workspace with beads using the br CLI.
-    let ws = tempfile::tempdir().unwrap();
-    let br = br_path();
+    let scan_root = tempfile::tempdir().unwrap();
+    let test_home = scan_root.path().join("home");
+    let home_workspace = scan_root.path().join("home-workspace");
+    let remote_workspace = scan_root.path().join("remote-workspace");
+    std::fs::create_dir_all(&test_home).unwrap();
+    std::fs::create_dir_all(&home_workspace).unwrap();
+    std::fs::create_dir_all(&remote_workspace).unwrap();
+
+    // Bind every command Explore runs to the fixture HOME as well as the
+    // fixture workspace. This keeps bead-rs from reading operator state even
+    // after the initial setup commands have completed.
+    let bead = bead_path();
+    let bead_wrapper = scan_root.path().join("isolated-bead");
+    std::fs::write(
+        &bead_wrapper,
+        format!(
+            "#!/bin/sh\nHOME=\"{}\" exec \"{}\" \"$@\"\n",
+            test_home.display(),
+            bead.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&bead_wrapper).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&bead_wrapper, permissions).unwrap();
+    }
 
     // Initialize the workspace.
-    let status = std::process::Command::new(&br)
-        .current_dir(ws.path())
-        .arg("init")
-        .status()
-        .expect("br init failed — is br installed at ~/.local/bin/br?");
-    assert!(status.success(), "br init should succeed");
+    let output = std::process::Command::new(&bead)
+        .current_dir(&remote_workspace)
+        .env("HOME", &test_home)
+        .args(["init", "--prefix", "test"])
+        .output()
+        .expect("bead init failed");
+    assert!(
+        output.status.success(),
+        "bead init should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::fs::write(
+        remote_workspace.join(".needle.yaml"),
+        format!(
+            "bead_cli:\n  backend: bead-rs\n  path: {}\n",
+            bead_wrapper.display()
+        ),
+    )
+    .unwrap();
 
     // Create a ready bead in this workspace.
-    let status = std::process::Command::new(&br)
-        .current_dir(ws.path())
+    let output = std::process::Command::new(&bead)
+        .current_dir(&remote_workspace)
+        .env("HOME", &test_home)
         .args([
             "create",
             "--title",
@@ -1410,17 +1451,18 @@ async fn explore_discovers_work_in_other_workspace() {
             "--description",
             "Ready to work",
         ])
-        .status()
-        .expect("br create failed");
-    assert!(status.success(), "br create should succeed");
-
-    // Home workspace is a separate dir (no beads there).
-    let home_ws = tempfile::tempdir().unwrap();
+        .output()
+        .expect("bead create failed");
+    assert!(
+        output.status.success(),
+        "bead create should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let config = ExploreConfig {
         enabled: true,
-        workspaces: vec![ws.path().to_path_buf()],
-        workspace_root: PathBuf::from("/tmp"),
+        workspaces: vec![remote_workspace.clone()],
+        workspace_root: scan_root.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
@@ -1428,9 +1470,9 @@ async fn explore_discovers_work_in_other_workspace() {
     };
     let strand = ExploreStrand::new(
         config,
-        home_ws.path().to_path_buf(),
-        Registry::new(tempfile::tempdir().unwrap().path()),
-        Telemetry::new("test".to_string()),
+        home_workspace,
+        Registry::new(&scan_root.path().join("registry")),
+        Telemetry::with_log_dir("test".to_string(), &scan_root.path().join("logs")),
         "test-worker".to_string(),
     );
 
@@ -1438,11 +1480,14 @@ async fn explore_discovers_work_in_other_workspace() {
     let dummy_store = ConcurrentMockStore::new(vec![]);
     let result = strand.evaluate(&dummy_store, &HashSet::new()).await;
 
-    assert!(
-        matches!(result, StrandResult::BeadFound(_)),
-        "explore should discover beads in other workspace; got: {:?}",
-        result
-    );
+    match result {
+        StrandResult::BeadFound(beads) => {
+            assert_eq!(beads.len(), 1);
+            assert_eq!(beads[0].title, "Explore integration test bead");
+            assert_eq!(beads[0].workspace, remote_workspace);
+        }
+        other => panic!("explore should discover the remote bead; got: {other:?}"),
+    }
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1698,15 +1743,9 @@ fn create_mitosis_dispatcher(json_response: &str) -> needle::dispatch::Dispatche
     needle::dispatch::Dispatcher::with_adapters(adapters, telemetry, 10)
 }
 
-/// Returns the path to the br CLI binary.
-fn br_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let local = PathBuf::from(&home).join(".local/bin/br");
-    if local.exists() {
-        local
-    } else {
-        PathBuf::from("br")
-    }
+/// Returns the path to the native bead-rs CLI binary.
+fn bead_path() -> PathBuf {
+    which::which("bead").expect("bead CLI must be installed for p2 integration tests")
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
