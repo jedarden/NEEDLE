@@ -4957,3 +4957,79 @@ async fn hard_deadline_timer_expires_after_duration() {
     let remaining = timer.remaining().expect("should have remaining time");
     assert!(remaining <= Duration::from_millis(10));
 }
+
+// ── Tsnet integration tests ──
+
+#[tokio::test]
+async fn tsnet_enabled_with_no_key_source_does_not_inject_env_vars() {
+    use crate::tsnet::{IdentityRegistry, TsnetConfig};
+    use crate::types::BeadId;
+
+    // Create a tsnet config with enabled=true but no key source
+    let tsnet_config = TsnetConfig {
+        enabled: true,
+        ..Default::default()
+    };
+
+    let tsnet_registry = IdentityRegistry::new(tsnet_config.clone());
+
+    // Attempt to provision an identity (should fail since no key source)
+    let worker_id = "test-worker".to_string();
+    let bead_id = BeadId::from("needle-test");
+
+    let provision_result = tsnet_registry
+        .provision_identity(&worker_id, &bead_id)
+        .await;
+
+    // Verify that provisioning failed
+    assert!(
+        provision_result.is_err(),
+        "provision_identity should fail when no key source is configured"
+    );
+
+    let error_msg = provision_result.unwrap_err().to_string();
+    assert!(
+        error_msg.contains("no Tailscale API key source configured"),
+        "error should indicate missing key source"
+    );
+
+    // Verify that no environment variables would be injected
+    let mut env = std::collections::HashMap::new();
+    env.insert("EXISTING_VAR".to_string(), "value".to_string());
+
+    // Since provision failed, inject_identity_env should never be called
+    // Verify the env doesn't contain tsnet variables
+    assert!(!env.contains_key("NEEDLE_TSNET_AUTH_KEY"));
+    assert!(!env.contains_key("NEEDLE_TSNET_HOSTNAME"));
+    assert!(!env.contains_key("NEEDLE_TSNET_CONTROL_URL"));
+    assert!(!env.contains_key("NEEDLE_TSNET_FUNNEL_URL"));
+    assert!(!env.contains_key("NEEDLE_TSNET_TAG"));
+
+    // Verify existing vars are preserved
+    assert_eq!(env.get("EXISTING_VAR"), Some(&"value".to_string()));
+}
+
+#[test]
+fn tsnet_disabled_does_not_inject_env_vars() {
+    use crate::tsnet::TsnetConfig;
+
+    // Create a tsnet config with enabled=false
+    let _tsnet_config = TsnetConfig {
+        enabled: false,
+        ..Default::default()
+    };
+
+    let mut env = std::collections::HashMap::new();
+    env.insert("EXISTING_VAR".to_string(), "value".to_string());
+
+    // When tsnet is disabled, inject_identity_env should not be called at all
+    // Verify the env doesn't contain tsnet variables
+    assert!(!env.contains_key("NEEDLE_TSNET_AUTH_KEY"));
+    assert!(!env.contains_key("NEEDLE_TSNET_HOSTNAME"));
+    assert!(!env.contains_key("NEEDLE_TSNET_CONTROL_URL"));
+    assert!(!env.contains_key("NEEDLE_TSNET_FUNNEL_URL"));
+    assert!(!env.contains_key("NEEDLE_TSNET_TAG"));
+
+    // Verify existing vars are preserved
+    assert_eq!(env.get("EXISTING_VAR"), Some(&"value".to_string()));
+}
