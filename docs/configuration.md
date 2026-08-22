@@ -12,6 +12,106 @@ This guide covers the most commonly used configuration options.
 
 ---
 
+## Configuration Reload Tiers
+
+Not all configuration changes are equal. Changes take effect at three different times:
+
+### Tier A: Live (Takes effect next cycle)
+
+**No rebuild required.** Changes are read from `self.config` and apply immediately on the next worker cycle. No components are reconstructed.
+
+**Effective timing:** Between 0 and `worker.config_reload_check_interval_secs` seconds after the file is saved (default: 0, meaning disabled).
+
+**Keys in this tier:**
+- `worker.idle_timeout` — Backoff duration when no work is found
+- `worker.idle_action` — What to do when idle (wait or exit)
+- `worker.max_claim_retries` — Maximum retry attempts for claim races
+- `agent.timeout` — Agent execution timeout (read fresh per dispatch)
+- `budget.*` — Cost tracking thresholds (warn_usd, stop_usd)
+
+### Tier B: Rebuild (Component reconstruction)
+
+**Component rebuild required.** Changes trigger reconstruction of the subsystem that owns them. The worker continues running; only the affected component is rebuilt.
+
+**Effective timing:** Next cycle after detection, plus time to rebuild the affected component(s).
+
+**Keys in this tier:**
+- `telemetry.*` — Telemetry sinks, OTLP configuration, hooks. **Tracing subscriber is rebuilt.** Turning OTLP on/off takes effect without a restart, but traces from the old configuration remain active until their spans close.
+- `strands.*` — All strand settings (enabled thresholds, cooldowns, max counts). **StrandRunner is rebuilt.**
+- `prompt.*` — Prompt templates, context files, instructions. **PromptBuilder is rebuilt.**
+- `agent.adapters_dir` — Adapter loading path. **Dispatcher is rebuilt.**
+- `agent.routing` — Model-to-adapter routing rules. **Dispatcher is rebuilt.**
+- `limits.*` — Provider/model concurrency and rate limits. **RateLimiter is rebuilt.**
+- `validation.*` — Gate timeouts and output caps. **OutcomeHandler is rebuilt.**
+
+**What happens when a Tier-B component fails to rebuild:** The worker keeps running with the previous instance of that component. A `config.reload.rejected` telemetry event is emitted with the error. The worker does not crash.
+
+### Tier C: Restart-Required (Cannot be applied to a running worker)
+
+**Worker restart required.** These keys are locked at boot time and cannot be changed safely without restarting the process.
+
+**Keys in this tier:**
+- `worker.config_reload_check_interval_secs` — The reload mechanism itself cannot be enabled/disabled or reconfigured from within a running worker (a worker started with `0` cannot discover a change that turns it on).
+- `worker.identifier_scheme` — Worker identity naming (NATO, custom) — locked into `qualified_id` at boot.
+- `workspace.home` — State directory path — heartbeats, logs, and registry paths are resolved once at startup.
+- `bead_cli.backend` — Bead store binding — changing mid-session would break in-progress claims and strand state.
+- `tokio runtime` configuration (if exposed) — Runtime shape is process-global.
+- `tracing-stack` shape (subscriber layers) — The tracing subscriber is installed once at boot; changing what layers are present cannot be done safely mid-process.
+
+**What happens when you change a Tier-C key:** The change is detected, a `config.reload.restart_required` telemetry event is emitted naming the changed keys, and the WARN is logged. The worker continues running with the previous value. You must restart the worker to apply the change.
+
+### How Reload Detection Works
+
+1. **Polling check:** Every `worker.config_reload_check_interval_secs` (default: `0` = disabled), after a bead completes and before the next selection cycle, the worker checks:
+   - Global config file mtime + content hash (`~/.config/needle/config.yaml`)
+   - Active workspace `.needle.yaml` mtime + content hash
+   - Per-section hashing identifies which config subtree changed
+
+2. **Validation:** The candidate config is fully validated before any swap. If invalid, the reload is rejected:
+   - `config.reload.rejected` telemetry event emitted
+   - WARN logged with validation errors
+   - Worker continues on the previous config
+   - No retry — fix the config, it will be picked up on the next check
+
+3. **Swap:** All-or-nothing. No half-applied configuration is ever observable.
+
+4. **Component rebuild:** Tier-B components are rebuilt. If a rebuild fails:
+   - Component keeps its previous instance
+   - `config.reload.component_rebuild_failed` telemetry event emitted
+   - Other components proceed with their new instances
+   - Worker continues running
+
+5. **Tier-C rejection:** Changes to Tier-C keys emit `config.reload.restart_required` and are not applied.
+
+### Operational Guidance
+
+**Enabling OTLP fleet-wide (the 2026-08-21 use case):**
+- Pre-condition: Set `worker.config_reload_check_interval_secs: 30` (or similar) and restart all workers. A worker started with `0` cannot discover the config that would enable polling.
+- Apply: Set `telemetry.otlp_sink.enabled: true` in global config
+- Result: Within one poll interval (max 30s), all workers rebuild their telemetry writer and begin exporting
+- Contrast: Without reload, this required draining all workers (~55 minutes for 15 workers on ex44), releasing their claimed beads, and relaunching.
+
+**Changing strand behavior:**
+- Tier B: `strands.pluck.split_after_failures`, `strands.explore.scan_interval_cycles`, `strands.mitosis.*`
+- Apply: Edit config, wait ≤ one interval
+- Result: StrandRunner is rebuilt; next strand evaluation uses the new thresholds
+
+**Changing worker identity:**
+- Tier C: `worker.identifier_scheme` (nato → custom), any change that would alter `qualified_id` construction
+- Apply: Worker restart required
+- Why: Heartbeat files, registry entries, and telemetry `service.instance.id` all embed `qualified_id`. Changing it mid-session would fragment identity and break peer monitoring.
+
+**Getting the live config:**
+- `needle config --dump --show-source` shows the **live** config of a running worker, including a reload generation counter
+- This reflects what the worker is actually running, not just what the file says
+
+### See Also
+
+- [ADR-017: Configuration Hot-Reload at the Cycle Boundary](../adr/017-configuration-hot-reload-at-the-cycle-boundary.md) — Full design rationale, implementation details, and failure-mode analysis
+- [Phase 18 in plan.md](../docs/plan/plan.md#phase-18-configuration-hot-reload-at-the-cycle-boundary) — Implementation status and exit criteria
+
+---
+
 ## Worker Configuration
 
 The `worker` section controls fleet behavior and worker spawning.
