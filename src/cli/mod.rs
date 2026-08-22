@@ -17,7 +17,9 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::bead_store::{spawn_with_etxtbsy_retry_sync_child, BeadStore};
-use crate::config::{CliOverrides, Config, ConfigLoader, StdoutSinkConfig};
+use crate::config::{
+    CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap, StdoutSinkConfig,
+};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
 use crate::rate_limit::RateLimiter;
@@ -229,6 +231,14 @@ pub enum CliCommand {
         /// Show source annotations (requires --dump).
         #[arg(long)]
         show_source: bool,
+
+        /// Show live config from running workers (requires --dump).
+        ///
+        /// When enabled, displays the actual configuration in use by running workers,
+        /// including the reload generation counter. This allows operators to confirm
+        /// what workers are actually running rather than what the config files say.
+        #[arg(long)]
+        live: bool,
     },
 
     /// Check system health and repair.
@@ -450,7 +460,8 @@ pub fn run() -> Result<()> {
             set,
             dump,
             show_source,
-        } => cmd_config(get, set, dump, show_source),
+            live,
+        } => cmd_config(get, set, dump, show_source, live),
         CliCommand::Doctor { repair, workspace } => cmd_doctor(repair, workspace),
         CliCommand::Init => cmd_init(),
         CliCommand::Version => {
@@ -512,10 +523,11 @@ fn cmd_run(
         max_workers: None,
         ..Default::default()
     };
-    let (mut config, _) = ConfigLoader::load_resolved(&workspace_root, cli_overrides)?;
+    let (mut config, mut sources) = ConfigLoader::load_resolved(&workspace_root, cli_overrides)?;
 
     if let Some(t) = timeout {
         config.agent.timeout = t;
+        sources.insert("agent.timeout".to_string(), ConfigSource::CliOverride);
     }
 
     if let Some(hr) = hot_reload {
@@ -566,7 +578,7 @@ fn cmd_run(
             new_hash: current_hash,
         })?;
 
-        return run_worker(config, worker_id);
+        return run_worker(config, worker_id, sources);
     }
 
     if is_needle_inner() {
@@ -578,7 +590,7 @@ fn cmd_run(
         let agent_name = agent.as_deref().unwrap_or(&config.agent.default);
         let session_name = sanitize_session_name(&format!("needle-{agent_name}-{worker_id}"));
         tracing::info!(worker = %worker_id, session = %session_name, "starting worker (inner re-entrant invocation)");
-        run_worker(config, worker_id)
+        run_worker(config, worker_id, sources)
     } else {
         // Always create dedicated tmux sessions, even if already inside tmux.
         launch_workers(
@@ -1029,7 +1041,7 @@ fn generate_session_id_for_worker() -> String {
 /// so that `worker.booting` is the very first JSONL event. Each subsequent
 /// init step is wrapped with `init.step.started` / `init.step.completed` so a
 /// silent hang pinpoints the exact blocking call.
-fn run_worker(config: Config, worker_name: String) -> Result<()> {
+fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) -> Result<()> {
     let boot_start = Instant::now();
     let qualified_id = format!("{}-{}", config.agent.default, worker_name);
     let telemetry_identity = worker_telemetry_identity(&config);
@@ -1196,11 +1208,12 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
 
     // Phase 3: worker construction (heavy — prompt loading, adapter discovery, etc.).
     let mut worker = init_step("worker_construction", &telemetry, || {
-        Ok(Worker::new_with_telemetry(
+        Ok(Worker::new_with_telemetry_and_sources(
             config,
             worker_name.clone(),
             store,
             telemetry.clone(),
+            config_sources,
         ))
     })?;
 
@@ -3299,9 +3312,13 @@ fn cmd_config(
     set: Option<Vec<String>>,
     dump: bool,
     show_source: bool,
+    live: bool,
 ) -> Result<()> {
     if show_source && !dump {
         bail!("--show-source requires --dump");
+    }
+    if live && !dump {
+        bail!("--live requires --dump");
     }
 
     let workspace_root = std::env::current_dir().unwrap_or_default();
@@ -3322,6 +3339,13 @@ fn cmd_config(
     }
 
     if dump {
+        // A source-annotated dump is also the operator-facing live view when
+        // workers are running. Keep --live as an explicit compatibility flag
+        // for callers that want the same view without source annotations.
+        if live || show_source {
+            return dump_live_config(&config, &sources, show_source, live);
+        }
+
         if show_source {
             let lines = ConfigLoader::dump_with_sources(&config, &sources);
             for line in &lines {
@@ -3420,6 +3444,132 @@ fn handle_config_set_stub(set_args: Vec<String>) -> Result<()> {
 
     println!("\nset not yet implemented");
     Ok(())
+}
+
+/// Dump the configuration snapshots published by running workers.
+///
+/// A worker owns the authoritative snapshot because its in-memory config can
+/// differ from the files currently on disk after a hot reload. If a worker was
+/// started by an older binary and has no snapshot yet, the resolved config is
+/// shown with an explicit warning rather than being presented as live state.
+fn dump_live_config(
+    config: &Config,
+    sources: &SourceMap,
+    show_source: bool,
+    explicit_live: bool,
+) -> Result<()> {
+    use crate::registry::Registry;
+
+    let needle_home = &config.workspace.home;
+    let registry = Registry::default_location(needle_home);
+
+    let workers = match registry.list() {
+        Ok(workers) => workers,
+        Err(e) => {
+            println!(
+                "# No worker registry found ({}): no running workers to inspect",
+                e
+            );
+            println!("# The registry is created when workers start. Run 'needle status' to see active workers.");
+            return Ok(());
+        }
+    };
+
+    if workers.is_empty() {
+        if explicit_live {
+            println!("# No workers registered (registry is empty): no running workers to inspect");
+            println!(
+                "# Workers register when they start. Run 'needle status' to verify fleet state."
+            );
+        } else {
+            // `--show-source` remains useful on a stopped fleet; there is no
+            // live snapshot to prefer, so retain the ordinary resolved view.
+            for line in ConfigLoader::dump_with_sources(config, sources) {
+                println!("{line}");
+            }
+        }
+        return Ok(());
+    }
+
+    println!(
+        "# Live configuration from {} running worker(s):",
+        workers.len()
+    );
+    println!("#");
+
+    // Each worker can be at a different reload generation, so print its
+    // snapshot next to its identity rather than printing one shared config.
+    for worker in &workers {
+        println!("# Worker: {} (PID: {}) — ALIVE", worker.id, worker.pid);
+        println!(
+            "#   Started: {}",
+            worker.started_at.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+        println!("#   Agent: {}", worker.agent);
+        if let Some(provider) = &worker.provider {
+            println!("#   Provider: {}", provider);
+        }
+        if let Some(model) = &worker.model {
+            println!("#   Model: {}", model);
+        }
+        println!("#   Workspace: {}", worker.workspace.display());
+        println!("#   Beads processed: {}", worker.beads_processed);
+        println!(
+            "#   Config reload generation: {}",
+            worker.config_reload_generation
+        );
+        match registry.live_config(&worker.id) {
+            Ok(Some(snapshot)) => {
+                println!("#   Live config snapshot: available");
+                let lines = live_snapshot_values(&snapshot, show_source);
+                for line in lines {
+                    println!("{line}");
+                }
+                if snapshot.reload_generation != worker.config_reload_generation {
+                    println!(
+                        "#   Warning: snapshot generation {} differs from registry generation {}",
+                        snapshot.reload_generation, worker.config_reload_generation
+                    );
+                }
+            }
+            Ok(None) => {
+                println!("#   Live config snapshot: unavailable (worker predates live-config publishing)");
+                print_fallback_config(config, sources, show_source);
+            }
+            Err(error) => {
+                println!("#   Live config snapshot: unavailable ({error})");
+                print_fallback_config(config, sources, show_source);
+            }
+        }
+        println!("#");
+    }
+
+    println!("# Tip: Values above come from each worker's published in-memory snapshot.");
+
+    Ok(())
+}
+
+fn print_fallback_config(config: &Config, sources: &SourceMap, show_source: bool) {
+    if show_source {
+        for line in ConfigLoader::dump_with_sources(config, sources) {
+            println!("#   {line}");
+        }
+    } else {
+        for line in config_dump(config) {
+            println!("#   {line}");
+        }
+    }
+}
+
+fn live_snapshot_values(
+    snapshot: &crate::registry::LiveConfigSnapshot,
+    show_source: bool,
+) -> &[String] {
+    if show_source {
+        &snapshot.values_with_sources
+    } else {
+        &snapshot.values
+    }
 }
 
 /// Look up a single config key by dot-separated path.
@@ -6079,6 +6229,24 @@ mod tests {
         assert!(lines
             .iter()
             .any(|l| l.starts_with("health.heartbeat_ttl_secs:")));
+    }
+
+    #[test]
+    fn live_snapshot_source_view_uses_worker_values() {
+        let snapshot = crate::registry::LiveConfigSnapshot {
+            values: vec!["worker.max_workers: 4".to_string()],
+            values_with_sources: vec!["worker.max_workers: 4 (from: built-in default)".to_string()],
+            reload_generation: 1,
+        };
+
+        assert_eq!(
+            live_snapshot_values(&snapshot, true),
+            &["worker.max_workers: 4 (from: built-in default)".to_string()]
+        );
+        assert_eq!(
+            live_snapshot_values(&snapshot, false),
+            &["worker.max_workers: 4".to_string()]
+        );
     }
 
     // TODO: Re-enable these tests when apply_config_set is implemented

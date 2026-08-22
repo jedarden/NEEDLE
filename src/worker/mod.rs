@@ -33,7 +33,7 @@ use crate::bead_store::BeadStore;
 use crate::canary::CanaryRunner;
 use crate::claim::Claimer;
 use crate::commit_hook;
-use crate::config::{Config, ConfigLoader};
+use crate::config::{CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap};
 use crate::cost::{self, BudgetCheck, EffortData};
 use crate::dispatch::{self, Dispatcher};
 use crate::health::HealthMonitor;
@@ -41,7 +41,7 @@ use crate::mitosis::{detects_needle_internal_config, MitosisEvaluator};
 use crate::outcome::OutcomeHandler;
 use crate::prompt::{BuiltPrompt, PromptBuilder};
 use crate::rate_limit::RateLimiter;
-use crate::registry::{Registry, WorkerEntry};
+use crate::registry::{LiveConfigSnapshot, Registry, WorkerEntry};
 use crate::routing;
 use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
@@ -66,6 +66,13 @@ fn truncate_for_display(s: &str, max_len: usize) -> &str {
         Some((idx, _)) => &s[..idx],
         None => s, // String is shorter than max_len, return as-is
     }
+}
+
+/// Remove the trailing source annotation from a formatted config dump line.
+fn strip_source_annotation(line: &str) -> String {
+    line.rsplit_once(" (from: ")
+        .and_then(|(value, source)| source.strip_suffix(')').map(|_| value.to_string()))
+        .unwrap_or_else(|| line.to_string())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -491,6 +498,8 @@ fn install_rebuilt_component<T>(
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
     config: Config,
+    /// Source annotations belonging to the configuration snapshot in use.
+    config_sources: SourceMap,
     worker_name: String,
     store: Arc<dyn BeadStore>,
     /// Home workspace store — kept for restore after processing a remote bead.
@@ -568,6 +577,11 @@ pub struct Worker {
     /// Fingerprint of the global configuration file observed by the last
     /// completed configuration reload check.
     config_reload_fingerprint: Option<ConfigFileFingerprint>,
+    /// Number of times the configuration has been successfully reloaded since boot.
+    /// Incremented each time a validated configuration is applied at the cycle boundary.
+    /// This counter is exposed via `needle config --dump --live` so operators can
+    /// confirm what a running worker is actually using rather than what the file says.
+    config_reload_generation: u64,
     /// The current bead lifecycle span. Created when a bead is claimed and
     /// instrumented onto each state-handler future until the lifecycle ends.
     ///
@@ -599,7 +613,28 @@ impl Worker {
         store: Arc<dyn BeadStore>,
         telemetry: Telemetry,
     ) -> Self {
-        Self::build(config, worker_name, store, telemetry, true)
+        Self::new_with_telemetry_and_sources(
+            config,
+            worker_name,
+            store,
+            telemetry,
+            SourceMap::new(),
+        )
+    }
+
+    /// Construct a worker with the source map from its resolved boot config.
+    ///
+    /// The source map is retained so the worker can publish source annotations
+    /// that describe the snapshot it is actually running, including after a
+    /// hot reload.
+    pub fn new_with_telemetry_and_sources(
+        config: Config,
+        worker_name: String,
+        store: Arc<dyn BeadStore>,
+        telemetry: Telemetry,
+        config_sources: SourceMap,
+    ) -> Self {
+        Self::build(config, worker_name, store, telemetry, config_sources, true)
     }
 
     /// Construct a worker from config, a worker name, and a bead store implementation.
@@ -614,7 +649,14 @@ impl Worker {
                 tracing::warn!(error = %e, "failed to create hook-enabled telemetry, falling back");
                 Telemetry::new(qualified_id.clone())
             });
-        Self::build(config, worker_name, store, telemetry, false)
+        Self::build(
+            config,
+            worker_name,
+            store,
+            telemetry,
+            SourceMap::new(),
+            false,
+        )
     }
 
     /// Shared construction logic used by both [`new`] and [`new_with_telemetry`].
@@ -623,6 +665,7 @@ impl Worker {
         worker_name: String,
         store: Arc<dyn BeadStore>,
         telemetry: Telemetry,
+        config_sources: SourceMap,
         booting_emitted: bool,
     ) -> Self {
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);
@@ -821,6 +864,7 @@ impl Worker {
 
         let worker = Worker {
             config,
+            config_sources,
             worker_name,
             home_store: store.clone(),
             store,
@@ -868,6 +912,7 @@ impl Worker {
             stale_binary_warned: false,
             last_config_reload_check: None,
             config_reload_fingerprint,
+            config_reload_generation: 0,
         };
 
         // Warn if both budget thresholds are disabled (0.0 = no cap).
@@ -1316,6 +1361,7 @@ impl Worker {
             provider: self.resolve_provider(),
             started_at: chrono::Utc::now(),
             beads_processed: 0,
+            config_reload_generation: self.config_reload_generation,
         };
         if let Err(e) = self.registry.register(entry.clone()) {
             // Log to both tracing and stderr for visibility
@@ -1328,6 +1374,9 @@ impl Worker {
             );
             eprintln!("       The worker will continue running but will not appear in 'needle status' or 'needle list'.");
             eprintln!("       This indicates a problem with ~/.needle/state/workers.json - check permissions and disk space.");
+        }
+        if let Err(e) = self.publish_live_config_snapshot() {
+            tracing::warn!(error = %e, "failed to publish live config snapshot");
         }
         self.telemetry.emit(EventKind::InitStepCompleted {
             step: "registry_registration".to_string(),
@@ -3753,7 +3802,13 @@ impl Worker {
                 changed_keys.sort();
                 changed_keys.dedup();
                 if !changed_keys.is_empty() {
-                    tracing::info!(changed_keys = ?changed_keys, "applied configuration at cycle boundary");
+                    self.config_sources = self.reload_source_map();
+                    self.config_reload_generation += 1;
+                    tracing::info!(
+                        changed_keys = ?changed_keys,
+                        reload_generation = self.config_reload_generation,
+                        "applied configuration at cycle boundary"
+                    );
                     if let Err(error) =
                         self.telemetry
                             .emit_try_lock(EventKind::ConfigReloadApplied {
@@ -3761,6 +3816,10 @@ impl Worker {
                             })
                     {
                         tracing::warn!(error = %error, "failed to emit config.reload.applied");
+                    }
+                    // Update registry to reflect new reload generation
+                    if let Err(e) = self.update_registry_entry() {
+                        tracing::warn!(error = %e, "failed to update registry after config reload");
                     }
                 }
             }
@@ -4810,6 +4869,78 @@ impl Worker {
     /// collisions when workers from different adapter pools share a NATO name.
     fn qualified_id(&self) -> String {
         format!("{}-{}", self.config.agent.default, self.worker_name)
+    }
+
+    /// Update the worker's registry entry after state changes (e.g., config reload).
+    ///
+    /// This is called after a successful config reload to update the
+    /// `config_reload_generation` field in the registry, so external tools
+    /// like `needle config --dump --live` can see the current reload generation.
+    fn update_registry_entry(&self) -> Result<()> {
+        let entry = crate::registry::WorkerEntry {
+            id: self.qualified_id(),
+            pid: std::process::id(),
+            workspace: self.config.workspace.default.clone(),
+            agent: self.config.agent.default.clone(),
+            model: None,
+            provider: self.resolve_provider(),
+            started_at: chrono::Utc::now(),
+            beads_processed: self.beads_processed,
+            config_reload_generation: self.config_reload_generation,
+        };
+        self.registry.register(entry)?;
+        self.publish_live_config_snapshot()
+    }
+
+    /// Publish the safe, user-facing portion of the running configuration.
+    ///
+    /// The worker owns this snapshot because the CLI process cannot inspect
+    /// another process's in-memory configuration.  Only the fields already
+    /// exposed by `config --dump` are persisted; resolved secrets are never
+    /// copied to the registry state directory.
+    fn publish_live_config_snapshot(&self) -> Result<()> {
+        let values_with_sources =
+            ConfigLoader::dump_with_sources(&self.config, &self.config_sources);
+        let values = values_with_sources
+            .iter()
+            .map(|line| strip_source_annotation(line))
+            .collect();
+        self.registry.update_live_config(
+            &self.qualified_id(),
+            LiveConfigSnapshot {
+                values,
+                values_with_sources,
+                reload_generation: self.config_reload_generation,
+            },
+        )
+    }
+
+    /// Re-resolve source annotations after a successful reload.
+    ///
+    /// The running config retains CLI overrides from boot even though the
+    /// reload candidate is loaded from the global file. Preserve those source
+    /// labels while refreshing file/env annotations for newly applied values.
+    fn reload_source_map(&self) -> SourceMap {
+        let workspace = self.config.workspace.default.clone();
+        let mut refreshed = ConfigLoader::load_resolved(
+            &workspace,
+            CliOverrides {
+                workspace: Some(workspace.clone()),
+                ..Default::default()
+            },
+        )
+        .map(|(_, sources)| sources)
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "failed to refresh live config source annotations");
+            self.config_sources.clone()
+        });
+
+        for (key, source) in &self.config_sources {
+            if matches!(source, ConfigSource::CliOverride) {
+                refreshed.insert(key.clone(), source.clone());
+            }
+        }
+        refreshed
     }
 
     /// Build the current exclusion set, pruning expired race-lost entries.
