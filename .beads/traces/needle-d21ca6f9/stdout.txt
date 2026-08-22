@@ -1,8 +1,0 @@
-Implemented and shipped.
-
-- Added `worker.config_reload_check_interval_secs` (default `0`).
-- Classified it as Tier C/restart-required.
-- Added validation, parsing, and tier tests.
-- Documented in [configuration.md](/home/coding/NEEDLE/docs/configuration.md).
-- Fast verification passed.
-- Committed/pushed as `fad2cab`; bead closed.

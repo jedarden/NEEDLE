@@ -1,7 +1,0 @@
-Implemented and pushed as `435fb53`.
-
-- Added interval-gated `check_config_reload()` after `do_log()` and hot-reload checks.
-- Detects changes using both mtime and SHA-256 content hash.
-- Keeps SIGHUP reserved for shutdown.
-- Added focused tests; fast definition-of-done passed.
-- Closed bead `needle-dd697601`.

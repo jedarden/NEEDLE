@@ -1,9 +1,0 @@
-Implemented and pushed roaming-workspace telemetry.
-
-- Shared workspace cell updated on successful claims.
-- All emit paths now include the current workspace.
-- Backend `"."` paths are corrected before dispatch.
-- OTLP export remains basename-only.
-- Added same-session workspace-switch and claim propagation tests.
-
-Verification passed for focused telemetry, claim, sync emit, and OTLP tests. Bead `needle-5359b52a` is closed. Remote `main`: `f45a8c3`.

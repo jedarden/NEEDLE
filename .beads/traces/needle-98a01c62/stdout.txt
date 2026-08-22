@@ -1,8 +1,0 @@
-Implemented and pushed `b07819d`.
-
-- Sanitization now returns `unknown` for empty/root-like paths.
-- Added regression coverage for root and trailing-slash paths.
-- `cargo test --lib strand::pluck::tests`: 37 passed.
-- Production `cargo clippy --lib`: passed.
-- Full fast gate remains blocked by unrelated integration-test compile errors.
-- Bead `needle-98a01c62` closed.

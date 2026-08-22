@@ -1,6 +1,0 @@
-Already completed by commit `9433776` (`needle-c3e2cb9a`).
-
-- Confirmed all waits in [dispatch/mod.rs](/home/coding/NEEDLE/src/dispatch/mod.rs:1534) use the shared `ProcessGuard`.
-- `./scripts/definition-of-done.sh --fast` passed: fmt, Clippy, and cargo check.
-- Recorded the duplicate finding and closed `needle-84894461`.
-- No new commit or push was created because no source changes were needed.

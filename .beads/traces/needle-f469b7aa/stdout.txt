@@ -1,6 +1,0 @@
-Task was already complete in the checkout:
-
-- `dead_worker_cleanup_integration` uses the shared `ProcessGuard`.
-- No local guard or direct `child.wait()` remains.
-- Bead `needle-f469b7aa` was updated and closed.
-- Verification was blocked by unrelated existing compile errors; no source changes, commit, or push were needed.

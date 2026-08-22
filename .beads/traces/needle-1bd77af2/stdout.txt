@@ -1,8 +1,0 @@
-Implemented and pushed as `2c3eae3`.
-
-- Routed adapters now require `<adapters_dir>/<adapter>.yaml` or `.yml`; built-in fallback is prevented.
-- Errors include model, matched pattern, and missing path.
-- Added focused unit test.
-- Bead closed.
-
-`rustfmt` passed for the changed file. Targeted tests were blocked by pre-existing repository compile errors.

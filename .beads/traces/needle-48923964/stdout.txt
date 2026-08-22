@@ -1,5 +1,0 @@
-Blocked and recorded on `needle-48923964` (left open, not closed).
-
-The 14 live stable workers booted with config reload disabled (`worker.config_reload_check_interval_secs` absent → default `0`); the target worker has no override. Any edit would be ignored without a restart.
-
-Also, `needle-stable config --dump --show-source` omits both required keys, so criterion 3 currently cannot pass. No fleet config, worker process, bead claim, or OTLP header was touched.

@@ -1,8 +1,0 @@
-Implemented and shipped atomic Tier-A config reloads.
-
-- Copies live fields into a pending snapshot, then assigns `self.config` once.
-- Preserves Tier-B/C fields and emits `config.reload.applied`.
-- Added regression coverage.
-- Fast verification passed.
-- Commit `735a3a8` pushed to `origin/main`.
-- Bead `needle-4f5c0143` closed.

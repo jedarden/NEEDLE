@@ -1,6 +1,0 @@
-Implemented and pushed as `12ca2ab`.
-
-- Superseded claims are reaped before worker liveness/self-identity checks.
-- Added a live-worker fixture: 3 recent claims → older 2 released, newest preserved.
-- Verified `cargo fmt`, Clippy, and all 98 Mend tests.
-- Closed bead `needle-d9a36be9`.

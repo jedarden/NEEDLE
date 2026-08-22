@@ -1,8 +1,0 @@
-Benchmark verification passed and bead `needle-5ec767a9` is closed.
-
-- Full `cargo bench --bench sanitize` completed successfully.
-- Reported p95: 10KB `1.35 ms`, 100KB `8.88 ms`, 1MB `84.63 ms`, dedicated percentile run `7.42 ms`.
-- All values were positive, plausible, and between median and p99.
-- Aggregation, correctness, and formatting tests: 18/18 passed.
-- `scripts/definition-of-done.sh --fast`: all 3 checks passed.
-- No source changes were needed, so no commit or push was created. Existing unrelated workspace changes were preserved.

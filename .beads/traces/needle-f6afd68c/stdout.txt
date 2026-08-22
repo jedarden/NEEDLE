@@ -1,8 +1,0 @@
-Implemented and pushed:
-
-- Mend now reclaims in-progress claims older than configurable `stuck_threshold_secs`, regardless of worker liveness.
-- Added regression coverage for stale claims held by live workers and fresh live claims.
-- Commit: `ecc207d` (pushed via `fcec280`)
-- Bead closed and checkpoint flushed.
-
-`rustfmt` passed. Focused tests were blocked by unrelated existing compile errors in outcome/validation.

@@ -1,7 +1,0 @@
-Completed and pushed.
-
-- Added 14 test failure sections with exact errors and full backtraces to [test_error_details.md](/home/coding/NEEDLE/test_error_details.md).
-- Verified 14/14 traces and no omitted frames.
-- Fast definition-of-done checks passed.
-- Commit: `a1dfebb`
-- Bead `needle-29956e6a` closed.

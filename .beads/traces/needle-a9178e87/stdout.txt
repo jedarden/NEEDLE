@@ -1,9 +1,0 @@
-Implemented and pushed in commit `823a089`.
-
-- Added all four `config.reload.*` EventKind variants and metadata-only payloads in [src/telemetry/mod.rs](/home/coding/NEEDLE/src/telemetry/mod.rs:650).
-- Added exact event-name/payload regression coverage.
-- Focused unit test passed.
-- `scripts/definition-of-done.sh --fast` passed: fmt, Clippy, and cargo check.
-- Bead `needle-a9178e87` closed.
-
-Unrelated `tests/integration_tests.rs` work remains unstaged and uncommitted.

@@ -1,7 +1,0 @@
-Implemented and pushed as `74c7d62`.
-
-- OTLP and disabled configurations now install `reload::Layer` unconditionally.
-- Disabled OTLP uses a no-op `Identity` layer.
-- Reload handle is retained for the worker lifetime.
-- Fast DoD, default/no-default checks, and library clippy passed.
-- Bead `needle-924fa47e` closed.

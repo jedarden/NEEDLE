@@ -1,7 +1,0 @@
-Verified successfully:
-
-- Rust 1.95.0 active and pinned; satisfies MSRV 1.75.
-- Cargo, rustfmt, Clippy, targets, and components available.
-- Core tools installed: `gcc/cc`, `make`, `pkg-config`, `git`, `curl`, `jq`, `openssl`.
-- `cargo check`, Clippy, fast definition-of-done, and `cargo build --bins` passed.
-- No source/config changes required; bead updated and closed.

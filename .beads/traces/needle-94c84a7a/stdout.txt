@@ -1,9 +1,0 @@
-Implemented and pushed `needle config --dump --show-source` live worker reporting.
-
-- Worker-owned config snapshots with source annotations
-- Reload generation counter per worker
-- Snapshot cleanup on worker deregistration
-- Regression tests added
-- Fast definition-of-done passed
-- Pushed as `4fb7d37`
-- Bead `needle-94c84a7a` closed

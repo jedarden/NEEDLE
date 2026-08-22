@@ -1,9 +1,0 @@
-Verification complete; bead `needle-6769220f` closed.
-
-- `cargo fmt --check`, Clippy, and fast definition-of-done passed.
-- Dispatch unit tests: 143 passed.
-- ProcessGuard integration tests: 4 passed.
-- No raw `child.wait()` remains in dispatch wait paths; no zombies observed.
-- No repository changes were needed, so no commit or push.
-
-Legacy heartbeat/subprocess fixtures still have unrelated bead-backend/CLI assumptions.

@@ -1,9 +1,0 @@
-Implemented and shipped.
-
-- Added ordered `ReplaceSinks` control messages and `Telemetry::replace_sinks`.
-- Added regression coverage for queued-event preservation.
-- Verification passed: targeted test and `scripts/definition-of-done.sh --fast`.
-- Commit pushed: `9c89574`
-- Bead `needle-df95d0c8` closed.
-
-Changes: [src/telemetry/mod.rs](/home/coding/NEEDLE/src/telemetry/mod.rs)

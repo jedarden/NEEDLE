@@ -1,3 +1,0 @@
-The regression was already fixed in `b07819d`; the sanitizer correctly returns `"unknown"` for empty/root-like paths. The named test passes.
-
-The full fast gate remains blocked by unrelated staged test changes. Bead `needle-d97cfad4` was updated and closed. No source changes were needed, so no commit or push was made.
