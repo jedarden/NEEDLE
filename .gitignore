@@ -12,9 +12,20 @@ test_output*
 p95_*
 *_output.txt
 
+# Test failure analysis reports (stale mislead workers investigating current CI state)
+test_error_details.md
+test_error_messages.txt
+test_failure_analysis_report.md
+failed_tests_stack_traces.txt
+test_stack_traces*.txt
+test_stack_traces_*.txt
+verification-failing-tests-list-*.md
+
 # Benchmark artifacts
 benchmark_*.txt
 full_benchmark.txt
+benchmark_output*.txt
+benchmark_*_verification.txt
 
 # Cargo install metadata (never belongs in a repo)
 .crates.toml
