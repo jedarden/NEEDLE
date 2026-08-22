@@ -281,7 +281,7 @@ impl PluckStrand {
 fn sanitize_workspace_name(workspace_path: &str) -> String {
     workspace_path
         .rsplit('/')
-        .next()
+        .find(|component| !component.is_empty())
         .unwrap_or("unknown")
         .chars()
         .map(|c| {
@@ -2459,6 +2459,9 @@ mod tests {
         );
         assert_eq!(sanitize_workspace_name("NEEDLE"), "NEEDLE");
         assert_eq!(sanitize_workspace_name(""), "unknown");
+        assert_eq!(sanitize_workspace_name("/"), "unknown");
+        assert_eq!(sanitize_workspace_name("////"), "unknown");
+        assert_eq!(sanitize_workspace_name("/home/coding/NEEDLE/"), "NEEDLE");
     }
 
     #[test]
