@@ -1095,6 +1095,30 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
         .context("writer thread failed to start")?;
     eprintln!("NEEDLE worker boot: writer thread started");
 
+    // Host-local housekeeping runs after telemetry is available but before the
+    // bead store is opened, so no claim can precede the sweep. Exclude cleanup
+    // time from the 60-second initialization watchdog: reclaiming a very large
+    // stale tree may legitimately take longer than worker construction.
+    let scratch_sweep_started = Instant::now();
+    match init_step("scratch_sweep", &telemetry, || {
+        crate::scratch_sweep::sweep_home_scratch(&config.worker.scratch_sweep)
+    }) {
+        Ok(outcome) => record_scratch_sweep_outcome(&telemetry, &outcome),
+        Err(error) => {
+            tracing::warn!(error = %error, "scratch startup sweep failed; worker startup will continue");
+            let _ = telemetry.emit(EventKind::Log {
+                phase: "scratch_sweep".to_string(),
+                context: serde_json::json!({
+                    "status": "failed",
+                    "error": error.to_string(),
+                }),
+                level: "warn".to_string(),
+                bead_id: None,
+            });
+        }
+    }
+    let scratch_sweep_elapsed = scratch_sweep_started.elapsed();
+
     // Phase 1: open only the backend explicitly bound by this workspace.
     // Binary availability is not evidence of store ownership.
     let store = init_step("bead_store_discover", &telemetry, || {
@@ -1181,7 +1205,10 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
     })?;
 
     // Boot timeout guard: self-abort if init took >60 s.
-    let elapsed_ms = boot_start.elapsed().as_millis() as u64;
+    let elapsed_ms = boot_start
+        .elapsed()
+        .saturating_sub(scratch_sweep_elapsed)
+        .as_millis() as u64;
     if elapsed_ms > 60_000 {
         telemetry.emit(EventKind::WorkerBootTimeout { elapsed_ms })?;
         bail!("boot exceeded 60 s ({elapsed_ms} ms), aborting");
@@ -1194,6 +1221,61 @@ fn run_worker(config: Config, worker_name: String) -> Result<()> {
 
     tracing::info!(final_state = %result, "worker finished");
     Ok(())
+}
+
+fn record_scratch_sweep_outcome(
+    telemetry: &Telemetry,
+    outcome: &crate::scratch_sweep::SweepOutcome,
+) {
+    use crate::scratch_sweep::SweepOutcome;
+
+    let (level, context) = match outcome {
+        SweepOutcome::Disabled => ("debug", serde_json::json!({ "status": "disabled" })),
+        SweepOutcome::ScratchDirectoryMissing { path } => (
+            "debug",
+            serde_json::json!({
+                "status": "scratch_directory_missing",
+                "path": path,
+            }),
+        ),
+        SweepOutcome::AlreadyRunning => {
+            ("debug", serde_json::json!({ "status": "already_running" }))
+        }
+        SweepOutcome::Completed(report) => {
+            let removed = report
+                .removed
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "path": entry.path,
+                        "bytes_reclaimed": entry.bytes_reclaimed,
+                    })
+                })
+                .collect::<Vec<_>>();
+            (
+                "info",
+                serde_json::json!({
+                    "status": "completed",
+                    "entries_examined": report.entries_examined,
+                    "stale_candidates": report.stale_candidates,
+                    "removed_count": report.removed.len(),
+                    "removed": removed,
+                    "skipped_live": report.skipped_live,
+                    "skipped_safety": report.skipped_safety,
+                    "bytes_reclaimed": report.bytes_reclaimed,
+                }),
+            )
+        }
+    };
+
+    if let Err(error) = telemetry.emit(EventKind::Log {
+        phase: "scratch_sweep".to_string(),
+        context,
+        level: level.to_string(),
+        bead_id: None,
+    }) {
+        tracing::warn!(error = %error, "failed to emit scratch sweep telemetry");
+    }
 }
 
 /// Emit start/complete telemetry around a fallible initialization step.

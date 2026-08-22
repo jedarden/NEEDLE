@@ -241,6 +241,46 @@ impl AgentConfig {
     }
 }
 
+/// Startup cleanup for disposable fleet checkouts under `$HOME/scratch`.
+///
+/// This is a host-level operational setting, so it is read from the global
+/// config and requires a worker restart to change.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScratchSweepConfig {
+    /// Whether workers sweep stale disposable checkouts before claiming work.
+    #[serde(default = "ScratchSweepConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Minimum age of a disposable checkout before it may be removed.
+    #[serde(default = "ScratchSweepConfig::default_ttl_hours")]
+    pub ttl_hours: u64,
+}
+
+impl Default for ScratchSweepConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            ttl_hours: Self::default_ttl_hours(),
+        }
+    }
+}
+
+impl ScratchSweepConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_ttl_hours() -> u64 {
+        48
+    }
+}
+
+impl ConfigTier for ScratchSweepConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        ReloadTier::RestartRequired
+    }
+}
+
 /// Worker fleet configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
@@ -326,6 +366,10 @@ pub struct WorkerConfig {
     #[serde(default = "WorkerConfig::default_config_reload_check_interval_secs")]
     pub config_reload_check_interval_secs: u64,
 
+    /// Host-local cleanup of stale disposable clones under `$HOME/scratch`.
+    #[serde(default)]
+    pub scratch_sweep: ScratchSweepConfig,
+
     /// Explicit path to the worker binary `needle supervise` spawns.
     ///
     /// When `None` (the default), the supervisor resolves
@@ -362,6 +406,7 @@ impl Default for WorkerConfig {
             short_retry_backoff: Self::default_short_retry_backoff(),
             freshness_check_interval_secs: Self::default_freshness_check_interval_secs(),
             config_reload_check_interval_secs: Self::default_config_reload_check_interval_secs(),
+            scratch_sweep: ScratchSweepConfig::default(),
             worker_binary_path: None,
         }
     }
@@ -371,7 +416,8 @@ impl ConfigTier for WorkerConfig {
     fn reload_tier(&self) -> ReloadTier {
         // Worker config has mixed tiers:
         // - Tier A: idle_* timeouts, max_claim_retries, cpu/memory warnings
-        // - Tier C: max_workers, launch_stagger, identifier_scheme, worker_binary_path
+        // - Tier C: max_workers, launch_stagger, identifier_scheme, scratch_sweep,
+        //   worker_binary_path
         // We return RestartRequired for the struct as a whole since Tier C fields exist.
         // Individual fields will be checked at runtime.
         ReloadTier::RestartRequired
@@ -5816,6 +5862,11 @@ impl Config {
             self.worker.config_reload_check_interval_secs,
             other.worker.config_reload_check_interval_secs
         );
+        check!(
+            "worker.scratch_sweep",
+            self.worker.scratch_sweep,
+            other.worker.scratch_sweep
+        );
 
         check!("workspace.home", self.workspace.home, other.workspace.home);
         check!(
@@ -6013,6 +6064,7 @@ fn validate_worker_field(field: &str, key_path: &str) -> Result<(), ConfigError>
         "idle_backoff_max",
         "short_retry_backoff",
         "config_reload_check_interval_secs",
+        "scratch_sweep",
         "worker_binary_path",
     ];
 
@@ -6614,6 +6666,30 @@ impl ConfigLoader {
                             );
                         }
                     }
+                    "worker.scratch_sweep.enabled" => {
+                        if let Ok(v) = value.parse::<bool>() {
+                            config.worker.scratch_sweep.enabled = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for worker.scratch_sweep.enabled — expected true/false"
+                            );
+                        }
+                    }
+                    "worker.scratch_sweep.ttl_hours" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            config.worker.scratch_sweep.ttl_hours = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for worker.scratch_sweep.ttl_hours — expected integer"
+                            );
+                        }
+                    }
                     "health.heartbeat_interval_secs" => {
                         if let Ok(v) = value.parse::<u64>() {
                             config.health.heartbeat_interval_secs = v;
@@ -6839,6 +6915,8 @@ impl ConfigLoader {
                 "agent.timeout",
                 "worker.max_workers",
                 "worker.idle_timeout",
+                "worker.scratch_sweep.enabled",
+                "worker.scratch_sweep.ttl_hours",
                 "health.heartbeat_interval_secs",
                 "health.heartbeat_ttl_secs",
             ] {
@@ -6915,6 +6993,13 @@ impl ConfigLoader {
             errors.push(ConfigError {
                 field: "worker.cpu_load_warn".to_string(),
                 message: "must be in range (0.0, 1.0]".to_string(),
+            });
+        }
+
+        if config.worker.scratch_sweep.enabled && config.worker.scratch_sweep.ttl_hours == 0 {
+            errors.push(ConfigError {
+                field: "worker.scratch_sweep.ttl_hours".to_string(),
+                message: "must be at least 1 when scratch sweeping is enabled".to_string(),
             });
         }
 
@@ -7006,6 +7091,14 @@ impl ConfigLoader {
             (
                 "worker.launch_stagger_seconds",
                 config.worker.launch_stagger_seconds.to_string(),
+            ),
+            (
+                "worker.scratch_sweep.enabled",
+                config.worker.scratch_sweep.enabled.to_string(),
+            ),
+            (
+                "worker.scratch_sweep.ttl_hours",
+                config.worker.scratch_sweep.ttl_hours.to_string(),
             ),
             (
                 "health.heartbeat_interval_secs",
@@ -9682,6 +9775,37 @@ agent:
         assert_eq!(config.strands.mitosis.max_depth, 3);
     }
 
+    // ── worker.scratch_sweep ──
+
+    #[test]
+    fn scratch_sweep_defaults_to_enabled_with_48_hour_ttl() {
+        let config = Config::default();
+        assert!(config.worker.scratch_sweep.enabled);
+        assert_eq!(config.worker.scratch_sweep.ttl_hours, 48);
+    }
+
+    #[test]
+    fn scratch_sweep_parses_from_yaml() {
+        let yaml = "worker:\n  scratch_sweep:\n    enabled: false\n    ttl_hours: 24\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.worker.scratch_sweep.enabled);
+        assert_eq!(config.worker.scratch_sweep.ttl_hours, 24);
+    }
+
+    #[test]
+    fn enabled_scratch_sweep_rejects_zero_ttl() {
+        let mut config = Config::default();
+        config.worker.scratch_sweep.ttl_hours = 0;
+        assert!(ConfigLoader::validate(&config)
+            .iter()
+            .any(|error| error.field == "worker.scratch_sweep.ttl_hours"));
+
+        config.worker.scratch_sweep.enabled = false;
+        assert!(!ConfigLoader::validate(&config)
+            .iter()
+            .any(|error| error.field == "worker.scratch_sweep.ttl_hours"));
+    }
+
     // ── worker.worker_binary_path (GitHub issue jedarden/NEEDLE#11) ──
 
     #[test]
@@ -11179,6 +11303,8 @@ resource_attributes:
             "worker.idle_backoff_max",
             "worker.short_retry_backoff",
             "worker.config_reload_check_interval_secs",
+            "worker.scratch_sweep.enabled",
+            "worker.scratch_sweep.ttl_hours",
             "worker.worker_binary_path",
         ];
 
@@ -11842,6 +11968,7 @@ path: null
         config2.worker.identifier_scheme = IdentifierScheme::Sequential;
         config2.worker.worker_binary_path = Some(PathBuf::from("/opt/needle"));
         config2.worker.config_reload_check_interval_secs = 60;
+        config2.worker.scratch_sweep.ttl_hours += 1;
         config2.workspace.home.push("reloaded");
         config2.workspace.default.push("reloaded-workspace");
         config2.bead_cli.backend = BeadBackend::Bead;
@@ -11861,6 +11988,7 @@ path: null
                 "worker.identifier_scheme",
                 "worker.worker_binary_path",
                 "worker.config_reload_check_interval_secs",
+                "worker.scratch_sweep",
                 "workspace.home",
                 "workspace.default",
                 "bead_cli.backend",
