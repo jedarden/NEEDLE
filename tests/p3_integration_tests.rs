@@ -35,12 +35,17 @@ use needle::validation::ValidationGate;
 // Test infrastructure
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Path to the bead-forge binary.
-fn bf_path() -> PathBuf {
-    which::which("bf").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(format!("{home}/.local/bin/bf"))
-    })
+/// Path to the native bead-rs binary required by these integration fixtures.
+fn bead_path() -> PathBuf {
+    which::which("bead").expect("bead CLI must be installed for strand integration tests")
+}
+
+fn bead_command(workspace: &Path) -> std::process::Command {
+    let test_home = workspace.join(".test-home");
+    std::fs::create_dir_all(&test_home).expect("failed to create isolated test HOME");
+    let mut command = std::process::Command::new(bead_path());
+    command.current_dir(workspace).env("HOME", test_home);
+    command
 }
 
 /// Create an isolated test workspace with `.beads/` initialized.
@@ -50,51 +55,37 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
         .tempdir()
         .context("failed to create temp dir")?;
 
-    let bf = bf_path();
-    let output = std::process::Command::new(&bf)
-        .args(["init"])
-        .current_dir(dir.path())
+    let output = bead_command(dir.path())
+        .args(["init", "--prefix", "p3"])
         .output()
-        .context("failed to run bf init")?;
+        .context("failed to run bead init")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf init failed: {}",
+            "bead init failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    fs::write(
+        dir.path().join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .context("failed to bind test workspace to bead-rs")?;
 
     Ok(dir)
 }
 
 /// Create a bead in the test workspace and return its ID.
 fn create_bead(workspace: &Path, title: &str) -> Result<BeadId> {
-    let bf = bf_path();
-    let do_create = || {
-        std::process::Command::new(&bf)
-            .args(["create", "--title", title, "--description", title])
-            .current_dir(workspace)
-            .output()
-            .context("failed to run bf create")
-    };
-
-    let mut output = do_create()?;
-
-    // Retry once on sync conflict (FrankenSQLite WAL race).
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
-            let _ = std::process::Command::new(&bf)
-                .args(["sync", "--flush-only"])
-                .current_dir(workspace)
-                .output();
-            output = do_create()?;
-        }
-    }
+    let output = bead_command(workspace)
+        .args(["create", "--title", title, "--description", title])
+        .output()
+        .context("failed to run bead create")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf create failed: {}",
+            "bead create failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -104,35 +95,15 @@ fn create_bead(workspace: &Path, title: &str) -> Result<BeadId> {
 }
 
 /// Add a label to a bead.
-///
-/// Retries once with `bf sync --flush-only` on SQLite sync conflicts.
 fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
-    let bf = bf_path();
-    let do_add = || {
-        std::process::Command::new(&bf)
-            .args(["label", "add", bead_id.as_ref(), "--label", label])
-            .current_dir(workspace)
-            .output()
-            .context("failed to run bf label add")
-    };
-
-    let mut output = do_add()?;
-
-    // Retry once on sync conflict (FrankenSQLite WAL race).
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
-            let _ = std::process::Command::new(&bf)
-                .args(["sync", "--flush-only"])
-                .current_dir(workspace)
-                .output();
-            output = do_add()?;
-        }
-    }
+    let output = bead_command(workspace)
+        .args(["label", "add", bead_id.as_ref(), "--label", label])
+        .output()
+        .context("failed to run bead label add")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf label add failed: {}",
+            "bead label add failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -144,11 +115,11 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
 fn store_for_workspace(workspace: &Path) -> Result<CliBeadStore> {
     let backend = builtin_bead_backends()
         .into_iter()
-        .find(|backend| backend.name == "bead-forge")
-        .ok_or_else(|| anyhow::anyhow!("built-in bead-forge descriptor missing"))?;
+        .find(|backend| backend.name == "bead-rs")
+        .ok_or_else(|| anyhow::anyhow!("built-in bead-rs descriptor missing"))?;
     CliBeadStore::new(
         backend,
-        bf_path(),
+        bead_path(),
         workspace.to_path_buf(),
         None,
         None,
@@ -231,7 +202,10 @@ async fn weave_creates_beads_from_agent_response() {
     let agent = Box::new(MockWeaveAgent {
         response: agent_response.to_string(),
     });
-    let telemetry = Telemetry::new("test-weave".to_string());
+    let telemetry = Telemetry::with_log_dir(
+        "test-weave".to_string(),
+        &workspace.path().join(".needle/logs"),
+    );
     let strand = WeaveStrand::new(
         config,
         workspace.path().to_path_buf(),
@@ -247,7 +221,7 @@ async fn weave_creates_beads_from_agent_response() {
         result
     );
 
-    // Verify beads were created in the real br store.
+    // Verify beads were created in the native bead-rs store.
     let all_beads = store.list_all().await.unwrap();
     let weave_beads: Vec<_> = all_beads
         .iter()
@@ -292,7 +266,10 @@ async fn weave_respects_max_beads_guardrail() {
     let agent = Box::new(MockWeaveAgent {
         response: agent_response.to_string(),
     });
-    let telemetry = Telemetry::new("test-weave".to_string());
+    let telemetry = Telemetry::with_log_dir(
+        "test-weave".to_string(),
+        &workspace.path().join(".needle/logs"),
+    );
     let strand = WeaveStrand::new(
         config,
         workspace.path().to_path_buf(),
@@ -322,7 +299,10 @@ async fn weave_disabled_returns_no_work() {
     let agent = Box::new(MockWeaveAgent {
         response: "should not be called".to_string(),
     });
-    let telemetry = Telemetry::new("test-weave".to_string());
+    let telemetry = Telemetry::with_log_dir(
+        "test-weave".to_string(),
+        &workspace.path().join(".needle/logs"),
+    );
     let strand = WeaveStrand::new(
         config,
         workspace.path().to_path_buf(),
@@ -347,7 +327,10 @@ async fn unravel_creates_alternatives_without_modifying_original() {
     let workspace = create_test_workspace("unravel-alt").unwrap();
     let state_dir = tempfile::tempdir().unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
-    let telemetry = Telemetry::new("test-unravel".to_string());
+    let telemetry = Telemetry::with_log_dir(
+        "test-unravel".to_string(),
+        &workspace.path().join(".needle/logs"),
+    );
 
     // Create a bead and label it as human-blocked (lowercase per filter_human_beads).
     let bead_id = create_bead(workspace.path(), "Human-blocked: need API key from vendor").unwrap();
@@ -409,7 +392,10 @@ async fn unravel_disabled_returns_no_work() {
     let workspace = create_test_workspace("unravel-off").unwrap();
     let state_dir = tempfile::tempdir().unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
-    let telemetry = Telemetry::new("test-unravel-off".to_string());
+    let telemetry = Telemetry::with_log_dir(
+        "test-unravel-off".to_string(),
+        &workspace.path().join(".needle/logs"),
+    );
 
     let config = UnravelConfig::default(); // disabled by default
 
@@ -440,7 +426,10 @@ async fn pulse_detects_scanner_findings_and_creates_beads() {
     let workspace = create_test_workspace("pulse-detect").unwrap();
     let state_dir = tempfile::tempdir().unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
-    let telemetry = Telemetry::new("test-pulse".to_string());
+    let telemetry = Telemetry::with_log_dir(
+        "test-pulse".to_string(),
+        &workspace.path().join(".needle/logs"),
+    );
 
     let config = PulseConfig {
         enabled: true,
@@ -500,7 +489,10 @@ async fn pulse_deduplicates_across_scans() {
     };
 
     // First scan — should create a bead.
-    let telemetry1 = Telemetry::new("test-pulse-1".to_string());
+    let telemetry1 = Telemetry::with_log_dir(
+        "test-pulse-1".to_string(),
+        &workspace.path().join(".needle/logs"),
+    );
     let strand1 = PulseStrand::new(
         config.clone(),
         workspace.path().to_path_buf(),
@@ -513,7 +505,10 @@ async fn pulse_deduplicates_across_scans() {
     let beads_after_first = store.list_all().await.unwrap().len();
 
     // Second scan — same issue, should NOT create a bead (dedup).
-    let telemetry2 = Telemetry::new("test-pulse-2".to_string());
+    let telemetry2 = Telemetry::with_log_dir(
+        "test-pulse-2".to_string(),
+        &workspace.path().join(".needle/logs"),
+    );
     let strand2 = PulseStrand::new(
         config,
         workspace.path().to_path_buf(),

@@ -1,6 +1,6 @@
-//! Integration tests for NEEDLE Phase 2 using real `bf` CLI.
+//! Integration tests for NEEDLE Phase 2 using the real bead-rs CLI.
 //!
-//! These tests use the actual `bf` binary to create and manage beads in
+//! These tests use the actual `bead` binary to create and manage beads in
 //! isolated temporary workspaces. Each test:
 //! - Creates its own `.beads/` directory
 //! - Is parallel-safe (unique workspace paths per test)
@@ -38,12 +38,21 @@ use needle::types::{BeadId, ClaimOutcome, StrandResult};
 // Test infrastructure
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Path to the bf binary (discovered via PATH or ~/.local/bin/bf).
-fn bf_path() -> PathBuf {
-    which::which("bf").unwrap_or_else(|_| {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(format!("{home}/.local/bin/bf"))
-    })
+/// Path to the native bead-rs binary required by these integration fixtures.
+fn bead_path() -> PathBuf {
+    which::which("bead").expect("bead CLI must be installed for strand integration tests")
+}
+
+fn bead_command(workspace: &Path) -> std::process::Command {
+    let test_home = workspace.join(".test-home");
+    std::fs::create_dir_all(&test_home).expect("failed to create isolated test HOME");
+    let mut command = std::process::Command::new(bead_path());
+    command.current_dir(workspace).env("HOME", test_home);
+    command
+}
+
+fn test_telemetry(worker_id: impl Into<String>, workspace: &Path) -> Telemetry {
+    Telemetry::with_log_dir(worker_id.into(), &workspace.join(".needle/logs"))
 }
 
 /// Create an isolated test workspace with `.beads/` directory initialized.
@@ -54,101 +63,63 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
         .context("failed to create temp dir")?;
 
     // Initialize .beads/ directory.
-    let br = bf_path();
-    let output = std::process::Command::new(&br)
-        .args(["init"])
-        .current_dir(dir.path())
+    let output = bead_command(dir.path())
+        .args(["init", "--prefix", "test"])
         .output()
-        .context("failed to run bf init")?;
+        .context("failed to run bead init")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf init failed: {}",
+            "bead init failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    std::fs::write(
+        dir.path().join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .context("failed to bind test workspace to bead-rs")?;
 
     Ok(dir)
 }
 
 /// Create a bead in the test workspace.
-///
-/// Retries once with `bf sync --flush-only` on FrankenSQLite sync conflicts.
 fn create_bead(workspace: &Path, title: &str, priority: u8) -> Result<BeadId> {
-    let br = bf_path();
-    let do_create = || {
-        std::process::Command::new(&br)
-            .args([
-                "create",
-                "--title",
-                title,
-                "--description",
-                &format!("Test bead: {title}"),
-            ])
-            .current_dir(workspace)
-            .output()
-            .context("failed to run bf create")
-    };
-
-    let mut output = do_create()?;
-
-    // Retry once on sync conflict (FrankenSQLite WAL race).
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Sync conflict") {
-            let _ = std::process::Command::new(&br)
-                .args(["sync", "--flush-only"])
-                .current_dir(workspace)
-                .output();
-            output = do_create()?;
-        }
-    }
+    let output = bead_command(workspace)
+        .args([
+            "create",
+            "--title",
+            title,
+            "--description",
+            &format!("Test bead: {title}"),
+            "--priority",
+            &priority.to_string(),
+        ])
+        .output()
+        .context("failed to run bead create")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf create failed: {}",
+            "bead create failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
 
     let id = String::from_utf8(output.stdout)?.trim().to_string();
-    // Set priority via update.
-    let _ = std::process::Command::new(&br)
-        .args(["update", &id, "--priority", &priority.to_string()])
-        .current_dir(workspace)
-        .output();
-
     Ok(BeadId::from(id))
 }
 
 /// Add a label to a bead.
 fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
-    let br = bf_path();
-    let do_add = || {
-        std::process::Command::new(&br)
-            .args(["label", "add", bead_id.as_ref(), "--label", label])
-            .current_dir(workspace)
-            .output()
-            .context("failed to run br label add")
-    };
-
-    let mut output = do_add()?;
-
-    // Retry once on sync conflict (FrankenSQLite WAL race).
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
-            let _ = std::process::Command::new(&br)
-                .args(["sync", "--flush-only"])
-                .current_dir(workspace)
-                .output();
-            output = do_add()?;
-        }
-    }
+    let output = bead_command(workspace)
+        .args(["label", "add", bead_id.as_ref(), "--label", label])
+        .output()
+        .context("failed to run bead label add")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "br label add failed: {}",
+            "bead label add failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -157,35 +128,15 @@ fn add_label(workspace: &Path, bead_id: &BeadId, label: &str) -> Result<()> {
 }
 
 /// Add a dependency between two beads (issue depends on dep).
-///
-/// Retries once with `bf sync --flush-only` on SQLite sync conflicts.
 fn add_dependency(workspace: &Path, issue_id: &BeadId, dep_id: &BeadId) -> Result<()> {
-    let bf = bf_path();
-    let do_add = || {
-        std::process::Command::new(&bf)
-            .args(["dep", "add", dep_id.as_ref(), "--blocks", issue_id.as_ref()])
-            .current_dir(workspace)
-            .output()
-            .context("failed to run bf dep add")
-    };
-
-    let mut output = do_add()?;
-
-    // Retry once on sync conflict (FrankenSQLite WAL race).
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("Sync conflict") || stderr.contains("sync conflict") {
-            let _ = std::process::Command::new(&bf)
-                .args(["sync", "--flush-only"])
-                .current_dir(workspace)
-                .output();
-            output = do_add()?;
-        }
-    }
+    let output = bead_command(workspace)
+        .args(["dep", "add", issue_id.as_ref(), dep_id.as_ref()])
+        .output()
+        .context("failed to run bead dep add")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "bf dep add failed: {}",
+            "bead dep add failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -197,11 +148,11 @@ fn add_dependency(workspace: &Path, issue_id: &BeadId, dep_id: &BeadId) -> Resul
 fn store_for_workspace(workspace: &Path) -> Result<CliBeadStore> {
     let backend = builtin_bead_backends()
         .into_iter()
-        .find(|backend| backend.name == "bead-forge")
-        .ok_or_else(|| anyhow::anyhow!("built-in bead-forge descriptor missing"))?;
+        .find(|backend| backend.name == "bead-rs")
+        .ok_or_else(|| anyhow::anyhow!("built-in bead-rs descriptor missing"))?;
     CliBeadStore::new(
         backend,
-        bf_path(),
+        bead_path(),
         workspace.to_path_buf(),
         None,
         None,
@@ -214,7 +165,7 @@ fn store_for_workspace(workspace: &Path) -> Result<CliBeadStore> {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_multi_worker_claiming_no_duplicates() {
+async fn real_bead_rs_multi_worker_claiming_no_duplicates() {
     let workspace = create_test_workspace("mw-claim").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
 
@@ -230,8 +181,7 @@ async fn real_br_multi_worker_claiming_no_duplicates() {
     assert_eq!(beads.len(), 5, "should have 5 ready beads");
 
     // 5 workers claim sequentially from the shared bead list.
-    // Sequential claiming avoids FrankenSQLite WAL races while still
-    // verifying that each worker skips already-claimed beads and picks
+    // Sequential claiming verifies that each worker skips already-claimed beads and picks
     // a unique bead. Concurrent claiming is covered by
     // p2_integration_tests::multi_worker_claiming_no_duplicates (mock store).
     let lock_dir = tempfile::tempdir().unwrap();
@@ -244,7 +194,7 @@ async fn real_br_multi_worker_claiming_no_duplicates() {
             lock_dir.path().to_path_buf(),
             5,
             10,
-            Telemetry::new(format!("worker-{worker_idx}")),
+            test_telemetry(format!("worker-{worker_idx}"), workspace.path()),
         );
 
         let result = claimer
@@ -275,7 +225,7 @@ async fn real_br_multi_worker_claiming_no_duplicates() {
 }
 
 #[tokio::test]
-async fn real_br_all_beads_eventually_claimed() {
+async fn real_bead_rs_all_beads_eventually_claimed() {
     let workspace = create_test_workspace("allclaim").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
 
@@ -298,7 +248,7 @@ async fn real_br_all_beads_eventually_claimed() {
             lock_dir.path().to_path_buf(),
             5,
             10,
-            Telemetry::new(format!("worker-{worker_idx}")),
+            test_telemetry(format!("worker-{worker_idx}"), workspace.path()),
         );
 
         let result = claimer
@@ -329,7 +279,7 @@ async fn real_br_all_beads_eventually_claimed() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_crashed_worker_bead_released_by_peer() {
+async fn real_bead_rs_crashed_worker_bead_released_by_peer() {
     let workspace = create_test_workspace("crash-release").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
     let hb_dir = tempfile::tempdir().unwrap();
@@ -370,7 +320,7 @@ async fn real_br_crashed_worker_bead_released_by_peer() {
 
     // Run peer monitor.
     let registry = Registry::new(reg_dir.path());
-    let telemetry = Telemetry::new("monitor-worker".to_string());
+    let telemetry = test_telemetry("monitor-worker", workspace.path());
     let monitor = needle::peer::PeerMonitor::new(
         hb_dir.path().to_path_buf(),
         Duration::from_secs(300),
@@ -397,7 +347,7 @@ async fn real_br_crashed_worker_bead_released_by_peer() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_explore_discovers_remote_workspace() {
+async fn real_bead_rs_explore_discovers_remote_workspace() {
     // Create home workspace (empty).
     let home_workspace = create_test_workspace("explore-home").unwrap();
     let home_store = store_for_workspace(home_workspace.path()).unwrap();
@@ -407,10 +357,11 @@ async fn real_br_explore_discovers_remote_workspace() {
     let _ = create_bead(remote_workspace.path(), "remote-bead", 1).unwrap();
 
     // Configure Explore strand to search the remote workspace.
+    let scan_root = tempfile::tempdir().unwrap();
     let config = ExploreConfig {
         enabled: true,
         workspaces: vec![remote_workspace.path().to_path_buf()],
-        workspace_root: PathBuf::from("/tmp"),
+        workspace_root: scan_root.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
@@ -421,7 +372,7 @@ async fn real_br_explore_discovers_remote_workspace() {
         config,
         home_workspace.path().to_path_buf(),
         Registry::new(tempfile::tempdir().unwrap().path()),
-        Telemetry::new("test".to_string()),
+        test_telemetry("test", home_workspace.path()),
         "test-worker".to_string(),
     );
 
@@ -441,7 +392,7 @@ async fn real_br_explore_discovers_remote_workspace() {
 }
 
 #[tokio::test]
-async fn real_br_explore_skips_home_workspace() {
+async fn real_bead_rs_explore_skips_home_workspace() {
     let home_workspace = create_test_workspace("explore-skip").unwrap();
     let home_store = store_for_workspace(home_workspace.path()).unwrap();
 
@@ -449,10 +400,11 @@ async fn real_br_explore_skips_home_workspace() {
     let _ = create_bead(home_workspace.path(), "home-bead", 1).unwrap();
 
     // Configure Explore with home workspace in the list (should be skipped).
+    let scan_root = tempfile::tempdir().unwrap();
     let config = ExploreConfig {
         enabled: true,
         workspaces: vec![home_workspace.path().to_path_buf()],
-        workspace_root: PathBuf::from("/tmp"),
+        workspace_root: scan_root.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
@@ -461,7 +413,7 @@ async fn real_br_explore_skips_home_workspace() {
 
     let reg_dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(reg_dir.path());
-    let telemetry = Telemetry::new("explore-worker".to_string());
+    let telemetry = test_telemetry("explore-worker", home_workspace.path());
     let explore = ExploreStrand::new(
         config,
         home_workspace.path().to_path_buf(),
@@ -480,7 +432,7 @@ async fn real_br_explore_skips_home_workspace() {
 }
 
 #[tokio::test]
-async fn real_br_explore_disabled_returns_no_work() {
+async fn real_bead_rs_explore_disabled_returns_no_work() {
     let home_workspace = create_test_workspace("explore-disabled").unwrap();
     let home_store = store_for_workspace(home_workspace.path()).unwrap();
 
@@ -488,10 +440,11 @@ async fn real_br_explore_disabled_returns_no_work() {
     let _ = create_bead(remote_workspace.path(), "remote-bead-2", 1).unwrap();
 
     // Configure Explore as disabled.
+    let scan_root = tempfile::tempdir().unwrap();
     let config = ExploreConfig {
         enabled: false,
         workspaces: vec![remote_workspace.path().to_path_buf()],
-        workspace_root: PathBuf::from("/tmp"),
+        workspace_root: scan_root.path().to_path_buf(),
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
@@ -502,7 +455,7 @@ async fn real_br_explore_disabled_returns_no_work() {
         config,
         home_workspace.path().to_path_buf(),
         Registry::new(tempfile::tempdir().unwrap().path()),
-        Telemetry::new("test".to_string()),
+        test_telemetry("test", home_workspace.path()),
         "test-worker".to_string(),
     );
 
@@ -519,7 +472,7 @@ async fn real_br_explore_disabled_returns_no_work() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_mend_cleans_crashed_peer() {
+async fn real_bead_rs_mend_cleans_crashed_peer() {
     let workspace = create_test_workspace("mend-crash").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
     let hb_dir = tempfile::tempdir().unwrap();
@@ -553,7 +506,7 @@ async fn real_br_mend_cleans_crashed_peer() {
     // Run Mend strand.
     let config = MendConfig::default();
     let registry = Registry::new(reg_dir.path());
-    let telemetry = Telemetry::new("mend-worker".to_string());
+    let telemetry = test_telemetry("mend-worker", workspace.path());
 
     let mend = MendStrand::new(
         config,
@@ -563,14 +516,14 @@ async fn real_br_mend_cleans_crashed_peer() {
         "mend-worker".to_string(),
         registry,
         telemetry,
-        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        workspace.path().join(".needle/logs"),
         0,
-        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        workspace.path().join(".needle/traces"),
         30,
         7,
-        std::path::PathBuf::from("/tmp"),
+        workspace.path().to_path_buf(),
         100,
-        std::path::PathBuf::from("/tmp/needle-test-state"),
+        workspace.path().join(".needle/state"),
         needle::config::LimitsConfig::default(),
     );
 
@@ -591,7 +544,7 @@ async fn real_br_mend_cleans_crashed_peer() {
 }
 
 #[tokio::test]
-async fn real_br_mend_no_stale_peers_returns_no_work() {
+async fn real_bead_rs_mend_no_stale_peers_returns_no_work() {
     let workspace = create_test_workspace("mend-clean").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
     let hb_dir = tempfile::tempdir().unwrap();
@@ -620,15 +573,13 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
     std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();
 
     // Run Mend strand with a fresh lock_dir and high lock TTL.
-    // Note: br doctor may still find issues, so we accept either NoWork or WorkCreated
-    // if the only work was db repair. The key assertion is that healthy peers
-    // don't cause bead releases.
+    // A healthy native store and fresh peer should not require maintenance.
     let config = MendConfig {
         lock_ttl_secs: 3600, // 1 hour - no locks are considered orphaned
         ..MendConfig::default()
     };
     let registry = Registry::new(reg_dir.path());
-    let telemetry = Telemetry::new("mend-worker".to_string());
+    let telemetry = test_telemetry("mend-worker", workspace.path());
 
     let mend = MendStrand::new(
         config,
@@ -638,22 +589,21 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
         "mend-worker".to_string(),
         registry,
         telemetry,
-        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        workspace.path().join(".needle/logs"),
         0,
-        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        workspace.path().join(".needle/traces"),
         30,
         7,
         workspace.path().to_path_buf(),
         100,
-        std::path::PathBuf::from("/tmp/needle-test-state"),
+        workspace.path().join(".needle/state"),
         needle::config::LimitsConfig::default(),
     );
 
     let result = mend.evaluate(store.as_ref(), &HashSet::new()).await;
 
     // With fresh heartbeat and no stale locks, we should get NoWork.
-    // (br doctor may find issues but those are non-fatal and shouldn't
-    // trigger WorkCreated in a fresh workspace.)
+    // Native `bead doctor` is clean and read-only in a fresh workspace.
     assert!(
         matches!(result, StrandResult::NoWork),
         "Mend should return NoWork when no stale peers; got {:?}",
@@ -662,7 +612,7 @@ async fn real_br_mend_no_stale_peers_returns_no_work() {
 }
 
 #[tokio::test]
-async fn real_br_mend_removes_orphaned_heartbeat() {
+async fn real_bead_rs_mend_removes_orphaned_heartbeat() {
     let workspace = create_test_workspace("mend-orphan-hb").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
     let hb_dir = tempfile::tempdir().unwrap();
@@ -692,7 +642,7 @@ async fn real_br_mend_removes_orphaned_heartbeat() {
     // Run Mend strand.
     let config = MendConfig::default();
     let registry = Registry::new(reg_dir.path());
-    let telemetry = Telemetry::new("mend-worker".to_string());
+    let telemetry = test_telemetry("mend-worker", workspace.path());
 
     let mend = MendStrand::new(
         config,
@@ -702,14 +652,14 @@ async fn real_br_mend_removes_orphaned_heartbeat() {
         "mend-worker".to_string(),
         registry,
         telemetry,
-        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        workspace.path().join(".needle/logs"),
         0,
-        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        workspace.path().join(".needle/traces"),
         30,
         7,
         workspace.path().to_path_buf(),
         100,
-        std::path::PathBuf::from("/tmp/needle-test-state"),
+        workspace.path().join(".needle/state"),
         needle::config::LimitsConfig::default(),
     );
 
@@ -730,7 +680,7 @@ async fn real_br_mend_removes_orphaned_heartbeat() {
 }
 
 #[tokio::test]
-async fn real_br_mend_keeps_registered_heartbeat() {
+async fn real_bead_rs_mend_keeps_registered_heartbeat() {
     let workspace = create_test_workspace("mend-keep-hb").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
     let hb_dir = tempfile::tempdir().unwrap();
@@ -760,21 +710,25 @@ async fn real_br_mend_keeps_registered_heartbeat() {
     // Register the worker.
     let registry = Registry::new(reg_dir.path());
     registry
-        .register(needle::registry::WorkerEntry {
-            id: "claude-registered-worker".to_string(),
-            pid: std::process::id(),
-            workspace: workspace.path().to_path_buf(),
-            agent: "test".to_string(),
-            model: None,
-            provider: None,
-            started_at: Utc::now(),
-            beads_processed: 0,
-        })
+        .register(
+            serde_json::from_value(serde_json::json!({
+                "id": "claude-registered-worker",
+                "pid": std::process::id(),
+                "workspace": workspace.path(),
+                "agent": "test",
+                "model": null,
+                "provider": null,
+                "started_at": Utc::now(),
+                "beads_processed": 0,
+                "config_reload_generation": 0
+            }))
+            .unwrap(),
+        )
         .unwrap();
 
     // Run Mend strand.
     let config = MendConfig::default();
-    let telemetry = Telemetry::new("mend-worker".to_string());
+    let telemetry = test_telemetry("mend-worker", workspace.path());
 
     let mend = MendStrand::new(
         config,
@@ -784,14 +738,14 @@ async fn real_br_mend_keeps_registered_heartbeat() {
         "mend-worker".to_string(),
         registry,
         telemetry,
-        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        workspace.path().join(".needle/logs"),
         0,
-        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        workspace.path().join(".needle/traces"),
         30,
         7,
         workspace.path().to_path_buf(),
         100,
-        std::path::PathBuf::from("/tmp/needle-test-state"),
+        workspace.path().join(".needle/state"),
         needle::config::LimitsConfig::default(),
     );
 
@@ -816,7 +770,7 @@ async fn real_br_mend_keeps_registered_heartbeat() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_mitosis_precondition_checks() {
+async fn real_bead_rs_mitosis_precondition_checks() {
     let workspace = create_test_workspace("mitosis-pre").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
     let lock_dir = tempfile::tempdir().unwrap();
@@ -838,11 +792,11 @@ async fn real_br_mitosis_precondition_checks() {
     };
     let evaluator = MitosisEvaluator::new(
         disabled_config,
-        Telemetry::new("test".to_string()),
+        test_telemetry("test", workspace.path()),
         lock_dir.path().to_path_buf(),
     );
 
-    let dispatcher = create_test_dispatcher();
+    let dispatcher = create_test_dispatcher(workspace.path());
     let prompt_builder =
         needle::prompt::PromptBuilder::new(&needle::config::PromptConfig::default());
 
@@ -876,7 +830,7 @@ async fn real_br_mitosis_precondition_checks() {
     };
     let evaluator2 = MitosisEvaluator::new(
         enabled_config,
-        Telemetry::new("test".to_string()),
+        test_telemetry("test", workspace.path()),
         lock_dir.path().to_path_buf(),
     );
 
@@ -906,7 +860,7 @@ async fn real_br_mitosis_precondition_checks() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_mitosis_dedup_skips_existing_children() {
+async fn real_bead_rs_mitosis_dedup_skips_existing_children() {
     let workspace = create_test_workspace("mitosis-dedup").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
 
@@ -918,7 +872,7 @@ async fn real_br_mitosis_dedup_skips_existing_children() {
     let existing_child_id = create_bead(workspace.path(), "Existing Task", 1).unwrap();
 
     // Add dependency: parent depends on child (child blocks parent).
-    // bead-forge names the blocker first and the blocked issue via --blocks.
+    // bead-rs writes dependencies blocked-first: parent, then blocker.
     add_dependency(workspace.path(), &parent_id, &existing_child_id).unwrap();
 
     // Verify the parent has the child as a dependency.
@@ -932,17 +886,17 @@ async fn real_br_mitosis_dedup_skips_existing_children() {
     // children and skip duplicates. This is tested via the unit tests in
     // mitosis/mod.rs (create_children_with_dedup, create_children_all_deduped).
     // Here we verify descriptor-driven dependency reads.
-    let titles: Vec<String> = parent
+    let blocker_ids: Vec<&BeadId> = parent
         .dependencies
         .iter()
         .filter(|d| d.dependency_type == "blocks")
-        .map(|d| d.title.clone())
+        .map(|d| &d.id)
         .collect();
 
     assert!(
-        titles.iter().any(|t| t.to_lowercase().contains("existing")),
+        blocker_ids.contains(&&existing_child_id),
         "parent should have existing child as blocker; got {:?}",
-        titles
+        blocker_ids
     );
 }
 
@@ -951,7 +905,7 @@ async fn real_br_mitosis_dedup_skips_existing_children() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_mitosis_flock_serializes_concurrent_workers() {
+async fn real_bead_rs_mitosis_flock_serializes_concurrent_workers() {
     let workspace = create_test_workspace("mitosis-flock").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
     let lock_dir = tempfile::tempdir().unwrap();
@@ -972,7 +926,7 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
         ..MitosisConfig::default()
     };
 
-    let dispatcher = Arc::new(create_test_dispatcher());
+    let dispatcher = Arc::new(create_test_dispatcher(workspace.path()));
     let prompt_builder = Arc::new(needle::prompt::PromptBuilder::new(
         &needle::config::PromptConfig::default(),
     ));
@@ -980,7 +934,7 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
     // Use a barrier to ensure both workers start at approximately the same time
     // and actually contend for the flock, rather than one completing before
     // the other even starts.
-    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
     let mut handles = Vec::new();
 
     for i in 0..2u32 {
@@ -996,13 +950,13 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
         let handle = tokio::spawn(async move {
             let evaluator = MitosisEvaluator::new(
                 config_clone,
-                Telemetry::new(format!("worker-{i}")),
+                test_telemetry(format!("worker-{i}"), &workspace_path),
                 lock_path,
             );
 
             // Wait at the barrier to ensure both workers are ready before proceeding.
             // This increases the likelihood that they will actually contend for the flock.
-            barrier.wait();
+            barrier.wait().await;
 
             evaluator
                 .evaluate(
@@ -1045,27 +999,28 @@ async fn real_br_mitosis_flock_serializes_concurrent_workers() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_strand_waterfall_ordering() {
+async fn real_bead_rs_strand_waterfall_ordering() {
     let workspace = create_test_workspace("waterfall").unwrap();
-    let config = needle::config::Config::default();
+    let mut config = needle::config::Config::default();
+    config.strands.explore.workspace_root = workspace.path().to_path_buf();
     let registry = Registry::new(workspace.path());
-    let telemetry = Telemetry::new("test".to_string());
+    let telemetry = test_telemetry("test", workspace.path());
 
     let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
 
     assert_eq!(
         runner.strand_names(),
-        vec!["pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "knot"],
-        "waterfall should be pluck → mend → explore → weave → unravel → pulse → reflect → knot"
+        vec!["pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "splice", "knot"],
+        "waterfall should include every configured strand in order"
     );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Test 8b: Strand waterfall exhaustion — full progression with real br
+// Test 8b: Strand waterfall exhaustion — full progression with real bead-rs
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_strand_waterfall_exhaustion() {
+async fn real_bead_rs_strand_waterfall_exhaustion() {
     // Create a workspace with a bead that has an excluded label ("deferred").
     // This simulates the INVISIBLE diagnosis scenario: open beads exist but
     // Pluck's filters excluded them, triggering Knot to create an alert bead.
@@ -1082,9 +1037,10 @@ async fn real_br_strand_waterfall_exhaustion() {
     assert_eq!(beads[0].id, bead_id, "bead ID should match");
 
     // Create a StrandRunner with default config.
-    let config = needle::config::Config::default();
+    let mut config = needle::config::Config::default();
+    config.strands.explore.workspace_root = workspace.path().to_path_buf();
     let registry = Registry::new(workspace.path());
-    let telemetry = Telemetry::new("test-waterfall-exhaustion".to_string());
+    let telemetry = test_telemetry("test-waterfall-exhaustion", workspace.path());
     let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
 
     // Run the waterfall with an empty exclusion set.
@@ -1178,9 +1134,8 @@ async fn real_br_strand_waterfall_exhaustion() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_strand_waterfall_exhaustion_with_telemetry_jsonl() {
+async fn real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl() {
     use std::io::BufRead;
-    use std::path::PathBuf;
 
     // Create a workspace with a bead that has an excluded label ("deferred").
     // This simulates the INVISIBLE diagnosis scenario: open beads exist but
@@ -1193,10 +1148,12 @@ async fn real_br_strand_waterfall_exhaustion_with_telemetry_jsonl() {
     add_label(workspace.path(), &bead_id, "deferred").unwrap();
 
     // Create a StrandRunner with default config.
-    let config = needle::config::Config::default();
+    let mut config = needle::config::Config::default();
+    config.strands.explore.workspace_root = workspace.path().to_path_buf();
     let registry = Registry::new(workspace.path());
     let worker_id = "test-waterfall-jsonl".to_string();
-    let telemetry = Telemetry::new(worker_id.clone());
+    let log_dir = workspace.path().join(".needle/logs");
+    let telemetry = Telemetry::with_log_dir(worker_id.clone(), &log_dir);
     let session_id = telemetry.session_id().to_string();
 
     // Start telemetry to spawn the background writer thread.
@@ -1223,9 +1180,17 @@ async fn real_br_strand_waterfall_exhaustion_with_telemetry_jsonl() {
 
     // ── Read and verify telemetry JSONL ─────────────────────────────────────────
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let log_dir = PathBuf::from(&home).join(".needle").join("logs");
-    let log_file = log_dir.join(format!("{worker_id}-{session_id}.jsonl"));
+    let log_prefix = format!("{worker_id}-{session_id}-");
+    let log_file = std::fs::read_dir(&log_dir)
+        .unwrap_or_else(|error| panic!("failed to read telemetry directory: {error}"))
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&log_prefix) && name.ends_with(".jsonl"))
+        })
+        .unwrap_or_else(|| panic!("telemetry JSONL file missing from {}", log_dir.display()));
 
     assert!(
         log_file.exists(),
@@ -1365,27 +1330,31 @@ async fn real_br_strand_waterfall_exhaustion_with_telemetry_jsonl() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Test 9: Provider/model concurrency limits (registry-based, no br needed)
+// Test 9: Provider/model concurrency limits (registry-based, no bead CLI needed)
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
-fn real_br_provider_concurrency_limit_enforced() {
+fn real_bead_rs_provider_concurrency_limit_enforced() {
     let dir = tempfile::tempdir().unwrap();
     let registry = Registry::new(dir.path());
 
     // Register 3 workers using anthropic provider.
     for i in 0..3 {
         registry
-            .register(needle::registry::WorkerEntry {
-                id: format!("worker-{i}"),
-                pid: std::process::id(),
-                workspace: PathBuf::from("/tmp/test"),
-                agent: "claude".to_string(),
-                model: Some("sonnet".to_string()),
-                provider: Some("anthropic".to_string()),
-                started_at: Utc::now(),
-                beads_processed: 0,
-            })
+            .register(
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("worker-{i}"),
+                    "pid": std::process::id(),
+                    "workspace": dir.path(),
+                    "agent": "claude",
+                    "model": "sonnet",
+                    "provider": "anthropic",
+                    "started_at": Utc::now(),
+                    "beads_processed": 0,
+                    "config_reload_generation": 0
+                }))
+                .unwrap(),
+            )
             .unwrap();
     }
 
@@ -1427,28 +1396,10 @@ fn real_br_provider_concurrency_limit_enforced() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_br_database_corruption_auto_recovery() {
+async fn real_bead_rs_database_corruption_auto_recovery() {
     use needle::bead_store::RecoveryOutcome;
 
-    // Use a hyphen-free temp directory name: br derives the bead prefix from the
-    // directory name by splitting on hyphens. Temp dirs like "needle-test-foo-XXXXXX"
-    // cause prefix mismatch during db recovery (br expects "needle" but IDs use
-    // the full directory name as prefix). A single-token prefix avoids this.
-    let workspace = tempfile::Builder::new()
-        .prefix("needlecorrupttest")
-        .tempdir()
-        .unwrap();
-    let br = bf_path();
-    let init = std::process::Command::new(&br)
-        .args(["init"])
-        .current_dir(workspace.path())
-        .output()
-        .unwrap();
-    assert!(
-        init.status.success(),
-        "bf init failed: {}",
-        String::from_utf8_lossy(&init.stderr)
-    );
+    let workspace = create_test_workspace("corruption").unwrap();
     let store = store_for_workspace(workspace.path()).unwrap();
 
     // Create 2 beads so we can verify data integrity after recovery.
@@ -1465,6 +1416,18 @@ async fn real_br_database_corruption_auto_recovery() {
     let shown = store.show(&bead_a).await.unwrap();
     assert_eq!(shown.title, "survive-corruption-a");
 
+    // bead-rs recovery imports only an explicit durable checkpoint. Flush the
+    // live SQLite store before corruption so the fixture follows that contract.
+    let flush = bead_command(workspace.path())
+        .args(["sync", "flush-only"])
+        .output()
+        .unwrap();
+    assert!(
+        flush.status.success(),
+        "bead checkpoint flush failed: {}",
+        String::from_utf8_lossy(&flush.stderr)
+    );
+
     // ── Corrupt the SQLite database ──────────────────────────────────────
     let db_path = workspace.path().join(".beads/beads.db");
     assert!(db_path.exists(), "database file should exist");
@@ -1478,16 +1441,15 @@ async fn real_br_database_corruption_auto_recovery() {
     let garbage = b"THIS_IS_CORRUPT_DATA_NOT_SQLITE_AT_ALL____";
     std::fs::write(&db_path, garbage).unwrap();
 
-    // Note: br auto-recovers from corruption by falling back to JSONL reads,
-    // so operations may still succeed. The key test is that recover_db()
-    // properly rebuilds the database file itself.
+    // Recovery must use bead-rs doctor and its checkpoint import contract; it
+    // must never apply a flat-JSONL repair procedure to this native database.
 
     // ── Run auto-recovery ────────────────────────────────────────────────
     let recovery = store.recover_db().await;
 
     match &recovery {
         RecoveryOutcome::Repaired(report) => {
-            // doctor --repair rebuilt the db from JSONL.
+            // Native doctor housekeeping repaired the database.
             eprintln!(
                 "  Recovery via repair: {} warnings, {} fixed",
                 report.warnings.len(),
@@ -1495,8 +1457,8 @@ async fn real_br_database_corruption_auto_recovery() {
             );
         }
         RecoveryOutcome::Rebuilt => {
-            // Full rebuild from JSONL succeeded.
-            eprintln!("  Recovery via full rebuild from JSONL");
+            // Full rebuild from the bead-rs checkpoint succeeded.
+            eprintln!("  Recovery via native checkpoint rebuild");
         }
         RecoveryOutcome::Failed(e) => {
             panic!("database recovery should succeed; got Failed: {e}");
@@ -1581,12 +1543,11 @@ async fn test_concurrent_claim_exclusivity(num_workers: u32) {
         let bead = bead.clone();
         let lock_path = lock_dir.path().to_path_buf();
         let handle = tokio::spawn(async move {
+            let telemetry = test_telemetry(format!("worker-{worker_idx}"), &lock_path);
             let claimer = Claimer::new(
-                store,
-                lock_path,
+                store, lock_path,
                 1, // max_retries=1 — report outcome immediately, don't retry
-                10,
-                Telemetry::new(format!("worker-{worker_idx}")),
+                10, telemetry,
             );
             claimer
                 .claim_next(
@@ -1648,17 +1609,17 @@ async fn test_concurrent_claim_exclusivity(num_workers: u32) {
 }
 
 #[tokio::test]
-async fn real_br_property_3_concurrent_claim_exclusivity_n2() {
+async fn real_bead_rs_property_3_concurrent_claim_exclusivity_n2() {
     test_concurrent_claim_exclusivity(2).await;
 }
 
 #[tokio::test]
-async fn real_br_property_3_concurrent_claim_exclusivity_n5() {
+async fn real_bead_rs_property_3_concurrent_claim_exclusivity_n5() {
     test_concurrent_claim_exclusivity(5).await;
 }
 
 #[tokio::test]
-async fn real_br_property_3_concurrent_claim_exclusivity_n20() {
+async fn real_bead_rs_property_3_concurrent_claim_exclusivity_n20() {
     test_concurrent_claim_exclusivity(20).await;
 }
 
@@ -1666,44 +1627,25 @@ async fn real_br_property_3_concurrent_claim_exclusivity_n20() {
 // Helpers
 // ═════════════════════════════════════════════════════════════════════════════
 
-fn create_test_dispatcher() -> needle::dispatch::Dispatcher {
+fn create_test_dispatcher(workspace: &Path) -> needle::dispatch::Dispatcher {
     use std::collections::HashMap;
     let adapters: HashMap<String, needle::dispatch::AgentAdapter> = HashMap::new();
-    let telemetry = Telemetry::new("test".to_string());
+    let telemetry = test_telemetry("test", workspace);
     needle::dispatch::Dispatcher::with_adapters(adapters, telemetry, 60)
 }
 
-/// Count the beads currently in a workspace via `bf list --json` (JSONL: one
-/// object per line).
-fn bf_bead_count(workspace: &Path) -> usize {
-    let output = std::process::Command::new(bf_path())
-        .args(["list", "--json", "--limit", "999999"])
-        .current_dir(workspace)
-        .output()
-        .expect("failed to run bf list");
-    assert!(
-        output.status.success(),
-        "bf list failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .count()
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
-// Race 3 — atomic mitosis / bead-splitting (plan.md Phase 5.3)
+// Race 3 — native mitosis / bead-splitting (plan.md Phase 5.3)
 //
 // `BeadStore::split_bead` must create N children and link each as a blocker of
-// the parent atomically, so a crash/kill mid-split cannot leave an orphaned
-// child with no dependency link (and a parent that never unblocks).
+// the parent. The capability gate below records that bead-rs does not currently
+// provide a transactional batch for crash-atomic splits.
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// The atomic split creates every child, links each as a blocker of the parent,
-/// and leaves the parent open (blocked) — mirroring NEEDLE's mitosis semantics.
+/// The native split creates every child, links each as a blocker of the parent,
+/// and leaves the parent open (blocked), mirroring NEEDLE's mitosis semantics.
 #[tokio::test]
-async fn split_bead_creates_children_and_links_them_atomically() {
+async fn split_bead_creates_children_and_links_them_with_bead_rs() {
     let workspace = create_test_workspace("split-atomic").unwrap();
     let store = store_for_workspace(workspace.path()).unwrap();
 
@@ -1762,48 +1704,15 @@ async fn split_bead_creates_children_and_links_them_atomically() {
     }
 }
 
-/// Crash-safety: if a multi-op mitosis fails partway (here: a dependency op that
-/// references a non-existent parent), the whole batch rolls back and NO orphaned
-/// child bead survives. Mirrors the verification in
-/// `docs/needle-mitosis-migration.md`, driving the same `bf batch` transaction
-/// that `split_bead` relies on.
-#[tokio::test]
-async fn failed_mitosis_batch_leaves_no_orphaned_children() {
-    let workspace = create_test_workspace("split-rollback").unwrap();
-    let parent = create_bead(workspace.path(), "parent-rollback", 1).unwrap();
-
-    let before = bf_bead_count(workspace.path());
-    assert_eq!(before, 1, "only the parent should exist before the split");
-
-    // Two child creates followed by a dependency op that references a bead that
-    // does not exist. bf executes the whole array inside one BEGIN IMMEDIATE
-    // transaction and fails fast on the bad op, rolling everything back.
-    let ops = format!(
-        r#"[
-            {{"op":"create","title":"orphan candidate 1","description":"b1"}},
-            {{"op":"create","title":"orphan candidate 2","description":"b2"}},
-            {{"op":"dep_add_blocker","id":"bf-doesnotexist","blocker":"@0"}},
-            {{"op":"dep_add_blocker","id":"{parent}","blocker":"@1"}}
-        ]"#,
-        parent = parent.as_ref(),
-    );
-
-    let output = std::process::Command::new(bf_path())
-        .args(["batch", "--json", &ops])
-        .current_dir(workspace.path())
-        .output()
-        .expect("failed to run bf batch");
-
-    assert!(
-        !output.status.success(),
-        "batch with a bad dependency op should fail, got success: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-
-    // The whole transaction rolled back: no orphaned children were created.
-    let after = bf_bead_count(workspace.path());
-    assert_eq!(
-        after, before,
-        "failed mitosis must leave no orphaned children (before={before}, after={after})"
-    );
+/// Transactional split rollback is backend-dependent. The native bead-rs CLI
+/// currently exposes sequential split operations, so this suite documents and
+/// gates the transaction-only scenario on the descriptor capability instead of
+/// invoking a command the backend does not provide.
+#[test]
+fn bead_rs_split_fixture_is_correctly_gated_without_transactional_batch() {
+    let backend = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-rs")
+        .expect("built-in bead-rs descriptor missing");
+    assert!(!backend.capabilities.transactional_batch);
 }
