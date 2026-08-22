@@ -1,10 +1,7 @@
-Verified successfully.
+Verified successfully:
 
-- Rust/Cargo 1.95.0 active; MSRV 1.75 satisfied.
-- rustfmt, clippy, declared targets, GCC/cc, make, pkg-config, cmake, and git available.
-- `cargo check --all-targets --locked` passed.
-- `cargo build --all-targets --locked` passed.
-- No required dependencies missing.
-- `cargo fmt --check` only found unrelated formatting in a concurrently modified file.
-
-No files were changed or committed. Bead `needle-2a19d87b` was updated and closed.
+- Rust 1.95.0 active and pinned; satisfies MSRV 1.75.
+- Cargo, rustfmt, Clippy, targets, and components available.
+- Core tools installed: `gcc/cc`, `make`, `pkg-config`, `git`, `curl`, `jq`, `openssl`.
+- `cargo check`, Clippy, fast definition-of-done, and `cargo build --bins` passed.
+- No source/config changes required; bead updated and closed.

@@ -46,3 +46,15 @@ target/criterion/
 # cycle and permanently dirtied this shared checkout. The authoritative store is
 # .beads/beads.db; the shared checkpoint is .beads/issues.jsonl.
 .beads/.bf_history/
+
+# Raw per-dispatch agent stdout/stderr captures (machine-local churn, not a
+# shared artifact). A single sweeping commit (a1e55e1b, 2026-08-21) tracked
+# 610 of these (422MB) alongside three compiled `cargo install` binaries
+# below, bloating .git to 719MB and producing a GitHub secret-scanning false
+# positive on incidental bytes inside one of the binaries (alert #18,
+# resolved 2026-08-22). The durable record is .beads/checkpoint/.
+.beads/traces/
+
+# `cargo install --root .needle-install` output — compiled binaries, never
+# source. Same commit as above tracked these; see .beads/traces/ note.
+.needle-install/

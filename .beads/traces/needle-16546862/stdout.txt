@@ -1,12 +1,12 @@
 Completed and closed `needle-16546862`.
 
-Recorded the full inventory in bead notes, including:
+Recorded the full 3,181-character inventory in the bead notes. Key findings:
 
-- All four expected YAML assertions.
-- Current live canary statuses and labels.
-- Stale failure assertions (`blocked` and `failure-count:1`).
-- Timeout scenario caveat.
-- Verified bead-forge vocabulary via `bf show --json`.
-- Recommended changes for each file.
+- Success fixture is current: `closed`, no labels.
+- Timeout fixture is stale: should expect `open`; timeout labels are not currently assertable.
+- Failure fixture is stale: first failure is `open` with `failure-count:1`, not `blocked` (quarantine starts at 5).
+- State-machine fixture is untestable: the runner always records no transitions.
+- Verified `bf show --json` on a real legacy bead; documented the distinction between lifecycle statuses and `ready` as a query concept.
+- Canary event logs show every named runner claimed a different fixture bead, so current snapshots are contaminated as scenario evidence.
 
-No repository files were changed, so no commit or push was made.
+No repository files were changed, so no commit was created.
