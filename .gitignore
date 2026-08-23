@@ -12,6 +12,22 @@ test_output*
 p95_*
 *_output.txt
 
+# Root-anchored spellings of the same junk — hyphen variants and exact names
+# the globs above miss. Anchored with a leading slash so they can only match
+# at the repo root, where shell redirect one-liners drop their output, and can
+# never hide a legitimately named file under tests/ or src/. The 17 tracked
+# offenders were removed in b0b4a2e (2026-08-19).
+/failing_tests*.txt
+/needle-ci-*-build-logs.txt
+/test_execution_summary.md
+/test-exit-code.txt
+/test-failure*
+/test_full_output.log
+/test_p95_*.txt
+/test-results*.txt
+/test_template_rendering.rs
+/test_trace*.txt
+
 # Test failure analysis reports (stale mislead workers investigating current CI state)
 test_error_details.md
 test_error_messages.txt
