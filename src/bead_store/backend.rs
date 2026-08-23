@@ -758,7 +758,11 @@ fn builtin_bead_rs() -> BeadBackend {
             transactional_batch: false,
             velocity_metadata: false,
         },
-        quirks: Vec::new(),
+        quirks: vec![BeadBackendQuirk {
+            name: "limit_zero_returns_empty_set".to_string(),
+            version_requirement: None,
+            description: "bead-rs has a bug where --limit 0 returns an empty set instead of all beads. Workaround: use a large explicit limit.".to_string(),
+        }],
         error_markers: BeadBackendErrorMarkers {
             corruption: vec![
                 "database disk image is malformed".to_string(),
@@ -894,11 +898,16 @@ mod tests {
         let bead_rs = builtin_bead_rs();
         let bead_forge = builtin_bead_forge();
 
-        // bead-rs should NOT have the limit_zero_returns_empty_set quirk
-        assert!(!bead_rs
+        // bead-rs SHOULD have the limit_zero_returns_empty_set quirk (verified against v0.1.3)
+        let rs_quirk = bead_rs
             .quirks
             .iter()
-            .any(|q| q.name == "limit_zero_returns_empty_set"));
+            .find(|q| q.name == "limit_zero_returns_empty_set")
+            .expect("bead-rs should declare limit_zero_returns_empty_set quirk");
+        assert!(
+            rs_quirk.version_requirement.is_none(),
+            "bead-rs quirk should apply to all versions"
+        );
 
         // bead-forge SHOULD have the limit_zero_returns_empty_set quirk declared
         // (but it only applies to versions <= 0.2.0)
@@ -914,10 +923,17 @@ mod tests {
     }
 
     #[test]
-    fn backend_without_quirks_has_empty_quirks_list() {
-        // A backend without quirks should have an empty list (not None)
+    fn backend_quirks_are_correctly_declared() {
+        // bead-rs has the limit_zero_returns_empty_set quirk
         let backend = builtin_bead_rs();
-        assert!(backend.quirks.is_empty());
+        assert!(!backend.quirks.is_empty(), "bead-rs should have quirks");
+        assert!(
+            backend
+                .quirks
+                .iter()
+                .any(|q| q.name == "limit_zero_returns_empty_set"),
+            "bead-rs should have limit_zero_returns_empty_set quirk"
+        );
     }
 
     #[test]
