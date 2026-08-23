@@ -88,8 +88,10 @@ run_check() {
     echo "✗ $name failed (exit code: $exit_code)"
     FAILURES+=("$name: exit code $exit_code")
     # Show the tail here while retaining the named failure for the summary.
-    echo "Failure details for $name (last 20 lines):"
-    echo "$output" | tail -n 20
+    # 100 lines covers cargo test's full alphabetical failures list; a 20-line
+    # tail truncated the head of that list, hiding which modules failed.
+    echo "Failure details for $name (last 100 lines):"
+    echo "$output" | tail -n 100
     # Keep running so every check reports its result. The summary below returns
     # the aggregate status after all requested checks have run.
     return 0
