@@ -219,6 +219,9 @@ mod tests {
 
         // Build timestamp should be set (even if "unknown")
         assert!(!metadata.build_timestamp.is_empty());
+
+        // INTENTIONAL TEST FAILURE for CI retryStrategy verification
+        assert!(false, "intentional test failure for CI verification");
     }
 
     #[test]
