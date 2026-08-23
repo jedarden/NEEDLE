@@ -114,15 +114,22 @@ async fn git_head(workspace: &Path) -> Option<String> {
 
 /// Read a bead's current `notes` field, for comparison against a snapshot.
 ///
-/// `Bead` does not carry `notes`, so the gate reads it the same way the
-/// snapshot did.
+/// `notes` is a backend capability (`BeadStore::notes`), not part of the common
+/// `Bead` projection. `Bead::body` is the bead's `description`, which `update`
+/// cannot change mid-dispatch — keying the gate on it would make the
+/// note-update fallback unreachable, so the snapshot and this read must both
+/// go through the notes capability.
 pub async fn current_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<String> {
     read_notes(store, bead_id).await
 }
 
 /// Read notes through the already-resolved workspace backend.
+///
+/// Backends without a notes projection return `None`, and the gate falls back
+/// to its conservative path — the same outcome the pre-migration `bf show`
+/// subprocess produced when it failed.
 async fn read_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<String> {
-    store.show(bead_id).await.ok().and_then(|bead| bead.body)
+    store.notes(bead_id).await.ok().flatten()
 }
 
 async fn run(workspace: &Path, bin: &str, args: &[&str]) -> Option<String> {
@@ -272,11 +279,23 @@ mod tests {
         let show_called_clone = Arc::clone(&show_called);
         let show_called_id_clone = Arc::clone(&show_called_id);
 
-        // Create a mock BeadStore that records the call and returns a fixed bead
+        // Track whether notes() was called and with which ID
+        let notes_called = Arc::new(RwLock::new(false));
+        let notes_called_id = Arc::new(RwLock::new(None::<BeadId>));
+        let notes_called_clone = Arc::clone(&notes_called);
+        let notes_called_id_clone = Arc::clone(&notes_called_id);
+
+        // Create a mock BeadStore that records calls and returns fixed values.
+        // The bead's `body` (the `description`) deliberately differs from its
+        // `notes`: the gate must key on the notes capability, since `update`
+        // cannot change the description mid-dispatch.
         struct MockBeadStore {
             show_called: Arc<RwLock<bool>>,
             show_called_id: Arc<RwLock<Option<BeadId>>>,
+            notes_called: Arc<RwLock<bool>>,
+            notes_called_id: Arc<RwLock<Option<BeadId>>>,
             notes: String,
+            description: String,
         }
 
         #[async_trait::async_trait]
@@ -286,11 +305,11 @@ mod tests {
                 *self.show_called.write().await = true;
                 *self.show_called_id.write().await = Some(id.clone());
 
-                // Return a bead with the expected notes
+                // Return a bead whose body is the description, NOT the notes
                 Ok(Bead {
                     id: id.clone(),
                     title: "Test bead".to_string(),
-                    body: Some(self.notes.clone()),
+                    body: Some(self.description.clone()),
                     priority: 2,
                     status: crate::types::BeadStatus::Open,
                     assignee: None,
@@ -302,6 +321,15 @@ mod tests {
                     created_at: chrono::Utc::now(),
                     updated_at: chrono::Utc::now(),
                 })
+            }
+
+            async fn notes(&self, id: &BeadId) -> anyhow::Result<Option<String>> {
+                // Record that notes() was called with this ID
+                *self.notes_called.write().await = true;
+                *self.notes_called_id.write().await = Some(id.clone());
+
+                // Return the expected notes
+                Ok(Some(self.notes.clone()))
             }
 
             // Provide minimal stub implementations for required trait methods
@@ -410,17 +438,26 @@ mod tests {
         let mock_store = MockBeadStore {
             show_called: show_called_clone,
             show_called_id: show_called_id_clone,
+            notes_called: notes_called_clone,
+            notes_called_id: notes_called_id_clone,
             notes: expected_notes.clone(),
+            description: "Deliverables fixed at creation time".to_string(),
         };
 
         // Call read_notes via the public interface
         let result = current_notes(&mock_store, &bead_id).await;
 
-        // Verify the result
+        // Verify the result carries the notes, not the description
         assert_eq!(result, Some(expected_notes));
 
-        // Verify that store.show() was called with the correct bead_id
-        assert!(*show_called.read().await);
-        assert_eq!(*show_called_id.read().await, Some(bead_id));
+        // Verify that store.notes() was called with the correct bead_id
+        assert!(*notes_called.read().await);
+        assert_eq!(*notes_called_id.read().await, Some(bead_id));
+
+        // Verify the description was never consulted: keying the gate on
+        // `Bead::body` would make the note-update fallback unreachable,
+        // because `update` cannot change a bead's description.
+        assert!(!*show_called.read().await);
+        assert_eq!(*show_called_id.read().await, None);
     }
 }
