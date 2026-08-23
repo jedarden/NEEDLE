@@ -127,6 +127,9 @@ if [[ "$LANE" == "slow" ]] || [[ "$LANE" == "all" ]]; then
   run_check "cargo test --test p2_integration_tests" timeout 900 cargo test --test p2_integration_tests
   run_check "cargo test --test p3_integration_tests" timeout 900 cargo test --test p3_integration_tests
   run_check "cargo test --test real_br_integration_tests" timeout 900 cargo test --test real_br_integration_tests
+
+  # Installer tests (isolated, shell-level regression tests)
+  run_check "installer tests" timeout 60 bash tests/installer/run.sh
 fi
 
 # Summary report

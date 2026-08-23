@@ -783,8 +783,8 @@ worker:
 
     #[test]
     fn worker_startup_fails_with_nonexistent_adapter() {
-        use std::io::Stdio;
         use std::process::Command;
+        use std::process::Stdio;
 
         // Create an isolated HOME environment
         let temp_home = TempHome::new().unwrap();
@@ -815,7 +815,7 @@ agent:
 
         // Spawn the needle worker subprocess with isolated HOME
         let output = Command::new(&bin_path)
-            .arg("worker")
+            .arg("run")
             .arg("--once")
             .env("HOME", temp_home.path()) // Isolate HOME to prevent scanning real workspaces
             .stdout(Stdio::piped())
