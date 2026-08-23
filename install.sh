@@ -117,20 +117,12 @@ get_latest_version() {
     local version
     local api_output
 
-    # Use a temp file to avoid broken pipe when grep closes early
-    local tmp_file
-    tmp_file=$(mktemp)
-
+    # Fetch release data (curl to stderr /dev/null to suppress broken pipe from grep -m1)
     if command -v curl &>/dev/null; then
-        curl -fsSL "$GITHUB_API" -o "$tmp_file"
-        api_output=$(cat "$tmp_file")
-        rm -f "$tmp_file"
+        api_output=$(curl -fsSL "$GITHUB_API" 2>/dev/null)
     elif command -v wget &>/dev/null; then
-        wget -qO "$tmp_file" "$GITHUB_API"
-        api_output=$(cat "$tmp_file")
-        rm -f "$tmp_file"
+        api_output=$(wget -qO- "$GITHUB_API" 2>/dev/null)
     else
-        rm -f "$tmp_file"
         error "Neither curl nor wget is available. Please install one of them."
     fi
 

@@ -255,6 +255,8 @@ async fn stop_works_when_emitter_already_exited() {
     shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
 
     // Wait for emitter to notice and exit
+    // Note: The emitter runs in a native thread using std::thread::sleep, so we must
+    // wait for actual wall-clock time to pass, not virtual time.
     std::thread::sleep(Duration::from_millis(200));
 
     // Now call stop() - should still clean up heartbeat file
@@ -402,6 +404,8 @@ async fn e2e_cleanup_in_all_worker_states() {
                 Some(config_dir),
             );
             // Give the emitter time to write the updated state
+            // Note: The emitter runs in a native thread using std::thread::sleep, so we must
+            // wait for actual wall-clock time to pass, not virtual time.
             std::thread::sleep(Duration::from_millis(100));
         }
 
@@ -565,6 +569,8 @@ async fn e2e_all_signals_with_full_worker_lifecycle() {
             Some(&needle::types::BeadId::from("test-bead")),
             Some(config_dir),
         );
+        // Note: The emitter runs in a native thread using std::thread::sleep, so we must
+        // wait for actual wall-clock time to pass, not virtual time.
         std::thread::sleep(Duration::from_millis(50));
 
         // Phase 3: Signal arrives (simulate by setting shutdown flag)

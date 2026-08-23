@@ -780,4 +780,94 @@ worker:
         let content = fs::read_to_string(config_path).unwrap();
         assert!(content.contains("worker:"));
     }
+
+    #[test]
+    fn worker_startup_fails_with_nonexistent_adapter() {
+        use std::io::Stdio;
+        use std::process::Command;
+
+        // Create an isolated HOME environment
+        let temp_home = TempHome::new().unwrap();
+
+        // Define a nonexistent adapter name
+        let nonexistent_adapter = "nonexistent-test-adapter-xyz123";
+
+        // Create a .needle.yaml config that specifies the nonexistent adapter
+        let config_yaml = format!(
+            r#"
+# Worker configuration
+worker:
+  name: test-worker
+
+# Agent configuration with nonexistent adapter
+agent:
+  default: {}
+"#,
+            nonexistent_adapter
+        );
+
+        let config_path = temp_home.create_needle_config(&config_yaml).unwrap();
+        assert!(config_path.exists(), "config file should be created");
+
+        // Get the path to the needle binary
+        let bin_path =
+            std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
+
+        // Spawn the needle worker subprocess with isolated HOME
+        let output = Command::new(&bin_path)
+            .arg("worker")
+            .arg("--once")
+            .env("HOME", temp_home.path()) // Isolate HOME to prevent scanning real workspaces
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("Failed to spawn needle worker");
+
+        let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+        // Assert the worker exits with nonzero status
+        assert!(
+            !output.status.success(),
+            "needle worker should fail with nonexistent adapter. Exit status: {:?}\nstderr: {}",
+            output.status.code(),
+            stderr_output
+        );
+
+        // Validate error message contains the adapter name
+        assert!(
+            stderr_output.contains(nonexistent_adapter),
+            "error message should mention the nonexistent adapter '{}'. Got: {}",
+            nonexistent_adapter,
+            stderr_output
+        );
+
+        // Validate error message contains "adapter" to indicate it's an adapter error
+        assert!(
+            stderr_output.contains("adapter") && stderr_output.contains("not found"),
+            "error should indicate adapter not found. Got: {}",
+            stderr_output
+        );
+
+        // Validate error message contains configuration directory guidance
+        assert!(
+            stderr_output.contains("~/.needle/agents/")
+                || stderr_output.contains(".needle/agents")
+                || stderr_output.contains("configuration directory")
+                || stderr_output.contains("To fix this"),
+            "error message should contain configuration directory guidance. Got: {}",
+            stderr_output
+        );
+
+        // Validate error message contains remediation instructions
+        assert!(
+            stderr_output.contains("Common causes") || stderr_output.contains("check"),
+            "error message should contain remediation instructions. Got: {}",
+            stderr_output
+        );
+
+        // Since the worker failed at startup (before entering the claim loop),
+        // no bead could have been claimed. This is verified by the startup
+        // sequence in worker/mod.rs where resolve_adapter() is called before
+        // the main loop begins.
+    }
 }

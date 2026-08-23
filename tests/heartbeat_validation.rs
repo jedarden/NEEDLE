@@ -91,6 +91,8 @@ async fn heartbeat_refreshes_every_30_seconds() {
     let time1 = chrono::DateTime::parse_from_rfc3339(timestamp1).unwrap();
 
     // Wait for heartbeat to refresh (2.5 seconds to account for interval + write time)
+    // Note: The emitter runs in a native thread using std::thread::sleep, so we must
+    // wait for actual wall-clock time to pass, not virtual time.
     std::thread::sleep(Duration::from_millis(2500));
 
     // Read updated timestamp
