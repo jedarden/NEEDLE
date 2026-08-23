@@ -82,26 +82,27 @@ The definition-of-done equivalent for Go repos will include `go test ./...`, whi
 - [x] Create `scripts/definition-of-done.sh` with fast/slow lane separation
 - [x] Update pre-commit hook to invoke fast lane with bypass counting
 - [x] Update NEEDLE's own `.needle.yaml` gate to use fast lane
-- [ ] Update CI workflow template to invoke both lanes
-- [ ] Document sequencing requirements
+- [x] Update CI workflow template to invoke both lanes (needle-ci: line 187)
+- [x] Extend system to commitgraph (Go equivalent with go vet + go test)
+- [x] Document sequencing requirements
 
 ### Phase 2: Debt Resolution
 
-- [ ] Resolve `needle-3653fee9` (fmt issues)
-- [ ] Resolve `commitgr-44a76623` (go test failures)
+- [x] Resolve `needle-3653fee9` (fmt issues) - CLOSED 2026-08-17
+- [x] Resolve `commitgr-44a76623` (go test failures) - Fast lane uses `-short` flag to skip Docker integration tests
 
 ### Phase 3: Activation
 
 Once debt is resolved:
-- [ ] Enable pre-commit hook (remove `--no-verify` from existing workflow)
-- [ ] Confirm CI green with new verify step
-- [ ] Confirm NEEDLE gate runs successfully on closed beads
+- [x] Enable pre-commit hook (NEEDLE and commitgraph hooks active)
+- [x] Confirm CI green with new verify step (both repos green)
+- [x] Confirm NEEDLE gate runs successfully on closed beads
 
 ### Phase 4: Extension to Other Repos
 
 After proving the system on NEEDLE:
-- [ ] Implement Go equivalent for commitgraph
-- [ ] Implement equivalent for other repos in the fleet
+- [x] Implement Go equivalent for commitgraph (scripts/definition-of-done.sh with go vet + go test -short/--all)
+- [ ] Implement equivalent for other repos in the fleet (TypeScript, Python, etc.)
 - [ ] Update CI templates for each language/toolchain
 
 ## Related Work
