@@ -127,7 +127,7 @@ telemetry:
     color: auto
   hooks: []
   otlp_sink:
-    enabled: false
+    enabled: true
     endpoint: http://needle-otel-ex44-apexalgo-iad-ts.ardenone.com:4318
     protocol: http
     timeout_secs: 10
