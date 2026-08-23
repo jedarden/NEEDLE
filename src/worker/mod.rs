@@ -4213,9 +4213,47 @@ impl Worker {
             candidate.worker.idle_timeout
         );
         replace!(
+            "worker.allow_exit_without_supervisor",
+            next.worker.allow_exit_without_supervisor,
+            candidate.worker.allow_exit_without_supervisor
+        );
+        // `idle_action` reloads through the same supervisor guard as boot
+        // (needle-d00f58d3). Without this, editing the config to
+        // `idle_action: exit` and letting the reload poller apply it would
+        // bypass the boot-time validation entirely and reintroduce the
+        // orphaned-bead hazard the guard exists to prevent.
+        let mut reloaded_idle_action = candidate.worker.idle_action.clone();
+        if reloaded_idle_action == IdleAction::Exit {
+            let supervisor_present = self.health.detect_supervisor_direct();
+            if let WorkerConfigValidationResult::Invalid { reason } =
+                validate_idle_action_config(&reloaded_idle_action, supervisor_present)
+            {
+                if next.worker.allow_exit_without_supervisor {
+                    tracing::warn!(
+                        idle_action = "exit",
+                        "config reload: allow_exit_without_supervisor is enabled - keeping Exit policy without a supervisor"
+                    );
+                    let _ = self.telemetry.emit(EventKind::ConfigWarning {
+                        warning_type: "idle_action_explicit_override".to_string(),
+                        message: "config reload set idle_action=exit with no supervisor detected, but allow_exit_without_supervisor is enabled. Worker will exit on empty queue - ensure an external recovery mechanism exists.".to_string(),
+                    });
+                } else {
+                    tracing::warn!(
+                        idle_action = "exit",
+                        "config reload: no supervisor detected - retaining idle_action=Wait (set allow_exit_without_supervisor=true to opt in to Exit without a supervisor)"
+                    );
+                    let _ = self.telemetry.emit(EventKind::ConfigWarning {
+                        warning_type: "idle_action_default_to_wait".to_string(),
+                        message: format!("config reload: {reason} - retaining Wait. Set allow_exit_without_supervisor=true to explicitly opt in to Exit without a supervisor."),
+                    });
+                    reloaded_idle_action = IdleAction::Wait;
+                }
+            }
+        }
+        replace!(
             "worker.idle_action",
             next.worker.idle_action,
-            candidate.worker.idle_action
+            reloaded_idle_action
         );
         replace!(
             "worker.max_claim_retries",
@@ -6283,6 +6321,147 @@ mod tests {
             worker.config.telemetry.file_sink.enabled,
             running_telemetry_enabled
         );
+    }
+
+    /// Pin the supervisor socket env to a nonexistent path for the duration
+    /// of a reload-guard test. `/tmp/needle-supervisor.sock` is machine
+    /// state: a live supervisor there would flip these tests' premise. The
+    /// env lock from `isolate_env` serializes the mutation; the caller must
+    /// hold its guard for the whole test and this helper restores the var on
+    /// drop via `EnvReset`.
+    struct SupervisorSocketReset;
+    impl Drop for SupervisorSocketReset {
+        fn drop(&mut self) {
+            std::env::remove_var("NEEDLE_SUPERVISOR_SOCKET");
+        }
+    }
+
+    fn pin_absent_supervisor_socket() -> SupervisorSocketReset {
+        let socket_dir = tempfile::tempdir().unwrap();
+        std::env::set_var(
+            "NEEDLE_SUPERVISOR_SOCKET",
+            socket_dir.path().join("absent.sock"),
+        );
+        SupervisorSocketReset
+    }
+
+    #[test]
+    fn tier_a_reload_cannot_enable_exit_without_supervisor() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _socket_reset = pin_absent_supervisor_socket();
+
+        let mut worker = make_worker(Arc::new(MockStore::empty()));
+        assert_eq!(worker.config.worker.idle_action, IdleAction::Wait);
+
+        let mut candidate = worker.config.clone();
+        candidate.worker.idle_action = IdleAction::Exit;
+        candidate.worker.allow_exit_without_supervisor = false;
+
+        let changed_keys = worker.apply_tier_a_config(&candidate);
+
+        assert_eq!(
+            worker.config.worker.idle_action,
+            IdleAction::Wait,
+            "reload must not enable Exit without a supervisor or an explicit opt-in"
+        );
+        assert!(
+            !changed_keys.contains(&"worker.idle_action".to_string()),
+            "a downgraded reload must not report idle_action as changed"
+        );
+    }
+
+    #[test]
+    fn tier_a_reload_enables_exit_with_explicit_opt_in() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _socket_reset = pin_absent_supervisor_socket();
+
+        let mut worker = make_worker(Arc::new(MockStore::empty()));
+
+        let mut candidate = worker.config.clone();
+        candidate.worker.idle_action = IdleAction::Exit;
+        candidate.worker.allow_exit_without_supervisor = true;
+
+        let changed_keys = worker.apply_tier_a_config(&candidate);
+
+        assert_eq!(
+            worker.config.worker.idle_action,
+            IdleAction::Exit,
+            "an explicit allow_exit_without_supervisor opt-in must survive reload"
+        );
+        assert!(worker.config.worker.allow_exit_without_supervisor);
+        assert!(changed_keys.contains(&"worker.idle_action".to_string()));
+        assert!(
+            changed_keys.contains(&"worker.allow_exit_without_supervisor".to_string()),
+            "the opt-in flag is itself Tier-A reloadable"
+        );
+    }
+
+    #[test]
+    fn tier_a_reload_enables_exit_when_supervisor_present() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _socket_reset = pin_absent_supervisor_socket();
+
+        // Build the worker around a home we control so a fresh supervisor
+        // heartbeat can be planted where detect_supervisor_direct looks.
+        let home = tempfile::tempdir().unwrap();
+        let explore_root = tempfile::tempdir().unwrap();
+        let mut config = valid_test_config();
+        config.self_modification.hot_reload = false;
+        config.strands.explore.enabled = false;
+        config.strands.explore.workspace_root = explore_root.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
+        config.workspace.home = home.path().to_path_buf();
+        let mut worker = Worker::new(
+            config,
+            "idle-reload-supervised".to_string(),
+            Arc::new(MockStore::empty()),
+        );
+
+        let hb_dir = home.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+        let heartbeat = serde_json::json!({ "last_heartbeat": chrono::Utc::now().to_rfc3339() });
+        std::fs::write(
+            hb_dir.join("supervisor-heartbeat.json"),
+            heartbeat.to_string(),
+        )
+        .unwrap();
+
+        let mut candidate = worker.config.clone();
+        candidate.worker.idle_action = IdleAction::Exit;
+        candidate.worker.allow_exit_without_supervisor = false;
+
+        let changed_keys = worker.apply_tier_a_config(&candidate);
+
+        assert_eq!(
+            worker.config.worker.idle_action,
+            IdleAction::Exit,
+            "a live supervisor makes Exit safe to reload"
+        );
+        assert!(changed_keys.contains(&"worker.idle_action".to_string()));
+    }
+
+    #[test]
+    fn tier_a_reload_downgrades_exit_when_supervisor_is_gone() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _socket_reset = pin_absent_supervisor_socket();
+
+        // The running config has Exit — e.g. booted under a supervisor that
+        // has since died. A reload that still requests Exit must fall back to
+        // Wait instead of silently keeping the now-unguarded Exit policy.
+        let mut worker = make_worker(Arc::new(MockStore::empty()));
+        worker.config.worker.idle_action = IdleAction::Exit;
+        worker.config.worker.allow_exit_without_supervisor = false;
+
+        let candidate = worker.config.clone();
+
+        let changed_keys = worker.apply_tier_a_config(&candidate);
+
+        assert_eq!(
+            worker.config.worker.idle_action,
+            IdleAction::Wait,
+            "a reload must re-check the supervisor even when Exit is already running"
+        );
+        assert!(changed_keys.contains(&"worker.idle_action".to_string()));
     }
 
     #[test]

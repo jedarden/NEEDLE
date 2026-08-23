@@ -49,6 +49,8 @@ worker:
 
 **Detection failures are treated as "no supervisor":** Supervisor presence is checked via a heartbeat file (with a 2-minute freshness TTL) and, failing that, a supervisor socket. If the heartbeat file is corrupt or unreadable, detection falls through to the socket check; if neither can establish presence, the worker behaves as unsupervised — the guard still runs and the `wait` default still applies. A degraded heartbeat never silently disables the safety check.
 
+**The same rule applies to config reloads:** `worker.idle_action` and `worker.allow_exit_without_supervisor` are hot-reloadable (Tier A), and the reload path enforces the identical guard as startup. A reload that requests `idle_action: exit` while no supervisor is detected is downgraded to `wait` with a `ConfigWarning`; enabling `allow_exit_without_supervisor: true` in the reloaded config is honored without a restart. A reload also re-checks the supervisor even when `exit` is already the running policy — if the supervisor has died since boot, the next reload falls back to `wait` instead of keeping an unguarded exit policy.
+
 ### Disposable Scratch Checkout Sweep
 
 At startup, before opening the bead store or claiming work, each worker tries

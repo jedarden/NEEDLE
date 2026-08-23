@@ -193,6 +193,7 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     // Worker configuration (mostly live)
     ("worker.idle_timeout", ReloadTier::Live),
     ("worker.idle_action", ReloadTier::Live),
+    ("worker.allow_exit_without_supervisor", ReloadTier::Live),
     ("worker.max_claim_retries", ReloadTier::Live),
     ("worker.claim_race_lost_skip", ReloadTier::Live),
     ("worker.cpu_load_warn", ReloadTier::Live),
