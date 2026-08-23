@@ -15,7 +15,6 @@ set -euo pipefail
 REPO="jedarden/NEEDLE"
 INSTALL_PATH="${NEEDLE_INSTALL_PATH:-$HOME/.local/bin/needle}"
 GITHUB_API="https://api.github.com/repos/$REPO/releases/latest" # gitleaks:allow - public API endpoint
-SKIP_CHECKSUM="${NEEDLE_SKIP_CHECKSUM:-false}"
 
 # Colors (only if stdout is a terminal)
 if [[ -t 1 ]]; then
@@ -57,21 +56,17 @@ Usage: install.sh [OPTIONS]
 Installs the needle binary to ~/.local/bin/needle (or \$NEEDLE_INSTALL_PATH).
 
 OPTIONS:
-    --skip-checksum    Skip checksum verification (NOT RECOMMENDED)
     -h, --help         Show this help message
 
 ENVIRONMENT VARIABLES:
     NEEDLE_INSTALL_PATH    Installation path (default: ~/.local/bin/needle)
-    NEEDLE_SKIP_CHECKSUM   Set to '1' or 'true' to skip checksum verification
 
 SECURITY NOTE:
-    By default, this installer verifies SHA-256 checksums and aborts on any
-    failure or mismatch. Skipping verification exposes you to tampered downloads.
-    Only skip if you understand and accept this risk.
+    This installer verifies SHA-256 checksums and aborts on any failure or
+    mismatch. This ensures the downloaded binary has not been corrupted or tampered with.
 
 Examples:
     curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
-    curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash -s -- --skip-checksum
 EOF
 }
 
@@ -79,10 +74,6 @@ EOF
 parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --skip-checksum)
-                SKIP_CHECKSUM=true
-                shift
-                ;;
             -h|--help)
                 show_usage
                 exit 0
@@ -192,66 +183,58 @@ main() {
     local checksums_file="$temp_dir/checksums.txt"
     info "Downloading checksums..."
     if ! download_file "$checksums_url" "$checksums_file" 2>/dev/null; then
-        if [[ "$SKIP_CHECKSUM" == "true" || "$SKIP_CHECKSUM" == "1" ]]; then
-            warn "Could not download checksums.txt — skipping integrity check (--skip-checksum)"
-        else
-            error "Could not download checksums.txt. Aborting installation.
-Use --skip-checksum to bypass this check (not recommended)."
-        fi
-    else
-        info "Verifying checksum..."
-        local expected_hash
-        expected_hash=$(grep "  ${asset_name}$\| ${asset_name}$" "$checksums_file" | awk '{print $1}')
-        if [[ -z "$expected_hash" ]]; then
-            if [[ "$SKIP_CHECKSUM" == "true" || "$SKIP_CHECKSUM" == "1" ]]; then
-                warn "Could not find checksum for ${asset_name} in checksums.txt — skipping (--skip-checksum)"
-            else
-                error "Could not find checksum for ${asset_name} in checksums.txt. Aborting installation.
-Use --skip-checksum to bypass this check (not recommended)."
-            fi
-        else
-            local actual_hash=""
-            local found_hash_tool=false
-            if command -v sha256sum &>/dev/null; then
-                actual_hash=$(sha256sum "$temp_binary" | awk '{print $1}')
-                found_hash_tool=true
-            elif command -v shasum &>/dev/null; then
-                actual_hash=$(shasum -a 256 "$temp_binary" | awk '{print $1}')
-                found_hash_tool=true
-            fi
+        error "Could not download checksums.txt. Installation aborted for security reasons."
+    fi
 
-            if [[ "$found_hash_tool" == "false" ]]; then
-                if [[ "$SKIP_CHECKSUM" == "true" || "$SKIP_CHECKSUM" == "1" ]]; then
-                    warn "Neither sha256sum nor shasum found — skipping checksum verification (--skip-checksum)"
-                else
-                    error "Neither sha256sum nor shasum available. Cannot verify checksum.
+    info "Verifying checksum..."
+    local expected_hash
+    expected_hash=$(grep "  ${asset_name}$\| ${asset_name}$" "$checksums_file" | awk '{print $1}')
+    if [[ -z "$expected_hash" ]]; then
+        error "Could not find checksum for ${asset_name} in checksums.txt. Installation aborted for security reasons."
+    fi
+
+    # Compute checksum of downloaded binary
+    local actual_hash=""
+    local found_hash_tool=false
+    if command -v sha256sum &>/dev/null; then
+        actual_hash=$(sha256sum "$temp_binary" | awk '{print $1}')
+        found_hash_tool=true
+    elif command -v shasum &>/dev/null; then
+        actual_hash=$(shasum -a 256 "$temp_binary" | awk '{print $1}')
+        found_hash_tool=true
+    fi
+
+    if [[ "$found_hash_tool" == "false" ]]; then
+        error "Neither sha256sum nor shasum available. Cannot verify checksum.
 Install coreutils (sha256sum) or check the system for shasum.
-Use --skip-checksum to bypass this check (not recommended)."
-                fi
-            elif [[ -n "$actual_hash" ]]; then
-                if [[ "$actual_hash" != "$expected_hash" ]]; then
-                    error "Checksum mismatch for ${asset_name}!
+Installation aborted for security reasons."
+    fi
+
+    if [[ -z "$actual_hash" ]]; then
+        error "Failed to compute checksum for downloaded binary. Installation aborted for security reasons."
+    fi
+
+    # Verify checksum matches
+    if [[ "$actual_hash" != "$expected_hash" ]]; then
+        error "Checksum mismatch for ${asset_name}!
   expected: ${expected_hash}
   got:      ${actual_hash}
 
 The downloaded binary may be corrupted or tampered with.
-This verification CANNOT be bypassed for security reasons."
-                fi
-                success "Checksum verified."
-            fi
-        fi
+Installation aborted for security reasons."
+    fi
+    success "Checksum verified."
 
-        # Optional GPG signature verification (informational only, never fails)
-        if command -v gpg &>/dev/null; then
-            local sig_url="https://github.com/${REPO}/releases/download/${version}/checksums.txt.asc"
-            local sig_file="$temp_dir/checksums.txt.asc"
-            if download_file "$sig_url" "$sig_file" 2>/dev/null; then
-                info "Verifying GPG signature..."
-                if gpg --verify "$sig_file" "$checksums_file" 2>/dev/null; then
-                    success "GPG signature verified."
-                else
-                    warn "GPG signature verification failed (signing key may not be in your keyring)."
-                fi
+    # Optional GPG signature verification (informational only, never fails)
+    if command -v gpg &>/dev/null; then
+        local sig_url="https://github.com/${REPO}/releases/download/${version}/checksums.txt.asc"
+        local sig_file="$temp_dir/checksums.txt.asc"
+        if download_file "$sig_url" "$sig_file" 2>/dev/null; then
+            info "Verifying GPG signature..."
+            if gpg --verify "$sig_file" "$checksums_file" 2>/dev/null; then
+                success "GPG signature verified."
+            else
+                warn "GPG signature verification failed (signing key may not be in your keyring)."
             fi
         fi
     fi
