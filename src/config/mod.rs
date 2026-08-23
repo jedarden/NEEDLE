@@ -382,6 +382,15 @@ pub struct WorkerConfig {
     /// wrong process when another tool shared the name.
     #[serde(default)]
     pub worker_binary_path: Option<PathBuf>,
+
+    /// Allow `idle_action=exit` without supervisor supervision.
+    ///
+    /// When `false` (the default), the worker will automatically use `Wait`
+    /// instead of `Exit` if no supervisor is detected during boot, emitting a
+    /// `ConfigWarning` telemetry event. Set this to `true` only if you understand
+    /// the orphaned bead risk and have an external recovery mechanism.
+    #[serde(default = "WorkerConfig::default_allow_exit_without_supervisor")]
+    pub allow_exit_without_supervisor: bool,
 }
 
 impl Default for WorkerConfig {
@@ -408,6 +417,7 @@ impl Default for WorkerConfig {
             config_reload_check_interval_secs: Self::default_config_reload_check_interval_secs(),
             scratch_sweep: ScratchSweepConfig::default(),
             worker_binary_path: None,
+            allow_exit_without_supervisor: Self::default_allow_exit_without_supervisor(),
         }
     }
 }
@@ -472,6 +482,10 @@ impl WorkerConfig {
     }
     fn default_config_reload_check_interval_secs() -> u64 {
         0
+    }
+
+    fn default_allow_exit_without_supervisor() -> bool {
+        false
     }
 }
 

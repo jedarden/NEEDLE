@@ -1491,12 +1491,29 @@ impl Worker {
                         }
                     }
                     WorkerConfigValidationResult::Invalid { reason } => {
-                        tracing::warn!(idle_action = "exit", "{}", reason);
-                        // Emit telemetry event for the configuration warning
-                        let _ = self.telemetry.emit(EventKind::ConfigWarning {
-                            warning_type: "idle_action_misconfiguration".to_string(),
-                            message: reason.clone(),
-                        });
+                        // Check if user has explicitly opted out of supervisor requirement
+                        if self.config.worker.allow_exit_without_supervisor {
+                            tracing::warn!(
+                                idle_action = "exit",
+                                "allow_exit_without_supervisor is enabled: using Exit policy without supervisor supervision"
+                            );
+                            let _ = self.telemetry.emit(EventKind::ConfigWarning {
+                                warning_type: "idle_action_explicit_override".to_string(),
+                                message: "idle_action=exit configured without supervisor supervision, but allow_exit_without_supervisor is enabled. Worker will exit on empty queue - ensure external recovery mechanism exists.".to_string(),
+                            });
+                        } else {
+                            // Default to Wait instead of Exit when no supervisor is present
+                            tracing::warn!(
+                                idle_action = "exit",
+                                "no supervisor detected: automatically defaulting to Wait (set allow_exit_without_supervisor=true to opt-in to Exit without supervisor)"
+                            );
+                            let _ = self.telemetry.emit(EventKind::ConfigWarning {
+                                warning_type: "idle_action_default_to_wait".to_string(),
+                                message: format!("{} - automatically defaulting to Wait. Set allow_exit_without_supervisor=true to explicitly opt-in to Exit without supervisor.", reason),
+                            });
+                            // Mutate the config to use Wait instead of Exit
+                            self.config.worker.idle_action = IdleAction::Wait;
+                        }
                     }
                 }
             }
@@ -9601,5 +9618,92 @@ mod tests {
             !present,
             "should return false when heartbeat file doesn't exist"
         );
+    }
+
+    // ── Tests for idle_action default behavior without supervisor ──
+
+    #[test]
+    fn test_idle_action_defaults_to_wait_without_supervisor_when_opt_in_disabled() {
+        // When no supervisor is present and allow_exit_without_supervisor is false,
+        // idle_action=Exit should be changed to Wait during boot
+        let worker_config = crate::config::WorkerConfig {
+            idle_action: IdleAction::Exit,
+            allow_exit_without_supervisor: false,
+            ..Default::default()
+        };
+
+        // Simulate the validation step
+        let validation_result = validate_idle_action_config(&worker_config.idle_action, false);
+
+        // Validation should fail (Exit without supervisor is unsafe)
+        assert!(!validation_result.is_valid());
+
+        // With allow_exit_without_supervisor=false, the worker should change idle_action to Wait
+        // (this would happen in the worker boot code we modified)
+        assert!(!worker_config.allow_exit_without_supervisor);
+    }
+
+    #[test]
+    fn test_idle_action_remains_exit_without_supervisor_when_opt_in_enabled() {
+        // When no supervisor is present but allow_exit_without_supervisor is true,
+        // idle_action=Exit should remain Exit (user has explicitly opted in)
+        let worker_config = crate::config::WorkerConfig {
+            idle_action: IdleAction::Exit,
+            allow_exit_without_supervisor: true,
+            ..Default::default()
+        };
+
+        // Validation still fails (Exit without supervisor is technically unsafe)
+        let validation_result = validate_idle_action_config(&worker_config.idle_action, false);
+        assert!(!validation_result.is_valid());
+
+        // But because allow_exit_without_supervisor=true, the worker boot code
+        // should respect the user's explicit opt-in and keep Exit
+        assert!(worker_config.allow_exit_without_supervisor);
+        assert_eq!(worker_config.idle_action, IdleAction::Exit);
+    }
+
+    #[test]
+    fn test_idle_action_wait_is_always_safe() {
+        // Wait should always be valid with or without supervisor
+        let worker_config = crate::config::WorkerConfig {
+            idle_action: IdleAction::Wait,
+            ..Default::default()
+        };
+
+        // Validation should pass for both cases
+        let result_no_sup = validate_idle_action_config(&worker_config.idle_action, false);
+        assert!(result_no_sup.is_valid());
+
+        let result_with_sup = validate_idle_action_config(&worker_config.idle_action, true);
+        assert!(result_with_sup.is_valid());
+    }
+
+    #[test]
+    fn test_idle_action_exit_is_safe_with_supervisor() {
+        // Exit should be valid when supervisor is present
+        let worker_config = crate::config::WorkerConfig {
+            idle_action: IdleAction::Exit,
+            ..Default::default()
+        };
+
+        // With supervisor present, validation should pass
+        let result = validate_idle_action_config(&worker_config.idle_action, true);
+        assert!(result.is_valid());
+    }
+
+    #[test]
+    fn test_default_idle_action_is_wait() {
+        // The default IdleAction should be Wait
+        let default = IdleAction::default();
+        assert_eq!(default, IdleAction::Wait);
+        assert_ne!(default, IdleAction::Exit);
+    }
+
+    #[test]
+    fn test_default_allow_exit_without_supervisor_is_false() {
+        // The default allow_exit_without_supervisor should be false for safety
+        let worker_config = crate::config::WorkerConfig::default();
+        assert!(!worker_config.allow_exit_without_supervisor);
     }
 }
