@@ -649,6 +649,8 @@ mod tests {
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
     use async_trait::async_trait;
     use std::sync::Mutex;
+    use tracing::Instrument;
+    use tracing_subscriber::prelude::*;
 
     fn make_bead(id: &str, workspace: &str) -> Bead {
         Bead {
@@ -1580,5 +1582,316 @@ mod tests {
             }
             other => panic!("expected Suspect result from claim_one, got {:?}", other),
         }
+    }
+
+    // ─── Telemetry-contract tests (needle-d91ca5e9) ────────────────────────────
+    //
+    // The bf-3uj6i span refactor replaced the `Entered` guard held across the
+    // claim await with `.instrument()`, and converted the worker-side
+    // `Span::current().record()` calls to explicit `claim_span.record()`.
+    // These tests pin the telemetry contract across that refactor: every
+    // EventKind emission and every declared `bead.claim` span attribute must
+    // still be observable by a downstream layer.
+
+    /// Captures every `record()` delivered to a layer, tagged by span name.
+    #[derive(Clone, Default)]
+    struct SpanRecordSink {
+        records: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    impl SpanRecordSink {
+        /// All records delivered for spans with the given name, in order.
+        fn recorded_on(&self, span_name: &str) -> Vec<String> {
+            self.records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(name, _)| name == span_name)
+                .map(|(_, kv)| kv.clone())
+                .collect()
+        }
+    }
+
+    /// Visitor that stringifies recorded field values.
+    struct FieldVisitor(Vec<(String, String)>);
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.push((field.name().to_string(), value.to_string()));
+        }
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.0.push((field.name().to_string(), value.to_string()));
+        }
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0
+                .push((field.name().to_string(), format!("{value:?}")));
+        }
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for SpanRecordSink
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_record(
+            &self,
+            id: &tracing::Id,
+            fields: &tracing::span::Record<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let Some(span) = ctx.span(id) else { return };
+            let name = span.metadata().name().to_string();
+            let mut visitor = FieldVisitor(Vec::new());
+            fields.record(&mut visitor);
+            let mut records = self.records.lock().unwrap();
+            for (key, value) in visitor.0 {
+                records.push((name.clone(), format!("{key}={value}")));
+            }
+        }
+    }
+
+    /// Build a `bead.claim` span with exactly the fields `worker::do_claim`
+    /// declares (src/worker/mod.rs), so tests observe the production shape.
+    fn claim_span_for(bead_id: &BeadId) -> tracing::Span {
+        let span = tracing::info_span!(
+            "bead.claim",
+            needle.bead.id = %bead_id.as_ref(),
+            needle.claim.retry_number = tracing::field::Empty,
+            needle.claim.result = tracing::field::Empty,
+        );
+        span.record("needle.claim.retry_number", 1u32);
+        span
+    }
+
+    /// Collect captured events as (event_type, bead_id, data) tuples.
+    fn captured_events(
+        events: &Mutex<Vec<crate::telemetry::TelemetryEvent>>,
+    ) -> Vec<(String, Option<BeadId>, serde_json::Value)> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| (e.event_type.clone(), e.bead_id.clone(), e.data.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn claim_success_emits_events_and_span_attributes() {
+        let recorder = SpanRecordSink::default();
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let bead = make_bead("needle-tel-ok", "/tmp/ws");
+        let store = Arc::new(MockBeadStore::new(vec![bead.clone()]));
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry.clone());
+
+        let outcome = tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(
+                claimer
+                    .claim_next(
+                        std::slice::from_ref(&bead),
+                        "worker-1",
+                        &HashSet::new(),
+                        "test-strand",
+                    )
+                    .instrument(claim_span_for(&bead.id)),
+            )
+        })
+        .unwrap();
+        assert!(matches!(outcome, ClaimOutcome::Claimed(_)));
+
+        drop(claimer);
+        drop(telemetry);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let captured = captured_events(&events);
+        let attempt = captured
+            .iter()
+            .find(|(t, _, _)| t == "bead.claim.attempted")
+            .expect("ClaimAttempt event must fire");
+        assert_eq!(attempt.1, Some(bead.id.clone()));
+        assert_eq!(attempt.2["attempt"], serde_json::json!(1));
+
+        let success = captured
+            .iter()
+            .find(|(t, _, _)| t == "bead.claim.succeeded")
+            .expect("ClaimSuccess event must fire");
+        assert_eq!(success.2["priority"], serde_json::json!(1));
+        assert_eq!(success.2["strand"], serde_json::json!("test-strand"));
+
+        let recorded = recorder.recorded_on("bead.claim");
+        assert!(
+            recorded.contains(&format!("needle.bead.id={}", bead.id.as_ref())),
+            "bead.claim must record needle.bead.id; got {recorded:?}"
+        );
+        assert!(
+            recorded.contains(&"needle.claim.retry_number=1".to_string()),
+            "bead.claim must record needle.claim.retry_number; got {recorded:?}"
+        );
+        assert!(
+            recorded.contains(&"needle.claim.result=succeeded".to_string()),
+            "bead.claim must record needle.claim.result=succeeded; got {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn claim_race_lost_emits_event_and_records_result() {
+        let recorder = SpanRecordSink::default();
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let lost = make_bead("needle-tel-lost", "/tmp/ws");
+        let won = make_bead("needle-tel-won", "/tmp/ws");
+        let store = Arc::new(
+            MockBeadStore::new(vec![lost.clone(), won.clone()]).with_claim_results(vec![
+                ClaimResult::RaceLost {
+                    claimed_by: "other-worker".to_string(),
+                },
+            ]),
+        );
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry.clone());
+
+        let outcome = tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(
+                claimer
+                    .claim_next(&[lost, won], "worker-1", &HashSet::new(), "test-strand")
+                    .instrument(claim_span_for(&BeadId::from("needle-tel-lost"))),
+            )
+        })
+        .unwrap();
+        assert!(
+            matches!(outcome, ClaimOutcome::Claimed(ref b) if b.id == BeadId::from("needle-tel-won"))
+        );
+
+        drop(claimer);
+        drop(telemetry);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let captured = captured_events(&events);
+        let race_lost = captured
+            .iter()
+            .find(|(t, _, _)| t == "bead.claim.race_lost")
+            .expect("ClaimRaceLost event must fire");
+        assert_eq!(race_lost.1, Some(BeadId::from("needle-tel-lost")));
+        assert_eq!(
+            captured
+                .iter()
+                .filter(|(t, _, _)| t == "bead.claim.attempted")
+                .count(),
+            2
+        );
+        assert!(captured.iter().any(|(t, _, _)| t == "bead.claim.succeeded"));
+
+        let recorded = recorder.recorded_on("bead.claim");
+        assert!(
+            recorded.contains(&"needle.claim.result=race_lost".to_string()),
+            "bead.claim must record needle.claim.result=race_lost; got {recorded:?}"
+        );
+        assert!(
+            recorded.contains(&"needle.claim.retry_number=2".to_string()),
+            "second attempt must bump needle.claim.retry_number; got {recorded:?}"
+        );
+        assert!(
+            recorded.contains(&"needle.claim.result=succeeded".to_string()),
+            "bead.claim must record needle.claim.result=succeeded; got {recorded:?}"
+        );
+    }
+
+    #[test]
+    fn claim_error_threshold_emits_threshold_event_and_error_result() {
+        let recorder = SpanRecordSink::default();
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let bead = make_bead("needle-tel-err", "/tmp/ws");
+        let error_result = ClaimResult::ClaimError {
+            reason: "br update exited with code 1".to_string(),
+        };
+        let store = Arc::new(
+            MockBeadStore::new(vec![bead.clone()]).with_claim_results(vec![
+                error_result.clone(),
+                error_result.clone(),
+                error_result.clone(),
+            ]),
+        );
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry.clone());
+
+        let mut last_outcome = None;
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..3 {
+                // Fresh span per cycle, mirroring worker::do_claim.
+                last_outcome = Some(
+                    runtime
+                        .block_on(
+                            claimer
+                                .claim_next(
+                                    std::slice::from_ref(&bead),
+                                    "worker-1",
+                                    &HashSet::new(),
+                                    "test-strand",
+                                )
+                                .instrument(claim_span_for(&bead.id)),
+                        )
+                        .unwrap(),
+                );
+            }
+        });
+
+        match last_outcome.expect("third claim must return an outcome") {
+            ClaimOutcome::Suspect {
+                consecutive_errors, ..
+            } => assert_eq!(consecutive_errors, 3),
+            other => panic!("expected Suspect on third claim, got {:?}", other),
+        }
+
+        drop(claimer);
+        drop(telemetry);
+        std::thread::sleep(Duration::from_millis(50));
+
+        let captured = captured_events(&events);
+        assert_eq!(
+            captured
+                .iter()
+                .filter(|(t, _, _)| t == "bead.claim.failed")
+                .count(),
+            3,
+            "each ClaimError must emit ClaimFailed"
+        );
+        let threshold = captured
+            .iter()
+            .find(|(t, _, _)| t == "bead.claim.error_threshold")
+            .expect("ClaimErrorThreshold event must fire on the third consecutive error");
+        assert_eq!(threshold.2["consecutive_errors"], serde_json::json!(3));
+        assert_eq!(threshold.1, Some(BeadId::from("needle-tel-err")));
+
+        let recorded = recorder.recorded_on("bead.claim");
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|kv| kv.starts_with("needle.claim.result="))
+                .count(),
+            3,
+            "each attempt must record needle.claim.result; got {recorded:?}"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|kv| kv.contains("br update exited with code 1")),
+            "error reason must land on needle.claim.result; got {recorded:?}"
+        );
     }
 }
