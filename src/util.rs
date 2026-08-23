@@ -506,6 +506,26 @@ impl BeadCli {
     pub fn new(name: String, path: std::path::PathBuf) -> Self {
         Self { name, path }
     }
+
+    /// The backend name for the probed CLI.
+    ///
+    /// [`probe_bead_cli`](fn@probe_bead_cli) reports the command it found
+    /// (`bead`, `bf`, `br`); this maps that command to the backend identifier
+    /// used across the rest of the ecosystem (`.needle.yaml`
+    /// `bead_cli.backend`, `BeadBackend` display):
+    ///
+    /// - `bead` -> `bead-rs`
+    /// - `bf` -> `bf`
+    /// - `br` -> `br`
+    ///
+    /// Unknown names pass through unchanged so hand-constructed values stay
+    /// representable.
+    pub fn backend_name(&self) -> &str {
+        match self.name.as_str() {
+            "bead" => "bead-rs",
+            other => other,
+        }
+    }
 }
 
 /// Probe PATH for available bead CLIs in priority order.
@@ -517,6 +537,9 @@ impl BeadCli {
 /// # Returns
 ///
 /// * `Option<BeadCli>` - The detected CLI with name and path, or `None` if no CLI is available
+///
+/// The backend name for the detected CLI (`bead-rs`, `bf`, or `br`) is
+/// available via [`BeadCli::backend_name`].
 ///
 /// # Examples
 ///
@@ -1998,13 +2021,37 @@ echo "Warning: deprecated flag" >&2
             "bf".to_string(),
             std::path::PathBuf::from("/home/user/.local/bin/bf"),
         );
-        let cli3 = BeadCli::new(
-            "br".to_string(),
-            std::path::PathBuf::from("/usr/bin/br"),
-        );
+        let cli3 = BeadCli::new("br".to_string(), std::path::PathBuf::from("/usr/bin/br"));
 
         assert_eq!(cli1, cli2, "identical BeadCli instances should be equal");
-        assert_ne!(cli1, cli3, "different BeadCli instances should not be equal");
+        assert_ne!(
+            cli1, cli3,
+            "different BeadCli instances should not be equal"
+        );
+    }
+
+    #[test]
+    fn test_bead_cli_backend_name_mapping() {
+        // The probe reports command names; backend_name() maps them to the
+        // backend identifiers the ecosystem uses elsewhere.
+        let bead = BeadCli::new(
+            "bead".to_string(),
+            std::path::PathBuf::from("/usr/local/bin/bead"),
+        );
+        assert_eq!(bead.backend_name(), "bead-rs");
+
+        let bf = BeadCli::new(
+            "bf".to_string(),
+            std::path::PathBuf::from("/home/user/.local/bin/bf"),
+        );
+        assert_eq!(bf.backend_name(), "bf");
+
+        let br = BeadCli::new("br".to_string(), std::path::PathBuf::from("/usr/bin/br"));
+        assert_eq!(br.backend_name(), "br");
+
+        // Unknown names pass through unchanged
+        let unknown = BeadCli::new("bd".to_string(), std::path::PathBuf::from("/opt/bin/bd"));
+        assert_eq!(unknown.backend_name(), "bd");
     }
 
     #[test]
@@ -2040,6 +2087,11 @@ echo "bead 0.1.3"
         assert!(result.is_some(), "should find bead CLI when available");
         let cli = result.unwrap();
         assert_eq!(cli.name, "bead", "should prioritize bead over other CLIs");
+        assert_eq!(
+            cli.backend_name(),
+            "bead-rs",
+            "bead command should report the bead-rs backend name"
+        );
         assert_eq!(cli.path, fake_bead, "should return correct path to bead");
     }
 
@@ -2073,9 +2125,20 @@ echo "bf 0.4.1"
         // Probe for CLI - should find bf (bead not available)
         let result = probe_bead_cli();
 
-        assert!(result.is_some(), "should find bf CLI when bead is not available");
+        assert!(
+            result.is_some(),
+            "should find bf CLI when bead is not available"
+        );
         let cli = result.unwrap();
-        assert_eq!(cli.name, "bf", "should fall back to bf when bead is unavailable");
+        assert_eq!(
+            cli.name, "bf",
+            "should fall back to bf when bead is unavailable"
+        );
+        assert_eq!(
+            cli.backend_name(),
+            "bf",
+            "bf command should report the bf backend name"
+        );
         assert_eq!(cli.path, fake_bf, "should return correct path to bf");
     }
 
@@ -2115,6 +2178,11 @@ echo "br (deprecated)"
         );
         let cli = result.unwrap();
         assert_eq!(cli.name, "br", "should fall back to br as last resort");
+        assert_eq!(
+            cli.backend_name(),
+            "br",
+            "br command should report the br backend name"
+        );
         assert_eq!(cli.path, fake_br, "should return correct path to br");
     }
 
@@ -2131,7 +2199,10 @@ echo "br (deprecated)"
         // Probe for CLI - should find nothing
         let result = probe_bead_cli();
 
-        assert!(result.is_none(), "should return None when no CLI is available");
+        assert!(
+            result.is_none(),
+            "should return None when no CLI is available"
+        );
     }
 
     #[test]
@@ -2190,7 +2261,10 @@ echo "br (deprecated)"
         // Probe for CLI - should prioritize bead over bf and br
         let result = probe_bead_cli();
 
-        assert!(result.is_some(), "should find a CLI when multiple are available");
+        assert!(
+            result.is_some(),
+            "should find a CLI when multiple are available"
+        );
         let cli = result.unwrap();
         assert_eq!(cli.name, "bead", "should prioritize bead over bf and br");
     }
@@ -2238,7 +2312,10 @@ echo "br (deprecated)"
         // Probe for CLI - should prioritize bf over br
         let result = probe_bead_cli();
 
-        assert!(result.is_some(), "should find a CLI when bf and br are available");
+        assert!(
+            result.is_some(),
+            "should find a CLI when bf and br are available"
+        );
         let cli = result.unwrap();
         assert_eq!(cli.name, "bf", "should prioritize bf over br");
     }
@@ -2314,7 +2391,10 @@ echo "test output"
             Some(cli) => {
                 // If found, verify the structure is valid
                 assert!(!cli.name.is_empty(), "CLI name should not be empty");
-                assert!(!cli.path.as_os_str().is_empty(), "CLI path should not be empty");
+                assert!(
+                    !cli.path.as_os_str().is_empty(),
+                    "CLI path should not be empty"
+                );
             }
             None => {
                 // If not found, that's also valid - just means no CLI is installed

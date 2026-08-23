@@ -622,6 +622,89 @@ impl std::fmt::Display for Backend {
     }
 }
 
+/// Unified backend detection result.
+///
+/// Contains both the backend name as a string and the resolved CLI path.
+/// This struct provides a convenient return type for backend detection
+/// that can be easily serialized or passed between components.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendDetection {
+    /// The backend name (e.g., "bead-rs" or "bead-forge")
+    pub backend: String,
+    /// The resolved path to the CLI binary
+    pub cli_path: PathBuf,
+}
+
+impl BackendDetection {
+    /// Create a new BackendDetection instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `backend` - The backend name
+    /// * `cli_path` - The resolved path to the CLI binary
+    pub fn new(backend: String, cli_path: PathBuf) -> Self {
+        Self { backend, cli_path }
+    }
+
+    /// Create from a Backend enum and path.
+    pub fn from_backend(backend: Backend, cli_path: PathBuf) -> Self {
+        Self {
+            backend: backend.to_string(),
+            cli_path,
+        }
+    }
+}
+
+/// Unified backend detection combining config and PATH probing.
+///
+/// This is the single entry point for backend detection that implements
+/// the two-stage strategy:
+///
+/// 1. **Config-first**: Check `.needle.yaml` for an explicit `bead_cli.backend`
+///    setting. If present, it takes absolute precedence over PATH probing.
+///
+/// 2. **Fallback probing**: If no config exists or backend is set to `auto`,
+///    probe PATH for available CLIs in priority order:
+///    - bead (bead-rs)
+///    - bf (bead-forge)
+///    - br (deprecated alias for bead-rs)
+///
+/// # Arguments
+///
+/// * `workspace_root` - Path to the workspace root (where `.needle.yaml` may exist)
+///
+/// # Returns
+///
+/// Returns `Ok(BackendDetection)` with the detected backend name and CLI path.
+/// Returns `Err` if no CLI is found or the config is invalid.
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle_config::detect_backend_unified;
+///
+/// let detection = detect_backend_unified(Path::new("/home/user/my-project"))?;
+/// println!("Backend: {} at {}", detection.backend, detection.cli_path.display());
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+///
+/// # Config Precedence
+///
+/// When `.needle.yaml` contains:
+///
+/// ```yaml
+/// bead_cli:
+///   backend: bead-rs  # or bead-forge, bf, auto
+/// ```
+///
+/// The configured backend is used exclusively, regardless of what's in PATH.
+/// Only when the backend is `auto` or the config doesn't exist does PATH
+/// probing occur.
+pub fn detect_backend_unified(workspace_root: &Path) -> Result<BackendDetection> {
+    let (backend, path) = detect_bead_backend(workspace_root)?;
+    Ok(BackendDetection::from_backend(backend, path))
+}
+
 /// Resolve the bead CLI binary path from configuration.
 ///
 /// Takes a `BeadCliConfig` and returns the backend type and binary path.

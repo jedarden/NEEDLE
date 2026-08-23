@@ -5188,6 +5188,10 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
 ///
 /// This is the preferred filtering method that avoids race conditions by using
 /// a process mapping built from a consistent snapshot of /proc.
+///
+/// Only filters out needle run processes that are descendants of OTHER needle run
+/// processes. Intermediate non-needle processes (e.g., shells) break the chain
+/// and prevent false positives.
 #[cfg(unix)]
 fn filter_descendant_processes_with_mapping(
     processes: Vec<DiscoveredProcess>,
@@ -5203,13 +5207,17 @@ fn filter_descendant_processes_with_mapping(
     let discovered_pids: HashSet<u32> = processes.iter().map(|p| p.pid).collect();
 
     // Build a set of all descendant PIDs of each discovered process
+    // CRITICAL: Only trace through OTHER DISCOVERED processes, not all processes.
+    // This prevents false positives where a needle process has an intermediate
+    // non-needle ancestor (e.g., a shell wrapper).
     let mut all_descendants: HashSet<u32> = HashSet::new();
 
     for &root_pid in &discovered_pids {
         let mut visited: HashSet<u32> = HashSet::new();
-        find_descendants_recursive_helper(
+        find_descendants_through_needle_processes_helper(
             root_pid,
             ppid_to_children,
+            &discovered_pids,
             &mut all_descendants,
             &mut visited,
         );
@@ -5226,20 +5234,31 @@ fn filter_descendant_processes_with_mapping(
 }
 
 /// Recursive helper to traverse process tree and collect descendants.
+///
+/// CRITICAL: Only follows descendants that are ALSO discovered (needle run) processes.
+/// Intermediate non-needle processes (shells, wrappers, etc.) break the chain.
 #[cfg(unix)]
-fn find_descendants_recursive_helper(
+fn find_descendants_through_needle_processes_helper(
     pid: u32,
     ppid_to_children: &HashMap<u32, Vec<u32>>,
+    discovered_pids: &HashSet<u32>,
     descendants: &mut HashSet<u32>,
     visited: &mut HashSet<u32>,
 ) {
     if let Some(children) = ppid_to_children.get(&pid) {
         for &child_pid in children {
+            // Only trace through OTHER discovered processes
+            // Non-needle processes break the descendant chain
+            if !discovered_pids.contains(&child_pid) {
+                continue;
+            }
+
             if visited.insert(child_pid) {
                 descendants.insert(child_pid);
-                find_descendants_recursive_helper(
+                find_descendants_through_needle_processes_helper(
                     child_pid,
                     ppid_to_children,
+                    discovered_pids,
                     descendants,
                     visited,
                 );
@@ -7449,11 +7468,11 @@ mod tests {
         //
         // After filtering, only processes 100 and 200 should remain.
 
-        use std::fs;
+        use std::collections::HashMap;
         use std::path::PathBuf;
 
         // Create mock processes
-        let processes = [
+        let processes = vec![
             DiscoveredProcess {
                 pid: 100,
                 workspace: Some(PathBuf::from("/workspace1")),
@@ -7486,33 +7505,194 @@ mod tests {
             },
         ];
 
-        // Mock the /proc filesystem by creating temporary files
-        let temp_dir = tempfile::tempdir().unwrap();
-        let proc_dir = temp_dir.path().join("proc");
-        fs::create_dir_all(&proc_dir).unwrap();
+        // Build parent->children mapping: 100->150, 200->250
+        let mut ppid_to_children: HashMap<u32, Vec<u32>> = HashMap::new();
+        ppid_to_children.insert(100, vec![150]);
+        ppid_to_children.insert(200, vec![250]);
 
-        // Create /proc/[pid]/status files with PPID information
-        for (pid, ppid) in [(100, 1), (200, 1), (150, 100), (250, 200)] {
-            let pid_dir = proc_dir.join(pid.to_string());
-            fs::create_dir_all(&pid_dir).unwrap();
-            let status_path = pid_dir.join("status");
-            let status_content = format!("PPID:\t{}\n", ppid);
-            fs::write(&status_path, status_content).unwrap();
-        }
+        // Apply filtering
+        let filtered = filter_descendant_processes_with_mapping(processes, &ppid_to_children);
 
-        // Note: This test doesn't actually call filter_descendant_processes()
-        // because it reads from /proc directly. Instead, it documents the
-        // expected behavior. The actual filtering logic is exercised by
-        // integration tests and real-world usage.
+        // Should only keep top-level processes (100 and 200)
+        assert_eq!(
+            filtered.len(),
+            2,
+            "should only have 2 processes after filtering"
+        );
+        let filtered_pids: std::collections::HashSet<u32> =
+            filtered.iter().map(|p| p.pid).collect();
+        assert!(filtered_pids.contains(&100), "should keep process 100");
+        assert!(filtered_pids.contains(&200), "should keep process 200");
+        assert!(
+            !filtered_pids.contains(&150),
+            "should filter out process 150"
+        );
+        assert!(
+            !filtered_pids.contains(&250),
+            "should filter out process 250"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filter_descendant_processes_with_intermediate_non_needle_process() {
+        // Test for the bug fix: intermediate non-needle processes should break
+        // the descendant chain and prevent false positives.
         //
-        // The filtering should result in only 2 processes (100 and 200),
-        // with 150 and 250 being filtered out as descendants.
+        // Scenario:
+        // - PID 100: needle run workspace1 (discovered)
+        // - PID 150: bash -c "some script" (child of 100, NOT discovered)
+        // - PID 200: needle run workspace1 (child of 150, discovered)
+        // - PID 300: needle run workspace2 (separate worker, discovered)
+        //
+        // Process tree: 100 -> 150 (bash) -> 200 (needle), and 300 (independent)
+        //
+        // Expected behavior: PID 200 should NOT be filtered out because PID 150
+        // is NOT a discovered (needle run) process. The descendant chain should
+        // only trace through OTHER discovered processes.
 
-        let discovered_pids: std::collections::HashSet<u32> =
-            processes.iter().map(|p| p.pid).collect();
-        assert_eq!(discovered_pids.len(), 4, "should start with 4 processes");
+        use std::collections::HashMap;
+        use std::path::PathBuf;
 
-        // After filtering, we expect only top-level processes (children of init/PPID 1)
-        // In a real scenario, processes 100 and 200 would remain, 150 and 250 would be filtered
+        let processes = vec![
+            DiscoveredProcess {
+                pid: 100,
+                workspace: Some(PathBuf::from("/workspace1")),
+                agent: Some("claude".to_string()),
+                identifier: Some("alpha".to_string()),
+                cmdline: "needle run --workspace /workspace1".to_string(),
+            },
+            DiscoveredProcess {
+                pid: 200,
+                workspace: Some(PathBuf::from("/workspace1")),
+                agent: Some("claude".to_string()),
+                identifier: Some("charlie".to_string()),
+                cmdline: "needle run --workspace /workspace1".to_string(),
+            },
+            DiscoveredProcess {
+                pid: 300,
+                workspace: Some(PathBuf::from("/workspace2")),
+                agent: Some("claude".to_string()),
+                identifier: Some("bravo".to_string()),
+                cmdline: "needle run --workspace /workspace2".to_string(),
+            },
+        ];
+
+        // Build parent->children mapping
+        // PID 100 has child 150 (bash, NOT in discovered list)
+        // PID 150 has child 200 (needle run, IS in discovered list)
+        // PID 300 is independent
+        let mut ppid_to_children: HashMap<u32, Vec<u32>> = HashMap::new();
+        ppid_to_children.insert(100, vec![150]); // 100 -> 150 (bash)
+        ppid_to_children.insert(150, vec![200]); // 150 -> 200 (needle)
+
+        // Apply filtering
+        let filtered = filter_descendant_processes_with_mapping(processes, &ppid_to_children);
+
+        // All three processes should remain because:
+        // - PID 100 is a top-level worker
+        // - PID 200 is a descendant of 100, but the chain includes PID 150 (bash)
+        //   which is NOT a discovered process, so the chain is broken
+        // - PID 300 is an independent worker
+        assert_eq!(filtered.len(), 3, "should keep all 3 processes");
+        let filtered_pids: std::collections::HashSet<u32> =
+            filtered.iter().map(|p| p.pid).collect();
+        assert!(filtered_pids.contains(&100), "should keep process 100");
+        assert!(
+            filtered_pids.contains(&200),
+            "should keep process 200 (intermediate bash breaks chain)"
+        );
+        assert!(filtered_pids.contains(&300), "should keep process 300");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filter_descendant_processes_filters_only_through_needle_processes() {
+        // Test that descendant filtering only traces through other needle run processes.
+        //
+        // Scenario:
+        // - PID 100: needle run (discovered)
+        // - PID 200: needle run, child of 100 (discovered, should be filtered)
+        // - PID 300: needle run, child of 200 (discovered, should be filtered)
+        // - PID 400: shell, child of 100 (NOT discovered)
+        // - PID 500: needle run, child of 400 (discovered, should NOT be filtered)
+        //
+        // Expected: PIDs 200 and 300 are filtered (direct needle descendant chain)
+        //           PID 500 is NOT filtered (chain broken by non-needle PID 400)
+
+        use std::collections::HashMap;
+        use std::path::PathBuf;
+
+        let processes = vec![
+            DiscoveredProcess {
+                pid: 100,
+                workspace: Some(PathBuf::from("/ws")),
+                agent: Some("claude".to_string()),
+                identifier: Some("root".to_string()),
+                cmdline: "needle run --workspace /ws".to_string(),
+            },
+            DiscoveredProcess {
+                pid: 200,
+                workspace: Some(PathBuf::from("/ws")),
+                agent: Some("claude".to_string()),
+                identifier: Some("child1".to_string()),
+                cmdline: "needle run --workspace /ws".to_string(),
+            },
+            DiscoveredProcess {
+                pid: 300,
+                workspace: Some(PathBuf::from("/ws")),
+                agent: Some("claude".to_string()),
+                identifier: Some("grandchild".to_string()),
+                cmdline: "needle run --workspace /ws".to_string(),
+            },
+            DiscoveredProcess {
+                pid: 500,
+                workspace: Some(PathBuf::from("/ws")),
+                agent: Some("claude".to_string()),
+                identifier: Some("indirect".to_string()),
+                cmdline: "needle run --workspace /ws".to_string(),
+            },
+        ];
+
+        // Build parent->children mapping
+        // 100 -> 200 (needle) and 400 (shell, NOT discovered)
+        // 200 -> 300 (needle)
+        // 400 -> 500 (needle)
+        let mut ppid_to_children: HashMap<u32, Vec<u32>> = HashMap::new();
+        ppid_to_children.insert(100, vec![200, 400]);
+        ppid_to_children.insert(200, vec![300]);
+        ppid_to_children.insert(400, vec![500]);
+
+        // Apply filtering
+        let filtered = filter_descendant_processes_with_mapping(processes, &ppid_to_children);
+
+        // Expected: PIDs 100 and 500 remain
+        // - 100: root process
+        // - 200: filtered (direct needle child of 100)
+        // - 300: filtered (needle descendant of 100 via 200)
+        // - 500: NOT filtered (descendant of 100 via 400, which is NOT a needle process)
+        assert_eq!(filtered.len(), 2, "should keep 2 processes");
+        let filtered_pids: std::collections::HashSet<u32> =
+            filtered.iter().map(|p| p.pid).collect();
+        assert!(
+            filtered_pids.contains(&100),
+            "should keep process 100 (root)"
+        );
+        assert!(
+            !filtered_pids.contains(&200),
+            "should filter process 200 (direct needle child)"
+        );
+        assert!(
+            !filtered_pids.contains(&300),
+            "should filter process 300 (needle descendant)"
+        );
+        assert!(
+            !filtered_pids.contains(&400),
+            "process 400 is not in discovered list"
+        );
+        assert!(
+            filtered_pids.contains(&500),
+            "should keep process 500 (chain broken by non-needle 400)"
+        );
     }
 }
