@@ -2054,6 +2054,30 @@ echo "Warning: deprecated flag" >&2
         assert_eq!(unknown.backend_name(), "bd");
     }
 
+    /// Set a hermetic PATH for probe tests: `dir` plus the directory holding
+    /// the real `which` utility.
+    ///
+    /// The probe shells out to `which`, so `which` itself must stay resolvable
+    /// even while every bead CLI is hidden. Dropping the ambient PATH matters:
+    /// the CI image installs a pinned bead-rs, which would otherwise win the
+    /// probe and shadow the bf/br fallbacks under test.
+    fn set_hermetic_probe_path(dir: &std::path::Path) {
+        let which_dir = std::process::Command::new("which")
+            .arg("which")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+        let path = match which_dir {
+            Some(d) => format!("{}:{}", dir.display(), d.display()),
+            None => dir.display().to_string(),
+        };
+        std::env::set_var("PATH", path);
+    }
+
     #[test]
     fn test_probe_bead_cli_with_bead_available() {
         use std::os::unix::fs::PermissionsExt;
@@ -2076,10 +2100,8 @@ echo "bead 0.1.3"
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_bead, perms).unwrap();
 
-        // Add temp dir to PATH
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
-        std::env::set_var("PATH", &new_path);
+        // Hermetic PATH: fake CLIs visible, ambient PATH (with its real bead) hidden
+        set_hermetic_probe_path(tmp_dir.path());
 
         // Probe for CLI - should find bead
         let result = probe_bead_cli();
@@ -2117,10 +2139,8 @@ echo "bf 0.4.1"
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_bf, perms).unwrap();
 
-        // Add temp dir to PATH
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
-        std::env::set_var("PATH", &new_path);
+        // Hermetic PATH: fake CLIs visible, ambient PATH (with its real bead) hidden
+        set_hermetic_probe_path(tmp_dir.path());
 
         // Probe for CLI - should find bf (bead not available)
         let result = probe_bead_cli();
@@ -2164,10 +2184,8 @@ echo "br (deprecated)"
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_br, perms).unwrap();
 
-        // Add temp dir to PATH
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
-        std::env::set_var("PATH", &new_path);
+        // Hermetic PATH: fake CLIs visible, ambient PATH (with its real bead) hidden
+        set_hermetic_probe_path(tmp_dir.path());
 
         // Probe for CLI - should find br (bead and bf not available)
         let result = probe_bead_cli();
@@ -2193,8 +2211,9 @@ echo "br (deprecated)"
         // Create an empty temporary directory
         let tmp_dir = tempfile::tempdir().unwrap();
 
-        // Set PATH to only the empty directory (no bead CLIs)
-        std::env::set_var("PATH", tmp_dir.path());
+        // Hermetic PATH with no bead CLIs: the probe still resolves `which`,
+        // which finds nothing in the empty directory or its own directory
+        set_hermetic_probe_path(tmp_dir.path());
 
         // Probe for CLI - should find nothing
         let result = probe_bead_cli();
@@ -2253,10 +2272,8 @@ echo "br (deprecated)"
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_br, perms).unwrap();
 
-        // Add temp dir to PATH
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
-        std::env::set_var("PATH", &new_path);
+        // Hermetic PATH: fake CLIs visible, ambient PATH (with its real bead) hidden
+        set_hermetic_probe_path(tmp_dir.path());
 
         // Probe for CLI - should prioritize bead over bf and br
         let result = probe_bead_cli();
@@ -2304,10 +2321,8 @@ echo "br (deprecated)"
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_br, perms).unwrap();
 
-        // Add temp dir to PATH
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
-        std::env::set_var("PATH", &new_path);
+        // Hermetic PATH: fake CLIs visible, ambient PATH (with its real bead) hidden
+        set_hermetic_probe_path(tmp_dir.path());
 
         // Probe for CLI - should prioritize bf over br
         let result = probe_bead_cli();
@@ -2342,10 +2357,8 @@ echo "test output"
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_binary, perms).unwrap();
 
-        // Add temp dir to PATH
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
-        std::env::set_var("PATH", &new_path);
+        // Hermetic PATH: fake CLIs visible, ambient PATH (with its real bead) hidden
+        set_hermetic_probe_path(tmp_dir.path());
 
         // Resolve command using which
         let result = resolve_command_in_path("test-binary");
@@ -2426,10 +2439,8 @@ echo "bead 0.1.3"
         perms.set_mode(0o755);
         std::fs::set_permissions(&fake_bead, perms).unwrap();
 
-        // Add to PATH
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", space_dir.display(), original_path);
-        std::env::set_var("PATH", &new_path);
+        // Hermetic PATH: fake bead visible, ambient PATH (with its real bead) hidden
+        set_hermetic_probe_path(&space_dir);
 
         // Should handle paths with spaces correctly
         let result = probe_bead_cli();
