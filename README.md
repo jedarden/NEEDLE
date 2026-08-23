@@ -37,6 +37,22 @@ needle run --agent claude --identity alpha
 The installer drops `needle` in `~/.local/bin` (override with `NEEDLE_INSTALL_PATH`);
 make sure that directory is on your `PATH`.
 
+### 🔒 Security Note
+
+The installer automatically verifies SHA-256 checksums to ensure the downloaded binary has not been corrupted or tampered with. This verification is **enabled by default** for your protection.
+
+**Checksum verification safeguards against:**
+- Corrupted downloads that could crash or behave unpredictably
+- Tampered binaries that could execute arbitrary malicious code
+- Supply chain attacks where a malicious actor modifies releases
+
+**To see full security options and tradeoffs:**
+```bash
+curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash -s -- --help
+```
+
+> **⚠️ Warning:** The installer supports an opt-out flag (`--skip-checksum`) for emergency recovery scenarios, but this is **strongly discouraged** except as a temporary workaround when checksums.txt is unavailable due to network/infrastructure issues. See the help output for full security details.
+
 A worker starts, claims the next bead, dispatches to your chosen agent CLI, and loops. Multiple workers can run in parallel against the same workspace — coordination is handled by the shared bead queue (no central orchestrator).
 
 See [`docs/examples/`](docs/examples/) for end-to-end configurations.

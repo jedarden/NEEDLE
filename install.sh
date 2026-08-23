@@ -253,7 +253,7 @@ main() {
     # Download the binary
     download_file "$download_url" "$temp_binary"
 
-    # Download and verify checksums
+    # Download and verify checksums (fail-closed: verification enabled by default for security)
     local checksums_url="https://github.com/${REPO}/releases/download/${version}/checksums.txt"
     local checksums_file="$temp_dir/checksums.txt"
     info "Downloading checksums..."

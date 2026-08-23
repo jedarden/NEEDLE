@@ -15,8 +15,8 @@
 //! Inspired by bg-gate (docs/research/bg-gate-validation.md).
 
 pub mod predispatch;
-pub mod worker_config;
 mod shipped_work;
+pub mod worker_config;
 pub use shipped_work::verify_shipped_work;
 
 use std::collections::HashMap;
