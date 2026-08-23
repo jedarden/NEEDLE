@@ -1477,51 +1477,43 @@ impl Worker {
 
         // Validate idle_action configuration
         let idle_action = self.config.worker.idle_action.clone();
-        match self.health.detect_supervisor_direct() {
-            Ok(supervisor_present) => {
-                let validation_result =
-                    validate_idle_action_config(&idle_action, supervisor_present);
-                match validation_result {
-                    WorkerConfigValidationResult::Valid => {
-                        if idle_action == crate::types::IdleAction::Exit {
-                            tracing::info!(
-                                idle_action = "exit",
-                                "supervisor detected: exit policy is safe"
-                            );
-                        }
-                    }
-                    WorkerConfigValidationResult::Invalid { reason } => {
-                        // Check if user has explicitly opted out of supervisor requirement
-                        if self.config.worker.allow_exit_without_supervisor {
-                            tracing::warn!(
-                                idle_action = "exit",
-                                "allow_exit_without_supervisor is enabled: using Exit policy without supervisor supervision"
-                            );
-                            let _ = self.telemetry.emit(EventKind::ConfigWarning {
-                                warning_type: "idle_action_explicit_override".to_string(),
-                                message: "idle_action=exit configured without supervisor supervision, but allow_exit_without_supervisor is enabled. Worker will exit on empty queue - ensure external recovery mechanism exists.".to_string(),
-                            });
-                        } else {
-                            // Default to Wait instead of Exit when no supervisor is present
-                            tracing::warn!(
-                                idle_action = "exit",
-                                "no supervisor detected: automatically defaulting to Wait (set allow_exit_without_supervisor=true to opt-in to Exit without supervisor)"
-                            );
-                            let _ = self.telemetry.emit(EventKind::ConfigWarning {
-                                warning_type: "idle_action_default_to_wait".to_string(),
-                                message: format!("{} - automatically defaulting to Wait. Set allow_exit_without_supervisor=true to explicitly opt-in to Exit without supervisor.", reason),
-                            });
-                            // Mutate the config to use Wait instead of Exit
-                            self.config.worker.idle_action = IdleAction::Wait;
-                        }
-                    }
+        // detect_supervisor_direct is total: detection errors are treated as
+        // "no supervisor", so this guard always runs (never silently skipped).
+        let supervisor_present = self.health.detect_supervisor_direct();
+        let validation_result = validate_idle_action_config(&idle_action, supervisor_present);
+        match validation_result {
+            WorkerConfigValidationResult::Valid => {
+                if idle_action == crate::types::IdleAction::Exit {
+                    tracing::info!(
+                        idle_action = "exit",
+                        "supervisor detected: exit policy is safe"
+                    );
                 }
             }
-            Err(e) => {
-                tracing::debug!(
-                    error = %e,
-                    "failed to detect supervisor presence, skipping idle_action validation"
-                );
+            WorkerConfigValidationResult::Invalid { reason } => {
+                // Check if user has explicitly opted out of supervisor requirement
+                if self.config.worker.allow_exit_without_supervisor {
+                    tracing::warn!(
+                        idle_action = "exit",
+                        "allow_exit_without_supervisor is enabled: using Exit policy without supervisor supervision"
+                    );
+                    let _ = self.telemetry.emit(EventKind::ConfigWarning {
+                        warning_type: "idle_action_explicit_override".to_string(),
+                        message: "idle_action=exit configured without supervisor supervision, but allow_exit_without_supervisor is enabled. Worker will exit on empty queue - ensure external recovery mechanism exists.".to_string(),
+                    });
+                } else {
+                    // Default to Wait instead of Exit when no supervisor is present
+                    tracing::warn!(
+                        idle_action = "exit",
+                        "no supervisor detected: automatically defaulting to Wait (set allow_exit_without_supervisor=true to opt-in to Exit without supervisor)"
+                    );
+                    let _ = self.telemetry.emit(EventKind::ConfigWarning {
+                        warning_type: "idle_action_default_to_wait".to_string(),
+                        message: format!("{} - automatically defaulting to Wait. Set allow_exit_without_supervisor=true to explicitly opt-in to Exit without supervisor.", reason),
+                    });
+                    // Mutate the config to use Wait instead of Exit
+                    self.config.worker.idle_action = IdleAction::Wait;
+                }
             }
         }
 

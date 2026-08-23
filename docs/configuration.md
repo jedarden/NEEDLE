@@ -47,6 +47,8 @@ worker:
 
 **With supervisor present:** When a supervisor is actively managing the fleet (detected via heartbeat files), `idle_action=exit` is safe and no override is needed. The supervisor will spawn replacement workers that can reclaim orphaned beads via heartbeat-based peer discovery.
 
+**Detection failures are treated as "no supervisor":** Supervisor presence is checked via a heartbeat file (with a 2-minute freshness TTL) and, failing that, a supervisor socket. If the heartbeat file is corrupt or unreadable, detection falls through to the socket check; if neither can establish presence, the worker behaves as unsupervised — the guard still runs and the `wait` default still applies. A degraded heartbeat never silently disables the safety check.
+
 ### Disposable Scratch Checkout Sweep
 
 At startup, before opening the bead store or claiming work, each worker tries

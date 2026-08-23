@@ -857,22 +857,43 @@ impl HealthMonitor {
     /// 1. Checks for a supervisor heartbeat file
     /// 2. Checks for a supervisor socket
     ///
-    /// Returns `Ok(true)` if either detection method finds a supervisor,
-    /// `Ok(false)` if no supervisor is detected.
-    /// Returns `Err` if detection fails.
-    pub fn detect_supervisor_direct(&self) -> Result<bool> {
+    /// Returns `true` if either detection method finds a supervisor,
+    /// `false` if no supervisor is detected.
+    ///
+    /// This check is total by design: an unreadable or corrupt heartbeat
+    /// file (and any other detection error) is treated as "supervisor not
+    /// detected" rather than propagated. Propagating would let the
+    /// idle_action guard at boot silently skip itself — the exact
+    /// orphaned-bead incident shape it exists to prevent (2026-06-21).
+    /// A heartbeat error still falls through to the socket check, so a live
+    /// supervisor remains detectable when only its heartbeat is degraded.
+    pub fn detect_supervisor_direct(&self) -> bool {
         // Check supervisor heartbeat file first
-        if self.check_supervisor_heartbeat_file()? {
-            return Ok(true);
+        match self.check_supervisor_heartbeat_file() {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "supervisor heartbeat check failed; treating supervisor as absent"
+                );
+            }
         }
 
         // Fall back to socket check
-        if Self::check_supervisor_socket()? {
-            return Ok(true);
+        match Self::check_supervisor_socket() {
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "supervisor socket check failed; treating supervisor as absent"
+                );
+            }
         }
 
         tracing::debug!("no supervisor detected via direct methods");
-        Ok(false)
+        false
     }
 
     // ── Internal ────────────────────────────────────────────────────────────
@@ -3210,7 +3231,7 @@ mod tests {
         std::fs::write(&supervisor_hb_path, supervisor_data.to_string()).unwrap();
 
         // Should detect supervisor via heartbeat file
-        let detected = monitor.detect_supervisor_direct().unwrap();
+        let detected = monitor.detect_supervisor_direct();
         assert!(detected, "should detect supervisor via heartbeat file");
     }
 
@@ -3247,7 +3268,7 @@ mod tests {
         }
 
         // Should detect supervisor via socket
-        let detected = monitor.detect_supervisor_direct().unwrap();
+        let detected = monitor.detect_supervisor_direct();
         assert!(detected, "should detect supervisor via socket");
 
         // Cleanup
@@ -3274,7 +3295,7 @@ mod tests {
         std::env::set_var("NEEDLE_SUPERVISOR_SOCKET", "/nonexistent/socket.sock");
 
         // No supervisor heartbeat file or socket
-        let detected = monitor.detect_supervisor_direct().unwrap();
+        let detected = monitor.detect_supervisor_direct();
         assert!(
             !detected,
             "should return false when no supervisor is detected"
@@ -3309,11 +3330,98 @@ mod tests {
         std::fs::write(&supervisor_hb_path, supervisor_data.to_string()).unwrap();
 
         // Should detect supervisor via heartbeat file first (even if socket also exists)
-        let detected = monitor.detect_supervisor_direct().unwrap();
+        let detected = monitor.detect_supervisor_direct();
         assert!(
             detected,
             "should detect supervisor via heartbeat (checked first)"
         );
+    }
+
+    /// Test that detect_supervisor_direct treats a corrupt heartbeat file as
+    /// "no supervisor" instead of erroring out (fail-safe, needle-d00f58d3).
+    ///
+    /// A corrupt heartbeat must not disable the idle_action guard: before the
+    /// fix, the read/parse error propagated and the worker boot silently
+    /// skipped validation entirely.
+    #[test]
+    fn detect_supervisor_direct_corrupt_heartbeat_returns_false() {
+        let _env_guard = lock_supervisor_socket_env();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Corrupt heartbeat file: exists but is not valid JSON
+        let supervisor_hb_path = hb_dir.join("supervisor-heartbeat.json");
+        std::fs::write(&supervisor_hb_path, b"{not valid json").unwrap();
+
+        // Point the socket fallback at a nonexistent path so only the
+        // heartbeat leg can influence the result
+        std::env::set_var("NEEDLE_SUPERVISOR_SOCKET", "/nonexistent/socket.sock");
+
+        let detected = monitor.detect_supervisor_direct();
+        assert!(
+            !detected,
+            "corrupt heartbeat must be treated as supervisor absent, not an error"
+        );
+
+        // Cleanup
+        std::env::remove_var("NEEDLE_SUPERVISOR_SOCKET");
+    }
+
+    /// Test that a corrupt heartbeat still falls through to the socket check,
+    /// so a live supervisor remains detectable when only its heartbeat file
+    /// is degraded (needle-d00f58d3).
+    #[test]
+    fn detect_supervisor_direct_corrupt_heartbeat_falls_back_to_socket() {
+        let _env_guard = lock_supervisor_socket_env();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "test-worker".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Corrupt heartbeat file
+        let supervisor_hb_path = hb_dir.join("supervisor-heartbeat.json");
+        std::fs::write(&supervisor_hb_path, b"garbage").unwrap();
+
+        // Live supervisor socket
+        let socket_path = dir.path().join("supervisor.sock");
+        std::env::set_var("NEEDLE_SUPERVISOR_SOCKET", socket_path.to_str().unwrap());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::net::UnixListener;
+            let _listener = UnixListener::bind(&socket_path).unwrap();
+        }
+
+        #[cfg(not(unix))]
+        {
+            // On non-Unix, just create a file
+            std::fs::write(&socket_path, b"test").unwrap();
+        }
+
+        let detected = monitor.detect_supervisor_direct();
+        assert!(
+            detected,
+            "socket fallback must still detect a live supervisor despite corrupt heartbeat"
+        );
+
+        // Cleanup
+        std::env::remove_var("NEEDLE_SUPERVISOR_SOCKET");
     }
 
     // ──────────────────────────────────────────────────────────────────────────────
