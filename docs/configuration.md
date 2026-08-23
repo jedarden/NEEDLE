@@ -26,6 +26,27 @@ worker:
   launch_stagger_seconds: 2   # Delay between worker launches (default: 2)
 ```
 
+### Idle Action and Supervisor Safety
+
+`worker.idle_action` controls what a worker does when the bead queue is empty:
+
+```yaml
+worker:
+  idle_action: wait           # What to do when queue is empty: "wait" or "exit" (default: wait)
+```
+
+**Default behavior without supervisor:** When no supervisor is detected and `idle_action=exit`, the worker automatically defaults to `wait` and emits a `ConfigWarning` telemetry event. This prevents orphaned beads — without a supervisor to spawn replacement workers, an exiting worker leaves any in-progress beads stranded with no recovery mechanism.
+
+**Opt-in to exit without supervisor:** If you understand the orphaned bead risk and have an external recovery mechanism, you can explicitly opt-in:
+
+```yaml
+worker:
+  idle_action: exit
+  allow_exit_without_supervisor: true  # Explicit opt-in (default: false)
+```
+
+**With supervisor present:** When a supervisor is actively managing the fleet (detected via heartbeat files), `idle_action=exit` is safe and no override is needed. The supervisor will spawn replacement workers that can reclaim orphaned beads via heartbeat-based peer discovery.
+
 ### Disposable Scratch Checkout Sweep
 
 At startup, before opening the bead store or claiming work, each worker tries

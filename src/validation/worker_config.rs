@@ -33,7 +33,9 @@ impl WorkerConfigValidationResult {
 /// Validate idle_action configuration against supervisor presence.
 ///
 /// This function checks whether the configured `idle_action` is safe given
-/// the presence or absence of a supervisor process.
+/// the presence or absence of a supervisor process. **Note:** This function
+/// only validates — it does not mutate configuration. The worker boot code
+/// handles the actual default-to-Wait behavior when appropriate.
 ///
 /// # Safety Rule
 ///
@@ -41,6 +43,12 @@ impl WorkerConfigValidationResult {
 /// a supervisor, when a worker exits due to an empty queue, any in-progress
 /// beads remain orphaned with no mechanism to reclaim them. The supervisor
 /// solves this by spawning new workers that can claim and retry orphaned beads.
+///
+/// # Default Behavior
+///
+/// When no supervisor is detected and `idle_action=exit`, the worker **automatically
+/// defaults to `wait`** unless `allow_exit_without_supervisor` is explicitly set
+/// to `true`. This is a safety feature to prevent orphaned beads.
 ///
 /// # Arguments
 ///
@@ -50,7 +58,7 @@ impl WorkerConfigValidationResult {
 /// # Returns
 ///
 /// * `WorkerConfigValidationResult::Valid` - If configuration is safe
-/// * `WorkerConfigValidationResult::Invalid` - If configuration is unsafe
+/// * `WorkerConfigValidationResult::Invalid` - If configuration is unsafe without explicit opt-in
 ///
 /// # Examples
 ///
@@ -62,7 +70,7 @@ impl WorkerConfigValidationResult {
 /// let result = validate_idle_action_config(IdleAction::Exit, true);
 /// assert!(result.is_valid());
 ///
-/// // Unsafe: Exit without supervisor
+/// // Unsafe: Exit without supervisor (requires allow_exit_without_supervisor=true)
 /// let result = validate_idle_action_config(IdleAction::Exit, false);
 /// assert!(!result.is_valid());
 /// assert!(result.error_reason().unwrap().contains("no supervisor"));
@@ -105,7 +113,7 @@ mod tests {
         let result = validate_idle_action_config(&IdleAction::Exit, false);
         assert!(!result.is_valid());
         let reason = result.error_reason().unwrap();
-        assert!(reason.contains("no supervisor"));
+        assert!(reason.contains("without supervisor supervision"));
         assert!(reason.contains("orphaned"));
     }
 
@@ -130,7 +138,7 @@ mod tests {
 
         // Verify the error message is comprehensive and actionable
         assert!(reason.contains("idle_action=exit"));
-        assert!(reason.contains("no supervisor"));
+        assert!(reason.contains("without supervisor supervision"));
         assert!(reason.contains("orphaned"));
         assert!(reason.contains("needle supervise"));
         assert!(reason.contains("idle_action=wait"));
@@ -154,5 +162,45 @@ mod tests {
             reason: "error".to_string(),
         }
         .is_valid());
+    }
+
+    #[test]
+    fn test_wait_is_default_without_supervisor() {
+        // The default IdleAction is Wait, which is safe without supervisor
+        let default_action = IdleAction::default();
+        assert_eq!(default_action, IdleAction::Wait);
+
+        // Wait should always validate successfully
+        let result = validate_idle_action_config(&default_action, false);
+        assert!(result.is_valid());
+        assert_eq!(result.error_reason(), None);
+    }
+
+    #[test]
+    fn test_exit_without_supervisor_is_invalid_by_default() {
+        // Exit without supervisor is unsafe (returns Invalid)
+        let result = validate_idle_action_config(&IdleAction::Exit, false);
+        assert!(!result.is_valid());
+        let reason = result.error_reason().unwrap();
+        assert!(reason.contains("without supervisor supervision"));
+        assert!(reason.contains("orphaned"));
+    }
+
+    #[test]
+    fn test_exit_with_supervisor_remains_valid() {
+        // Exit with supervisor is safe
+        let result = validate_idle_action_config(&IdleAction::Exit, true);
+        assert!(result.is_valid());
+        assert_eq!(result.error_reason(), None);
+    }
+
+    #[test]
+    fn test_wait_is_always_valid() {
+        // Wait is valid with or without supervisor
+        let result_no_sup = validate_idle_action_config(&IdleAction::Wait, false);
+        assert!(result_no_sup.is_valid());
+
+        let result_with_sup = validate_idle_action_config(&IdleAction::Wait, true);
+        assert!(result_with_sup.is_valid());
     }
 }
