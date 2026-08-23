@@ -794,9 +794,12 @@ fn builtin_bead_forge() -> BeadBackend {
         "sync conflict".to_string(),
     ];
 
-    // No quirks for current verified version (0.4.1)
-    // The bug affecting <= 0.2.0 (--limit 0 returning empty set) is fixed
-    backend.quirks = Vec::new();
+    // Quirks for known bugs in older versions
+    backend.quirks = vec![BeadBackendQuirk {
+        name: "limit_zero_returns_empty_set".to_string(),
+        version_requirement: Some("<= 0.2.0".to_string()),
+        description: "bead-forge 0.2.0 has a bug where --limit 0 returns an empty set instead of all beads. Workaround: use a large explicit limit.".to_string(),
+    }];
 
     let operations = &mut backend.operations;
     operations.insert(
@@ -897,12 +900,17 @@ mod tests {
             .iter()
             .any(|q| q.name == "limit_zero_returns_empty_set"));
 
-        // bead-forge 0.4.1 should NOT have the limit_zero_returns_empty_set quirk
-        // The quirk only applied to versions <= 0.2.0, and 0.4.1 is well past that
-        assert!(!bead_forge
+        // bead-forge SHOULD have the limit_zero_returns_empty_set quirk declared
+        // (but it only applies to versions <= 0.2.0)
+        let quirk = bead_forge
             .quirks
             .iter()
-            .any(|q| q.name == "limit_zero_returns_empty_set"));
+            .find(|q| q.name == "limit_zero_returns_empty_set")
+            .expect("bead-forge should declare limit_zero_returns_empty_set quirk");
+
+        // Verify the quirk metadata
+        assert_eq!(quirk.version_requirement, Some("<= 0.2.0".to_string()));
+        assert!(quirk.description.contains("limit 0"));
     }
 
     #[test]

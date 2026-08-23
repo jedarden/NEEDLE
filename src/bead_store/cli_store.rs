@@ -141,7 +141,6 @@ impl CliBeadStore {
     /// Check if a specific quirk applies to the current backend version.
     /// Returns true only if the quirk exists and its version_requirement matches
     /// the backend's verified version (or has no version requirement).
-    #[allow(dead_code)]
     fn has_quirk(&self, quirk_name: &str) -> bool {
         self.backend
             .quirks
@@ -150,7 +149,6 @@ impl CliBeadStore {
     }
 
     /// Check if a quirk's version requirement matches the backend's verified version.
-    #[allow(dead_code)]
     fn quirk_version_matches(&self, quirk: &crate::bead_store::backend::BeadBackendQuirk) -> bool {
         match &quirk.version_requirement {
             None => true, // No version requirement means it always applies
@@ -345,7 +343,13 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
-        let values = HashMap::from([("limit", "999999".to_string())]);
+        // Apply limit workaround only if backend has the quirk
+        let limit = if self.has_quirk("limit_zero_returns_empty_set") {
+            "999999"
+        } else {
+            "0" // Use 0 for backends that handle --limit correctly
+        };
+        let values = HashMap::from([("limit", limit.to_string())]);
         let stdout = self.run_operation("ready", &values).await?;
         let mut beads = self.parse_beads("ready", &stdout)?;
         if let Some(assignee) = &filters.assignee {
@@ -362,7 +366,13 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn list_all(&self) -> Result<Vec<Bead>> {
-        let values = HashMap::from([("limit", "999999".to_string())]);
+        // Apply limit workaround only if backend has the quirk
+        let limit = if self.has_quirk("limit_zero_returns_empty_set") {
+            "999999"
+        } else {
+            "0" // Use 0 for backends that handle --limit correctly
+        };
+        let values = HashMap::from([("limit", limit.to_string())]);
         let stdout = self.run_operation("list_all", &values).await?;
         self.parse_beads("list_all", &stdout)
     }
@@ -1208,15 +1218,16 @@ mod tests {
         )
         .unwrap();
 
-        // bead-forge 0.4.1 does NOT have the quirk (only applied to <= 0.2.0)
+        // bead-forge 0.4.1 does NOT have the quirk applied (only applied to <= 0.2.0)
         assert!(!store_with_quirk.has_quirk("limit_zero_returns_empty_set"));
-        let values = HashMap::from([("limit", "999999".to_string())]);
+        // When the quirk doesn't apply, use "0" (backend handles --limit correctly)
+        let values = HashMap::from([("limit", "0".to_string())]);
         assert_eq!(
             store_with_quirk.render_operation("ready", &values).unwrap(),
-            ["ready", "--json", "--limit", "999999"]
+            ["ready", "--json", "--limit", "0"]
         );
 
-        // Test with bead-rs (does NOT have the quirk)
+        // Test with bead-rs (does NOT have the quirk at all)
         let bead_rs = builtin_bead_backends()
             .into_iter()
             .find(|backend| backend.name == "bead-rs")
@@ -1234,11 +1245,12 @@ mod tests {
 
         // bead-rs does not have the quirk, so has_quirk should return false
         assert!(!store_without_quirk.has_quirk("limit_zero_returns_empty_set"));
+        // bead-rs also uses "0" since it doesn't have the quirk
         assert_eq!(
             store_without_quirk
                 .render_operation("ready", &values)
                 .unwrap(),
-            ["list", "--ready", "--json", "--limit", "999999"]
+            ["list", "--ready", "--json", "--limit", "0"]
         );
     }
 
