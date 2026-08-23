@@ -6236,6 +6236,536 @@ strands:
     println!("  Preserved relative: {}", relative_path.display());
 }
 
+/// Test tilde expansion in health.heartbeat_dir configuration.
+///
+/// This test validates that tilde-prefixed paths in health.heartbeat_dir are
+/// correctly expanded to the HOME directory during config loading.
+#[tokio::test]
+async fn health_heartbeat_dir_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::fs;
+
+    // Use HomeGuard for proper HOME isolation
+    let _home_guard = HomeGuard::isolate();
+    let isolated_home = _home_guard._temp_dir.path();
+
+    // Create test heartbeat directory in the isolated home
+    let heartbeat_dir = isolated_home.join("heartbeat");
+    fs::create_dir_all(&heartbeat_dir).expect("failed to create heartbeat dir");
+
+    // Test 1: Tilde-prefixed path expands correctly
+    let tilde_path = "~/heartbeat";
+    let expanded = expand_tilde(tilde_path);
+    assert_eq!(
+        expanded,
+        heartbeat_dir.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Absolute path is preserved
+    let absolute_path = std::path::PathBuf::from("/var/lib/needle/heartbeat");
+
+    // Test 3: Relative path is preserved
+    let relative_path = std::path::PathBuf::from("relative/heartbeat");
+
+    // Test 4: Config with tilde path
+    let yaml = format!(
+        r#"
+health:
+  heartbeat_dir: {}
+"#,
+        tilde_path
+    );
+
+    // Load config - this should trigger tilde expansion
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+
+    // The config should expand tildes
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    // Verify the heartbeat_dir was expanded
+    let heartbeat = &config_expanded.health.heartbeat_dir;
+    assert!(
+        heartbeat.is_some(),
+        "heartbeat_dir should be set after expansion"
+    );
+
+    let expanded_path = heartbeat.as_ref().unwrap();
+    assert!(
+        expanded_path.starts_with(isolated_home),
+        "heartbeat_dir should be expanded to isolated home, got: {}",
+        expanded_path.display()
+    );
+
+    assert_eq!(
+        expanded_path, &heartbeat_dir,
+        "heartbeat_dir should point to our test directory"
+    );
+
+    // Test 5: Config with absolute path (should be preserved)
+    let yaml_abs = format!(
+        r#"
+health:
+  heartbeat_dir: {}
+"#,
+        absolute_path.display()
+    );
+
+    let config_abs: Config = serde_yaml::from_str(&yaml_abs).expect("failed to parse config");
+    let mut config_expanded_abs = config_abs;
+    config_expanded_abs.expand_tildes();
+
+    assert_eq!(
+        config_expanded_abs.health.heartbeat_dir,
+        Some(absolute_path.clone()),
+        "absolute heartbeat_dir path should be preserved"
+    );
+
+    // Test 6: Config with relative path (should be preserved)
+    let yaml_rel = format!(
+        r#"
+health:
+  heartbeat_dir: {}
+"#,
+        relative_path.display()
+    );
+
+    let config_rel: Config = serde_yaml::from_str(&yaml_rel).expect("failed to parse config");
+    let mut config_expanded_rel = config_rel;
+    config_expanded_rel.expand_tildes();
+
+    assert_eq!(
+        config_expanded_rel.health.heartbeat_dir,
+        Some(relative_path.clone()),
+        "relative heartbeat_dir path should be preserved"
+    );
+
+    // Note: HomeGuard automatically restores HOME when dropped
+    println!("✓ Health heartbeat_dir tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Expanded tilde path: {}", heartbeat_dir.display());
+    println!("  Preserved absolute: {}", absolute_path.display());
+    println!("  Preserved relative: {}", relative_path.display());
+}
+
+/// Test tilde expansion in supervisor.socket_path configuration.
+///
+/// This test validates that tilde-prefixed paths in supervisor.socket_path are
+/// correctly expanded to the HOME directory during config loading.
+#[tokio::test]
+async fn supervisor_socket_path_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::fs;
+
+    // Use HomeGuard for proper HOME isolation
+    let _home_guard = HomeGuard::isolate();
+    let isolated_home = _home_guard._temp_dir.path();
+
+    // Create test socket directory in the isolated home
+    let socket_dir = isolated_home.join(".needle");
+    fs::create_dir_all(&socket_dir).expect("failed to create socket dir");
+
+    let socket_path = socket_dir.join("supervisor.sock");
+
+    // Test 1: Tilde-prefixed path expands correctly
+    let tilde_path = "~/.needle/supervisor.sock";
+    let expanded = expand_tilde(tilde_path);
+    assert_eq!(
+        expanded,
+        socket_path.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Absolute path is preserved
+    let absolute_path = std::path::PathBuf::from("/run/needle/supervisor.sock");
+
+    // Test 3: Relative path is preserved
+    let relative_path = std::path::PathBuf::from("relative/supervisor.sock");
+
+    // Test 4: Config with tilde path
+    let yaml = format!(
+        r#"
+supervisor:
+  socket_path: {}
+"#,
+        tilde_path
+    );
+
+    // Load config - this should trigger tilde expansion
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+
+    // The config should expand tildes
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    // Verify the socket_path was expanded
+    let socket = &config_expanded.supervisor.socket_path;
+    assert!(
+        socket.is_some(),
+        "socket_path should be set after expansion"
+    );
+
+    let expanded_path = socket.as_ref().unwrap();
+    assert!(
+        expanded_path.starts_with(isolated_home),
+        "socket_path should be expanded to isolated home, got: {}",
+        expanded_path.display()
+    );
+
+    assert_eq!(
+        expanded_path, &socket_path,
+        "socket_path should point to our test socket"
+    );
+
+    // Test 5: Config with absolute path (should be preserved)
+    let yaml_abs = format!(
+        r#"
+supervisor:
+  socket_path: {}
+"#,
+        absolute_path.display()
+    );
+
+    let config_abs: Config = serde_yaml::from_str(&yaml_abs).expect("failed to parse config");
+    let mut config_expanded_abs = config_abs;
+    config_expanded_abs.expand_tildes();
+
+    assert_eq!(
+        config_expanded_abs.supervisor.socket_path,
+        Some(absolute_path.clone()),
+        "absolute socket_path should be preserved"
+    );
+
+    // Test 6: Config with relative path (should be preserved)
+    let yaml_rel = format!(
+        r#"
+supervisor:
+  socket_path: {}
+"#,
+        relative_path.display()
+    );
+
+    let config_rel: Config = serde_yaml::from_str(&yaml_rel).expect("failed to parse config");
+    let mut config_expanded_rel = config_rel;
+    config_expanded_rel.expand_tildes();
+
+    assert_eq!(
+        config_expanded_rel.supervisor.socket_path,
+        Some(relative_path.clone()),
+        "relative socket_path should be preserved"
+    );
+
+    // Note: HomeGuard automatically restores HOME when dropped
+    println!("✓ Supervisor socket_path tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Expanded tilde path: {}", socket_path.display());
+    println!("  Preserved absolute: {}", absolute_path.display());
+    println!("  Preserved relative: {}", relative_path.display());
+}
+
+/// Test tilde expansion in self_modification.canary_workspace configuration.
+///
+/// This test validates that tilde-prefixed paths in self_modification.canary_workspace
+/// are correctly expanded to the HOME directory during config loading.
+#[tokio::test]
+async fn self_modification_canary_workspace_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::fs;
+
+    // Use HomeGuard for proper HOME isolation
+    let _home_guard = HomeGuard::isolate();
+    let isolated_home = _home_guard._temp_dir.path();
+
+    // Create test canary workspace directory in the isolated home
+    let canary_ws = isolated_home.join("dev").join("canary-workspace");
+    fs::create_dir_all(&canary_ws).expect("failed to create canary workspace");
+
+    // Test 1: Tilde-prefixed path expands correctly
+    let tilde_path = "~/dev/canary-workspace";
+    let expanded = expand_tilde(tilde_path);
+    assert_eq!(
+        expanded,
+        canary_ws.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Absolute path is preserved
+    let absolute_path = std::path::PathBuf::from("/opt/canary-workspace");
+
+    // Test 3: Relative path is preserved
+    let relative_path = std::path::PathBuf::from("relative/canary");
+
+    // Test 4: Config with tilde path
+    let yaml = format!(
+        r#"
+self_modification:
+  canary_workspace: {}
+"#,
+        tilde_path
+    );
+
+    // Load config - this should trigger tilde expansion
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+
+    // The config should expand tildes
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    // Verify the canary_workspace was expanded
+    assert!(
+        config_expanded
+            .self_modification
+            .canary_workspace
+            .starts_with(isolated_home),
+        "canary_workspace should be expanded to isolated home, got: {}",
+        config_expanded.self_modification.canary_workspace.display()
+    );
+
+    assert_eq!(
+        config_expanded.self_modification.canary_workspace, canary_ws,
+        "canary_workspace should point to our test workspace"
+    );
+
+    // Test 5: Config with absolute path (should be preserved)
+    let yaml_abs = format!(
+        r#"
+self_modification:
+  canary_workspace: {}
+"#,
+        absolute_path.display()
+    );
+
+    let config_abs: Config = serde_yaml::from_str(&yaml_abs).expect("failed to parse config");
+    let mut config_expanded_abs = config_abs;
+    config_expanded_abs.expand_tildes();
+
+    assert_eq!(
+        config_expanded_abs.self_modification.canary_workspace,
+        absolute_path.clone(),
+        "absolute canary_workspace path should be preserved"
+    );
+
+    // Test 6: Config with relative path (should be preserved)
+    let yaml_rel = format!(
+        r#"
+self_modification:
+  canary_workspace: {}
+"#,
+        relative_path.display()
+    );
+
+    let config_rel: Config = serde_yaml::from_str(&yaml_rel).expect("failed to parse config");
+    let mut config_expanded_rel = config_rel;
+    config_expanded_rel.expand_tildes();
+
+    assert_eq!(
+        config_expanded_rel.self_modification.canary_workspace,
+        relative_path.clone(),
+        "relative canary_workspace path should be preserved"
+    );
+
+    // Note: HomeGuard automatically restores HOME when dropped
+    println!("✓ Self-modification canary_workspace tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Expanded tilde path: {}", canary_ws.display());
+    println!("  Preserved absolute: {}", absolute_path.display());
+    println!("  Preserved relative: {}", relative_path.display());
+}
+
+/// Test tilde expansion in prompt.variants[].content_file configuration.
+///
+/// This test validates that tilde-prefixed paths in prompt variant content_file
+/// fields are correctly expanded to the HOME directory during config loading.
+#[tokio::test]
+async fn prompt_variants_content_file_tilde_expansion() {
+    use needle::config::Config;
+    use needle::util::expand_tilde;
+    use std::fs;
+
+    // Use HomeGuard for proper HOME isolation
+    let _home_guard = HomeGuard::isolate();
+    let isolated_home = _home_guard._temp_dir.path();
+
+    // Create test prompt directories in the isolated home
+    let prompts_dir = isolated_home.join("prompts");
+    fs::create_dir_all(&prompts_dir).expect("failed to create prompts dir");
+
+    let content_file = prompts_dir.join("pluck-v2.txt");
+    fs::write(&content_file, "test prompt content").expect("failed to write content file");
+
+    // Test 1: Tilde-prefixed path expands correctly
+    let tilde_path = "~/prompts/pluck-v2.txt";
+    let expanded = expand_tilde(tilde_path);
+    assert_eq!(
+        expanded,
+        content_file.to_str().unwrap(),
+        "tilde path should be expanded to isolated home"
+    );
+
+    // Test 2: Absolute path is preserved
+    let absolute_path = std::path::PathBuf::from("/etc/needle/prompts/custom.txt");
+
+    // Test 3: Relative path is preserved
+    let relative_path = std::path::PathBuf::from("prompts/relative.txt");
+
+    // Test 4: Config with tilde path
+    let yaml = format!(
+        r#"
+prompt:
+  variants:
+    pluck:
+      - name: v2
+        weight: 100
+        content_file: {}
+"#,
+        tilde_path
+    );
+
+    // Load config - this should trigger tilde expansion
+    let config: Config = serde_yaml::from_str(&yaml).expect("failed to parse config");
+
+    // The config should expand tildes
+    let mut config_expanded = config;
+    config_expanded.expand_tildes();
+
+    // Verify the content_file was expanded
+    let variants = config_expanded.prompt.variants.get("pluck");
+    assert!(
+        variants.is_some() && !variants.as_ref().unwrap().is_empty(),
+        "pluck variant should be set"
+    );
+
+    let expanded_path = &variants.as_ref().unwrap()[0].content_file;
+    assert!(
+        expanded_path.starts_with(isolated_home),
+        "content_file should be expanded to isolated home, got: {}",
+        expanded_path.display()
+    );
+
+    assert_eq!(
+        expanded_path, &content_file,
+        "content_file should point to our test file"
+    );
+
+    // Test 5: Config with absolute path (should be preserved)
+    let yaml_abs = format!(
+        r#"
+prompt:
+  variants:
+    custom:
+      - name: custom
+        weight: 100
+        content_file: {}
+"#,
+        absolute_path.display()
+    );
+
+    let config_abs: Config = serde_yaml::from_str(&yaml_abs).expect("failed to parse config");
+    let mut config_expanded_abs = config_abs;
+    config_expanded_abs.expand_tildes();
+
+    let variants_abs = config_expanded_abs.prompt.variants.get("custom");
+    assert!(
+        variants_abs.is_some() && !variants_abs.as_ref().unwrap().is_empty(),
+        "custom variant should be set"
+    );
+
+    assert_eq!(
+        variants_abs.as_ref().unwrap()[0].content_file,
+        absolute_path.clone(),
+        "absolute content_file path should be preserved"
+    );
+
+    // Test 6: Config with relative path (should be preserved)
+    let yaml_rel = format!(
+        r#"
+prompt:
+  variants:
+    relative:
+      - name: relative
+        weight: 100
+        content_file: {}
+"#,
+        relative_path.display()
+    );
+
+    let config_rel: Config = serde_yaml::from_str(&yaml_rel).expect("failed to parse config");
+    let mut config_expanded_rel = config_rel;
+    config_expanded_rel.expand_tildes();
+
+    let variants_rel = config_expanded_rel.prompt.variants.get("relative");
+    assert!(
+        variants_rel.is_some() && !variants_rel.as_ref().unwrap().is_empty(),
+        "relative variant should be set"
+    );
+
+    assert_eq!(
+        variants_rel.as_ref().unwrap()[0].content_file,
+        relative_path.clone(),
+        "relative content_file path should be preserved"
+    );
+
+    // Test 7: Multiple variants with mixed tilde and non-tilde paths
+    let yaml_mixed = format!(
+        r#"
+prompt:
+  variants:
+    pluck:
+      - name: v2
+        weight: 100
+        content_file: {}
+    custom:
+      - name: custom
+        weight: 100
+        content_file: {}
+    relative:
+      - name: relative
+        weight: 100
+        content_file: {}
+"#,
+        tilde_path,
+        absolute_path.display(),
+        relative_path.display()
+    );
+
+    let config_mixed: Config = serde_yaml::from_str(&yaml_mixed).expect("failed to parse config");
+    let mut config_expanded_mixed = config_mixed;
+    config_expanded_mixed.expand_tildes();
+
+    let pluck_variant = config_expanded_mixed.prompt.variants.get("pluck").unwrap();
+    assert_eq!(
+        pluck_variant[0].content_file, content_file,
+        "tilde path in pluck variant should be expanded"
+    );
+
+    let custom_variant = config_expanded_mixed.prompt.variants.get("custom").unwrap();
+    assert_eq!(
+        custom_variant[0].content_file, absolute_path,
+        "absolute path in custom variant should be preserved"
+    );
+
+    let relative_variant = config_expanded_mixed
+        .prompt
+        .variants
+        .get("relative")
+        .unwrap();
+    assert_eq!(
+        relative_variant[0].content_file, relative_path,
+        "relative path in relative variant should be preserved"
+    );
+
+    // Note: HomeGuard automatically restores HOME when dropped
+    println!("✓ Prompt variants content_file tilde expansion test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Expanded tilde path: {}", content_file.display());
+    println!("  Preserved absolute: {}", absolute_path.display());
+    println!("  Preserved relative: {}", relative_path.display());
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // End of Tilde Expansion Integration Tests
 // ═════════════════════════════════════════════════════════════════════════════
