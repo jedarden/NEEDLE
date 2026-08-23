@@ -50,6 +50,7 @@ use crate::types::{
     WorkerState,
 };
 use crate::upgrade::{self, HotReloadCheck};
+use crate::validation::worker_config::{validate_idle_action_config, WorkerConfigValidationResult};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Helper functions
@@ -1474,31 +1475,30 @@ impl Worker {
         })?;
         let step_start = Instant::now();
 
-        // Warn if idle_action=exit without supervisor supervision
-        if self.config.worker.idle_action == crate::types::IdleAction::Exit {
-            match self.health.detect_supervisor_direct() {
-                Ok(supervisor_present) => {
-                    if !supervisor_present {
-                        tracing::warn!(
-                            idle_action = "exit",
-                            "no supervisor detected: worker configured to exit when queue is dry will leave orphaned in_progress beads with no reclaim mechanism"
-                        );
-                        tracing::warn!(
-                            "to fix: either run workers under a supervisor (needle supervise) or set idle_action=wait in config"
-                        );
-                    } else {
-                        tracing::info!(
-                            idle_action = "exit",
-                            "supervisor detected: exit policy is safe"
-                        );
+        // Validate idle_action configuration
+        let idle_action = self.config.worker.idle_action.clone();
+        match self.health.detect_supervisor_direct() {
+            Ok(supervisor_present) => {
+                let validation_result = validate_idle_action_config(&idle_action, supervisor_present);
+                match validation_result {
+                    WorkerConfigValidationResult::Valid => {
+                        if idle_action == crate::types::IdleAction::Exit {
+                            tracing::info!(
+                                idle_action = "exit",
+                                "supervisor detected: exit policy is safe"
+                            );
+                        }
+                    }
+                    WorkerConfigValidationResult::Invalid { reason } => {
+                        tracing::warn!(idle_action = "exit", "{}", reason);
                     }
                 }
-                Err(e) => {
-                    tracing::debug!(
-                        error = %e,
-                        "failed to detect supervisor presence, skipping idle_action validation"
-                    );
-                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "failed to detect supervisor presence, skipping idle_action validation"
+                );
             }
         }
 
