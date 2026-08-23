@@ -185,9 +185,14 @@ self_modification:
   auto_promote: false
   canary_timeout: 300
   hot_reload: true
+# Disabled 2026-08-23 (bead needle-5925360b): the configured endpoint
+# (needle-feed-ex44-apexalgo-iad-ts.ardenone.com/ingest) never existed in DNS
+# or any cluster, and FabricConfig has no runtime consumer in NEEDLE — real
+# telemetry flows via telemetry.otlp_sink. See the bead notes for the full
+# validation, including the working dashboard ingest path.
 fabric:
-  enabled: true
-  endpoint: http://needle-feed-ex44-apexalgo-iad-ts.ardenone.com/ingest
+  enabled: false
+  endpoint: ''
   timeout: 2
   batching: false
 supervisor:
