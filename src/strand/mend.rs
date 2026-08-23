@@ -417,12 +417,19 @@ impl MendStrand {
 
     // ── Step 1.6: Stale assignee cleanup on open beads ─────────────────────────
 
-    /// Scan all open beads and clear assignees whose workers have no live heartbeat.
+    /// Scan all open beads and clear assignees whose workers have no live heartbeat
+    /// or are not actively working on this specific bead.
     ///
     /// This heals beads that became permanently unclaimable after a reopen
     /// (bead-forge's reopen does not clear assignee). An open bead with a stale
     /// assignee is invisible to all workers because ready() filters out assigned
     /// beads. Clearing the assignee makes it claimable again.
+    ///
+    /// Staleness detection strategy:
+    /// - An assignee is stale if the worker has no heartbeat or is dead
+    /// - An assignee is ALSO stale if a live worker exists but is not working
+    ///   on THIS specific bead (current_bead != bead.id)
+    /// - This handles the --count 1 relaunch case where a worker name is reused
     async fn cleanup_stale_assignees_on_open_beads(
         &self,
         store: &dyn BeadStore,
@@ -431,7 +438,39 @@ impl MendStrand {
         let all_beads = store.list_all().await?;
         let workers = self.registry.list()?;
 
-        // Build a set of fully-qualified worker IDs for registered, alive workers.
+        // Build a map of live worker IDs to their current_bead from heartbeats.
+        // This tells us which bead each live worker is actively working on.
+        use std::collections::HashMap;
+        let mut worker_current_beads: HashMap<String, Option<BeadId>> = HashMap::new();
+
+        // Read all heartbeats to find current_bead for each live worker.
+        let heartbeats = match HealthMonitor::read_all_heartbeats(&self.heartbeat_dir) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!(
+                    error = %e,
+                    "mend: failed to read heartbeats for stale assignee cleanup"
+                );
+                // Proceed without heartbeat data - we'll fall back to registry checks.
+                vec![]
+            }
+        };
+
+        for hb in &heartbeats {
+            let worker_key = if hb.qualified_id.is_empty() {
+                &hb.worker_id
+            } else {
+                &hb.qualified_id
+            };
+
+            // Only track workers that are actually alive (PID check).
+            if HealthMonitor::check_pid_alive(hb.pid) {
+                worker_current_beads.insert(worker_key.clone(), hb.current_bead.clone());
+            }
+        }
+
+        // Build a set of live worker IDs from the registry (fallback for workers without heartbeats).
+        // This maintains backward compatibility with tests that only register workers.
         let live_worker_ids: std::collections::HashSet<String> = workers
             .iter()
             .filter(|w| HealthMonitor::check_pid_alive(w.pid))
@@ -454,11 +493,40 @@ impl MendStrand {
                 continue;
             }
 
-            // Skip if the assignee matches a registered, alive worker.
-            // Workers register with fully-qualified IDs ({adapter}-{worker_id}),
-            // so this comparison prevents collisions when workers from different
-            // adapter pools share a NATO name.
-            if live_worker_ids.contains(assignee.as_str()) {
+            // Check if this assignee is stale.
+            // An assignee is ONLY stale if:
+            // 1. The worker has no heartbeat and is not in the registry (dead), OR
+            // 2. The worker has a heartbeat and is explicitly working on a DIFFERENT bead
+            //
+            // This handles the --count 1 relaunch case where a worker name is reused:
+            // - If the worker is idle (no current bead), keep the assignee (may resume work)
+            // - If the worker is working on THIS bead, keep the assignee
+            // - If the worker is working on a DIFFERENT bead, clear the stale assignee
+            // - If no heartbeat but worker is in registry (backward compat), keep assignee
+            let is_stale = match worker_current_beads.get(assignee.as_str()) {
+                Some(current_bead) => {
+                    // Worker has a heartbeat - only clear if working on DIFFERENT bead
+                    match current_bead {
+                        Some(active_bead_id) => {
+                            // Worker is actively working on some bead
+                            active_bead_id != &bead.id
+                        }
+                        None => {
+                            // Worker is alive but idle (no current bead)
+                            // Don't clear - they may resume work on this bead
+                            false
+                        }
+                    }
+                }
+                None => {
+                    // No heartbeat found for this worker
+                    // Fall back to registry check for backward compatibility
+                    !live_worker_ids.contains(assignee.as_str())
+                }
+            };
+
+            if !is_stale {
+                // Worker is alive and actively working on this bead - skip
                 continue;
             }
 
@@ -467,7 +535,7 @@ impl MendStrand {
                 bead_id = %bead.id,
                 assignee = %assignee,
                 workspace = %bead.workspace.display(),
-                "clearing stale assignee from open bead (assignee has no live worker)"
+                "clearing stale assignee from open bead (worker not actively working on this bead)"
             );
 
             match store.clear_assignee(&bead.id).await {
@@ -6621,5 +6689,278 @@ mod tests {
         assert_eq!(idle_event.data["worker_id"], "claude-idle");
         assert_eq!(idle_event.data["pid"], worker_pid);
         assert!(idle_event.data["age_secs"].as_u64().unwrap() >= 85); // Allow some timing tolerance
+    }
+
+    // ── Stale assignee cleanup on open beads tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn open_bead_with_stale_assignee_cleared_when_worker_alive_but_working_on_different_bead()
+    {
+        use crate::telemetry::test_utils::MemorySink;
+
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Create an open bead with an assignee.
+        let bead = make_open_bead_with_assignee("nd-open-stale", "alive-worker");
+
+        // Register the worker as alive.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "alive-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 1,
+                config_reload_generation: 0,
+            })
+            .unwrap();
+
+        // Write a heartbeat for the worker, but working on a DIFFERENT bead.
+        // This simulates the --count 1 relaunch case where the worker name is reused
+        // but is working on a different bead.
+        let mut heartbeat =
+            make_stale_heartbeat("alive-worker", std::process::id(), Some("different-bead"));
+        heartbeat.last_heartbeat = Utc::now(); // Make it recent
+        heartbeat.started_at = Utc::now() - chrono::Duration::seconds(3600);
+        write_heartbeat(hb_dir.path(), &heartbeat);
+
+        let (store, _, clear_count) = MockBeadStore::new(vec![bead]);
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after clearing stale assignee from open bead, got: {result:?}"
+        );
+        assert_eq!(clear_count.load(Ordering::Relaxed), 1);
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendStaleAssigneeCleared event was emitted.
+        let captured = events.lock().unwrap();
+        let cleared_event = captured
+            .iter()
+            .find(|e| e.event_type == "mend.stale_assignee_cleared")
+            .expect("MendStaleAssigneeCleared event should be emitted");
+        assert_eq!(cleared_event.data["bead_id"], "nd-open-stale");
+        assert_eq!(cleared_event.data["assignee"], "alive-worker");
+    }
+
+    #[tokio::test]
+    async fn open_bead_with_live_assignee_not_cleared_when_worker_actively_working_on_bead() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Create an open bead with an assignee.
+        let bead = make_open_bead_with_assignee("nd-open-active", "active-worker");
+
+        // Register the worker as alive.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "active-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 1,
+                config_reload_generation: 0,
+            })
+            .unwrap();
+
+        // Write a heartbeat for the worker, actively working on THIS bead.
+        let mut heartbeat =
+            make_stale_heartbeat("active-worker", std::process::id(), Some("nd-open-active"));
+        heartbeat.last_heartbeat = Utc::now(); // Make it recent
+        heartbeat.started_at = Utc::now() - chrono::Duration::seconds(3600);
+        write_heartbeat(hb_dir.path(), &heartbeat);
+
+        let (store, _, clear_count) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when assignee is alive and actively working on this bead, got: {result:?}"
+        );
+        assert_eq!(clear_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn open_bead_with_dead_worker_assignee_cleared() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Create an open bead with an assignee.
+        let bead = make_open_bead_with_assignee("nd-open-dead", "dead-worker");
+
+        // Register the worker with a dead PID.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "dead-worker".to_string(),
+                pid: 99_999_999,
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+                config_reload_generation: 0,
+            })
+            .unwrap();
+
+        // Write a heartbeat for the dead worker (even though PID is dead).
+        let heartbeat = make_stale_heartbeat("dead-worker", 99_999_999, Some("nd-open-dead"));
+        write_heartbeat(hb_dir.path(), &heartbeat);
+
+        let (store, _, clear_count) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after clearing assignee from dead worker, got: {result:?}"
+        );
+        assert_eq!(clear_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn open_bead_with_idle_worker_assignee_cleared() {
+        use crate::telemetry::test_utils::MemorySink;
+
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Create an open bead with an assignee.
+        let bead = make_open_bead_with_assignee("nd-open-idle", "idle-worker");
+
+        // Register the worker as alive.
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "idle-worker".to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 1,
+                config_reload_generation: 0,
+            })
+            .unwrap();
+
+        // Write a heartbeat for the worker with NO current bead (idle).
+        let mut heartbeat = make_stale_heartbeat("idle-worker", std::process::id(), None);
+        heartbeat.last_heartbeat = Utc::now(); // Make it recent
+        heartbeat.started_at = Utc::now() - chrono::Duration::seconds(3600);
+        write_heartbeat(hb_dir.path(), &heartbeat);
+
+        let (store, _, clear_count) = MockBeadStore::new(vec![bead]);
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after clearing assignee from idle worker, got: {result:?}"
+        );
+        assert_eq!(clear_count.load(Ordering::Relaxed), 1);
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendStaleAssigneeCleared event was emitted.
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|e| e.event_type == "mend.stale_assignee_cleared"),
+            "MendStaleAssigneeCleared event should be emitted for idle worker"
+        );
     }
 }
