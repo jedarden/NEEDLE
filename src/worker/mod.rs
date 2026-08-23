@@ -1492,6 +1492,11 @@ impl Worker {
                     }
                     WorkerConfigValidationResult::Invalid { reason } => {
                         tracing::warn!(idle_action = "exit", "{}", reason);
+                        // Emit telemetry event for the configuration warning
+                        let _ = self.telemetry.emit(EventKind::ConfigWarning {
+                            warning_type: "idle_action_misconfiguration".to_string(),
+                            message: reason.clone(),
+                        });
                     }
                 }
             }

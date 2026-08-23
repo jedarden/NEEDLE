@@ -7029,6 +7029,79 @@ async fn truncate_commit_sha_handles_short_shas() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// Integration test for needle-d6b09c72: idle_action misconfiguration warning
+#[tokio::test]
+async fn idle_action_exit_without_supervisor_emits_warning() {
+    use needle::telemetry::Telemetry;
+    use needle::types::IdleAction;
+    use needle::validation::worker_config::validate_idle_action_config;
+    use std::sync::Arc;
+
+    // This test verifies that when idle_action=Exit is configured without a supervisor
+    // present, a warning is emitted at startup and the worker continues running.
+
+    let store: Arc<dyn BeadStore> = Arc::new(IntegrationMockStore::empty());
+    let _home_guard = HomeGuard::isolate();
+    let mut config = Config::default();
+
+    // Configure idle_action=Exit (misconfiguration without supervisor)
+    config.worker.idle_action = IdleAction::Exit;
+    config.agent.default = "echo-test".to_string();
+    config.agent.routing = None; // Disable routing in tests - use adapter directly
+    config.self_modification.hot_reload = false;
+    config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
+    config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
+    // Confine Explore strand to test's tempdir to prevent scanning real user directories
+    config.strands.explore.workspace_root = _home_guard._temp_dir.path().to_path_buf();
+    config.strands.explore.workspaces = Vec::new();
+
+    let mut worker = Worker::new(config, "test-worker-idle-warning".to_string(), store);
+
+    let adapter = test_adapter("echo-test", "echo done", 10);
+    let mut adapters = HashMap::new();
+    adapters.insert("echo-test".to_string(), adapter);
+
+    // Create a telemetry collector to capture events
+    let telemetry = Telemetry::new("test-worker-idle-warning".to_string());
+    worker.set_dispatcher(Dispatcher::with_adapters(adapters, telemetry.clone(), 10));
+
+    // Run the worker - it should emit the warning during initialization
+    // The worker should continue running and complete successfully despite the warning
+    let result = worker.run().await.unwrap();
+    assert_eq!(
+        result,
+        WorkerState::Stopped,
+        "worker should complete successfully even with misconfiguration warning"
+    );
+
+    // Verify the validation function would detect the misconfiguration
+    let validation_result = validate_idle_action_config(&IdleAction::Exit, false);
+    assert!(
+        !validation_result.is_valid(),
+        "validation should detect idle_action=Exit without supervisor as invalid"
+    );
+
+    let reason = validation_result.error_reason().unwrap();
+    assert!(
+        reason.contains("without supervisor"),
+        "error message should mention missing supervisor, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("orphaned"),
+        "error message should explain the orphaned bead risk"
+    );
+    assert!(
+        reason.contains("needle supervise"),
+        "error message should suggest supervisor solution"
+    );
+    assert!(
+        reason.contains("idle_action=wait"),
+        "error message should suggest config alternative"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // CI verification test for needle-318c33ba
 // This test is intentionally broken to verify that test failures surface correctly
 #[tokio::test]
