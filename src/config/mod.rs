@@ -11752,12 +11752,14 @@ resource_attributes:
 
     #[test]
     fn test_otlp_config_matches_plan_md() {
-        // This is the EXACT config from plan.md lines 1965-1985
+        // This is the config from plan.md's OTLP Sink example (as corrected to
+        // the implemented schema: the sink key is `otlp_sink`, not `otlp` —
+        // see ADR-017 and the deployed .needle.yaml).
         // Tests that the schema documented in plan.md actually loads correctly
         // Regression test for bead needle-f78eebbb
         let yaml = r#"
 telemetry:
-  otlp:
+  otlp_sink:
     enabled: true
     endpoint: "http://otel-collector.tailnet:4317"
     protocol: grpc
@@ -12034,7 +12036,15 @@ path: null
         // Modify multiple sections
         config2.agent.timeout = 999;
         config2.telemetry.file_sink.enabled = false;
-        config2.limits.providers.clear();
+        // `providers` defaults to an empty map, so `clear()` would be a no-op;
+        // insert an entry to make a real change in the limits section.
+        config2.limits.providers.insert(
+            "anthropic".to_string(),
+            ProviderLimits {
+                max_concurrent: Some(2),
+                ..Default::default()
+            },
+        );
 
         let changed = config1.changed_sections(&config2);
 

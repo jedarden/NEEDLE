@@ -1964,7 +1964,7 @@ Exports telemetry as OpenTelemetry signals (traces, metrics, logs) over OTLP to 
 
 ```yaml
 telemetry:
-  otlp:
+  otlp_sink:
     enabled: true
     endpoint: "http://otel-collector.tailnet:4317"    # gRPC default; use 4318 for HTTP
     protocol: grpc                                     # grpc | http/protobuf
@@ -2550,7 +2550,7 @@ telemetry:
     format: normal
     color: auto
   hooks: []
-  otlp:
+  otlp_sink:
     enabled: false
     endpoint: "http://localhost:4317"
     protocol: grpc              # grpc | http/protobuf
