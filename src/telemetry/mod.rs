@@ -165,6 +165,11 @@ pub enum EventKind {
         total_wait_secs: u64,
         reason: String,
     },
+    /// Configuration validation warning.
+    ConfigWarning {
+        warning_type: String,
+        message: String,
+    },
 
     // ── Strand evaluation ──
     StrandEvaluated {
@@ -908,6 +913,7 @@ impl EventKind {
             EventKind::InitStepCompleted { .. } => "init.step.completed",
             EventKind::WorkerBootTimeout { .. } => "worker.boot.timeout",
             EventKind::WorkerLaunchDeferred { .. } => "worker.launch.deferred",
+            EventKind::ConfigWarning { .. } => "config.warning",
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
             EventKind::StrandSkipped { .. } => "strand.skipped",
             EventKind::ResolveEvaluated { .. } => "strand.resolve.evaluated",
@@ -1113,6 +1119,7 @@ impl EventKind {
             | EventKind::InitStepCompleted { .. }
             | EventKind::WorkerBootTimeout { .. }
             | EventKind::WorkerLaunchDeferred { .. }
+            | EventKind::ConfigWarning { .. }
             | EventKind::StrandEvaluated { .. }
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
@@ -1280,6 +1287,15 @@ impl EventKind {
                     "deferred_count": deferred_count,
                     "total_wait_secs": total_wait_secs,
                     "reason": reason
+                })
+            }
+            EventKind::ConfigWarning {
+                warning_type,
+                message,
+            } => {
+                serde_json::json!({
+                    "warning_type": warning_type,
+                    "message": message
                 })
             }
             EventKind::StrandEvaluated {
@@ -2563,6 +2579,7 @@ impl EventKind {
             | EventKind::MendStaleAssigneeCleared { .. }
             | EventKind::MendAssigneeClearFailed { .. }
             | EventKind::WorkerLaunchDeferred { .. }
+            | EventKind::ConfigWarning { .. }
             | EventKind::BeadQuarantined { .. }
             | EventKind::SpawnPathModifiedInPlace { .. }
             | EventKind::Log { .. } => None,
