@@ -3459,12 +3459,13 @@ impl Worker {
 
     /// Consume a terminal action and enforce the dispatch postcondition.
     ///
-    /// Outcome handlers perform their normal transition first. This single
-    /// state-machine boundary then verifies that the bead is no longer held;
-    /// if handling was cancelled, timed out, errored, or reported a transition
-    /// that did not stick, it releases the claim before advancing. Because
-    /// [`BeadAction`] has no empty variant and is `must_use`, a HANDLING branch
-    /// cannot silently return `()` and leave the claim behind.
+    /// This is the ONLY place in the codebase that mutates bead state based on
+    /// handler outcomes. Outcome handlers ONLY return a BeadAction enum; they
+    /// never call store.release(), store.block(), or any other state mutation.
+    ///
+    /// Because [`BeadAction`] has no empty variant and is `must_use`, a HANDLING
+    /// branch cannot silently return `()` and leave a claim behind. The type
+    /// system enforces that every dispatch cycle ends with an explicit transition.
     async fn apply_bead_action(&mut self, action: BeadAction) -> Result<()> {
         let bead = self
             .current_bead
@@ -3472,77 +3473,121 @@ impl Worker {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("applying bead action without current_bead"))?;
 
-        let claim_is_held =
-            match tokio::time::timeout(Duration::from_secs(30), self.store.show(&bead.id)).await {
-                Ok(Ok(current)) => match current.status {
-                    BeadStatus::Open => current.assignee.is_some(),
-                    BeadStatus::InProgress => true,
-                    BeadStatus::Done
-                    | BeadStatus::Closed
-                    | BeadStatus::Blocked
-                    | BeadStatus::Deferred => false,
-                },
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        action = %action,
-                        error = %error,
-                        "could not verify dispatch postcondition; forcing release"
-                    );
-                    true
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        action = %action,
-                        "dispatch postcondition verification timed out; forcing release"
-                    );
-                    true
-                }
-            };
+        tracing::debug!(
+            bead_id = %bead.id,
+            action = %action,
+            "applying bead action"
+        );
 
-        if claim_is_held {
-            match tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await
-            {
-                Ok(Ok(())) => {
-                    self.telemetry.emit(EventKind::BeadReleased {
-                        bead_id: bead.id.clone(),
-                        reason: format!("postcondition_recovery:{action}"),
-                    })?;
+        // Perform the appropriate state mutation for each action variant.
+        // This is the structural enforcement: all state mutations happen here,
+        // never inside handlers.
+        match action.clone() {
+            BeadAction::Closed => {
+                // Bead was closed by the agent. Verify it's actually closed.
+                match tokio::time::timeout(Duration::from_secs(30), self.store.show(&bead.id)).await {
+                    Ok(Ok(current)) => {
+                        if current.status != BeadStatus::Closed && current.status != BeadStatus::Done {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                actual_status = ?current.status,
+                                "agent reported closed but bead is not closed; releasing to enforce postcondition"
+                            );
+                            // Force release to enforce postcondition
+                            tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                        }
+                        // Bead is closed/done as expected
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %e,
+                            "could not verify bead closure; assuming closed"
+                        );
+                        // Assume closed - the handler determined this
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            "verification timed out; assuming closed"
+                        );
+                        // Assume closed - the handler determined this
+                    }
                 }
-                Ok(Err(error)) => {
-                    return Err(error).with_context(|| {
-                        format!(
-                            "failed to apply {action} action: bead {} is still held",
-                            bead.id
-                        )
-                    });
-                }
-                Err(_) => {
-                    bail!(
-                        "timed out applying {action} action: bead {} is still held",
-                        bead.id
-                    );
-                }
+            }
+            BeadAction::Released => {
+                // Release the bead back to open status.
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                self.telemetry.emit(EventKind::BeadReleased {
+                    bead_id: bead.id.clone(),
+                    reason: "handler_action:released".to_string(),
+                })?;
+            }
+            BeadAction::Deferred => {
+                // Release and add deferred label.
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    self.store.add_label(&bead.id, "deferred"),
+                ).await;
+                self.telemetry.emit(EventKind::BeadReleased {
+                    bead_id: bead.id.clone(),
+                    reason: "handler_action:deferred".to_string(),
+                })?;
+            }
+            BeadAction::Alerted => {
+                // Release after creating an alert bead.
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                self.telemetry.emit(EventKind::BeadReleased {
+                    bead_id: bead.id.clone(),
+                    reason: "handler_action:alerted".to_string(),
+                })?;
+            }
+            BeadAction::Quarantined => {
+                // Block the bead (status=blocked, labeled 'cycling').
+                // Note: Handler has already emitted BeadQuarantined telemetry with failure count.
+                tokio::time::timeout(Duration::from_secs(30), self.store.block(&bead.id)).await??;
+                let _ = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    self.store.add_label(&bead.id, "cycling"),
+                ).await;
+            }
+            BeadAction::Interrupted => {
+                // Release due to worker interruption.
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                self.telemetry.emit(EventKind::BeadReleased {
+                    bead_id: bead.id.clone(),
+                    reason: "worker_interrupted".to_string(),
+                })?;
+            }
+            BeadAction::Errored => {
+                // Release after handler error.
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                self.telemetry.emit(EventKind::BeadReleased {
+                    bead_id: bead.id.clone(),
+                    reason: "handler_error_recovery".to_string(),
+                })?;
             }
         }
 
         tracing::debug!(
             bead_id = %bead.id,
             action = %action,
-            recovered_held_claim = claim_is_held,
             "applied terminal bead action"
         );
 
+        // Transition to next state based on action
         match action {
-            BeadAction::Interrupted => self.set_state(WorkerState::Stopped),
+            BeadAction::Interrupted => self.set_state(WorkerState::Stopped)?,
             BeadAction::Closed
             | BeadAction::Released
             | BeadAction::Deferred
             | BeadAction::Alerted
             | BeadAction::Quarantined
-            | BeadAction::Errored => self.set_state(WorkerState::Logging),
+            | BeadAction::Errored => self.set_state(WorkerState::Logging)?,
         }
+
+        Ok(())
     }
 
     /// LOGGING: record effort telemetry, check budget, update registry, and

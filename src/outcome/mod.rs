@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use chrono::Utc;
 
-use crate::bead_store::{BeadStore, SyncRecoveryError};
+use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::telemetry::{EventKind, Telemetry};
 #[cfg(test)]
@@ -83,19 +83,26 @@ impl OutcomeHandler {
         }
     }
 
-    /// Release a bead with sync conflict recovery and graceful failure handling.
+    /// Prepare telemetry events for a bead release.
+    ///
+    /// This helper method collects telemetry events that would be emitted during
+    /// a bead release operation, but does NOT actually perform the release.
+    /// The actual release must be performed by the caller via BeadAction.
+    ///
+    /// This is part of the structural enforcement: handlers only return BeadAction,
+    /// they never directly mutate bead state. The worker's apply_bead_action()
+    /// method is the ONLY place that calls store.release().
     ///
     /// Flow:
     /// 1. Run `br sync --flush-only` to push local writes to JSONL first.
-    /// 2. Attempt `br update` to release the bead (set status=open, assignee="").
-    /// 3. If SYNC_CONFLICT recovery fails, emit `BeadReleaseFailed` and return Ok.
+    /// 2. Return telemetry events that would be emitted during release.
     ///
-    /// This method never returns an error — release failures are non-fatal.
-    /// The worker can continue processing other beads even if release fails.
-    async fn release_bead(&self, store: &dyn BeadStore, bead: &Bead) -> Result<Vec<EventKind>> {
+    /// This method never returns an error — flush failures are non-fatal.
+    /// The worker can continue processing other beads even if flush fails.
+    async fn prepare_release_events(&self, store: &dyn BeadStore, bead: &Bead) -> Result<Vec<EventKind>> {
         let mut events = Vec::new();
 
-        // Step 1: Flush local writes to JSONL before attempting release.
+        // Flush local writes to JSONL before the release happens in apply_bead_action().
         // Emit heartbeat before br call to track where hang occurs.
         let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
             bead_id: Some(bead.id.clone()),
@@ -117,7 +124,7 @@ impl OutcomeHandler {
             Ok(None) => {
                 tracing::warn!(
                     bead_id = %bead.id,
-                    "flush timed out before release, attempting release anyway"
+                    "flush timed out before release will be attempted by apply_bead_action()"
                 );
                 events.push(EventKind::WorkerHandlingTimeout {
                     bead_id: bead.id.clone(),
@@ -130,7 +137,7 @@ impl OutcomeHandler {
                 tracing::warn!(
                     bead_id = %bead.id,
                     error = %e,
-                    "flush failed before release, attempting release anyway"
+                    "flush failed before release will be attempted by apply_bead_action()"
                 );
                 events.push(EventKind::WorkerHandlingTimeout {
                     bead_id: bead.id.clone(),
@@ -141,66 +148,8 @@ impl OutcomeHandler {
             }
         }
 
-        // Step 2: Attempt release with timeout protection.
-        // Emit heartbeat before br release call to track where hang occurs.
-        let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
-            bead_id: Some(bead.id.clone()),
-            state: "HANDLING_RELEASE".to_string(),
-        });
-
-        let release_result =
-            tokio::time::timeout(std::time::Duration::from_secs(30), store.release(&bead.id)).await;
-
-        match release_result {
-            Ok(Ok(())) => {
-                tracing::debug!(
-                    bead_id = %bead.id,
-                    "bead released successfully"
-                );
-                // Emit heartbeat after successful release.
-                let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
-                    bead_id: Some(bead.id.clone()),
-                    state: "HANDLING_RELEASE_DONE".to_string(),
-                });
-                events.push(EventKind::BeadReleased {
-                    bead_id: bead.id.clone(),
-                    reason: "release_success".to_string(),
-                });
-            }
-            Ok(Err(e)) => {
-                // Release failed (br error, not timeout).
-                // Check if this is a SyncRecoveryError (sync recovery was attempted but failed).
-                if e.downcast_ref::<SyncRecoveryError>().is_some() {
-                    tracing::error!(
-                        bead_id = %bead.id,
-                        error = %e,
-                        "br release failed after SYNC_CONFLICT recovery — \
-                         worker will continue (bead may remain assigned)"
-                    );
-                } else {
-                    tracing::error!(
-                        bead_id = %bead.id,
-                        error = %e,
-                        "br release failed — worker will continue (bead may remain assigned)"
-                    );
-                }
-                events.push(EventKind::BeadReleaseFailed {
-                    bead_id: bead.id.clone(),
-                    reason: e.to_string(),
-                });
-            }
-            Err(_) => {
-                // Timeout after 30s.
-                tracing::error!(
-                    bead_id = %bead.id,
-                    "br release timed out after 30s — worker will continue (bead may remain assigned)"
-                );
-                events.push(EventKind::BeadReleaseFailed {
-                    bead_id: bead.id.clone(),
-                    reason: "timeout after 30s".to_string(),
-                });
-            }
-        }
+        // Note: The actual release happens in apply_bead_action(), not here.
+        // We only prepare telemetry events here.
 
         Ok(events)
     }
@@ -557,7 +506,7 @@ impl OutcomeHandler {
                                 bead_id: bead.id.clone(),
                                 duration_ms: 0,
                             });
-                            let mut release_events = self.release_bead(store, bead).await?;
+                            let mut release_events = self.prepare_release_events(store, bead).await?;
                             events.append(&mut release_events);
                             return Ok((BeadAction::Released, events));
                         }
@@ -568,7 +517,7 @@ impl OutcomeHandler {
                                 "no shipped work detected — releasing orphaned bead with failure increment"
                             );
                             // Release and increment failure count to apply quarantine.
-                            let mut release_events = self.release_bead(store, bead).await?;
+                            let mut release_events = self.prepare_release_events(store, bead).await?;
                             events.append(&mut release_events);
                             let release_succeeded = events
                                 .iter()
@@ -585,7 +534,7 @@ impl OutcomeHandler {
                                 "shipped-work check errored — releasing orphaned bead with failure increment"
                             );
                             // On error, release and increment failure count.
-                            let mut release_events = self.release_bead(store, bead).await?;
+                            let mut release_events = self.prepare_release_events(store, bead).await?;
                             events.append(&mut release_events);
                             let release_succeeded = events
                                 .iter()
@@ -602,7 +551,7 @@ impl OutcomeHandler {
                         "enforce_shipped_work disabled — releasing orphaned bead"
                     );
                     // If enforce_shipped_work is disabled, just release without closing.
-                    let mut release_events = self.release_bead(store, bead).await?;
+                    let mut release_events = self.prepare_release_events(store, bead).await?;
                     events.append(&mut release_events);
                     return Ok((BeadAction::Released, events));
                 }
@@ -619,7 +568,7 @@ impl OutcomeHandler {
                     operation: "show".to_string(),
                     error: "timeout after 30s".to_string(),
                 });
-                let mut release_events = self.release_bead(store, bead).await?;
+                let mut release_events = self.prepare_release_events(store, bead).await?;
                 events.append(&mut release_events);
                 return Ok((BeadAction::Released, events));
             }
@@ -636,7 +585,7 @@ impl OutcomeHandler {
                     operation: "show".to_string(),
                     error: e.to_string(),
                 });
-                let mut release_events = self.release_bead(store, bead).await?;
+                let mut release_events = self.prepare_release_events(store, bead).await?;
                 events.append(&mut release_events);
                 return Ok((BeadAction::Released, events));
             }
@@ -740,7 +689,7 @@ impl OutcomeHandler {
         }
 
         // Release the bead back to open with flush-before-release and sync recovery.
-        let mut release_events = self.release_bead(store, bead).await?;
+        let mut release_events = self.prepare_release_events(store, bead).await?;
         events.append(&mut release_events);
 
         // If release succeeded, increment the failure count and apply the same
@@ -817,7 +766,7 @@ impl OutcomeHandler {
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::warn!(bead_id = %bead.id, "agent failure — releasing bead");
 
-        let mut events = self.release_bead(store, bead).await?;
+        let mut events = self.prepare_release_events(store, bead).await?;
 
         // If release succeeded, increment failure count and check the
         // quarantine threshold. A bead that has exceeded
@@ -891,7 +840,7 @@ impl OutcomeHandler {
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::warn!(bead_id = %bead.id, "agent timed out — releasing bead as deferred");
 
-        let mut events = self.release_bead(store, bead).await?;
+        let mut events = self.prepare_release_events(store, bead).await?;
 
         // If release succeeded, increment failure count and add deferred label.
         let release_succeeded = events
@@ -944,7 +893,7 @@ impl OutcomeHandler {
             "agent crashed — releasing bead and creating alert"
         );
 
-        let events = self.release_bead(store, bead).await?;
+        let events = self.prepare_release_events(store, bead).await?;
 
         // Create alert bead with diagnostic info (best-effort).
         let signal_num = if signal_code > 128 {
@@ -1020,7 +969,7 @@ impl OutcomeHandler {
             "agent binary not found — releasing bead (config issue, no retry)"
         );
 
-        let events = self.release_bead(store, bead).await?;
+        let events = self.prepare_release_events(store, bead).await?;
         Ok((BeadAction::Released, events))
     }
 
@@ -1032,7 +981,7 @@ impl OutcomeHandler {
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::info!(bead_id = %bead.id, "agent interrupted — releasing bead for clean shutdown");
 
-        let events = self.release_bead(store, bead).await?;
+        let events = self.prepare_release_events(store, bead).await?;
         Ok((BeadAction::Interrupted, events))
     }
 

@@ -15,6 +15,7 @@ set -euo pipefail
 REPO="jedarden/NEEDLE"
 INSTALL_PATH="${NEEDLE_INSTALL_PATH:-$HOME/.local/bin/needle}"
 GITHUB_API="https://api.github.com/repos/$REPO/releases/latest" # gitleaks:allow - public API endpoint
+SKIP_CHECKSUM="${NEEDLE_SKIP_CHECKSUM:-false}"
 
 # Colors (only if stdout is a terminal)
 if [[ -t 1 ]]; then
@@ -48,6 +49,41 @@ error() {
     exit 1
 }
 
+# Conspicuous warning for checksum opt-out
+warn_checksum_skipped() {
+    cat <<'EOF'
+
+════════════════════════════════════════════════════════════════════════════════
+                                  ⚠️  SECURITY WARNING  ⚠️
+════════════════════════════════════════════════════════════════════════════════
+
+Checksum verification is DISABLED. The downloaded binary will NOT be verified
+against the expected SHA-256 hash from the release.
+
+This means you CANNOT detect if the binary has been:
+  • Corrupted during download
+  • Tampered with by a malicious actor
+  • Modified from what the project released
+
+Risks of installing without checksum verification:
+  → You may install a compromised binary
+  → A malicious actor could inject arbitrary code
+  → Your system and data could be at risk
+
+The NEEDLE project strongly recommends AGAINST this option. Only use it if:
+  • You are in a controlled environment with alternative verification
+  • You fully understand and accept the security risks
+  • This is a temporary workaround for network/infrastructure issues
+
+For normal installations, press Ctrl+C to abort and fix the checksum issue.
+
+════════════════════════════════════════════════════════════════════════════════
+
+Press Enter to continue with checksum verification DISABLED, or Ctrl+C to abort...
+EOF
+    read -r
+}
+
 # Show usage information
 show_usage() {
     cat <<EOF
@@ -56,17 +92,43 @@ Usage: install.sh [OPTIONS]
 Installs the needle binary to ~/.local/bin/needle (or \$NEEDLE_INSTALL_PATH).
 
 OPTIONS:
-    -h, --help         Show this help message
+    -h, --help              Show this help message
+    --skip-checksum         Skip checksum verification (NOT RECOMMENDED - see SECURITY below)
 
 ENVIRONMENT VARIABLES:
-    NEEDLE_INSTALL_PATH    Installation path (default: ~/.local/bin/needle)
+    NEEDLE_INSTALL_PATH     Installation path (default: ~/.local/bin/needle)
+    NEEDLE_SKIP_CHECKSUM    Set to '1' or 'true' to skip checksum verification (NOT RECOMMENDED)
 
 SECURITY NOTE:
-    This installer verifies SHA-256 checksums and aborts on any failure or
-    mismatch. This ensures the downloaded binary has not been corrupted or tampered with.
+    This installer verifies SHA-256 checksums to ensure the downloaded binary has not been
+    corrupted or tampered with. Checksum verification is enabled by default for your safety.
+
+    ⚠️  SKIPPING CHECKSUM VERIFICATION IS NOT RECOMMENDED:
+    The --skip-checksum flag and NEEDLE_SKIP_CHECKSUM environment variable allow you to bypass
+    verification, but this exposes you to significant security risks:
+
+    • A corrupted binary could crash or behave unpredictably
+    • A tampered binary could execute arbitrary malicious code
+    • You cannot verify the binary matches what the project released
+
+    These options should ONLY be used as a temporary workaround when:
+    • Checksums.txt is temporarily unavailable due to network/infrastructure issues
+    • You have alternative verification methods in place
+    • You fully understand and accept the security risks
+
+    IMPORTANT: Even with --skip-checksum, actual checksum MISMATCHES will still cause
+    installation to abort. This flag only applies when checksums are unavailable, not when
+    they indicate a mismatch.
 
 Examples:
+    # Normal installation (recommended)
     curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
+
+    # Skip checksum verification (NOT recommended, use with caution)
+    curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash -s -- --skip-checksum
+
+    # Skip via environment variable (NOT recommended, use with caution)
+    NEEDLE_SKIP_CHECKSUM=1 curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
 EOF
 }
 
@@ -78,11 +140,24 @@ parse_args() {
                 show_usage
                 exit 0
                 ;;
+            --skip-checksum)
+                # Normalize the env var if set via flag
+                export NEEDLE_SKIP_CHECKSUM="true"
+                SKIP_CHECKSUM="true"
+                ;;
             *)
                 error "Unknown option: $1. Use --help for usage."
                 ;;
         esac
+        shift
     done
+
+    # Normalize environment variable values
+    if [[ "$SKIP_CHECKSUM" == "1" || "$SKIP_CHECKSUM" == "true" || "$SKIP_CHECKSUM" == "yes" ]]; then
+        SKIP_CHECKSUM="true"
+    else
+        SKIP_CHECKSUM="false"
+    fi
 }
 
 # Detect the operating system
@@ -183,47 +258,69 @@ main() {
     local checksums_file="$temp_dir/checksums.txt"
     info "Downloading checksums..."
     if ! download_file "$checksums_url" "$checksums_file" 2>/dev/null; then
-        error "Could not download checksums.txt. Installation aborted for security reasons."
-    fi
+        if [[ "$SKIP_CHECKSUM" == "true" ]]; then
+            warn_checksum_skipped
+            warn "Skipping checksum verification (checksums.txt unavailable)"
+        else
+            error "Could not download checksums.txt. Installation aborted for security reasons."
+        fi
+    else
+        # Checksums downloaded successfully, proceed with verification
+        info "Verifying checksum..."
+        local expected_hash
+        expected_hash=$(grep "  ${asset_name}$\| ${asset_name}$" "$checksums_file" | awk '{print $1}')
+        if [[ -z "$expected_hash" ]]; then
+            if [[ "$SKIP_CHECKSUM" == "true" ]]; then
+                warn_checksum_skipped
+                warn "Skipping checksum verification (checksum for ${asset_name} not found)"
+            else
+                error "Could not find checksum for ${asset_name} in checksums.txt. Installation aborted for security reasons."
+            fi
+        else
+            # We have an expected hash, compute the actual hash
+            local actual_hash=""
+            local found_hash_tool=false
+            if command -v sha256sum &>/dev/null; then
+                actual_hash=$(sha256sum "$temp_binary" | awk '{print $1}')
+                found_hash_tool=true
+            elif command -v shasum &>/dev/null; then
+                actual_hash=$(shasum -a 256 "$temp_binary" | awk '{print $1}')
+                found_hash_tool=true
+            fi
 
-    info "Verifying checksum..."
-    local expected_hash
-    expected_hash=$(grep "  ${asset_name}$\| ${asset_name}$" "$checksums_file" | awk '{print $1}')
-    if [[ -z "$expected_hash" ]]; then
-        error "Could not find checksum for ${asset_name} in checksums.txt. Installation aborted for security reasons."
-    fi
-
-    # Compute checksum of downloaded binary
-    local actual_hash=""
-    local found_hash_tool=false
-    if command -v sha256sum &>/dev/null; then
-        actual_hash=$(sha256sum "$temp_binary" | awk '{print $1}')
-        found_hash_tool=true
-    elif command -v shasum &>/dev/null; then
-        actual_hash=$(shasum -a 256 "$temp_binary" | awk '{print $1}')
-        found_hash_tool=true
-    fi
-
-    if [[ "$found_hash_tool" == "false" ]]; then
-        error "Neither sha256sum nor shasum available. Cannot verify checksum.
+            if [[ "$found_hash_tool" == "false" ]]; then
+                if [[ "$SKIP_CHECKSUM" == "true" ]]; then
+                    warn_checksum_skipped
+                    warn "Skipping checksum verification (no hash tool available)"
+                else
+                    error "Neither sha256sum nor shasum available. Cannot verify checksum.
 Install coreutils (sha256sum) or check the system for shasum.
 Installation aborted for security reasons."
-    fi
-
-    if [[ -z "$actual_hash" ]]; then
-        error "Failed to compute checksum for downloaded binary. Installation aborted for security reasons."
-    fi
-
-    # Verify checksum matches
-    if [[ "$actual_hash" != "$expected_hash" ]]; then
-        error "Checksum mismatch for ${asset_name}!
+                fi
+            elif [[ -z "$actual_hash" ]]; then
+                if [[ "$SKIP_CHECKSUM" == "true" ]]; then
+                    warn_checksum_skipped
+                    warn "Skipping checksum verification (failed to compute checksum)"
+                else
+                    error "Failed to compute checksum for downloaded binary. Installation aborted for security reasons."
+                fi
+            else
+                # Verify checksum matches - MISMATCHES ARE NEVER SKIPPABLE (security-critical)
+                if [[ "$actual_hash" != "$expected_hash" ]]; then
+                    error "Checksum mismatch for ${asset_name}!
   expected: ${expected_hash}
   got:      ${actual_hash}
 
 The downloaded binary may be corrupted or tampered with.
-Installation aborted for security reasons."
+Installation aborted for security reasons.
+
+NOTE: Checksum mismatches are never skippable, even with --skip-checksum.
+This flag only applies when checksums are unavailable, not when they indicate a mismatch."
+                fi
+                success "Checksum verified."
+            fi
+        fi
     fi
-    success "Checksum verified."
 
     # Optional GPG signature verification (informational only, never fails)
     if command -v gpg &>/dev/null; then
