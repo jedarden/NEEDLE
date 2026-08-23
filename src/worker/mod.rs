@@ -1479,7 +1479,8 @@ impl Worker {
         let idle_action = self.config.worker.idle_action.clone();
         match self.health.detect_supervisor_direct() {
             Ok(supervisor_present) => {
-                let validation_result = validate_idle_action_config(&idle_action, supervisor_present);
+                let validation_result =
+                    validate_idle_action_config(&idle_action, supervisor_present);
                 match validation_result {
                     WorkerConfigValidationResult::Valid => {
                         if idle_action == crate::types::IdleAction::Exit {
@@ -3485,16 +3486,23 @@ impl Worker {
         match action.clone() {
             BeadAction::Closed => {
                 // Bead was closed by the agent. Verify it's actually closed.
-                match tokio::time::timeout(Duration::from_secs(30), self.store.show(&bead.id)).await {
+                match tokio::time::timeout(Duration::from_secs(30), self.store.show(&bead.id)).await
+                {
                     Ok(Ok(current)) => {
-                        if current.status != BeadStatus::Closed && current.status != BeadStatus::Done {
+                        if current.status != BeadStatus::Closed
+                            && current.status != BeadStatus::Done
+                        {
                             tracing::warn!(
                                 bead_id = %bead.id,
                                 actual_status = ?current.status,
                                 "agent reported closed but bead is not closed; releasing to enforce postcondition"
                             );
                             // Force release to enforce postcondition
-                            tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                            tokio::time::timeout(
+                                Duration::from_secs(30),
+                                self.store.release(&bead.id),
+                            )
+                            .await??;
                         }
                         // Bead is closed/done as expected
                     }
@@ -3517,7 +3525,8 @@ impl Worker {
             }
             BeadAction::Released => {
                 // Release the bead back to open status.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
+                    .await??;
                 self.telemetry.emit(EventKind::BeadReleased {
                     bead_id: bead.id.clone(),
                     reason: "handler_action:released".to_string(),
@@ -3525,11 +3534,13 @@ impl Worker {
             }
             BeadAction::Deferred => {
                 // Release and add deferred label.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
+                    .await??;
                 let _ = tokio::time::timeout(
                     Duration::from_secs(30),
                     self.store.add_label(&bead.id, "deferred"),
-                ).await;
+                )
+                .await;
                 self.telemetry.emit(EventKind::BeadReleased {
                     bead_id: bead.id.clone(),
                     reason: "handler_action:deferred".to_string(),
@@ -3537,7 +3548,8 @@ impl Worker {
             }
             BeadAction::Alerted => {
                 // Release after creating an alert bead.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
+                    .await??;
                 self.telemetry.emit(EventKind::BeadReleased {
                     bead_id: bead.id.clone(),
                     reason: "handler_action:alerted".to_string(),
@@ -3550,11 +3562,13 @@ impl Worker {
                 let _ = tokio::time::timeout(
                     Duration::from_secs(30),
                     self.store.add_label(&bead.id, "cycling"),
-                ).await;
+                )
+                .await;
             }
             BeadAction::Interrupted => {
                 // Release due to worker interruption.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
+                    .await??;
                 self.telemetry.emit(EventKind::BeadReleased {
                     bead_id: bead.id.clone(),
                     reason: "worker_interrupted".to_string(),
@@ -3562,7 +3576,8 @@ impl Worker {
             }
             BeadAction::Errored => {
                 // Release after handler error.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await??;
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
+                    .await??;
                 self.telemetry.emit(EventKind::BeadReleased {
                     bead_id: bead.id.clone(),
                     reason: "handler_error_recovery".to_string(),

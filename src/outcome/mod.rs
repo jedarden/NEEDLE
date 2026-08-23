@@ -99,7 +99,11 @@ impl OutcomeHandler {
     ///
     /// This method never returns an error — flush failures are non-fatal.
     /// The worker can continue processing other beads even if flush fails.
-    async fn prepare_release_events(&self, store: &dyn BeadStore, bead: &Bead) -> Result<Vec<EventKind>> {
+    async fn prepare_release_events(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+    ) -> Result<Vec<EventKind>> {
         let mut events = Vec::new();
 
         // Flush local writes to JSONL before the release happens in apply_bead_action().
@@ -506,7 +510,8 @@ impl OutcomeHandler {
                                 bead_id: bead.id.clone(),
                                 duration_ms: 0,
                             });
-                            let mut release_events = self.prepare_release_events(store, bead).await?;
+                            let mut release_events =
+                                self.prepare_release_events(store, bead).await?;
                             events.append(&mut release_events);
                             return Ok((BeadAction::Released, events));
                         }
@@ -517,7 +522,8 @@ impl OutcomeHandler {
                                 "no shipped work detected — releasing orphaned bead with failure increment"
                             );
                             // Release and increment failure count to apply quarantine.
-                            let mut release_events = self.prepare_release_events(store, bead).await?;
+                            let mut release_events =
+                                self.prepare_release_events(store, bead).await?;
                             events.append(&mut release_events);
                             let release_succeeded = events
                                 .iter()
@@ -534,7 +540,8 @@ impl OutcomeHandler {
                                 "shipped-work check errored — releasing orphaned bead with failure increment"
                             );
                             // On error, release and increment failure count.
-                            let mut release_events = self.prepare_release_events(store, bead).await?;
+                            let mut release_events =
+                                self.prepare_release_events(store, bead).await?;
                             events.append(&mut release_events);
                             let release_succeeded = events
                                 .iter()
