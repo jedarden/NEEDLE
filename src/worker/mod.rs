@@ -75,6 +75,88 @@ fn strip_source_annotation(line: &str) -> String {
         .unwrap_or_else(|| line.to_string())
 }
 
+/// Detect whether a supervisor is present at worker startup.
+///
+/// This function checks for supervisor presence by examining:
+/// - The supervisor heartbeat file (if configured)
+/// - The supervisor socket (if configured)
+///
+/// A supervisor is considered present if:
+/// - The heartbeat file exists and is not stale (modified within TTL), OR
+/// - The socket path exists (for Unix domain sockets)
+///
+/// # Arguments
+///
+/// * `heartbeat_path` - Optional path to the supervisor's heartbeat file
+/// * `socket_path` - Optional path to the supervisor's control socket
+/// * `ttl_secs` - Time-to-live for heartbeat freshness (seconds)
+///
+/// # Returns
+///
+/// `true` if a supervisor is detected, `false` otherwise.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::PathBuf;
+///
+/// let heartbeat = Some(PathBuf::from("/tmp/supervisor-heartbeat.json"));
+/// let socket = None;
+/// let present = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), 300);
+/// assert!(!present); // No supervisor running
+/// ```
+pub fn detect_supervisor_presence(
+    heartbeat_path: Option<&PathBuf>,
+    socket_path: Option<&PathBuf>,
+    ttl_secs: u64,
+) -> bool {
+    // Check heartbeat file first
+    if let Some(path) = heartbeat_path {
+        if check_heartbeat_freshness(path, ttl_secs) {
+            return true;
+        }
+    }
+
+    // Check socket if heartbeat check failed
+    if let Some(path) = socket_path {
+        if path.exists() {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Check if a heartbeat file is fresh (within TTL).
+///
+/// # Arguments
+///
+/// * `path` - Path to the heartbeat file
+/// * `ttl_secs` - Time-to-live in seconds
+///
+/// # Returns
+///
+/// `true` if the file exists and was modified within the TTL window.
+fn check_heartbeat_freshness(path: &Path, ttl_secs: u64) -> bool {
+    let metadata = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    let modified = match metadata.modified() {
+        Ok(time) => time,
+        Err(_) => return false,
+    };
+
+    let now = SystemTime::now();
+    let duration = match now.duration_since(modified) {
+        Ok(d) => d,
+        Err(_) => return false, // Clock skew
+    };
+
+    duration.as_secs() <= ttl_secs
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Global shutdown flag for signal handlers
 // ──────────────────────────────────────────────────────────────────────────────
@@ -5483,6 +5565,48 @@ mod tests {
         assert_eq!(truncate_for_display(unicode, 5), "hello");
     }
 
+    // ── Tests for truncate_commit_sha ──
+
+    #[test]
+    fn test_truncate_commit_sha_with_short_sha() {
+        // Test with 7-character SHA (actual observed case: 'ee18678')
+        // This was the root cause of the fleet-wide panic
+        let short_sha = "ee18678";
+        assert_eq!(truncate_commit_sha(short_sha), short_sha);
+        assert_eq!(truncate_commit_sha(short_sha).len(), 7);
+    }
+
+    #[test]
+    fn test_truncate_commit_sha_with_unknown() {
+        // Test with 'unknown' fallback (also 7 characters)
+        let unknown = "unknown";
+        assert_eq!(truncate_commit_sha(unknown), unknown);
+        assert_eq!(truncate_commit_sha(unknown).len(), 7);
+    }
+
+    #[test]
+    fn test_truncate_commit_sha_with_long_sha() {
+        // Test with full 40-character SHA
+        let long_sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+        assert_eq!(truncate_commit_sha(long_sha), "a1b2c3d4e5f6");
+        assert_eq!(truncate_commit_sha(long_sha).len(), 12);
+    }
+
+    #[test]
+    fn test_truncate_commit_sha_with_exact_length() {
+        // Test when string length equals 12
+        let exact = "abcdefghijkl";
+        assert_eq!(truncate_commit_sha(exact), exact);
+        assert_eq!(truncate_commit_sha(exact).len(), 12);
+    }
+
+    #[test]
+    fn test_truncate_commit_sha_with_empty_string() {
+        // Test with empty string
+        assert_eq!(truncate_commit_sha(""), "");
+        assert_eq!(truncate_commit_sha("").len(), 0);
+    }
+
     #[test]
     fn config_file_change_detects_hash_change_with_unchanged_mtime() {
         let directory = tempfile::tempdir().unwrap();
@@ -9261,6 +9385,156 @@ mod tests {
         assert!(
             worker.found_but_all_excluded(),
             "should detect explore found candidates (excluded by filters)"
+        );
+    }
+
+    // ── Supervisor presence detection tests ─────────────────────────────────────
+
+    #[test]
+    fn detect_supervisor_presence_returns_false_with_no_heartbeat_or_socket() {
+        let heartbeat = None;
+        let socket = None;
+        let ttl_secs = 300;
+
+        let present = detect_supervisor_presence(heartbeat, socket, ttl_secs);
+        assert!(
+            !present,
+            "should return false when no supervisor indicators exist"
+        );
+    }
+
+    #[test]
+    fn detect_supervisor_presence_returns_true_with_fresh_heartbeat_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp_dir.path().join("supervisor-heartbeat.json");
+
+        // Create a fresh heartbeat file
+        fs::write(
+            &heartbeat_path,
+            r#"{"pid": 12345, "last_update": "2026-08-23T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let heartbeat = Some(&heartbeat_path);
+        let socket = None;
+        let ttl_secs = 300;
+
+        let present = detect_supervisor_presence(heartbeat, socket, ttl_secs);
+        assert!(present, "should return true with fresh heartbeat file");
+    }
+
+    #[test]
+    fn detect_supervisor_presence_returns_false_with_stale_heartbeat_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp_dir.path().join("supervisor-heartbeat.json");
+
+        // Create an old heartbeat file
+        fs::write(
+            &heartbeat_path,
+            r#"{"pid": 12345, "last_update": "2020-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        // Set file modification time to 10 minutes ago (beyond TTL of 300 seconds)
+        let ten_minutes_ago = SystemTime::now() - Duration::from_secs(600);
+        filetime::set_file_mtime(&heartbeat_path, ten_minutes_ago.into()).unwrap();
+
+        let heartbeat = Some(&heartbeat_path);
+        let socket = None;
+        let ttl_secs = 300;
+
+        let present = detect_supervisor_presence(heartbeat, socket, ttl_secs);
+        assert!(!present, "should return false with stale heartbeat file");
+    }
+
+    #[test]
+    fn detect_supervisor_presence_returns_true_with_socket_only() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let socket_path = temp_dir.path().join("supervisor.sock");
+
+        // Create a socket file
+        fs::write(&socket_path, "").unwrap();
+
+        let heartbeat = None;
+        let socket = Some(&socket_path);
+        let ttl_secs = 300;
+
+        let present = detect_supervisor_presence(heartbeat, socket, ttl_secs);
+        assert!(present, "should return true when socket exists");
+    }
+
+    #[test]
+    fn detect_supervisor_presence_returns_true_with_fresh_heartbeat_ignoring_socket() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp_dir.path().join("supervisor-heartbeat.json");
+        let socket_path = temp_dir.path().join("supervisor.sock");
+
+        // Create a fresh heartbeat file
+        fs::write(
+            &heartbeat_path,
+            r#"{"pid": 12345, "last_update": "2026-08-23T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        // Create a socket file (should be ignored since heartbeat is fresh)
+        fs::write(&socket_path, "").unwrap();
+
+        let heartbeat = Some(&heartbeat_path);
+        let socket = Some(&socket_path);
+        let ttl_secs = 300;
+
+        let present = detect_supervisor_presence(heartbeat, socket, ttl_secs);
+        assert!(
+            present,
+            "should return true with fresh heartbeat (socket ignored)"
+        );
+    }
+
+    #[test]
+    fn detect_supervisor_presence_falls_back_to_socket_with_stale_heartbeat() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp_dir.path().join("supervisor-heartbeat.json");
+        let socket_path = temp_dir.path().join("supervisor.sock");
+
+        // Create a stale heartbeat file
+        fs::write(
+            &heartbeat_path,
+            r#"{"pid": 12345, "last_update": "2020-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        // Set file modification time to 10 minutes ago (beyond TTL of 300 seconds)
+        let ten_minutes_ago = SystemTime::now() - Duration::from_secs(600);
+        filetime::set_file_mtime(&heartbeat_path, ten_minutes_ago.into()).unwrap();
+
+        // Create a socket file (fallback should detect this)
+        fs::write(&socket_path, "").unwrap();
+
+        let heartbeat = Some(&heartbeat_path);
+        let socket = Some(&socket_path);
+        let ttl_secs = 300;
+
+        let present = detect_supervisor_presence(heartbeat, socket, ttl_secs);
+        assert!(
+            present,
+            "should return true with socket as fallback to stale heartbeat"
+        );
+    }
+
+    #[test]
+    fn detect_supervisor_presence_returns_false_missing_heartbeat_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp_dir.path().join("supervisor-heartbeat.json");
+
+        // Don't create the file - it doesn't exist
+        let heartbeat = Some(&heartbeat_path);
+        let socket = None;
+        let ttl_secs = 300;
+
+        let present = detect_supervisor_presence(heartbeat, socket, ttl_secs);
+        assert!(
+            !present,
+            "should return false when heartbeat file doesn't exist"
         );
     }
 }
