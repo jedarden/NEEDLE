@@ -475,6 +475,131 @@ pub fn parse_backend_name_from_version(
     )
 }
 
+/// Represents a detected bead CLI with its name and resolved path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeadCli {
+    /// The CLI name (e.g., "bead", "bf", "br")
+    pub name: String,
+    /// The resolved path to the CLI binary
+    pub path: std::path::PathBuf,
+}
+
+impl BeadCli {
+    /// Create a new BeadCli instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The CLI name
+    /// * `path` - The resolved path to the CLI binary
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use needle::util::BeadCli;
+    /// use std::path::PathBuf;
+    ///
+    /// let cli = BeadCli {
+    ///     name: "bead".to_string(),
+    ///     path: PathBuf::from("/usr/local/bin/bead"),
+    /// };
+    /// ```
+    pub fn new(name: String, path: std::path::PathBuf) -> Self {
+        Self { name, path }
+    }
+}
+
+/// Probe PATH for available bead CLIs in priority order.
+///
+/// This function checks which bead CLI is available in PATH by probing for each
+/// CLI in priority order: `bead` (bead-rs), then `bf` (bead-forge), then `br` (deprecated).
+/// It returns the first CLI found with its resolved path.
+///
+/// # Returns
+///
+/// * `Option<BeadCli>` - The detected CLI with name and path, or `None` if no CLI is available
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::util::probe_bead_cli;
+///
+/// match probe_bead_cli() {
+///     Some(cli) => println!("Found CLI: {} at {}", cli.name, cli.path.display()),
+///     None => println!("No bead CLI found in PATH"),
+/// }
+/// ```
+///
+/// # Priority Order
+///
+/// 1. **bead** (bead-rs) - The current canonical CLI (highest priority)
+/// 2. **bf** (bead-forge) - The previous CLI being phased out
+/// 3. **br** (deprecated) - Deprecated alias (lowest priority)
+pub fn probe_bead_cli() -> Option<BeadCli> {
+    // Probe in priority order: bead > bf > br
+    for cli_name in &["bead", "bf", "br"] {
+        if let Some(path) = resolve_command_in_path(cli_name) {
+            debug!(
+                cli = cli_name,
+                path = %path.display(),
+                "found bead CLI in PATH"
+            );
+            return Some(BeadCli::new(cli_name.to_string(), path));
+        }
+    }
+
+    debug!("no bead CLI found in PATH");
+    None
+}
+
+/// Resolve a command to its full path using the `which` or `command -v` utilities.
+///
+/// This function attempts to locate a command in PATH using standard Unix utilities.
+/// It first tries `which` (most common), then falls back to `command -v` (POSIX-compliant).
+///
+/// # Arguments
+///
+/// * `command` - The command name to resolve
+///
+/// # Returns
+///
+/// * `Option<std::path::PathBuf>` - The resolved path if found, or `None` if not found
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::util::resolve_command_in_path;
+///
+/// if let Some(path) = resolve_command_in_path("rustc") {
+///     println!("rustc found at: {}", path.display());
+/// }
+/// ```
+fn resolve_command_in_path(command: &str) -> Option<std::path::PathBuf> {
+    use std::process::Command;
+
+    // Try `which` first (most common on Linux/Unix systems)
+    if let Ok(output) = Command::new("which").arg(command).output() {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path_str.is_empty() {
+                return Some(std::path::PathBuf::from(path_str));
+            }
+        }
+    }
+
+    // Fall back to `command -v` (POSIX-compliant alternative)
+    if let Ok(output) = Command::new("command").args(["-v", command]).output() {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            // `command -v` may return aliases or functions, check if it's a path
+            if !path_str.is_empty() && (path_str.contains('/') || path_str.contains('\\')) {
+                return Some(std::path::PathBuf::from(path_str));
+            }
+        }
+    }
+
+    None
+}
+
 /// Crate-wide test-only environment isolation.
 ///
 /// `HOME` is process-global, but Rust runs unit tests as threads inside a
@@ -1848,5 +1973,389 @@ echo "Warning: deprecated flag" >&2
         // If it were to return Err, capture_timestamp() would handle it:
         // let timestamp = capture_timestamp(); // would return epoch fallback
         // assert_eq!(timestamp, "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn test_bead_cli_struct_creation() {
+        // Test basic BeadCli struct creation
+        let cli = BeadCli::new(
+            "bead".to_string(),
+            std::path::PathBuf::from("/usr/local/bin/bead"),
+        );
+
+        assert_eq!(cli.name, "bead");
+        assert_eq!(cli.path, std::path::PathBuf::from("/usr/local/bin/bead"));
+    }
+
+    #[test]
+    fn test_bead_cli_struct_equality() {
+        // Test BeadCli equality comparison
+        let cli1 = BeadCli::new(
+            "bf".to_string(),
+            std::path::PathBuf::from("/home/user/.local/bin/bf"),
+        );
+        let cli2 = BeadCli::new(
+            "bf".to_string(),
+            std::path::PathBuf::from("/home/user/.local/bin/bf"),
+        );
+        let cli3 = BeadCli::new(
+            "br".to_string(),
+            std::path::PathBuf::from("/usr/bin/br"),
+        );
+
+        assert_eq!(cli1, cli2, "identical BeadCli instances should be equal");
+        assert_ne!(cli1, cli3, "different BeadCli instances should not be equal");
+    }
+
+    #[test]
+    fn test_probe_bead_cli_with_bead_available() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        // Create a temporary directory and fake bead binary
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bead = tmp_dir.path().join("bead");
+
+        std::fs::write(
+            &fake_bead,
+            r#"#!/bin/sh
+echo "bead 0.1.3"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_bead).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bead, perms).unwrap();
+
+        // Add temp dir to PATH
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Probe for CLI - should find bead
+        let result = probe_bead_cli();
+
+        assert!(result.is_some(), "should find bead CLI when available");
+        let cli = result.unwrap();
+        assert_eq!(cli.name, "bead", "should prioritize bead over other CLIs");
+        assert_eq!(cli.path, fake_bead, "should return correct path to bead");
+    }
+
+    #[test]
+    fn test_probe_bead_cli_with_bf_available() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        // Create a temporary directory and fake bf binary (no bead)
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bf = tmp_dir.path().join("bf");
+
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+echo "bf 0.4.1"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_bf).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bf, perms).unwrap();
+
+        // Add temp dir to PATH
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Probe for CLI - should find bf (bead not available)
+        let result = probe_bead_cli();
+
+        assert!(result.is_some(), "should find bf CLI when bead is not available");
+        let cli = result.unwrap();
+        assert_eq!(cli.name, "bf", "should fall back to bf when bead is unavailable");
+        assert_eq!(cli.path, fake_bf, "should return correct path to bf");
+    }
+
+    #[test]
+    fn test_probe_bead_cli_with_br_available() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        // Create a temporary directory and fake br binary (no bead, no bf)
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_br = tmp_dir.path().join("br");
+
+        std::fs::write(
+            &fake_br,
+            r#"#!/bin/sh
+echo "br (deprecated)"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_br).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_br, perms).unwrap();
+
+        // Add temp dir to PATH
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Probe for CLI - should find br (bead and bf not available)
+        let result = probe_bead_cli();
+
+        assert!(
+            result.is_some(),
+            "should find br CLI when bead and bf are not available"
+        );
+        let cli = result.unwrap();
+        assert_eq!(cli.name, "br", "should fall back to br as last resort");
+        assert_eq!(cli.path, fake_br, "should return correct path to br");
+    }
+
+    #[test]
+    fn test_probe_bead_cli_with_none_available() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        // Create an empty temporary directory
+        let tmp_dir = tempfile::tempdir().unwrap();
+
+        // Set PATH to only the empty directory (no bead CLIs)
+        std::env::set_var("PATH", tmp_dir.path());
+
+        // Probe for CLI - should find nothing
+        let result = probe_bead_cli();
+
+        assert!(result.is_none(), "should return None when no CLI is available");
+    }
+
+    #[test]
+    fn test_probe_bead_cli_priority_order() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        // Create a temporary directory with all three CLIs
+        let tmp_dir = tempfile::tempdir().unwrap();
+
+        // Create fake bead
+        let fake_bead = tmp_dir.path().join("bead");
+        std::fs::write(
+            &fake_bead,
+            r#"#!/bin/sh
+echo "bead 0.1.3"
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_bead).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bead, perms).unwrap();
+
+        // Create fake bf
+        let fake_bf = tmp_dir.path().join("bf");
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+echo "bf 0.4.1"
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_bf).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bf, perms).unwrap();
+
+        // Create fake br
+        let fake_br = tmp_dir.path().join("br");
+        std::fs::write(
+            &fake_br,
+            r#"#!/bin/sh
+echo "br (deprecated)"
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_br).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_br, perms).unwrap();
+
+        // Add temp dir to PATH
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Probe for CLI - should prioritize bead over bf and br
+        let result = probe_bead_cli();
+
+        assert!(result.is_some(), "should find a CLI when multiple are available");
+        let cli = result.unwrap();
+        assert_eq!(cli.name, "bead", "should prioritize bead over bf and br");
+    }
+
+    #[test]
+    fn test_probe_bead_cli_bf_priority_over_br() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        // Create a temporary directory with bf and br (no bead)
+        let tmp_dir = tempfile::tempdir().unwrap();
+
+        // Create fake bf
+        let fake_bf = tmp_dir.path().join("bf");
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+echo "bf 0.4.1"
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_bf).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bf, perms).unwrap();
+
+        // Create fake br
+        let fake_br = tmp_dir.path().join("br");
+        std::fs::write(
+            &fake_br,
+            r#"#!/bin/sh
+echo "br (deprecated)"
+"#,
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_br).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_br, perms).unwrap();
+
+        // Add temp dir to PATH
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Probe for CLI - should prioritize bf over br
+        let result = probe_bead_cli();
+
+        assert!(result.is_some(), "should find a CLI when bf and br are available");
+        let cli = result.unwrap();
+        assert_eq!(cli.name, "bf", "should prioritize bf over br");
+    }
+
+    #[test]
+    fn test_resolve_command_in_path_with_which() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        // Create a temporary directory and fake binary
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_binary = tmp_dir.path().join("test-binary");
+
+        std::fs::write(
+            &fake_binary,
+            r#"#!/bin/sh
+echo "test output"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_binary).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_binary, perms).unwrap();
+
+        // Add temp dir to PATH
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", tmp_dir.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Resolve command using which
+        let result = resolve_command_in_path("test-binary");
+
+        assert!(result.is_some(), "should resolve command using which");
+        assert_eq!(result.unwrap(), fake_binary, "should return correct path");
+    }
+
+    #[test]
+    fn test_resolve_command_in_path_not_found() {
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        // Try to resolve a non-existent command
+        let result = resolve_command_in_path("nonexistent-binary-xyz123");
+
+        assert!(
+            result.is_none(),
+            "should return None for non-existent command"
+        );
+    }
+
+    #[test]
+    fn test_resolve_command_in_path_empty_command() {
+        let result = resolve_command_in_path("");
+
+        assert!(
+            result.is_none(),
+            "should return None for empty command name"
+        );
+    }
+
+    #[test]
+    fn test_probe_bead_cli_real_system_likely_has_something() {
+        // This test runs against the real system PATH
+        // It may or may not find a CLI depending on the environment
+        // The test just verifies the function doesn't panic and returns a valid result type
+
+        let result = probe_bead_cli();
+
+        // We don't assert specific values here since this depends on the test environment
+        // Just verify the function completes without panicking
+        match result {
+            Some(cli) => {
+                // If found, verify the structure is valid
+                assert!(!cli.name.is_empty(), "CLI name should not be empty");
+                assert!(!cli.path.as_os_str().is_empty(), "CLI path should not be empty");
+            }
+            None => {
+                // If not found, that's also valid - just means no CLI is installed
+            }
+        }
+    }
+
+    #[test]
+    fn test_probe_bead_cli_path_with_spaces() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        // Create a temp directory with spaces in the name
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let space_dir = tmp_dir.path().join("path with spaces");
+        std::fs::create_dir_all(&space_dir).unwrap();
+
+        let fake_bead = space_dir.join("bead");
+        std::fs::write(
+            &fake_bead,
+            r#"#!/bin/sh
+echo "bead 0.1.3"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_bead).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bead, perms).unwrap();
+
+        // Add to PATH
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", space_dir.display(), original_path);
+        std::env::set_var("PATH", &new_path);
+
+        // Should handle paths with spaces correctly
+        let result = probe_bead_cli();
+
+        assert!(result.is_some(), "should find CLI even in path with spaces");
+        let cli = result.unwrap();
+        assert_eq!(cli.name, "bead");
     }
 }
