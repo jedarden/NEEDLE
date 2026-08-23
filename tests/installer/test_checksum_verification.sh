@@ -419,21 +419,20 @@ test_e2e_install_with_mismatch_fails() {
     teardown
 }
 
-# Test: Version discovery uses temp file (not pipe)
-test_version_disclosure_uses_temp_file() {
-    echo "TEST: test_version_disclosure_uses_temp_file"
+# Test: Version discovery must not pipe curl into an early-exiting reader
+# (structural guard; behavioral coverage lives in test_e2e_install.sh)
+test_version_discovery_no_curl_pipe() {
+    echo "TEST: test_version_discovery_no_curl_pipe"
 
     setup
 
-    # Check that install.sh uses temp file, not pipe
     local install_script="/home/coding/NEEDLE/install.sh"
-    if grep -q "tmp_file=\$(mktemp)" "$install_script" && \
-       grep -q "curl.*-o \"\$tmp_file\"" "$install_script"; then
-        echo "  ✓ version discovery uses temp file (avoids broken pipe)"
-        ((PASS_COUNT++)) || true
-    else
-        echo "  ✗ version discovery should use temp file"
+    if grep -qE 'curl [^|]*\|[[:space:]]*(grep|head)' "$install_script"; then
+        echo "  ✗ version discovery pipes curl into an early-exiting reader (broken-pipe risk)"
         ((FAIL_COUNT++)) || true
+    else
+        echo "  ✓ curl is never piped into an early-exiting reader"
+        ((PASS_COUNT++)) || true
     fi
     ((TEST_COUNT++)) || true
 
@@ -459,7 +458,7 @@ main() {
     test_checksum_mismatch_never_skippable
     test_e2e_install_with_valid_checksum
     test_e2e_install_with_mismatch_fails
-    test_version_disclosure_uses_temp_file
+    test_version_discovery_no_curl_pipe
 
     echo ""
     echo "========================================="

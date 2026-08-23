@@ -6,6 +6,14 @@ Isolated, shell-level regression tests for the NEEDLE installer script (`install
 
 These tests verify the behavior of the installer script across all critical paths, with a focus on security-critical checksum verification and opt-out mechanisms. All tests are fully isolated and do not touch real user installations or make network calls.
 
+The authoritative suite is `test_e2e_install.sh`: it runs the **real** `install.sh`
+as a subprocess against a mock `curl` that serves the GitHub API document and
+release assets from a local fixture root (missing files behave like `curl -f`
+on a 404). Every run gets an empty environment (`env -i`), its own `HOME`, its
+own `NEEDLE_INSTALL_PATH`, and closed stdin — the exact shape of the documented
+`curl ... | bash` invocation. The other two suites are supplementary
+(fixture-level and structural checks).
+
 ## Running Tests
 
 ### Run installer tests only
@@ -26,7 +34,8 @@ bash scripts/definition-of-done.sh --all
 
 ## Test Coverage
 
-All tests use local fixtures and mocks - no real network calls or installations.
+Behaviors below are exercised end-to-end by `test_e2e_install.sh` (real script,
+mock download layer); the fixture suites provide supplementary checks.
 
 ### Checksum Verification (Security-Critical)
 - ✅ **Valid checksums** - Installation proceeds with correct checksum
@@ -55,7 +64,18 @@ All tests use local fixtures and mocks - no real network calls or installations.
 
 ### Download Failures
 - ✅ **Checksum download failure** - Aborts without opt-out, continues with opt-out
-- ✅ **Network error handling** - Proper error messages for network failures
+- ✅ **Binary download failure** - Aborts before anything is moved into place
+- ✅ **GitHub API unreachable** - Aborts with a legible message
+- ✅ **Version discovery** - Parses a >64KiB multi-line release document with no
+  `curl: (23) Failure writing output` / broken-pipe diagnostic
+
+### Opt-Out Robustness
+- ✅ **Non-interactive opt-out** - `--skip-checksum` / `NEEDLE_SKIP_CHECKSUM=1`
+  with closed stdin installs (regression: the confirmation prompt's `read`
+  used to hit EOF and abort under `set -e`)
+- ✅ **Missing checksum entry + opt-out** - Installs with warning (regression:
+  the entry-lookup grep used to abort silently under `pipefail` before the
+  opt-out branch could apply)
 
 ## Parallel Safety
 
@@ -83,8 +103,10 @@ Custom bash test framework with helpers:
 - Mock install scripts - Simulates various failure modes
 
 ### Test Files
-- `test_install.sh` - Comprehensive test suite (25 tests)
-- `run.sh` - Test runner script
+- `test_e2e_install.sh` - End-to-end suite: runs the real install.sh against a mock curl (14 scenarios)
+- `test_install.sh` - Fixture-level test suite (25 tests)
+- `test_checksum_verification.sh` - Legacy fixture suite, retained for reference
+- `run.sh` - Test runner script (runs all three suites, e2e first)
 - `README.md` - This documentation
 
 ## Security-Critical Behaviors

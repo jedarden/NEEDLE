@@ -81,7 +81,13 @@ For normal installations, press Ctrl+C to abort and fix the checksum issue.
 
 Press Enter to continue with checksum verification DISABLED, or Ctrl+C to abort...
 EOF
-    read -r
+    # Prompt only when stdin is a terminal. The documented pipe invocation
+    # (curl ... | bash -s -- --skip-checksum) has no stdin left to read:
+    # `read -r` returns 1 at EOF, which under `set -e` aborted the install
+    # right after this warning instead of proceeding with the opt-out.
+    if [[ -t 0 ]]; then
+        read -r || true
+    fi
 }
 
 # Show usage information
@@ -183,16 +189,29 @@ get_latest_version() {
     local version
     local api_output
 
-    # Fetch release data (curl to stderr /dev/null to suppress broken pipe from grep -m1)
+    # Fetch the whole release document into a variable first. curl must not
+    # be piped into an early-exiting reader (grep -m1, head): the reader
+    # closes the pipe while curl still has data to write, which produced
+    # `curl: (23) Failure writing output to destination` and, under
+    # `set -o pipefail`, can turn the writer's SIGPIPE into an abort.
     if command -v curl &>/dev/null; then
-        api_output=$(curl -fsSL "$GITHUB_API" 2>/dev/null)
+        api_output=$(curl -fsSL "$GITHUB_API" 2>/dev/null) ||
+            error "Could not reach the GitHub API to determine the latest version. Please check your internet connection."
     elif command -v wget &>/dev/null; then
-        api_output=$(wget -qO- "$GITHUB_API" 2>/dev/null)
+        api_output=$(wget -qO- "$GITHUB_API" 2>/dev/null) ||
+            error "Could not reach the GitHub API to determine the latest version. Please check your internet connection."
     else
         error "Neither curl nor wget is available. Please install one of them."
     fi
 
-    version=$(echo "$api_output" | grep -m1 '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    # Extract the tag with a regex match instead of a grep pipeline, so no
+    # reader can exit early and close a pipe under the writer's feet.
+    local tag_re='"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)"'
+    if [[ "$api_output" =~ $tag_re ]]; then
+        version="${BASH_REMATCH[1]}"
+    else
+        version=""
+    fi
 
     if [[ -z "$version" ]]; then
         error "Failed to determine the latest version. Please check your internet connection."
@@ -268,7 +287,11 @@ main() {
         # Checksums downloaded successfully, proceed with verification
         info "Verifying checksum..."
         local expected_hash
-        expected_hash=$(grep "  ${asset_name}$\| ${asset_name}$" "$checksums_file" | awk '{print $1}')
+        # `|| true`: grep exits 1 when the asset has no entry, and under
+        # `set -euo pipefail` that would abort the installer silently here —
+        # before the legible error below and before the --skip-checksum
+        # branch could apply. An empty result is handled explicitly.
+        expected_hash=$(grep "  ${asset_name}$\| ${asset_name}$" "$checksums_file" | awk '{print $1}' || true)
         if [[ -z "$expected_hash" ]]; then
             if [[ "$SKIP_CHECKSUM" == "true" ]]; then
                 warn_checksum_skipped
