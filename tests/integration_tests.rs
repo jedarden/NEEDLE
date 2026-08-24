@@ -143,6 +143,9 @@ use needle::types::{
 use needle::worker::truncate_commit_sha;
 use needle::worker::Worker;
 
+// Serial test execution for tests that modify global environment variables
+use serial_test::serial;
+
 // ─── Test isolation infrastructure ───────────────────────────────────────────────
 
 /// Guard that restores HOME to its original value when dropped.
@@ -2612,21 +2615,21 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     let remote_beads_dir = remote_workspace.join(".beads");
     fs::create_dir_all(&remote_beads_dir).unwrap();
 
-    // Initialize the br workspace first.
-    let init_output = std::process::Command::new("/home/coding/.local/bin/br")
+    // Initialize the bead workspace first.
+    let init_output = std::process::Command::new("bead")
         .arg("init")
         .current_dir(&remote_workspace)
         .output()
-        .expect("br init command failed to execute");
+        .expect("bead init command failed to execute");
     assert!(
         init_output.status.success(),
-        "br init failed: {}",
+        "bead init failed: {}",
         String::from_utf8_lossy(&init_output.stderr)
     );
 
-    // Create a zombie bead in the remote workspace using br CLI.
+    // Create a zombie bead in the remote workspace using bead CLI.
     // First, create the bead as open.
-    let output = std::process::Command::new("/home/coding/.local/bin/br")
+    let output = std::process::Command::new("bead")
         .arg("create")
         .arg("--type=task")
         .arg("--title=Zombie bead from crashed worker")
@@ -2653,7 +2656,7 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     // Claim the bead to a dead worker with the correct qualified_id format.
     // The ExploreStrand's qualified_id is "claude-test-worker", so we use a different
     // adapter prefix to ensure it doesn't match.
-    let claim_output = std::process::Command::new("/home/coding/.local/bin/br")
+    let claim_output = std::process::Command::new("bead")
         .arg("update")
         .arg(bead_id.as_ref())
         .arg("--assignee")
@@ -2762,20 +2765,20 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     let remote_beads_dir = remote_workspace.join(".beads");
     fs::create_dir_all(&remote_beads_dir).unwrap();
 
-    // Initialize the br workspace first.
-    let init_output = std::process::Command::new("/home/coding/.local/bin/br")
+    // Initialize the bead workspace first.
+    let init_output = std::process::Command::new("bead")
         .arg("init")
         .current_dir(&remote_workspace)
         .output()
-        .expect("br init command failed to execute");
+        .expect("bead init command failed to execute");
     assert!(
         init_output.status.success(),
-        "br init failed: {}",
+        "bead init failed: {}",
         String::from_utf8_lossy(&init_output.stderr)
     );
 
     // Create a bead in the remote workspace.
-    let output = std::process::Command::new("/home/coding/.local/bin/br")
+    let output = std::process::Command::new("bead")
         .arg("create")
         .arg("--type=task")
         .arg("--title=Bead with live assignee")
@@ -2814,7 +2817,7 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
         .unwrap();
 
     // Claim the bead to the live worker.
-    let claim_output = std::process::Command::new("/home/coding/.local/bin/br")
+    let claim_output = std::process::Command::new("bead")
         .arg("update")
         .arg(bead_id.as_ref())
         .arg("--assignee")
@@ -2823,10 +2826,10 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
         .arg("in_progress")
         .current_dir(&remote_workspace)
         .output()
-        .expect("br update command failed to execute");
+        .expect("bead update command failed to execute");
     assert!(
         claim_output.status.success(),
-        "br update failed: {}",
+        "bead update failed: {}",
         String::from_utf8_lossy(&claim_output.stderr)
     );
 
@@ -2898,15 +2901,15 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     fs::create_dir_all(&remote_beads_dir).unwrap();
 
     // Create a bead in the remote workspace.
-    let output = std::process::Command::new("/home/coding/.local/bin/br")
+    let output = std::process::Command::new("bead")
         .arg("create")
         .arg("--type=task")
         .arg("--title=Bead assigned to us")
         .arg("--description=This bead is assigned to the current worker")
         .current_dir(&remote_workspace)
         .output()
-        .expect("br create command failed to execute");
-    assert!(output.status.success(), "br create failed");
+        .expect("bead create command failed to execute");
+    assert!(output.status.success(), "bead create failed");
 
     let create_result = String::from_utf8_lossy(&output.stdout);
     let bead_id = create_result
@@ -2923,7 +2926,7 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
 
     // Claim the bead to ourselves using the qualified identity (matching production).
     let qualified_id = "claude-test-worker";
-    let claim_output = std::process::Command::new("/home/coding/.local/bin/br")
+    let claim_output = std::process::Command::new("bead")
         .arg("update")
         .arg(bead_id.as_ref())
         .arg("--assignee")
@@ -3003,16 +3006,16 @@ async fn mend_removes_stale_dependency_links() {
     let temp_dir = tempfile::tempdir().unwrap();
     let workspace = temp_dir.path();
 
-    // Initialize br workspace.
-    let init_output = std::process::Command::new("/home/coding/.local/bin/br")
+    // Initialize bead workspace.
+    let init_output = std::process::Command::new("bead")
         .arg("init")
         .current_dir(workspace)
         .output()
-        .expect("br init failed");
-    assert!(init_output.status.success(), "br init failed");
+        .expect("bead init failed");
+    assert!(init_output.status.success(), "bead init failed");
 
     // Create blocker bead.
-    let blocker_output = std::process::Command::new("/home/coding/.local/bin/br")
+    let blocker_output = std::process::Command::new("bead")
         .args([
             "create",
             "--title=Blocker bead",
@@ -3020,8 +3023,8 @@ async fn mend_removes_stale_dependency_links() {
         ])
         .current_dir(workspace)
         .output()
-        .expect("br create failed");
-    assert!(blocker_output.status.success(), "br create failed");
+        .expect("bead create failed");
+    assert!(blocker_output.status.success(), "bead create failed");
 
     let blocker_id = String::from_utf8_lossy(&blocker_output.stdout)
         .lines()
@@ -3031,7 +3034,7 @@ async fn mend_removes_stale_dependency_links() {
         .to_string();
 
     // Create blocked bead.
-    let blocked_output = std::process::Command::new("/home/coding/.local/bin/br")
+    let blocked_output = std::process::Command::new("bead")
         .args([
             "create",
             "--title=Blocked bead",
@@ -3039,8 +3042,8 @@ async fn mend_removes_stale_dependency_links() {
         ])
         .current_dir(workspace)
         .output()
-        .expect("br create failed");
-    assert!(blocked_output.status.success(), "br create failed");
+        .expect("bead create failed");
+    assert!(blocked_output.status.success(), "bead create failed");
 
     let blocked_id = String::from_utf8_lossy(&blocked_output.stdout)
         .lines()
@@ -3050,12 +3053,12 @@ async fn mend_removes_stale_dependency_links() {
         .to_string();
 
     // Add dependency: blocked depends on blocker.
-    let dep_output = std::process::Command::new("/home/coding/.local/bin/br")
+    let dep_output = std::process::Command::new("bead")
         .args(["dep", "add", &blocker_id, "--blocks", &blocked_id])
         .current_dir(workspace)
         .output()
-        .expect("br dep add failed");
-    assert!(dep_output.status.success(), "br dep add failed");
+        .expect("bead dep add failed");
+    assert!(dep_output.status.success(), "bead dep add failed");
 
     // Verify the dependency exists and the blocked bead is... blocked.
     let store = configured_forge_store(workspace.to_path_buf());
@@ -3083,12 +3086,12 @@ async fn mend_removes_stale_dependency_links() {
     );
 
     // Close the blocker bead.
-    let close_output = std::process::Command::new("/home/coding/.local/bin/bf")
+    let close_output = std::process::Command::new("bead")
         .args(["close", &blocker_id, "--reason=Blocker completed"])
         .current_dir(workspace)
         .output()
-        .expect("bf close failed");
-    assert!(close_output.status.success(), "bf close failed");
+        .expect("bead close failed");
+    assert!(close_output.status.success(), "bead close failed");
 
     // Verify the blocker is closed but the dependency still exists (stale link).
     let blocked_bead_after = store
@@ -3237,15 +3240,15 @@ async fn idle_worker_flagging_detects_stuck_workers() {
     };
     registry.register(idle_entry).unwrap();
 
-    // Create a minimal br workspace for the bead store.
+    // Create a minimal bead workspace for the bead store.
     let ws_path = workspace.path().join("ws");
     std::fs::create_dir_all(&ws_path).unwrap();
-    let init_output = std::process::Command::new("/home/coding/.local/bin/br")
+    let init_output = std::process::Command::new("bead")
         .arg("init")
         .current_dir(&ws_path)
         .output()
-        .expect("br init failed");
-    assert!(init_output.status.success(), "br init failed");
+        .expect("bead init failed");
+    assert!(init_output.status.success(), "bead init failed");
 
     let store = configured_forge_store(ws_path.to_path_buf());
 
@@ -3981,13 +3984,13 @@ async fn worker_binary_path_supervisor_initialization() {
     let workspace = temp_dir.path().join("workspace");
     fs::create_dir_all(&workspace).expect("failed to create workspace");
 
-    // Initialize br workspace
-    let init_output = std::process::Command::new("/home/coding/.local/bin/br")
+    // Initialize bead workspace
+    let init_output = std::process::Command::new("bead")
         .arg("init")
         .current_dir(&workspace)
         .output()
-        .expect("br init failed");
-    assert!(init_output.status.success(), "br init failed");
+        .expect("bead init failed");
+    assert!(init_output.status.success(), "bead init failed");
 
     // Configure supervisor with a custom binary path
     let custom_binary = PathBuf::from("/custom/path/to/needle");
@@ -4114,6 +4117,7 @@ exit 0
 /// correctly expanded to the HOME directory during config loading, with proper
 /// tempdir isolation to avoid contaminating the real user environment.
 #[tokio::test]
+#[serial]
 async fn worker_binary_path_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -4220,6 +4224,7 @@ worker:
 /// slashes, including bare tilde with slash, paths with trailing slashes, and
 /// multiple trailing slashes.
 #[tokio::test]
+#[serial]
 async fn worker_binary_path_tilde_expansion_trailing_slashes() {
     use needle::util::expand_tilde;
     use std::env;
@@ -4320,6 +4325,7 @@ async fn worker_binary_path_tilde_expansion_trailing_slashes() {
 /// parent directories, including ~/.., ~/../, ~/path/.., and combinations with
 /// trailing slashes.
 #[tokio::test]
+#[serial]
 async fn worker_binary_path_tilde_expansion_parent_directories() {
     use needle::util::expand_tilde;
     use std::env;
@@ -4441,6 +4447,7 @@ async fn worker_binary_path_tilde_expansion_parent_directories() {
 /// correctly expanded to the HOME directory during config loading, with proper
 /// tempdir isolation to avoid contaminating the real user environment.
 #[tokio::test]
+#[serial]
 async fn workspace_home_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -4564,6 +4571,7 @@ workspace:
 /// correctly expanded to the HOME directory during config loading, with proper
 /// tempdir isolation to avoid contaminating the real user environment.
 #[tokio::test]
+#[serial]
 async fn workspace_default_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -4707,6 +4715,7 @@ workspace:
 /// This test validates that both workspace path fields can use tilde expansion
 /// in the same configuration, and both are expanded correctly.
 #[tokio::test]
+#[serial]
 async fn workspace_home_and_default_tilde_expansion_combined() {
     use needle::config::Config;
     use std::env;
@@ -4797,6 +4806,7 @@ workspace:
 /// correctly expanded to the HOME directory during config loading, with proper
 /// tempdir isolation to avoid contaminating the real user environment.
 #[tokio::test]
+#[serial]
 async fn agent_adapters_dir_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -4908,6 +4918,7 @@ agent:
 /// correctly expanded to the HOME directory during config loading, with proper
 /// tempdir isolation to avoid contaminating the real user environment.
 #[tokio::test]
+#[serial]
 async fn bead_cli_path_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -5041,6 +5052,7 @@ bead_cli:
 /// are correctly expanded to the HOME directory during config loading, with proper
 /// tempdir isolation to avoid contaminating the real user environment.
 #[tokio::test]
+#[serial]
 async fn explore_workspace_root_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -5156,6 +5168,7 @@ strands:
 /// (a vector of paths) are correctly expanded to the HOME directory during config
 /// loading, with proper tempdir isolation to avoid contaminating the real user environment.
 #[tokio::test]
+#[serial]
 async fn explore_workspaces_tilde_expansion() {
     use needle::config::Config;
     use std::env;
@@ -5172,9 +5185,20 @@ async fn explore_workspaces_tilde_expansion() {
     fs::create_dir_all(&workspace1).expect("failed to create workspace1");
     fs::create_dir_all(&workspace2).expect("failed to create workspace2");
 
-    // Save the original HOME and set our isolated home
+    // Save the original HOME
     let original_home = env::var("HOME").ok();
+
+    // Set our isolated home
     env::set_var("HOME", &isolated_home);
+
+    // Ensure HOME is restored even on panic
+    let _guard = scopeguard::guard(original_home, |original_home| {
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        } else {
+            env::remove_var("HOME");
+        }
+    });
 
     // Test 1: Tilde-prefixed paths in workspaces list
     let yaml = r#"
@@ -5281,13 +5305,7 @@ strands:
         "absolute path should pass through unchanged in mixed list"
     );
 
-    // Restore original HOME
-    if let Some(home) = original_home {
-        env::set_var("HOME", home);
-    } else {
-        env::remove_var("HOME");
-    }
-
+    // Note: HOME is automatically restored by _home_guard when it drops here
     println!("✓ Explore workspaces tilde expansion test passed");
     println!("  Isolated home: {}", isolated_home.display());
     println!("  Tilde path ~/dev/workspace1 -> {}", workspace1.display());
@@ -5428,6 +5446,7 @@ strands:
 /// config loading, with proper tempdir isolation to avoid contaminating the
 /// real user environment.
 #[tokio::test]
+#[serial]
 async fn telemetry_log_dir_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -5574,6 +5593,7 @@ telemetry:
 /// config loading, with proper tempdir isolation to avoid contaminating the
 /// real user environment.
 #[tokio::test]
+#[serial]
 async fn supervisor_heartbeat_path_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -5709,6 +5729,7 @@ supervisor: {}
 /// config loading, with proper tempdir isolation to avoid contaminating the
 /// real user environment.
 #[tokio::test]
+#[serial]
 async fn prompt_context_files_tilde_expansion() {
     use needle::config::Config;
     use std::env;
@@ -5726,9 +5747,20 @@ async fn prompt_context_files_tilde_expansion() {
     fs::write(&context1, "# Context 1").expect("failed to write context1");
     fs::write(&context2, "# Context 2").expect("failed to write context2");
 
-    // Save the original HOME and set our isolated home
+    // Save the original HOME
     let original_home = env::var("HOME").ok();
+
+    // Set our isolated home
     env::set_var("HOME", &isolated_home);
+
+    // Ensure HOME is restored even on panic
+    let _guard = scopeguard::guard(original_home, |original_home| {
+        if let Some(home) = original_home {
+            env::set_var("HOME", home);
+        } else {
+            env::remove_var("HOME");
+        }
+    });
 
     // Test 1: Tilde-prefixed paths in context_files list
     let yaml = r#"
@@ -5831,13 +5863,7 @@ prompt:
         "absolute path should pass through unchanged in mixed list"
     );
 
-    // Restore original HOME
-    if let Some(home) = original_home {
-        env::set_var("HOME", home);
-    } else {
-        env::remove_var("HOME");
-    }
-
+    // Note: HOME is automatically restored by _home_guard when it drops here
     println!("✓ Prompt context_files tilde expansion test passed");
     println!("  Isolated home: {}", isolated_home.display());
     println!(
@@ -5923,6 +5949,7 @@ async fn tilde_expansion_multiple_tildes_in_same_value() {
 /// - `~/path/~` - Tilde at end of path component: only START tilde expands
 /// - `~` - Bare tilde: should expand to home directory
 #[tokio::test]
+#[serial]
 async fn tilde_expansion_position_start_vs_middle_end() {
     use needle::util::expand_tilde;
 
@@ -6031,6 +6058,7 @@ async fn tilde_expansion_position_start_vs_middle_end() {
 /// exclude_workspaces list are correctly expanded to the HOME directory during
 /// config loading, with proper tempdir isolation.
 #[tokio::test]
+#[serial]
 async fn weave_exclude_workspaces_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -6124,6 +6152,7 @@ strands:
 /// report_workspace field are correctly expanded to the HOME directory during
 /// config loading, with proper tempdir isolation.
 #[tokio::test]
+#[serial]
 async fn splice_report_workspace_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -6355,6 +6384,7 @@ health:
 /// This test validates that tilde-prefixed paths in supervisor.socket_path are
 /// correctly expanded to the HOME directory during config loading.
 #[tokio::test]
+#[serial]
 async fn supervisor_socket_path_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -6471,6 +6501,7 @@ supervisor:
 /// This test validates that tilde-prefixed paths in self_modification.canary_workspace
 /// are correctly expanded to the HOME directory during config loading.
 #[tokio::test]
+#[serial]
 async fn self_modification_canary_workspace_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -6581,6 +6612,7 @@ self_modification:
 /// This test validates that tilde-prefixed paths in prompt variant content_file
 /// fields are correctly expanded to the HOME directory during config loading.
 #[tokio::test]
+#[serial]
 async fn prompt_variants_content_file_tilde_expansion() {
     use needle::config::Config;
     use needle::util::expand_tilde;
@@ -7628,5 +7660,97 @@ async fn idle_action_exit_without_supervisor_emits_warning() {
     assert!(
         reason.contains("idle_action=wait"),
         "error message should suggest config alternative"
+    );
+}
+
+/// Regression test for needle-f78eebbb: Verify OTLP config schema matches plan.md.
+///
+/// This test ensures that a YAML config copied verbatim from plan.md (lines 1961-1982
+/// and 2553-2570) loads without error and produces the values it specifies.
+///
+/// The issue documented three discrepancies between plan.md and the implementation:
+/// 1. tls was documented as a nested map {insecure, ca_file} but allegedly was a String
+/// 2. timeout_ms was documented but allegedly was timeout_secs
+/// 3. signals field {traces, metrics, logs} was documented but allegedly missing
+///
+/// This test verifies all three are now implemented correctly and match the plan.
+#[tokio::test]
+async fn otlp_config_schema_matches_plan_md() {
+    use needle::config::ConfigLoader;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    // Config copied verbatim from plan.md lines 1961-1982
+    let config_yaml = r#"
+telemetry:
+  otlp_sink:
+    enabled: true
+    endpoint: "http://otel-collector.tailnet:4317"
+    protocol: grpc
+    headers:
+      - "authorization: Bearer ${OTEL_TOKEN}"
+    timeout_ms: 5000
+    compression: gzip
+    tls:
+      insecure: false
+      ca_file: ""
+    signals:
+      traces: true
+      metrics: true
+      logs: true
+    resource_attributes:
+      - "deployment.environment=production"
+      - "service.namespace=needle-fleet"
+"#;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join(".needle.yaml");
+    let mut file = std::fs::File::create(&config_path).unwrap();
+    file.write_all(config_yaml.as_bytes()).unwrap();
+
+    // Load config - should succeed without error
+    let config = ConfigLoader::load_from_path(&config_path)
+        .expect("plan.md config should load without error");
+
+    // Verify all values match what plan.md documents
+    assert!(
+        config.telemetry.otlp_sink.enabled,
+        "enabled should be true per plan.md"
+    );
+    assert_eq!(
+        config.telemetry.otlp_sink.endpoint, "http://otel-collector.tailnet:4317",
+        "endpoint should match plan.md"
+    );
+    assert_eq!(
+        config.telemetry.otlp_sink.timeout_ms, 5000,
+        "timeout_ms should be 5000 per plan.md"
+    );
+    assert_eq!(
+        config.telemetry.otlp_sink.compression, "gzip",
+        "compression should be gzip per plan.md"
+    );
+
+    // Verify tls is a nested map, not a String (needle-f78eebbb claim #1)
+    assert!(
+        !config.telemetry.otlp_sink.tls.insecure,
+        "tls.insecure should be false per plan.md"
+    );
+    assert_eq!(
+        config.telemetry.otlp_sink.tls.ca_file, "",
+        "tls.ca_file should be empty string per plan.md"
+    );
+
+    // Verify signals field exists and contains traces/metrics/logs (needle-f78eebbb claim #3)
+    assert!(
+        config.telemetry.otlp_sink.signals.traces,
+        "signals.traces should be true per plan.md"
+    );
+    assert!(
+        config.telemetry.otlp_sink.signals.metrics,
+        "signals.metrics should be true per plan.md"
+    );
+    assert!(
+        config.telemetry.otlp_sink.signals.logs,
+        "signals.logs should be true per plan.md"
     );
 }
