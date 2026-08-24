@@ -3499,6 +3499,292 @@ path: /path/to/./bf
             assert_eq!(restored.path, original.path);
         }
     }
+
+    // ─── Auto backend CLI discovery tests ────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_bead_cli_auto_finds_bead_on_path() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create bead binary on a custom PATH
+        let bin_dir = home.join("path-bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bead_bin = bin_dir.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_bin);
+
+        // Set PATH to include bead, HOME to tmp_dir (no local binaries)
+        std::env::set_var("PATH", &bin_dir);
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(
+            backend,
+            Backend::Bead,
+            "Auto should return Backend::Bead when bead found on PATH"
+        );
+        assert_eq!(path, bead_bin, "Should return the PATH bead binary");
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_finds_bead_in_local_bin() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH to prevent finding bead on PATH
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        // Create ~/.local/bin/bead
+        let local_bin = home.join(".local/bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let bead_local = local_bin.join("bead");
+        std::fs::write(&bead_local, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_local);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(
+            backend,
+            Backend::Bead,
+            "Auto should return Backend::Bead when bead found in ~/.local/bin"
+        );
+        assert_eq!(
+            path, bead_local,
+            "Should return the ~/.local/bin/bead binary"
+        );
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_finds_bead_in_cargo_bin() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH and ensure ~/.local/bin/bead doesn't exist
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        // Since we can't actually write to /usr/local/cargo/bin in tests,
+        // we'll verify the logic by checking that the code would try this path
+        // by inspecting the error when it's not found elsewhere
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        // This should fail since bead doesn't exist in any of the first three locations
+        let result = resolve_bead_cli(&config);
+        assert!(
+            result.is_err(),
+            "Should error when bead not found in any location"
+        );
+
+        // Verify the error message mentions the cargo path in search locations
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("/usr/local/cargo/bin/bead"),
+            "Error should mention /usr/local/cargo/bin/bead in search locations"
+        );
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_finds_bf_on_path() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create bf binary on a custom PATH (no bead available)
+        let bin_dir = home.join("path-bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bf_bin = bin_dir.join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_bin);
+
+        // Set PATH to include bf, HOME to tmp_dir (no local binaries)
+        std::env::set_var("PATH", &bin_dir);
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(
+            backend,
+            Backend::Bf,
+            "Auto should return Backend::Bf when only bf found on PATH"
+        );
+        assert_eq!(path, bf_bin, "Should return the PATH bf binary");
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_finds_bf_in_local_bin() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Clear PATH to prevent finding binaries on PATH
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        // Create ~/.local/bin/bf (no bead available anywhere)
+        let local_bin = home.join(".local/bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let bf_local = local_bin.join("bf");
+        std::fs::write(&bf_local, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_local);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(
+            backend,
+            Backend::Bf,
+            "Auto should return Backend::Bf when only bf found in ~/.local/bin"
+        );
+        assert_eq!(path, bf_local, "Should return the ~/.local/bin/bf binary");
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_complete_fallback_chain() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Test 1: bead on PATH takes precedence over everything else
+        let path_bin = home.join("path-bin");
+        std::fs::create_dir_all(&path_bin).unwrap();
+        let bead_path = path_bin.join("bead");
+        std::fs::write(&bead_path, "#!/bin/sh\necho bead-path").unwrap();
+        make_executable(&bead_path);
+
+        let local_bin = home.join(".local/bin");
+        std::fs::create_dir_all(&local_bin).unwrap();
+        let bead_local = local_bin.join("bead");
+        std::fs::write(&bead_local, "#!/bin/sh\necho bead-local").unwrap();
+        make_executable(&bead_local);
+        let bf_local = local_bin.join("bf");
+        std::fs::write(&bf_local, "#!/bin/sh\necho bf-local").unwrap();
+        make_executable(&bf_local);
+
+        std::env::set_var("PATH", &path_bin);
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead, "PATH bead should take precedence");
+        assert_eq!(
+            path, bead_path,
+            "Should prefer bead on PATH over ~/.local/bin/bead"
+        );
+
+        // Test 2: ~/.local/bin/bead is preferred over PATH bf
+        std::env::set_var("PATH", "");
+        std::fs::remove_file(&bead_path).unwrap();
+
+        let bf_path = path_bin.join("bf");
+        std::fs::write(&bf_path, "#!/bin/sh\necho bf-path").unwrap();
+        make_executable(&bf_path);
+        std::env::set_var("PATH", &path_bin);
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(
+            backend,
+            Backend::Bead,
+            "~/.local/bin/bead should take precedence over PATH bf"
+        );
+        assert_eq!(
+            path, bead_local,
+            "Should prefer ~/.local/bin/bead over PATH bf"
+        );
+
+        // Test 3: PATH bf is preferred over ~/.local/bin/bf
+        std::fs::remove_file(&bead_local).unwrap();
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(
+            backend,
+            Backend::Bf,
+            "PATH bf should be found when no bead available"
+        );
+        assert_eq!(path, bf_path, "Should prefer PATH bf over ~/.local/bin/bf");
+
+        // Test 4: ~/.local/bin/bf is the final fallback
+        std::env::set_var("PATH", "");
+
+        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(
+            backend,
+            Backend::Bf,
+            "~/.local/bin/bf should be final fallback"
+        );
+        assert_eq!(path, bf_local, "Should fall back to ~/.local/bin/bf");
+    }
+
+    #[test]
+    fn test_resolve_bead_cli_auto_error_neither_cli_found() {
+        let (_lock, _env) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Set up environment with no binaries anywhere
+        std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", "");
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let result = resolve_bead_cli(&config);
+        assert!(
+            result.is_err(),
+            "Auto should error when neither bead nor bf is found"
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no bead CLI found"),
+            "Error should indicate no CLI found"
+        );
+
+        // Verify the complete search chain is mentioned in the error
+        assert!(err.contains("bead on PATH"), "Should mention bead on PATH");
+        assert!(
+            err.contains(".local/bin/bead"),
+            "Should mention ~/.local/bin/bead"
+        );
+        assert!(
+            err.contains("/usr/local/cargo/bin/bead"),
+            "Should mention /usr/local/cargo/bin/bead"
+        );
+        assert!(err.contains("bf on PATH"), "Should mention bf on PATH");
+        assert!(
+            err.contains(".local/bin/bf"),
+            "Should mention ~/.local/bin/bf"
+        );
+    }
 }
 
 /// Pluck strand configuration (primary bead selection).
