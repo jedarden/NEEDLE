@@ -12,6 +12,175 @@ This guide covers the most commonly used configuration options.
 
 ---
 
+## Configuration Reload Tiers
+
+**Every configuration key has a reload tier** that determines how changes take effect:
+
+| Tier | Behavior | Applies When |
+|------|----------|--------------|
+| **A (Live)** | Takes effect immediately on the next worker cycle | Change the config file; no restart needed |
+| **B (Rebuild)** | Component rebuilt at cycle boundary | Change the config file; no restart needed |
+| **C (Restart Required)** | Requires full process restart | **Must restart workers** to apply |
+
+**Critical:** Editing a **Tier-C** key without restarting produces a **silent no-op** — the worker continues running with the old value and emits `config.reload.restart_required`. This is the same failure mode that let a `.needle.yaml` enable OTLP for days while doing nothing.
+
+### Tier A (Live) — Most Common Operations
+
+**These keys take effect immediately on the next cycle.** No restart, no component rebuild.
+
+**Agent settings:**
+- `agent.default` — Default agent CLI
+- `agent.timeout` — Agent process timeout
+- `agent.args` — Extra arguments passed to agent
+- `agent.routing.*` — Model-to-adapter routing rules
+
+**Worker runtime behavior:**
+- `worker.idle_timeout` — Seconds to wait between queue polls when idle
+- `worker.idle_action` — What to do when queue is empty (`wait` or `exit`)
+- `worker.allow_exit_without_supervisor` — Opt-in to exit without supervisor
+- `worker.max_claim_retries` — Maximum claim retry attempts
+- `worker.cpu_load_warn` — CPU load warning threshold
+- `worker.memory_free_warn_mb` — Memory warning threshold
+- `worker.building_timeout` — Timeout for building prompts
+- `worker.freshness_check_interval_secs` — Interval for checking fresh beads
+
+**Budget and pricing:**
+- `budget.warn_usd` — Warning threshold in USD
+- `budget.stop_usd` — Stop threshold in USD
+- `pricing` — Provider pricing model
+
+**Strand thresholds:**
+- `strands.pluck.exclude_labels` — Labels to exclude from plucking
+- `strands.mend.stale_claim_ttl` — Time before a claim is considered stale
+- `strands.mend.lock_ttl` — Lock file TTL
+- `strands.explore.workspaces` — Pinned workspace list
+- `strands.weave.*` — Weave bead creation limits
+- `strands.unravel.*` — Unravel alternative limits
+- `strands.pulse.*` — Pulse scanner settings
+- `strands.reflect.*` — Learning and skill capture limits
+- `strands.splice.*` — Live loop detection thresholds
+- `strands.knot.*` — Exhaustion recovery settings
+- `strands.mitosis.enabled` — Enable/disable mitosis
+- `strands.mitosis.first_failure_only` — Split only on first failure
+
+**Outcome handling:**
+- `outcome.quarantine_after_failures` — Quarantine bead after N failures
+
+### Tier B (Rebuild) — Component Reconstruction
+
+**These keys trigger component rebuild at the cycle boundary.** No restart needed.
+
+**Telemetry:**
+- `telemetry.file_sink.*` — Log file settings (enabled, log_dir, retention_days, rotation)
+- `telemetry.stdout_sink.*` — Console output (enabled, format, color)
+- `telemetry.hooks` — Webhook configuration
+- `telemetry.otlp.enabled` — **OTLP can be toggled on a running worker**
+- `telemetry.otlp.endpoint` — Collector endpoint
+- `telemetry.otlp.protocol` — gRPC or HTTP
+- `telemetry.otlp.headers` — Authorization headers (supports `env:` references)
+- `telemetry.otlp.timeout_ms` — Request timeout
+- `telemetry.otlp.compression` — Compression (gzip, none, zstd)
+- `telemetry.otlp.tls.*` — TLS configuration
+- `telemetry.otlp.signals` — Which signals to export
+- `telemetry.otlp.resource_attributes` — OTEL resource attributes
+
+**Prompt building:**
+- `prompt.context_files` — Context file patterns
+- `prompt.instructions` — Agent instructions
+- `prompt.templates` — Prompt templates
+- `prompt.variants` — Prompt variants
+
+**Agent adapters:**
+- `agent.adapters_dir` — Directory containing adapter TOML files
+
+**Rate limiting:**
+- `limits.providers` — Provider-level rate limits
+- `limits.models` — Model-level rate limits
+
+**Validation gates:**
+- `gates` — Gate configuration
+- `validation.outcome_timeout_seconds` — Gate execution timeout
+- `validation.stderr_cap_bytes` — Stderr capture limit
+
+### Tier C (Restart Required) — Process Identity
+
+**These keys cannot be changed without restarting the worker process.** Changes here emit `config.reload.restart_required` and **do not take effect**.
+
+**Worker identity and launch:**
+- `worker.max_workers` — **Maximum concurrent workers** (supervisor-only)
+- `worker.launch_stagger_seconds` — Delay between worker launches
+- `worker.identifier_scheme` — Worker naming scheme
+- `worker.worker_binary_path` — Path to worker binary
+- `worker.config_reload_check_interval_secs` — **Polling interval for config reloads** (default: 0/disabled)
+
+**Workspace paths:**
+- `workspace.home` — **NEEDLE home directory** for heartbeats and logs
+- `workspace.default` — Default workspace directory
+
+**Bead CLI backend:**
+- `bead_cli.backend` — **Bead backend type** (`bead-forge` or `bead-rs`)
+- `bead_cli.path` — Explicit path to bead CLI
+
+**Health monitoring:**
+- `health.heartbeat_interval` — Heartbeat interval
+- `health.heartbeat_ttl` — Heartbeat TTL
+- `health.heartbeat_dir` — Heartbeat directory
+- `health.peer_check_interval` — Peer discovery check interval
+
+**Process-level configuration:**
+- `tsnet` — Tailscale networking configuration
+- `self_modification` — Hot-reload and upgrade settings
+- `supervisor` — Supervisor configuration
+
+### Common Operations and Their Tiers
+
+| Operation | Tier | How to Apply |
+|-----------|------|--------------|
+| Change agent timeout | A | Edit config file; applies next cycle |
+| Enable OTLP export | B | Edit config file; applies next cycle |
+| Adjust memory warning | A | Edit config file; applies next cycle |
+| Change worker max_workers | **C** | **Must restart supervisor** |
+| Move workspace.home | **C** | **Must restart all workers** |
+| Switch bead CLI backend | **C** | **Must restart all workers** |
+| Enable config polling | **C** | **Must restart workers** (default: 0/disabled) |
+| Change prompt templates | B | Edit config file; PromptBuilder rebuilt next cycle |
+
+### Detecting When Restart Is Required
+
+When a Tier-C key is changed in the config file, a running worker:
+
+1. Detects the change on the next config reload check
+2. Emits `config.reload.restart_required` telemetry event
+3. Continues running with the **old** value
+4. Logs a WARN-level message
+
+**This is a silent failure mode** — the config file says one thing, but the worker is doing another. Always check for `config.reload.restart_required` events after editing configuration.
+
+### Enabling Config Reload Polling
+
+By default, config reload polling is **disabled** (`worker.config_reload_check_interval_secs: 0`). To enable hot-reload:
+
+```yaml
+# ~/.config/needle/config.yaml
+worker:
+  config_reload_check_interval_secs: 30  # Check every 30 seconds
+```
+
+**This setting is Tier-C (restart required)** — a worker started with the default `0` cannot discover a file change that enables polling. Restart the worker after changing this value.
+
+### Verification
+
+To check what a running worker is actually using (not just what the config file says):
+
+```bash
+# Dump the live config from a running worker
+needle config --dump --show-source
+```
+
+This shows the **live** config including reload generation, so you can confirm what the worker is actually running rather than what the file says.
+
+---
+
 ## Worker Configuration
 
 The `worker` section controls fleet behavior and worker spawning.
