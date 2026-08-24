@@ -315,8 +315,7 @@ NEEDLE/
 │   ├── validation/        # Pre-dispatch and post-execution checks
 │   └── worker/            # Worker session and identity management
 ├── tests/                 # Integration tests
-├── ci/                    # Docker images used by GitHub Actions
-├── .github/workflows/     # CI + release pipelines
+├── ci/                    # Docker images used by CI (runs on Argo Workflows)
 ├── config/                # Vendored gitleaks rules
 └── docs/                  # Plan, research, examples, post-mortems
 ```
@@ -377,3 +376,9 @@ If you want to run NEEDLE in your own workflow, open an issue and I'll help.
 ## 📄 License
 
 MIT
+
+---
+
+Part of [jedarden.com](https://jedarden.com) · Read the write-up: [jedarden.com/projects/needle/](https://jedarden.com/projects/needle/)
+
+*This GitHub repo is a read-only mirror of git.ardenone.com/jedarden/NEEDLE — issues and PRs are welcome here either way.*
