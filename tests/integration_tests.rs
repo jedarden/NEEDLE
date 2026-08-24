@@ -2631,7 +2631,7 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
     // First, create the bead as open.
     let output = std::process::Command::new("bead")
         .arg("create")
-        .arg("--type=task")
+        .arg("--issue-type=task")
         .arg("--title=Zombie bead from crashed worker")
         .arg("--description=This bead was assigned to a worker that crashed")
         .current_dir(&remote_workspace)
@@ -2780,7 +2780,7 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
     // Create a bead in the remote workspace.
     let output = std::process::Command::new("bead")
         .arg("create")
-        .arg("--type=task")
+        .arg("--issue-type=task")
         .arg("--title=Bead with live assignee")
         .arg("--description=This bead is assigned to a live worker")
         .current_dir(&remote_workspace)
@@ -2903,7 +2903,7 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     // Create a bead in the remote workspace.
     let output = std::process::Command::new("bead")
         .arg("create")
-        .arg("--type=task")
+        .arg("--issue-type=task")
         .arg("--title=Bead assigned to us")
         .arg("--description=This bead is assigned to the current worker")
         .current_dir(&remote_workspace)
@@ -7410,56 +7410,46 @@ async fn init_tracing_subscriber_with_otlp_enabled_does_not_panic() {
 /// REQUIRED ISOLATION — see "Test Isolation Policy" in CLAUDE.md and ADR-006.
 #[tokio::test]
 async fn subprocess_adapter_failure_exits_nonzero() {
-    use std::io::Write;
-
     // Create isolated temp directory for HOME and workspace
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let workspace = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).expect("failed to create workspace");
 
-    let config_dir = temp_dir.path().join(".needle");
-    std::fs::create_dir_all(&config_dir).expect("failed to create config dir");
+    // Initialize bead workspace (bead-rs CLI)
+    let bead_result = std::process::Command::new("bead")
+        .arg("init")
+        .current_dir(&workspace)
+        .output();
 
-    // Create a minimal config with a nonexistent adapter
-    let config_path = config_dir.join("config.toml");
-    let config_content = format!(
-        r#"[worker]
-idle_action = "exit"
-idle_timeout = 10
+    // bead init may fail if the workspace is already initialized - that's OK for this test
+    if let Ok(init_output) = bead_result {
+        if !init_output.status.success() {
+            let stderr = String::from_utf8_lossy(&init_output.stderr);
+            // Only fail hard if it's a real error, not "already initialized"
+            if !stderr.contains("already") && !stderr.contains("exists") {
+                panic!("bead init failed: {}", stderr);
+            }
+        }
+    }
 
-[agent]
-default = "nonexistent-test-adapter-xyz-999"
-timeout = 10
-
-[workspace]
-default = "{}"
-home = "{}"
-
-[strands.explore]
-enabled = true
-workspaces = []
-workspace_root = "{}"
-"#,
-        workspace.display(),
-        temp_dir.path().display(),
-        temp_dir.path().display() // Isolate Explore scan root to test tempdir
-    );
-
-    let mut config_file =
-        std::fs::File::create(&config_path).expect("failed to create config file");
-    config_file
-        .write_all(config_content.as_bytes())
-        .expect("failed to write config");
+    // Create .needle.yaml configuration to enable bead store discovery
+    // Use bead-rs backend since that's the active CLI in this workspace
+    std::fs::write(
+        workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .expect("failed to create .needle.yaml configuration");
 
     // Spawn the needle binary with our test config
     let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
     let mut cmd = Command::new(&bin_path);
-    cmd.arg("worker")
-        .arg("--once")
-        .arg("--config")
-        .arg(&config_path)
+    cmd.arg("run")
+        .arg("--agent")
+        .arg("nonexistent-test-adapter-xyz-999")
         .arg("--workspace")
         .arg(&workspace)
+        .arg("--identifier")
+        .arg("test-worker-nonexistent-adapter")
         .env("HOME", temp_dir.path()) // Isolate HOME to prevent Explore strand from scanning real user workspace
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -7527,12 +7517,34 @@ workspace_root = "{}"
         "stderr should not be empty when adapter does not exist"
     );
 
-    // Verify stderr mentions the adapter name or "adapter" generally
+    // ASSERTION: Error message must contain the nonexistent adapter name
     assert!(
-        stderr_output.contains("nonexistent-test-adapter-xyz-999")
-            || stderr_output.contains("adapter")
-            || stderr_output.contains("not found"),
-        "stderr should mention the nonexistent adapter; got: {}",
+        stderr_output.contains("nonexistent-test-adapter-xyz-999"),
+        "stderr should mention the nonexistent adapter name 'nonexistent-test-adapter-xyz-999'. \
+         Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION: Error message must include configuration-directory guidance
+    // This helps users understand where adapter configuration should be located
+    assert!(
+        stderr_output.contains("~/.needle/agents/")
+            || stderr_output.contains(".needle/agents/")
+            || stderr_output.contains("claude-config/agents/")
+            || stderr_output.contains(".config/needle/adapters/")
+            || stderr_output.contains("configuration directory")
+            || (stderr_output.contains("check") && stderr_output.contains("config")),
+        "stderr should include configuration directory guidance. Got stderr:\n{}",
+        stderr_output
+    );
+
+    // ASSERTION: Verify no bead was claimed
+    // The error message should indicate that startup aborted BEFORE claiming could occur
+    assert!(
+        stderr_output.contains("prevent claiming")
+            || stderr_output.contains("aborting")
+            || stderr_output.contains("startup aborted"),
+        "stderr should indicate that startup aborted before bead claiming could occur. Got:\n{}",
         stderr_output
     );
 }
