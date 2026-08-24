@@ -955,6 +955,91 @@ pub async fn check_bead_forge_version(br_path: &Path) -> VersionCheck {
     }
 }
 
+/// Parse backend name from a binary's version output.
+///
+/// Runs the binary with `--version` (or a custom version command) and parses
+/// stdout to extract the backend identity (e.g., "bf", "bead", "bead-forge",
+/// "bead-rs").
+///
+/// # Arguments
+///
+/// * `binary` - Path to the binary to execute
+/// * `version_args` - Optional custom version arguments (defaults to `["--version"]`)
+///
+/// # Returns
+///
+/// * `Ok(String)` - The extracted backend name
+/// * `Err` - If the binary cannot be spawned, exits with an error code, or
+///   produces unparseable output
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::PathBuf;
+/// use needle::bead_store::parse_backend_name_from_version;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let binary = PathBuf::from("/usr/bin/bf");
+/// let backend_name = parse_backend_name_from_version(&binary, None).await?;
+/// assert!(backend_name == "bf" || backend_name == "bead-forge");
+/// # Ok(())
+/// # }
+/// ```
+pub async fn parse_backend_name_from_version(
+    binary: &Path,
+    version_args: Option<&[&str]>,
+) -> Result<String> {
+    use std::process::Stdio;
+
+    let args = version_args.unwrap_or(&["--version"]);
+
+    let output = spawn_with_etxtbsy_retry_exponential(
+        || async {
+            tokio::process::Command::new(binary)
+                .args(args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+        },
+        5,  // max_attempts
+        20, // base_ms
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to spawn binary for version check: {} {:?}",
+            binary.display(),
+            args
+        )
+    })?;
+
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "binary {} {:?} exited with code {}: {}",
+            binary.display(),
+            args,
+            output.status.code().unwrap_or(-1),
+            format!("{stdout}{stderr}").trim()
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined_output = format!("{stdout}{stderr}");
+
+    // Extract the backend name from the version output
+    // The pattern captures the name at the start (e.g., "bf " or "bead ")
+    let trimmed_output = combined_output.trim_start();
+    let captured_name = trimmed_output.split_whitespace().next().ok_or_else(|| {
+        anyhow::anyhow!("binary {} produced empty version output", binary.display())
+    })?;
+
+    Ok(captured_name.to_string())
+}
+
 /// Run version handshake and emit telemetry for known-bad versions.
 ///
 /// This is called during worker boot to detect and warn about known-bad
@@ -3325,5 +3410,275 @@ fi
             "Error should mention capability mismatch, got: {}",
             err_msg
         );
+    }
+
+    // ─── Tests for parse_backend_name_from_version ─────────────────────────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parse_backend_name_from_bead_forge_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let bf_binary = workspace.path().join("bf-fixture");
+        std::fs::write(
+            &bf_binary,
+            r#"#!/bin/bash
+echo "bf 0.4.1"
+"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&bf_binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&bf_binary, perm).unwrap();
+
+        let backend_name = parse_backend_name_from_version(&bf_binary, None)
+            .await
+            .expect("should parse bf output successfully");
+        assert_eq!(backend_name, "bf");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parse_backend_name_from_bead_rs_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let bead_binary = workspace.path().join("bead-fixture");
+        std::fs::write(
+            &bead_binary,
+            r#"#!/bin/bash
+echo "bead 0.1.1"
+"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&bead_binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&bead_binary, perm).unwrap();
+
+        let backend_name = parse_backend_name_from_version(&bead_binary, None)
+            .await
+            .expect("should parse bead output successfully");
+        assert_eq!(backend_name, "bead");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parse_backend_name_with_custom_version_args() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let custom_binary = workspace.path().join("custom-fixture");
+        std::fs::write(
+            &custom_binary,
+            r#"#!/bin/bash
+if [ "$1" = "version" ]; then
+  echo "my-backend 2.0.0"
+else
+  echo "Unknown command"
+  exit 1
+fi
+"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&custom_binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&custom_binary, perm).unwrap();
+
+        let backend_name = parse_backend_name_from_version(&custom_binary, Some(&["version"]))
+            .await
+            .expect("should parse output with custom args successfully");
+        assert_eq!(backend_name, "my-backend");
+    }
+
+    #[tokio::test]
+    async fn parse_backend_name_handles_missing_binary() {
+        let nonexistent = PathBuf::from("/nonexistent/binary-that-does-not-exist");
+
+        let result = parse_backend_name_from_version(&nonexistent, None).await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("failed to spawn") || err_msg.contains("No such file"),
+            "Error should mention spawn failure, got: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parse_backend_name_handles_bad_exit_code() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let failing_binary = workspace.path().join("failing-fixture");
+        std::fs::write(
+            &failing_binary,
+            r#"#!/bin/bash
+echo "Error: something went wrong" >&2
+exit 1
+"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&failing_binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&failing_binary, perm).unwrap();
+
+        let result = parse_backend_name_from_version(&failing_binary, None).await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exited with code"),
+            "Error should mention exit code, got: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parse_backend_name_handles_empty_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let empty_binary = workspace.path().join("empty-fixture");
+        std::fs::write(
+            &empty_binary,
+            r#"#!/bin/bash
+# Output nothing
+"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&empty_binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&empty_binary, perm).unwrap();
+
+        let result = parse_backend_name_from_version(&empty_binary, None).await;
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("empty version output") || err_msg.contains("empty"),
+            "Error should mention empty output, got: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parse_backend_name_handles_various_output_formats() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Test different output formats
+        let test_cases = vec![
+            ("bf 0.2.0-github", "bf"),
+            ("bead 0.1.1-abc123", "bead"),
+            ("my-backend 1.0.0-beta", "my-backend"),
+            ("bead-forge 0.4.1", "bead-forge"),
+            ("bead-rs 0.2.0", "bead-rs"),
+        ];
+
+        for (output, expected_name) in test_cases {
+            let binary = workspace.path().join(format!("fixture-{}", expected_name));
+            std::fs::write(
+                &binary,
+                format!(
+                    r#"#!/bin/bash
+echo "{}"
+"#,
+                    output
+                ),
+            )
+            .unwrap();
+            let mut perm = std::fs::metadata(&binary).unwrap().permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&binary, perm).unwrap();
+
+            let backend_name = parse_backend_name_from_version(&binary, None)
+                .await
+                .unwrap_or_else(|_| panic!("should parse {} output successfully", expected_name));
+            assert_eq!(
+                backend_name, expected_name,
+                "Expected {}, got {} for output {}",
+                expected_name, backend_name, output
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parse_backend_name_handles_stderr_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("stderr-fixture");
+        std::fs::write(
+            &binary,
+            r#"#!/bin/bash
+echo "bead 0.1.1" >&2
+"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&binary, perm).unwrap();
+
+        let backend_name = parse_backend_name_from_version(&binary, None)
+            .await
+            .expect("should parse stderr output successfully");
+        assert_eq!(backend_name, "bead");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parse_backend_name_handles_mixed_stdout_stderr() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("mixed-fixture");
+        std::fs::write(
+            &binary,
+            r#"#!/bin/bash
+echo "Warning: deprecated" >&2
+echo "bead 0.1.1"
+echo "Info: something else"
+"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&binary, perm).unwrap();
+
+        let backend_name = parse_backend_name_from_version(&binary, None)
+            .await
+            .expect("should parse mixed output successfully");
+        assert_eq!(backend_name, "bead");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn parse_backend_name_handles_whitespace_leading_output() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("whitespace-fixture");
+        std::fs::write(
+            &binary,
+            r#"#!/bin/bash
+echo "   bead 0.1.1"
+"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&binary, perm).unwrap();
+
+        let backend_name = parse_backend_name_from_version(&binary, None)
+            .await
+            .expect("should handle leading whitespace successfully");
+        assert_eq!(backend_name, "bead");
     }
 }
