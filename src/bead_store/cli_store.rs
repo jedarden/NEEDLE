@@ -1243,9 +1243,10 @@ mod tests {
         )
         .unwrap();
 
-        // bead-rs does not have the quirk, so has_quirk should return false
-        assert!(!store_without_quirk.has_quirk("limit_zero_returns_empty_set"));
-        // bead-rs also uses "0" since it doesn't have the quirk
+        // bead-rs DOES have the quirk (declared without version requirement in builtin_bead_rs)
+        assert!(store_without_quirk.has_quirk("limit_zero_returns_empty_set"));
+        // When the quirk applies, "0" is still passed - the workaround is applied by the caller
+        // by using a large explicit limit instead of 0
         assert_eq!(
             store_without_quirk
                 .render_operation("ready", &values)
