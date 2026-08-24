@@ -1304,7 +1304,7 @@ impl Worker {
                     self.do_execute().instrument(lifecycle_span.clone()).await?
                 }
                 WorkerState::Handling => {
-                    let action = self.do_handle().instrument(lifecycle_span.clone()).await?;
+                    let action = self.do_handle().instrument(lifecycle_span.clone()).await;
                     self.apply_bead_action(action).await?;
                 }
                 WorkerState::Logging => {
@@ -2943,18 +2943,20 @@ impl Worker {
     /// must consume the returned [`BeadAction`] through
     /// [`apply_bead_action`](Self::apply_bead_action), which verifies that the
     /// claim is no longer held before leaving HANDLING.
-    async fn do_handle(&mut self) -> Result<BeadAction> {
+    async fn do_handle(&mut self) -> BeadAction {
         let bead = match self.current_bead {
             Some(ref b) => b.clone(),
             None => {
-                bail!("HANDLING state without current_bead — invariant violated");
+                // Invariant violated - return error action to force recovery
+                return BeadAction::Errored;
             }
         };
 
         let (output, was_interrupted) = match self.exec_output.take() {
             Some(pair) => pair,
             None => {
-                bail!("HANDLING state without exec_output — invariant violated");
+                // Invariant violated - return error action to force recovery
+                return BeadAction::Errored;
             }
         };
 
@@ -3135,7 +3137,7 @@ impl Worker {
                         // HANDLING failed. The explicit error action is applied
                         // by the state-machine caller before the cycle advances.
                         heartbeat_task.abort();
-                        return Ok(BeadAction::Errored);
+                        return BeadAction::Errored;
                     }
                 }
             }
@@ -3155,7 +3157,7 @@ impl Worker {
                     operation: "handling_state".to_string(),
                     error: "critical timeout after 90s".to_string(),
                 });
-                return Ok(BeadAction::Errored);
+                return BeadAction::Errored;
             }
         };
 
@@ -3185,7 +3187,7 @@ impl Worker {
             // Stop the heartbeat task.
             cancelled.store(true, Ordering::Release);
             heartbeat_task.abort();
-            return Ok(BeadAction::Errored);
+            return BeadAction::Errored;
         }
 
         // Cancellation and internal handler timeouts are represented as an
@@ -3194,7 +3196,7 @@ impl Worker {
         if handler_result.bead_action == BeadAction::Errored {
             cancelled.store(true, Ordering::Release);
             heartbeat_task.abort();
-            return Ok(BeadAction::Errored);
+            return BeadAction::Errored;
         }
 
         // HOOP Hook 2 (event tap): emit the outcome as a single terminal
@@ -3469,7 +3471,7 @@ impl Worker {
         cancelled.store(true, Ordering::Release);
         heartbeat_task.abort();
 
-        Ok(handler_result.bead_action)
+        handler_result.bead_action
     }
 
     /// Consume a terminal action and enforce the dispatch postcondition.
@@ -7170,7 +7172,7 @@ mod tests {
             },
             false,
         ));
-        let action = worker.do_handle().await.unwrap();
+        let action = worker.do_handle().await;
 
         assert_eq!(worker.last_outcome.as_deref(), Some("failure"));
         assert_eq!(action, BeadAction::Released);
@@ -7986,9 +7988,12 @@ mod tests {
         worker.state = WorkerState::Handling;
         worker.current_bead = None;
 
-        let result = worker.do_handle().await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invariant"));
+        let action = worker.do_handle().await;
+        assert_eq!(
+            action,
+            BeadAction::Errored,
+            "invariant violation must return Errored action"
+        );
     }
 
     #[tokio::test]
@@ -8000,9 +8005,12 @@ mod tests {
         worker.current_bead = Some(make_test_bead("needle-handle"));
         worker.exec_output = None;
 
-        let result = worker.do_handle().await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invariant"));
+        let action = worker.do_handle().await;
+        assert_eq!(
+            action,
+            BeadAction::Errored,
+            "invariant violation must return Errored action"
+        );
     }
 
     #[tokio::test]
