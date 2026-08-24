@@ -2988,8 +2988,16 @@ impl HookSink {
                 match Self::run_hook(&hook.command, &json) {
                     Ok(()) => {}
                     Err(e) => {
+                        let timestamp = Utc::now();
+                        tracing::debug!(
+                            event_type = "telemetry.sink_error",
+                            timestamp = %timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                            hook_command = %hook.command,
+                            error = %e,
+                            "captured timestamp for sink error event (command hook failure)"
+                        );
                         failures.push(TelemetryEvent {
-                            timestamp: Utc::now(),
+                            timestamp,
                             event_type: "telemetry.sink_error".to_string(),
                             worker_id: event.worker_id.clone(),
                             session_id: event.session_id.clone(),
@@ -3015,8 +3023,16 @@ impl HookSink {
                 match Self::post_url(url, &json) {
                     Ok(()) => {}
                     Err(e) => {
+                        let timestamp = Utc::now();
+                        tracing::debug!(
+                            event_type = "telemetry.sink_error",
+                            timestamp = %timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                            hook_url = %url,
+                            error = %e,
+                            "captured timestamp for sink error event (URL hook failure)"
+                        );
                         failures.push(TelemetryEvent {
-                            timestamp: Utc::now(),
+                            timestamp,
                             event_type: "telemetry.sink_error".to_string(),
                             worker_id: event.worker_id.clone(),
                             session_id: event.session_id.clone(),
