@@ -840,6 +840,7 @@ impl OtlpSink {
     ) -> Result<(SdkTracerProvider, SdkMeterProvider, SdkLoggerProvider)> {
         let metadata = Self::build_grpc_metadata(config)?;
         let timeout = Duration::from_millis(config.timeout_ms);
+        let compression = Self::resolve_compression(config);
 
         // Import the tonic-specific exporters
         use opentelemetry_otlp::WithTonicConfig;
@@ -847,18 +848,25 @@ impl OtlpSink {
 
         // Build the transport exporters, then use the same provider path as the
         // transport-seam tests below.
-        let base_span_exporter = SpanExporter::builder()
+        let mut span_builder = SpanExporter::builder()
             .with_tonic()
             .with_endpoint(config.endpoint.clone())
             .with_timeout(timeout)
-            .with_metadata(metadata.clone())
-            .build()?;
-        let base_log_exporter = LogExporter::builder()
+            .with_metadata(metadata.clone());
+        if let Some(c) = compression {
+            span_builder = span_builder.with_compression(c);
+        }
+        let base_span_exporter = span_builder.build()?;
+
+        let mut log_builder = LogExporter::builder()
             .with_tonic()
             .with_endpoint(config.endpoint.clone())
             .with_timeout(timeout)
-            .with_metadata(metadata.clone())
-            .build()?;
+            .with_metadata(metadata.clone());
+        if let Some(c) = compression {
+            log_builder = log_builder.with_compression(c);
+        }
+        let base_log_exporter = log_builder.build()?;
 
         Self::build_grpc_providers_with_exporters_inner(
             config,
@@ -913,6 +921,7 @@ impl OtlpSink {
         use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithTonicConfig};
 
         let timeout = Duration::from_millis(config.timeout_ms);
+        let compression = Self::resolve_compression(config);
 
         let span_exporter = ResilientGrpcSpanExporter::new(base_span_exporter, drop_tx.clone());
         let batch_span_processor = BatchSpanProcessor::builder(span_exporter).build();
@@ -921,12 +930,15 @@ impl OtlpSink {
             .with_resource(resource.clone())
             .build();
 
-        let metric_exporter = MetricExporter::builder()
+        let mut metric_builder = MetricExporter::builder()
             .with_tonic()
             .with_endpoint(config.endpoint.clone())
             .with_timeout(timeout)
-            .with_metadata(metadata.clone())
-            .build()?;
+            .with_metadata(metadata.clone());
+        if let Some(c) = compression {
+            metric_builder = metric_builder.with_compression(c);
+        }
+        let metric_exporter = metric_builder.build()?;
         let metric_reader = PeriodicReader::builder(metric_exporter)
             .with_interval(Duration::from_secs(config.metrics_interval_secs))
             .build();
@@ -971,6 +983,7 @@ impl OtlpSink {
         let timeout = Duration::from_millis(config.timeout_ms);
 
         let headers_map = Self::build_http_headers(config)?;
+        let compression = Self::resolve_compression(config);
 
         // opentelemetry-otlp only auto-appends the per-signal path
         // (/v1/traces, /v1/metrics, /v1/logs) when the endpoint is resolved from
@@ -986,18 +999,25 @@ impl OtlpSink {
 
         // Build the transport exporters, then use the same provider path as the
         // transport-seam tests below.
-        let base_span_exporter = SpanExporter::builder()
+        let mut span_builder = SpanExporter::builder()
             .with_http()
             .with_endpoint(http_signal_endpoint("/v1/traces"))
             .with_timeout(timeout)
-            .with_headers(headers_map.clone())
-            .build()?;
-        let base_log_exporter = LogExporter::builder()
+            .with_headers(headers_map.clone());
+        if let Some(c) = compression {
+            span_builder = span_builder.with_compression(c);
+        }
+        let base_span_exporter = span_builder.build()?;
+
+        let mut log_builder = LogExporter::builder()
             .with_http()
             .with_endpoint(http_signal_endpoint("/v1/logs"))
             .with_timeout(timeout)
-            .with_headers(headers_map.clone())
-            .build()?;
+            .with_headers(headers_map.clone());
+        if let Some(c) = compression {
+            log_builder = log_builder.with_compression(c);
+        }
+        let base_log_exporter = log_builder.build()?;
 
         Self::build_http_providers_with_exporters_inner(
             config,
@@ -1052,6 +1072,7 @@ impl OtlpSink {
         use opentelemetry_otlp::{MetricExporter, WithExportConfig, WithHttpConfig};
 
         let timeout = Duration::from_millis(config.timeout_ms);
+        let compression = Self::resolve_compression(config);
         let http_signal_endpoint =
             |path: &str| format!("{}{}", config.endpoint.trim_end_matches('/'), path);
 
@@ -1062,12 +1083,15 @@ impl OtlpSink {
             .with_resource(resource.clone())
             .build();
 
-        let metric_exporter = MetricExporter::builder()
+        let mut metric_builder = MetricExporter::builder()
             .with_http()
             .with_endpoint(http_signal_endpoint("/v1/metrics"))
             .with_timeout(timeout)
-            .with_headers(headers_map.clone())
-            .build()?;
+            .with_headers(headers_map.clone());
+        if let Some(c) = compression {
+            metric_builder = metric_builder.with_compression(c);
+        }
+        let metric_exporter = metric_builder.build()?;
         let metric_reader = PeriodicReader::builder(metric_exporter)
             .with_interval(Duration::from_secs(config.metrics_interval_secs))
             .build();
@@ -1088,6 +1112,33 @@ impl OtlpSink {
 
     fn build_http_headers(config: &OtlpSinkConfig) -> Result<HashMap<String, String>> {
         resolve_headers(&config.headers).map(|headers| headers.into_iter().collect())
+    }
+
+    /// Resolve `config.compression` ("gzip"/"zstd") into the SDK's enum.
+    ///
+    /// `.with_endpoint()` being called programmatically (as we always do, from
+    /// config.endpoint) means the SDK's OTEL_EXPORTER_OTLP_COMPRESSION env-var
+    /// autodetection never fires either — same shape as the /v1/{signal} path
+    /// bug (bf-6a617): a config field that looks wired but silently isn't.
+    /// Without this, every export goes out uncompressed; a real ~50-event batch
+    /// (tens of KB) then takes several seconds over the wire and blows past the
+    /// 10s client timeout, surfacing as a `TimedOut` reqwest error indistinguishable
+    /// from a dead collector. An empty/"none" value intentionally disables compression.
+    fn resolve_compression(config: &OtlpSinkConfig) -> Option<opentelemetry_otlp::Compression> {
+        let value = config.compression.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("none") {
+            return None;
+        }
+        match value.parse() {
+            Ok(c) => Some(c),
+            Err(_) => {
+                tracing::warn!(
+                    compression = value,
+                    "unrecognized otlp_sink.compression value, exporting uncompressed"
+                );
+                None
+            }
+        }
     }
 
     /// Dispatch a telemetry event to the appropriate signal.
