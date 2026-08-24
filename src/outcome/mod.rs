@@ -2541,4 +2541,137 @@ mod tests {
             "gate command was not actually killed — it ran to completion in the background"
         );
     }
+
+    // ── Regression test for needle-6d76f548: vanished workspace directory ──
+
+    #[tokio::test]
+    async fn handle_success_releases_bead_when_workspace_vanishes() {
+        // Regression test for needle-6d76f548: when the workspace directory is
+        // deleted while the worker is handling outcome (e.g., by a concurrent
+        // operation or supervisor restart), the bead MUST still be released to
+        // enforce the postcondition, even though store operations fail.
+        //
+        // This reproduces the bash error seen in the wild:
+        // "getcwd: cannot access parent directories: No such file or directory"
+        struct VanishingWorkspaceStore {
+            inner: MockBeadStore,
+            show_fail_count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        }
+
+        #[async_trait::async_trait]
+        impl BeadStore for VanishingWorkspaceStore {
+            fn has_valid_store(&self) -> bool {
+                true
+            }
+
+            async fn list_all(&self) -> Result<Vec<Bead>> {
+                self.inner.list_all().await
+            }
+            async fn ready(&self, filters: &crate::bead_store::Filters) -> Result<Vec<Bead>> {
+                self.inner.ready(filters).await
+            }
+
+            async fn show(&self, _id: &BeadId) -> Result<Bead> {
+                // Simulate the workspace directory vanishing during show()
+                // by failing after a few calls
+                let count = self
+                    .show_fail_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if count < 2 {
+                    self.inner.show(_id).await
+                } else {
+                    // After 2 successful calls, the workspace vanishes
+                    anyhow::bail!("workspace directory vanished: getcwd failed")
+                }
+            }
+
+            async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
+                self.inner.claim(id, actor).await
+            }
+
+            async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
+                self.inner.claim_auto(actor).await
+            }
+
+            async fn release(&self, id: &BeadId) -> Result<()> {
+                self.inner.release(id).await
+            }
+            async fn block(&self, id: &BeadId) -> Result<()> {
+                self.inner.block(id).await
+            }
+            async fn flush(&self) -> Result<()> {
+                // Flush succeeds even after workspace vanishes
+                self.inner.flush().await
+            }
+            async fn reopen(&self, id: &BeadId) -> Result<()> {
+                self.inner.reopen(id).await
+            }
+            async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+                self.inner.labels(id).await
+            }
+            async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+                self.inner.add_label(id, label).await
+            }
+            async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+                self.inner.remove_label(id, label).await
+            }
+            async fn create_bead(
+                &self,
+                title: &str,
+                body: &str,
+                labels: &[&str],
+            ) -> Result<BeadId> {
+                self.inner.create_bead(title, body, labels).await
+            }
+            async fn doctor_repair(&self) -> Result<crate::bead_store::RepairReport> {
+                self.inner.doctor_repair().await
+            }
+            async fn doctor_check(&self) -> Result<crate::bead_store::RepairReport> {
+                self.inner.doctor_check().await
+            }
+            async fn full_rebuild(&self) -> Result<()> {
+                self.inner.full_rebuild().await
+            }
+            async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+                self.inner.add_dependency(blocker_id, blocked_id).await
+            }
+            async fn remove_dependency(
+                &self,
+                blocked_id: &BeadId,
+                blocker_id: &BeadId,
+            ) -> Result<()> {
+                self.inner.remove_dependency(blocked_id, blocker_id).await
+            }
+
+            async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+                self.inner.clear_assignee(id).await
+            }
+        }
+
+        let handler = test_handler();
+        let store = VanishingWorkspaceStore {
+            inner: MockBeadStore::new(BeadStatus::InProgress),
+            show_fail_count: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        };
+        let bead = test_bead(BeadStatus::InProgress);
+
+        // The handler should still release the bead even when show() fails
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        // Critical: the bead MUST be released even though workspace operations failed
+        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(!result.telemetry_events.is_empty());
+
+        // Verify that the error was logged and handled
+        assert!(
+            result
+                .telemetry_events
+                .iter()
+                .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. })),
+            "workspace failure should emit WorkerHandlingTimeout event"
+        );
+    }
 }
